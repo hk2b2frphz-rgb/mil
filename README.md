@@ -218,7 +218,6 @@ python response_recorder.py \
 | `--cfg-coef` | model default | CFG coefficient |
 | `--max-gen-sec` | `60.0` | Per-trial generation cap (seconds) |
 | `--response-sec` | `10.0` | Seconds of response audio to save |
-| `--allow-overlap` | off | Allow Moshi to speak while user audio is still being fed |
 | `--no-print-transcript` | off | Suppress transcript output |
 
 ---
@@ -266,13 +265,10 @@ Conversation timeline:
 `conversation_timeline.jsonl` stores the same events as JSON lines for later
 analysis.
 
-By default, the prompt is fed as a dual-stream history: user audio contains the
-full prompt, while the Moshi audio stream is forced to silence for the same
-duration. Any Moshi text sampled during that prompt window is removed from the
-history, so the continuation starts from `user audio + silent Moshi audio`
-rather than from a half-generated Moshi utterance. The script then saves only
-the continuation generated during the appended silence. Use `--allow-overlap`
-to keep Moshi's original full-duplex behavior.
+By default, Moshi runs in its normal full-duplex streaming mode: user audio is
+fed frame by frame, and Moshi can respond at any point while the prompt and
+appended silence are being fed. To test faster user prompts, increase
+`--tts-speed`.
 
 ### `transcript.jsonl` format
 

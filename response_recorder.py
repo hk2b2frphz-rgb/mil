@@ -452,7 +452,6 @@ def run_trial(
     silence_sec: float,
     max_gen_sec: float,
     acoustic_delay: int,
-    allow_overlap: bool,
 ) -> dict:
     """
     Run a single inference trial.
@@ -521,23 +520,14 @@ def run_trial(
                     if codes is None:
                         continue
 
-                    prompt_phase = not allow_overlap and step < input_steps
-                    depformer_replace_tokens = (
-                        _make_silent_moshi_tokens(lm_gen, device)
-                        if prompt_phase
-                        else None
-                    )
-                    out = _lm_gen_step(lm_gen, codes, depformer_replace_tokens)
-                    if prompt_phase:
-                        _overwrite_current_text_as_zero(lm_gen)
+                    out = lm_gen.step(codes)
                     if out is None:
                         continue
 
                     # Split text token and audio tokens
                     text_id = int(out[0, 0, 0].item())
                     audio_tok = out[0, 1:, :].cpu()  # (num_codebooks, 1)
-                    response_phase = allow_overlap or step >= input_steps
-                    if response_phase and _audio_tokens_are_decodable(audio_tok):
+                    if _audio_tokens_are_decodable(audio_tok):
                         if first_audio_step is None:
                             first_audio_step = step
                         audio_frames.append(audio_tok)
@@ -545,7 +535,7 @@ def run_trial(
                     # Decode valid text tokens only. Moshi can emit special
                     # ungenerated/initial tokens outside the tokenizer vocab.
                     piece = _decode_text_piece(text_tokenizer, text_id)
-                    if response_phase and piece is not None:
+                    if piece is not None:
                         time_sec = round(step / frame_rate, 4)
                         text_events.append(
                             {"step": step, "time_sec": time_sec, "piece": piece}
@@ -558,55 +548,9 @@ def run_trial(
         "text_events": text_events,
         "total_steps": n_steps,
         "input_steps": input_steps,
-        "allow_overlap": allow_overlap,
         "first_audio_step": first_audio_step,
         "first_response_step": first_response_step,
     }
-
-
-def _make_silent_moshi_tokens(lm_gen, device: str):
-    """Build Moshi-side no-speech tokens for dual-stream prompt feeding."""
-    import torch
-
-    lm_model = getattr(lm_gen, "lm_model", lm_gen)
-    dep_q = int(getattr(lm_model, "dep_q"))
-    token_id = int(getattr(lm_model, "zero_token_id", -1))
-    return torch.full((1, dep_q, 1), token_id, dtype=torch.long, device=device)
-
-
-def _lm_gen_step(lm_gen, codes, depformer_replace_tokens):
-    if depformer_replace_tokens is None:
-        return lm_gen.step(codes)
-    try:
-        return lm_gen.step(codes, depformer_replace_tokens=depformer_replace_tokens)
-    except TypeError:
-        logger.warning(
-            "Installed LMGen does not support depformer_replace_tokens; "
-            "falling back to normal step."
-        )
-        return lm_gen.step(codes)
-
-
-def _overwrite_current_text_as_zero(lm_gen) -> None:
-    """Remove sampled Moshi text from the prompt history."""
-    import torch
-
-    state = getattr(lm_gen, "_streaming_state", None)
-    lm_model = getattr(lm_gen, "lm_model", lm_gen)
-    if state is None:
-        return
-
-    cache_time = state.cache.shape[2]
-    positions = (state.offsets % cache_time)[:, None, None]
-    zero = torch.full(
-        (state.batch_size, 1, 1),
-        int(getattr(lm_model, "zero_token_id", -1)),
-        dtype=torch.long,
-        device=state.cache.device,
-    )
-    old_value = state.cache[:, :1].gather(-1, positions)
-    value = torch.where(state.exec_mask[:, None, None], zero, old_value)
-    state.cache[:, :1].scatter_(-1, positions, value)
 
 
 def _audio_tokens_are_decodable(audio_tok) -> bool:
@@ -783,7 +727,6 @@ def save_trial_outputs(
     text_events = trial_result["text_events"]
     total_steps = trial_result["total_steps"]
     input_steps = trial_result.get("input_steps")
-    allow_overlap = trial_result.get("allow_overlap", False)
     first_audio_step = trial_result["first_audio_step"]
     first_response_step = trial_result["first_response_step"]
 
@@ -878,7 +821,6 @@ def save_trial_outputs(
         "total_steps": total_steps,
         "input_end_step": input_end_step,
         "input_steps": input_steps,
-        "allow_overlap": allow_overlap,
         "first_audio_step": first_audio_step,
         "first_audio_time_sec": first_audio_time_sec,
         "audible_response_start_step": audible_response_start_step,
@@ -1079,14 +1021,6 @@ def parse_args() -> argparse.Namespace:
              "Use 0 or a negative value to save the full decoded response.",
     )
     parser.add_argument(
-        "--allow-overlap",
-        action="store_true",
-        help="Allow Moshi to speak while the user prompt is still being fed. "
-             "By default, user audio and silent Moshi audio are fed as a "
-             "dual-stream prompt, then the continuation is generated during "
-             "the appended silence.",
-    )
-    parser.add_argument(
         "--no-print-transcript",
         action="store_true",
         help="Do not print the generated transcript/ASR-style result.",
@@ -1189,7 +1123,6 @@ def main() -> None:
                     silence_sec=args.silence_sec,
                     max_gen_sec=args.max_gen_sec,
                     acoustic_delay=acoustic_delay,
-                    allow_overlap=args.allow_overlap,
                 )
                 wall_time = time.time() - t0
 
