@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "huggingface-hub",
-    "moshi",
+    "moshi>=0.2.11",
     "numpy",
     "pyopenjtalk",
     "pyttsx3",

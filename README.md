@@ -78,52 +78,69 @@ only applies to backends that support voice selection.
 
 ## Quick-start examples
 
-### Synthetic training data: Gemma 4 + llm-jp-moshi
+### Synthetic training data: Gemma 4 + Moshi TTS
 
 `scripts/generate_synthetic_moshi_training_data.py` creates a small test
 dataset for Moshi fine-tuning experiments.  It is intended to be run on the
 GPU server, not on a lightweight local machine.
 
-The default mode is `moshi-selfplay`:
+The default mode is `scripted-moshi-tts`:
 
-1. Gemma 4 generates a Japanese loneliness/isolation support dialogue plan.
-2. Local TTS renders only the user's turns into the right channel.
-3. `llm-jp/llm-jp-moshi-v1` receives that user stream and generates the
-   counselor/Moshi stream into the left channel.
-4. The script writes stereo WAVs, per-WAV timestamp JSON, a manifest JSONL,
-   and a `dialogues.jsonl` log of the generated scripts.
+1. Gemma 4 generates a Japanese loneliness/isolation support dialogue script.
+2. The main script calls Gemma through `scripts/gemma_dialogue_worker.py` as a
+   subprocess. No separate API server is required.
+3. Kyutai/Moshi TTS renders every script turn into audio.
+4. The script places counselor/Moshi turns in the left channel and user turns
+   in the right channel, then writes stereo WAVs, per-WAV timestamp JSON, a
+   manifest JSONL, and a `dialogues.jsonl` log.
 
-Keep the Moshi Python environment separate from the Gemma runtime.  Current
-Moshi packages can require `huggingface-hub<1.0`, while newer Gemma 4 support
-in Transformers can require a newer Hugging Face stack.  To avoid that resolver
-conflict, the dataset script talks to Gemma through an OpenAI-compatible local
-server by default and does not install `transformers` in this uv environment.
-
-Start Gemma 4 separately with any OpenAI-compatible server, for example
-llama.cpp or vLLM.  The dataset script expects a chat-completions endpoint such
-as `http://127.0.0.1:8080/v1/chat/completions`.
+Moshi and Gemma still use separate Python environments because current Moshi
+packages can require `huggingface-hub<1.0`, while newer Gemma 4 support in
+Transformers can require a newer Hugging Face stack.  This is not an external
+server: the dataset program launches the Gemma worker process itself.  Set up
+both environments once:
 
 Run a tiny three-case test from the cloned `mos` folder:
 
 ```bash
+# Moshi + TTS environment
 uv sync
+
+# Gemma-only runtime, isolated from Moshi dependencies
+uv sync --project gemma_runtime
 
 uv run python scripts/generate_synthetic_moshi_training_data.py \
   --out-dir data/synthetic_loneliness_test \
   --num-dialogues 3 \
-  --mode moshi-selfplay \
-  --gemma-backend openai-compatible \
-  --gemma-api-base http://127.0.0.1:8080/v1 \
-  --gemma-model gemma-4-E2B-it \
-  --moshi-hf-repo llm-jp/llm-jp-moshi-v1 \
-  --tts-speed-user 1.9 \
-  --moshi-silence-sec 18
+  --mode scripted-moshi-tts \
+  --gemma-backend transformers-subprocess \
+  --gemma-model google/gemma-4-E2B-it \
+  --moshi-tts-repo kyutai/tts-1.6b-en_fr
 ```
 
-`HF_TOKEN` is not required by this script. If the separate Gemma server needs
-credentials, configure that server side only.  For an offline/check-format run,
-use `--gemma-backend template`, or pre-generate dialogue JSONL in another
-environment and pass it with `--dialogues-jsonl`.
+`HF_TOKEN` is not required by this script. If the model download needs Hugging
+Face credentials, run `huggingface-cli login` inside the relevant environment.
+For an offline/check-format run, use `--gemma-backend template`, or
+pre-generate dialogue JSONL and pass it with `--dialogues-jsonl`.
+
+Important mode distinction:
+
+- `scripted-moshi-tts`: Gemma's script is the transcript, and Moshi/Kyutai TTS
+  synthesizes that script. Use this for script-faithful training data.
+- `moshi-selfplay`: user turns are rendered with local TTS, then
+  `llm-jp/llm-jp-moshi-v1` improvises the counselor stream from the user
+  audio. Use this to sample Moshi behavior, not to force a fixed script.
+- `scripted-local-tts` or `scripted-stereo`: local TTS renders both speakers
+  for quick format checks.
+
+The default Kyutai/Moshi TTS checkpoint above is the official open TTS model.
+If you have a Japanese-capable Moshi TTS checkpoint, pass it with
+`--moshi-tts-repo`.
+
+`llm-jp/llm-jp-moshi-v1` is a full-duplex spoken dialogue model, not a
+script-faithful text-to-speech checkpoint.  In this tool it is used only by
+`--mode moshi-selfplay`, where it generates its own counselor response from the
+user audio context.
 
 Output shape:
 
@@ -150,20 +167,16 @@ The WAV channel convention is:
 - left channel: Moshi / counselor stream
 - right channel: user stream
 
-For a lighter format check that does not load Moshi, render both speakers from
-the Gemma script with local TTS:
+For a lighter format check that does not load Moshi TTS, render both speakers
+from the Gemma script with local TTS:
 
 ```bash
 uv run python scripts/generate_synthetic_moshi_training_data.py \
   --out-dir data/synthetic_scripted_test \
   --num-dialogues 3 \
-  --mode scripted-stereo
+  --mode scripted-local-tts \
+  --gemma-backend template
 ```
-
-`moshi-selfplay` uses Moshi's generated audio and Moshi text tokens as an
-approximate transcript. For train-grade data, manually review the generated
-WAV/JSON pairs and consider re-annotating the left channel with an ASR tool
-before long fine-tuning runs.
 
 ### Minimal run (one input file, three seeds, default model)
 

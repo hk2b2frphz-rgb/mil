@@ -1,7 +1,7 @@
 # Core model package
 # Install from source if the PyPI version is outdated:
 #   pip install git+https://github.com/kyutai-labs/moshi.git
-moshi
+moshi>=0.2.11
 
 # Deep-learning stack (CUDA wheels should match your driver; adjust as needed)
 torch>=2.1.0

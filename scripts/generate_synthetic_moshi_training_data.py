@@ -6,11 +6,12 @@ Generate a small synthetic Moshi fine-tuning dataset.
 Pipeline:
 1. Gemma 4 generates Japanese dialogue scripts for loneliness/isolation
    support-window use cases.
-2. In the default "moshi-selfplay" mode, user turns are rendered with local
-   TTS into the right channel, then llm-jp-moshi-v1 generates the left-channel
-   counselor stream from that user audio context.
-3. In "scripted-stereo" mode, both speakers are rendered from the Gemma script
-   with local TTS. This is useful for checking the dataset format quickly.
+2. In the default "scripted-moshi-tts" mode, each script turn is rendered
+   with Kyutai/Moshi TTS and placed into a stereo dialogue file.
+3. In "moshi-selfplay" mode, user turns are rendered as audio and
+   llm-jp-moshi-v1 generates the counselor stream from that user audio context.
+4. In "scripted-local-tts" mode, both speakers are rendered from the Gemma
+   script with local pyopenjtalk/pyttsx3 TTS for quick format checks.
 
 Outputs follow the moshi-finetune dataset shape:
   out_dir/
@@ -29,6 +30,7 @@ import os
 import random
 import re
 import shutil
+import subprocess
 import sys
 import time
 import urllib.error
@@ -124,8 +126,9 @@ class AudioSegment:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate a small Gemma 4 + llm-jp-moshi synthetic stereo dataset "
-            "for Moshi fine-tuning experiments."
+            "Generate a small Gemma 4 + Moshi TTS synthetic stereo dataset "
+            "for Moshi fine-tuning experiments. llm-jp-moshi can also be "
+            "sampled with --mode moshi-selfplay."
         )
     )
     parser.add_argument(
@@ -143,12 +146,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--mode",
-        choices=["moshi-selfplay", "scripted-stereo"],
-        default="moshi-selfplay",
+        choices=[
+            "scripted-moshi-tts",
+            "moshi-selfplay",
+            "scripted-local-tts",
+            "scripted-stereo",
+        ],
+        default="scripted-moshi-tts",
         help=(
-            "moshi-selfplay: Gemma creates the dialogue plan, local TTS creates "
-            "the user stream, and Moshi generates the counselor stream. "
-            "scripted-stereo: local TTS renders both Gemma speakers."
+            "scripted-moshi-tts: render the generated script with Kyutai/Moshi "
+            "TTS into stereo WAVs. moshi-selfplay: local TTS creates the user "
+            "stream and llm-jp-moshi generates the counselor stream. "
+            "scripted-local-tts/scripted-stereo: local TTS renders both speakers."
         ),
     )
     parser.add_argument(
@@ -169,19 +178,44 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-template-fallback",
         action="store_true",
-        help="Fail instead of using deterministic templates when Gemma output cannot be parsed.",
+        help="Deprecated; generation now fails unless --allow-template-fallback is set.",
+    )
+    parser.add_argument(
+        "--allow-template-fallback",
+        action="store_true",
+        help="Use deterministic templates if Gemma generation fails.",
     )
 
     # Gemma generation
     parser.add_argument(
         "--gemma-backend",
-        choices=["openai-compatible", "transformers", "template"],
-        default="openai-compatible",
+        choices=[
+            "transformers-subprocess",
+            "transformers",
+            "openai-compatible",
+            "template",
+        ],
+        default="transformers-subprocess",
         help=(
-            "Dialogue generation backend. Use openai-compatible for a Gemma "
-            "server running in a separate environment, avoiding dependency "
-            "conflicts with moshi. Default: openai-compatible."
+            "Dialogue generation backend. transformers-subprocess runs Gemma "
+            "from this script via a separate Python environment, avoiding "
+            "dependency conflicts with Moshi. Default: transformers-subprocess."
         ),
+    )
+    parser.add_argument(
+        "--gemma-python",
+        default=os.environ.get("GEMMA_PYTHON"),
+        help=(
+            "Python executable for --gemma-backend transformers-subprocess. "
+            "Defaults to gemma_runtime/.venv/bin/python if present, otherwise "
+            "the current Python."
+        ),
+    )
+    parser.add_argument(
+        "--gemma-worker",
+        type=Path,
+        default=Path(__file__).with_name("gemma_dialogue_worker.py"),
+        help="Worker script used by --gemma-backend transformers-subprocess.",
     )
     parser.add_argument(
         "--gemma-api-base",
@@ -202,8 +236,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--gemma-timeout-sec",
         type=float,
-        default=120.0,
-        help="HTTP timeout for OpenAI-compatible Gemma requests.",
+        default=300.0,
+        help="Timeout for Gemma generation requests/subprocess calls.",
     )
     parser.add_argument(
         "--gemma-model",
@@ -216,7 +250,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--gemma-task",
         default="any-to-any",
-        help="Transformers pipeline task, only used with --gemma-backend transformers.",
+        help=(
+            "Transformers pipeline task, used with --gemma-backend "
+            "transformers or transformers-subprocess."
+        ),
     )
     parser.add_argument(
         "--gemma-device-map",
@@ -263,6 +300,31 @@ def parse_args() -> argparse.Namespace:
         default=120.0,
         help="Safety cap for each Moshi streaming run.",
     )
+
+    # Kyutai/Moshi TTS for script-faithful audio rendering
+    parser.add_argument(
+        "--moshi-tts-repo",
+        default="kyutai/tts-1.6b-en_fr",
+        help="HF repo for Kyutai/Moshi TTS in scripted-moshi-tts mode.",
+    )
+    parser.add_argument(
+        "--moshi-tts-voice-repo",
+        default=None,
+        help="Optional HF repo for pre-computed Kyutai/Moshi TTS voices.",
+    )
+    parser.add_argument(
+        "--moshi-tts-voice-user",
+        default="expresso/ex03-ex01_happy_001_channel1_334s.wav",
+        help="Voice path/name for user turns in scripted-moshi-tts mode.",
+    )
+    parser.add_argument(
+        "--moshi-tts-voice-moshi",
+        default="expresso/ex03-ex01_happy_001_channel1_334s.wav",
+        help="Voice path/name for counselor turns in scripted-moshi-tts mode.",
+    )
+    parser.add_argument("--moshi-tts-temp", type=float, default=0.6)
+    parser.add_argument("--moshi-tts-cfg-coef", type=float, default=2.0)
+    parser.add_argument("--moshi-tts-n-q", type=int, default=32)
 
     # Local TTS
     parser.add_argument("--tts-rate", type=int, default=220)
@@ -423,7 +485,11 @@ class GemmaDialogueGenerator:
         }[self.args.gemma_dtype]
 
     def load(self) -> None:
-        if self.args.gemma_backend in {"openai-compatible", "template"}:
+        if self.args.gemma_backend in {
+            "openai-compatible",
+            "template",
+            "transformers-subprocess",
+        }:
             return
         if self.pipe is not None:
             return
@@ -455,6 +521,11 @@ class GemmaDialogueGenerator:
 
         if self.args.gemma_backend == "openai-compatible":
             text = self.generate_openai_compatible(prompt)
+            data = extract_json_object(text)
+            return dialogue_from_mapping(data, use_case)
+
+        if self.args.gemma_backend == "transformers-subprocess":
+            text = self.generate_transformers_subprocess(prompt)
             data = extract_json_object(text)
             return dialogue_from_mapping(data, use_case)
 
@@ -512,6 +583,87 @@ class GemmaDialogueGenerator:
                 "or use --dialogues-jsonl / --gemma-backend template."
             ) from exc
         return openai_chat_response_to_text(data)
+
+    def generate_transformers_subprocess(self, prompt: str) -> str:
+        return self.generate_transformers_subprocess_batch([prompt])[0]
+
+    def generate_transformers_subprocess_batch(self, prompts: list[str]) -> list[str]:
+        python_exe = resolve_gemma_python(self.args)
+        worker = Path(self.args.gemma_worker)
+        if not worker.is_file():
+            raise FileNotFoundError(f"Gemma worker script not found: {worker}")
+
+        command = [
+            python_exe,
+            str(worker),
+            "--model",
+            self.args.gemma_model,
+            "--task",
+            self.args.gemma_task,
+            "--device-map",
+            self.args.gemma_device_map,
+            "--dtype",
+            self.args.gemma_dtype,
+            "--temperature",
+            str(self.args.gemma_temperature),
+            "--max-new-tokens",
+            str(self.args.gemma_max_new_tokens),
+        ]
+        if self.args.trust_remote_code:
+            command.append("--trust-remote-code")
+
+        payload = json.dumps({"prompts": prompts}, ensure_ascii=False)
+        try:
+            proc = subprocess.run(
+                command,
+                input=payload,
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                timeout=self.args.gemma_timeout_sec,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"Gemma subprocess timed out after {self.args.gemma_timeout_sec}s: "
+                f"{' '.join(command)}"
+            ) from exc
+
+        if proc.returncode != 0:
+            raise RuntimeError(
+                "Gemma subprocess failed. Install the Gemma runtime with "
+                "`uv sync --project gemma_runtime`, or pass --gemma-python to "
+                "a Python environment that has Transformers/Gemma installed.\n"
+                f"command: {' '.join(command)}\n"
+                f"stderr:\n{proc.stderr.strip()}"
+            )
+        try:
+            data = json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "Gemma subprocess did not return JSON.\n"
+                f"stdout:\n{proc.stdout}\n"
+                f"stderr:\n{proc.stderr}"
+            ) from exc
+        texts = data.get("texts")
+        if not isinstance(texts, list):
+            raise RuntimeError(f"Gemma worker returned no 'texts' list: {data}")
+        return [str(text) for text in texts]
+
+
+def resolve_gemma_python(args: argparse.Namespace) -> str:
+    if args.gemma_python:
+        return str(args.gemma_python)
+
+    runtime_dir = REPO_ROOT / "gemma_runtime" / ".venv"
+    candidates = [
+        runtime_dir / "bin" / "python",
+        runtime_dir / "Scripts" / "python.exe",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return sys.executable
 
 
 def chat_completions_url(api_base: str) -> str:
@@ -684,6 +836,109 @@ class LocalTTS:
         return pcm.astype(np.float32)
 
 
+class MoshiTTS:
+    """Script-faithful text-to-speech using Kyutai/Moshi TTSModel."""
+
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.tts_model = None
+        self.sample_rate = 24_000
+
+    def load(self) -> None:
+        if self.tts_model is not None:
+            return
+        try:
+            from moshi.models.loaders import CheckpointInfo  # type: ignore[import]
+            from moshi.models.tts import (  # type: ignore[import]
+                DEFAULT_DSM_TTS_VOICE_REPO,
+                TTSModel,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Moshi TTS requires a moshi package that provides "
+                "`moshi.models.tts.TTSModel`. Install/update moshi in the "
+                "Moshi environment, then rerun."
+            ) from exc
+
+        logger.info("Loading Kyutai/Moshi TTS from %s ...", self.args.moshi_tts_repo)
+        checkpoint_info = CheckpointInfo.from_hf_repo(self.args.moshi_tts_repo)
+        self.tts_model = TTSModel.from_checkpoint_info(
+            checkpoint_info,
+            n_q=self.args.moshi_tts_n_q,
+            temp=self.args.moshi_tts_temp,
+            device=self.args.device,
+        )
+        if self.args.moshi_tts_voice_repo is None:
+            self.args.moshi_tts_voice_repo = DEFAULT_DSM_TTS_VOICE_REPO
+        self.sample_rate = int(self.tts_model.mimi.sample_rate)
+
+    def synthesize(self, text: str, speaker: str) -> np.ndarray:
+        self.load()
+        assert self.tts_model is not None
+
+        import torch
+
+        voice = (
+            self.args.moshi_tts_voice_user
+            if speaker == "user"
+            else self.args.moshi_tts_voice_moshi
+        )
+        entries = self.tts_model.prepare_script([text], padding_between=1)
+        voice_path = self._voice_path(voice)
+        condition_attributes = self.tts_model.make_condition_attributes(
+            [voice_path],
+            cfg_coef=self.args.moshi_tts_cfg_coef,
+        )
+
+        frame_count = 0
+
+        def _on_frame(frame) -> None:
+            nonlocal frame_count
+            try:
+                if (frame != -1).all():
+                    frame_count += 1
+            except Exception:
+                frame_count += 1
+
+        with torch.no_grad():
+            result = self.tts_model.generate(
+                [entries],
+                [condition_attributes],
+                on_frame=_on_frame,
+            )
+
+        pcms: list[np.ndarray] = []
+        with self.tts_model.mimi.streaming(1), torch.no_grad():
+            for frame in result.frames[self.tts_model.delay_steps:]:
+                try:
+                    if not bool((frame != -1).all().item()):
+                        continue
+                except Exception:
+                    pass
+                pcm = self.tts_model.mimi.decode(frame[:, 1:, :]).cpu().numpy()
+                pcms.append(np.clip(pcm[0, 0], -1.0, 1.0).astype(np.float32))
+
+        if not pcms:
+            logger.warning("Moshi TTS produced no audio for text: %s", text)
+            return np.zeros(int(0.2 * self.sample_rate), dtype=np.float32)
+        pcm_out = np.concatenate(pcms, axis=-1).astype(np.float32)
+        if not self.args.no_trim_tts:
+            pcm_out = trim_silence(pcm_out, self.sample_rate)
+        logger.info(
+            "Moshi TTS synthesized %.2fs for %s turn (%d frames)",
+            pcm_out.size / self.sample_rate,
+            speaker,
+            frame_count,
+        )
+        return pcm_out
+
+    def _voice_path(self, voice: str) -> str:
+        assert self.tts_model is not None
+        if voice.endswith(".safetensors") or Path(voice).is_file():
+            return voice
+        return self.tts_model.get_voice_path(voice)
+
+
 def trim_silence(pcm: np.ndarray, sample_rate: int, threshold: float = 1e-4) -> np.ndarray:
     if pcm.size == 0:
         return pcm
@@ -733,7 +988,7 @@ def normalize_stereo(stereo: np.ndarray) -> np.ndarray:
 
 def build_scripted_segments(
     dialogue: Dialogue,
-    tts: LocalTTS,
+    tts: Any,
     args: argparse.Namespace,
 ) -> list[AudioSegment]:
     cursor = args.lead_in_sec
@@ -1028,12 +1283,36 @@ def generate_dialogues(args: argparse.Namespace) -> list[Dialogue]:
     use_cases = load_use_cases(args)[: args.num_dialogues]
     generator = GemmaDialogueGenerator(args)
     dialogues: list[Dialogue] = []
+    if args.gemma_backend == "transformers-subprocess":
+        prompts = [build_gemma_prompt(use_case, rng) for use_case in use_cases]
+        try:
+            texts = generator.generate_transformers_subprocess_batch(prompts)
+            if len(texts) != len(use_cases):
+                raise RuntimeError(
+                    f"Gemma returned {len(texts)} dialogues for "
+                    f"{len(use_cases)} use cases."
+                )
+            for use_case, text in zip(use_cases, texts):
+                data = extract_json_object(text)
+                dialogue = dialogue_from_mapping(data, use_case)
+                logger.info("Generated dialogue with Gemma: %s", dialogue.id)
+                dialogues.append(dialogue)
+            return dialogues
+        except Exception as exc:
+            if args.no_template_fallback or not args.allow_template_fallback:
+                raise
+            logger.warning(
+                "Gemma batch generation failed; using template fallback: %s",
+                exc,
+            )
+            return [template_dialogue(use_case) for use_case in use_cases]
+
     for use_case in use_cases:
         try:
             dialogue = generator.generate(use_case, rng)
             logger.info("Generated dialogue with Gemma: %s", dialogue.id)
         except Exception as exc:
-            if args.no_template_fallback:
+            if args.no_template_fallback or not args.allow_template_fallback:
                 raise
             logger.warning(
                 "Gemma generation failed for %s; using template fallback: %s",
@@ -1061,10 +1340,30 @@ def render_one_scripted(
     segments = build_scripted_segments(dialogue, tts, args)
     stereo = render_segments_to_stereo(segments, sample_rate, tail_sec=0.5)
     meta = {
-        "mode": "scripted-stereo",
+        "mode": args.mode,
         "sample_rate": sample_rate,
         "duration_sec": round(stereo.shape[-1] / sample_rate, 4),
         "transcript_source": "gemma_script",
+    }
+    return stereo, segments_to_alignments(segments), meta
+
+
+def render_one_moshi_tts(
+    dialogue: Dialogue,
+    args: argparse.Namespace,
+    tts: MoshiTTS,
+) -> tuple[np.ndarray, list[list[Any]], dict[str, Any]]:
+    segments = build_scripted_segments(dialogue, tts, args)
+    stereo = render_segments_to_stereo(segments, tts.sample_rate, tail_sec=0.5)
+    meta = {
+        "mode": "scripted-moshi-tts",
+        "sample_rate": tts.sample_rate,
+        "duration_sec": round(stereo.shape[-1] / tts.sample_rate, 4),
+        "moshi_tts_repo": args.moshi_tts_repo,
+        "moshi_tts_voice_user": args.moshi_tts_voice_user,
+        "moshi_tts_voice_moshi": args.moshi_tts_voice_moshi,
+        "transcript_source": "gemma_script",
+        "audio_source": "kyutai_moshi_tts",
     }
     return stereo, segments_to_alignments(segments), meta
 
@@ -1085,10 +1384,15 @@ def render_dataset(args: argparse.Namespace, dialogues: list[Dialogue]) -> None:
             path.unlink()
 
     moshi_renderer: Optional[MoshiSelfplayRenderer] = None
+    moshi_tts: Optional[MoshiTTS] = None
     if args.mode == "moshi-selfplay":
         moshi_renderer = MoshiSelfplayRenderer(args)
         moshi_renderer.load()
         sample_rate = moshi_renderer.sample_rate
+    elif args.mode == "scripted-moshi-tts":
+        moshi_tts = MoshiTTS(args)
+        moshi_tts.load()
+        sample_rate = moshi_tts.sample_rate
     else:
         sample_rate = 24_000
 
@@ -1123,6 +1427,10 @@ def render_dataset(args: argparse.Namespace, dialogues: list[Dialogue]) -> None:
                 sample_dir=sample_dir,
             )
             sample_rate = moshi_renderer.sample_rate
+        elif args.mode == "scripted-moshi-tts":
+            assert moshi_tts is not None
+            stereo, alignments, meta = render_one_moshi_tts(dialogue, args, moshi_tts)
+            sample_rate = moshi_tts.sample_rate
         else:
             stereo, alignments, meta = render_one_scripted(dialogue, args, sample_dir)
             sample_rate = int(meta["sample_rate"])
