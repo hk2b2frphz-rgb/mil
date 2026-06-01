@@ -11,6 +11,7 @@ torchaudio>=2.1.0
 sphn
 
 # Simple text-to-speech for text/stdin prompts
+edge-tts
 pyttsx3
 
 # Numerical

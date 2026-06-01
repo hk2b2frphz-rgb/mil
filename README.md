@@ -32,10 +32,7 @@ pip install uv
 # 2. Create .venv and install dependencies
 uv sync
 
-# 3. Install Linux OS TTS dependency when using text/stdin prompts
-bash scripts/install_linux_tts_deps.sh
-
-# 4. Run inside the uv environment
+# 3. Run inside the uv environment
 uv run python response_recorder.py --help
 ```
 
@@ -50,13 +47,13 @@ source into the uv environment:
 uv pip install git+https://github.com/kyutai-labs/moshi.git
 ```
 
-`uv sync` installs the Python-side TTS dependency (`pyttsx3`). Linux also
-needs an OS speech backend. The helper script installs `espeak-ng` with apt:
+`uv sync` installs the Python-side TTS dependencies (`edge-tts` and `pyttsx3`).
+No sudo is required. On Linux without an OS speech backend, the script falls
+back to `edge-tts`, which uses an online Microsoft Edge TTS service.
 
 ```bash
 uv sync
-bash scripts/install_linux_tts_deps.sh
-uv run python -c "import pyttsx3; print('pyttsx3 OK')"
+uv run python -c "import edge_tts; print('edge-tts OK')"
 echo "こんにちは" | uv run python response_recorder.py --out-dir results/stdin/
 ```
 
@@ -67,17 +64,9 @@ If you intentionally use an already-active virtual environment instead of
 uv pip install pyttsx3
 ```
 
-If `pyttsx3` still cannot initialize on Linux, the script automatically falls
-back to command-line TTS engines. Install the lightweight fallback directly:
-
-```bash
-sudo apt-get update
-sudo apt-get install -y espeak-ng
-echo "こんにちは" | uv run python response_recorder.py --tts-voice ja --out-dir results/stdin/
-```
-
-The script tries TTS backends in this order: `pyttsx3`, `espeak-ng`, `espeak`,
-`pico2wave`, then Windows System.Speech.
+The script tries TTS backends in this order: `pyttsx3`, `edge-tts`,
+`espeak-ng`, `espeak`, `pico2wave`, then Windows System.Speech. The default
+`edge-tts` voice is `ja-JP-NanamiNeural`; override it with `--tts-voice`.
 
 ---
 
