@@ -93,6 +93,16 @@ The default mode is `moshi-selfplay`:
 4. The script writes stereo WAVs, per-WAV timestamp JSON, a manifest JSONL,
    and a `dialogues.jsonl` log of the generated scripts.
 
+Keep the Moshi Python environment separate from the Gemma runtime.  Current
+Moshi packages can require `huggingface-hub<1.0`, while newer Gemma 4 support
+in Transformers can require a newer Hugging Face stack.  To avoid that resolver
+conflict, the dataset script talks to Gemma through an OpenAI-compatible local
+server by default and does not install `transformers` in this uv environment.
+
+Start Gemma 4 separately with any OpenAI-compatible server, for example
+llama.cpp or vLLM.  The dataset script expects a chat-completions endpoint such
+as `http://127.0.0.1:8080/v1/chat/completions`.
+
 Run a tiny three-case test from the cloned `mos` folder:
 
 ```bash
@@ -102,15 +112,18 @@ uv run python scripts/generate_synthetic_moshi_training_data.py \
   --out-dir data/synthetic_loneliness_test \
   --num-dialogues 3 \
   --mode moshi-selfplay \
-  --gemma-model google/gemma-4-E2B-it \
+  --gemma-backend openai-compatible \
+  --gemma-api-base http://127.0.0.1:8080/v1 \
+  --gemma-model gemma-4-E2B-it \
   --moshi-hf-repo llm-jp/llm-jp-moshi-v1 \
   --tts-speed-user 1.9 \
   --moshi-silence-sec 18
 ```
 
-`HF_TOKEN` is not required by this script. If the server cannot download a
-model because of Hugging Face permissions or rate limits, log in once with
-`huggingface-cli login`, or point `--gemma-model` at a local model directory.
+`HF_TOKEN` is not required by this script. If the separate Gemma server needs
+credentials, configure that server side only.  For an offline/check-format run,
+use `--gemma-backend template`, or pre-generate dialogue JSONL in another
+environment and pass it with `--dialogues-jsonl`.
 
 Output shape:
 

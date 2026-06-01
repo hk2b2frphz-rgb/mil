@@ -14,11 +14,6 @@ sphn
 pyopenjtalk
 pyttsx3
 
-# Dialogue generation with Gemma 4
-transformers>=5.5.0
-accelerate
-sentencepiece
-
 # Numerical
 numpy
 

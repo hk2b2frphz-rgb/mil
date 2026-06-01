@@ -25,11 +25,14 @@ import argparse
 import json
 import logging
 import math
+import os
 import random
 import re
 import shutil
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -171,14 +174,49 @@ def parse_args() -> argparse.Namespace:
 
     # Gemma generation
     parser.add_argument(
+        "--gemma-backend",
+        choices=["openai-compatible", "transformers", "template"],
+        default="openai-compatible",
+        help=(
+            "Dialogue generation backend. Use openai-compatible for a Gemma "
+            "server running in a separate environment, avoiding dependency "
+            "conflicts with moshi. Default: openai-compatible."
+        ),
+    )
+    parser.add_argument(
+        "--gemma-api-base",
+        default=os.environ.get("GEMMA_API_BASE")
+        or os.environ.get("OPENAI_BASE_URL")
+        or "http://127.0.0.1:8080/v1",
+        help=(
+            "OpenAI-compatible API base URL for Gemma, e.g. "
+            "http://127.0.0.1:8080/v1. Used with --gemma-backend "
+            "openai-compatible."
+        ),
+    )
+    parser.add_argument(
+        "--gemma-api-key",
+        default=os.environ.get("GEMMA_API_KEY") or os.environ.get("OPENAI_API_KEY"),
+        help="Optional API key for the OpenAI-compatible Gemma endpoint.",
+    )
+    parser.add_argument(
+        "--gemma-timeout-sec",
+        type=float,
+        default=120.0,
+        help="HTTP timeout for OpenAI-compatible Gemma requests.",
+    )
+    parser.add_argument(
         "--gemma-model",
         default="google/gemma-4-E2B-it",
-        help="Hugging Face model id for Gemma 4 dialogue generation.",
+        help=(
+            "Gemma model id/name. For OpenAI-compatible servers this is sent "
+            "as the request model field."
+        ),
     )
     parser.add_argument(
         "--gemma-task",
         default="any-to-any",
-        help="Transformers pipeline task. Gemma 4 small models support any-to-any.",
+        help="Transformers pipeline task, only used with --gemma-backend transformers.",
     )
     parser.add_argument(
         "--gemma-device-map",
@@ -385,6 +423,8 @@ class GemmaDialogueGenerator:
         }[self.args.gemma_dtype]
 
     def load(self) -> None:
+        if self.args.gemma_backend in {"openai-compatible", "template"}:
+            return
         if self.pipe is not None:
             return
         from transformers import pipeline
@@ -409,10 +449,17 @@ class GemmaDialogueGenerator:
             self.pipe = pipeline("text-generation", **kwargs)
 
     def generate(self, use_case: dict[str, Any], rng: random.Random) -> Dialogue:
+        if self.args.gemma_backend == "template":
+            return template_dialogue(use_case)
+        prompt = build_gemma_prompt(use_case, rng)
+
+        if self.args.gemma_backend == "openai-compatible":
+            text = self.generate_openai_compatible(prompt)
+            data = extract_json_object(text)
+            return dialogue_from_mapping(data, use_case)
+
         self.load()
         assert self.pipe is not None
-
-        prompt = build_gemma_prompt(use_case, rng)
         generation_kwargs = {
             "max_new_tokens": self.args.gemma_max_new_tokens,
             "temperature": self.args.gemma_temperature,
@@ -435,6 +482,69 @@ class GemmaDialogueGenerator:
         text = pipeline_result_to_text(result)
         data = extract_json_object(text)
         return dialogue_from_mapping(data, use_case)
+
+    def generate_openai_compatible(self, prompt: str) -> str:
+        url = chat_completions_url(self.args.gemma_api_base)
+        payload = {
+            "model": self.args.gemma_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": self.args.gemma_temperature,
+            "max_tokens": self.args.gemma_max_new_tokens,
+        }
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if self.args.gemma_api_key:
+            headers["Authorization"] = f"Bearer {self.args.gemma_api_key}"
+        request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=self.args.gemma_timeout_sec,
+            ) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                "Could not reach the OpenAI-compatible Gemma endpoint at "
+                f"{url}. Start a Gemma server separately, pass --gemma-api-base, "
+                "or use --dialogues-jsonl / --gemma-backend template."
+            ) from exc
+        return openai_chat_response_to_text(data)
+
+
+def chat_completions_url(api_base: str) -> str:
+    base = api_base.rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    if base.endswith("/v1"):
+        return f"{base}/chat/completions"
+    return f"{base}/v1/chat/completions"
+
+
+def openai_chat_response_to_text(data: dict[str, Any]) -> str:
+    choices = data.get("choices") or []
+    if not choices:
+        raise ValueError(f"OpenAI-compatible response has no choices: {data}")
+    choice = choices[0]
+    message = choice.get("message") if isinstance(choice, dict) else None
+    if isinstance(message, dict):
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    parts.append(str(item.get("text", "")))
+                else:
+                    parts.append(str(item))
+            return "".join(parts)
+    text = choice.get("text") if isinstance(choice, dict) else None
+    if isinstance(text, str):
+        return text
+    raise ValueError(f"Could not extract text from OpenAI-compatible response: {data}")
 
 
 def pipeline_result_to_text(result: Any) -> str:
