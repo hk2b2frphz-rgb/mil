@@ -32,7 +32,10 @@ pip install uv
 # 2. Create .venv and install dependencies
 uv sync
 
-# 3. Run inside the uv environment
+# 3. Install Linux OS TTS dependency when using text/stdin prompts
+bash scripts/install_linux_tts_deps.sh
+
+# 4. Run inside the uv environment
 uv run python response_recorder.py --help
 ```
 
@@ -47,11 +50,12 @@ source into the uv environment:
 uv pip install git+https://github.com/kyutai-labs/moshi.git
 ```
 
-If you see `ModuleNotFoundError: No module named 'pyttsx3'`, refresh the uv
-environment and run through uv rather than the system Python:
+`uv sync` installs the Python-side TTS dependency (`pyttsx3`). Linux also
+needs an OS speech backend. The helper script installs `espeak-ng` with apt:
 
 ```bash
 uv sync
+bash scripts/install_linux_tts_deps.sh
 uv run python -c "import pyttsx3; print('pyttsx3 OK')"
 echo "こんにちは" | uv run python response_recorder.py --out-dir results/stdin/
 ```
@@ -63,8 +67,8 @@ If you intentionally use an already-active virtual environment instead of
 uv pip install pyttsx3
 ```
 
-On Linux GPU servers, `pyttsx3` may also fail if the OS speech backend is not
-installed. Install a lightweight command-line TTS engine:
+If `pyttsx3` still cannot initialize on Linux, the script automatically falls
+back to command-line TTS engines. Install the lightweight fallback directly:
 
 ```bash
 sudo apt-get update
