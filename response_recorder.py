@@ -294,20 +294,28 @@ def load_models(args: argparse.Namespace):
     text_tokenizer = checkpoint_info.get_text_tokenizer()
 
     logger.info("Loading Moshi LM (dtype=%s, device=%s) ...", dtype, args.device)
-    lm_gen = checkpoint_info.get_moshi(device=args.device, dtype=dtype)
-    lm_gen.eval()
+    lm_model = checkpoint_info.get_moshi(device=args.device, dtype=dtype)
+    lm_model.eval()
 
-    # Get lm_gen config and apply CLI overrides
+    # Get lm_gen config and apply CLI overrides before wrapping LMModel.
     lm_gen_cfg = checkpoint_info.lm_gen_config
 
     if args.temp is not None:
         _try_setattr(lm_gen_cfg, "temp", args.temp)
-        _try_setattr(lm_gen, "temp", args.temp)
     if args.temp_text is not None:
         _try_setattr(lm_gen_cfg, "temp_text", args.temp_text)
-        _try_setattr(lm_gen, "temp_text", args.temp_text)
     if args.cfg_coef is not None:
         _try_setattr(lm_gen_cfg, "cfg_coef", args.cfg_coef)
+
+    lm_gen = _ensure_lm_generator(lm_model, lm_gen_cfg)
+    if hasattr(lm_gen, "eval"):
+        lm_gen.eval()
+
+    if args.temp is not None:
+        _try_setattr(lm_gen, "temp", args.temp)
+    if args.temp_text is not None:
+        _try_setattr(lm_gen, "temp_text", args.temp_text)
+    if args.cfg_coef is not None:
         _try_setattr(lm_gen, "cfg_coef", args.cfg_coef)
 
     # Determine acoustic delay from model config, falling back to 2
@@ -317,6 +325,28 @@ def load_models(args: argparse.Namespace):
     logger.info("Acoustic delay: %d frames", acoustic_delay)
 
     return mimi, text_tokenizer, lm_gen, lm_gen_cfg, acoustic_delay
+
+
+def _ensure_lm_generator(lm_model, lm_gen_cfg):
+    """Return an object with streaming() and step(), wrapping LMModel if needed."""
+    if hasattr(lm_model, "step") and hasattr(lm_model, "streaming"):
+        return lm_model
+
+    try:
+        from moshi.models.lm import LMGen  # type: ignore[import]
+    except ImportError:
+        from moshi.models.lm_gen import LMGen  # type: ignore[import]
+
+    signature = inspect.signature(LMGen)
+    supported = set(signature.parameters)
+    cfg_kwargs = {}
+    for name in ("temp", "temp_text", "top_k", "top_k_text", "cfg_coef"):
+        value = _getattr_chain(lm_gen_cfg, name, None)
+        if value is not None and name in supported:
+            cfg_kwargs[name] = value
+
+    logger.info("Wrapping LMModel with LMGen using config: %s", cfg_kwargs)
+    return LMGen(lm_model, **cfg_kwargs)
 
 
 def _checkpoint_info_from_args(loaders, args: argparse.Namespace):
@@ -362,13 +392,18 @@ def _checkpoint_info_from_args(loaders, args: argparse.Namespace):
 
 def _try_setattr(obj, name: str, value) -> None:
     try:
-        setattr(obj, name, value)
+        if isinstance(obj, dict):
+            obj[name] = value
+        else:
+            setattr(obj, name, value)
     except Exception:
         pass
 
 
 def _getattr_chain(obj, name: str, default):
     try:
+        if isinstance(obj, dict):
+            return obj.get(name, default)
         return getattr(obj, name)
     except AttributeError:
         return default
