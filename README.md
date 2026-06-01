@@ -269,6 +269,12 @@ Each line is a JSON object:
   "frame_rate": 12.5,
   "sample_rate": 24000,
   "total_steps": 225,
+  "input_end_step": 32,
+  "first_audio_step": 18,
+  "first_audio_time_sec": 1.44,
+  "audible_response_start_step": 20,
+  "audible_response_start_sec": 1.6,
+  "audible_start_after_input_sec": -0.96,
   "first_response_step": 18,
   "first_response_latency_sec": 1.44,
   "wall_time_sec": 47.2,
@@ -281,6 +287,13 @@ was used (i.e. the corresponding CLI flag was not supplied).
 
 `first_response_latency_sec` is the latency to the **first non-padding text
 token**.  It is `null` when no text was generated.
+
+`first_audio_time_sec` is when Moshi first returned audio tokens. Because the
+codec has an acoustic delay, `audible_response_start_sec` is the estimated
+stream time where that audio becomes audible in `response.wav`.
+`audible_start_after_input_sec` compares that estimated audible start with the
+end of the prompt audio: negative means Moshi started speaking while the prompt
+was still being fed, positive means it started after the prompt ended.
 
 ---
 

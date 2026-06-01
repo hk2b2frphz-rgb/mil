@@ -459,6 +459,7 @@ def run_trial(
 
     audio_frames: list[torch.Tensor] = []   # each: (num_codebooks, 1) cpu
     text_events: list[dict] = []
+    first_audio_step: Optional[int] = None
     first_response_step: Optional[int] = None
 
     # ---- Streaming inference loop ----------------------------------------
@@ -497,6 +498,8 @@ def run_trial(
                     # Split text token and audio tokens
                     text_id = int(out[0, 0, 0].item())
                     audio_tok = out[0, 1:, :].cpu()  # (num_codebooks, 1)
+                    if first_audio_step is None:
+                        first_audio_step = step
                     audio_frames.append(audio_tok)
 
                     # Decode text token; skip padding ids 0 and 3
@@ -514,6 +517,7 @@ def run_trial(
         "audio_frames": audio_frames,
         "text_events": text_events,
         "total_steps": n_steps,
+        "first_audio_step": first_audio_step,
         "first_response_step": first_response_step,
     }
 
@@ -585,6 +589,7 @@ def save_trial_outputs(
     audio_frames = trial_result["audio_frames"]
     text_events = trial_result["text_events"]
     total_steps = trial_result["total_steps"]
+    first_audio_step = trial_result["first_audio_step"]
     first_response_step = trial_result["first_response_step"]
 
     # ---- Audio -----------------------------------------------------------
@@ -617,6 +622,27 @@ def save_trial_outputs(
         if first_response_step is not None
         else None
     )
+    first_audio_time_sec = (
+        first_audio_step / frame_rate
+        if first_audio_step is not None
+        else None
+    )
+    audible_response_start_step = (
+        first_audio_step + acoustic_delay
+        if first_audio_step is not None
+        else None
+    )
+    audible_response_start_sec = (
+        audible_response_start_step / frame_rate
+        if audible_response_start_step is not None
+        else None
+    )
+    input_end_step = int(round(input_duration_sec * frame_rate))
+    audible_start_after_input_sec = (
+        audible_response_start_sec - input_duration_sec
+        if audible_response_start_sec is not None
+        else None
+    )
 
     # Resolve effective temperature/cfg values from args or defaults
     temp = args.temp if args.temp is not None else float("nan")
@@ -639,6 +665,12 @@ def save_trial_outputs(
         "frame_rate": frame_rate,
         "sample_rate": sample_rate,
         "total_steps": total_steps,
+        "input_end_step": input_end_step,
+        "first_audio_step": first_audio_step,
+        "first_audio_time_sec": first_audio_time_sec,
+        "audible_response_start_step": audible_response_start_step,
+        "audible_response_start_sec": audible_response_start_sec,
+        "audible_start_after_input_sec": audible_start_after_input_sec,
         "first_response_step": first_response_step,
         "first_response_latency_sec": first_response_latency_sec,
         "wall_time_sec": round(wall_time, 3),
@@ -948,18 +980,41 @@ def main() -> None:
                     if first_step is not None
                     else "N/A"
                 )
+                first_audio_step = result["first_audio_step"]
+                audible_start_sec = (
+                    (first_audio_step + acoustic_delay) / frame_rate
+                    if first_audio_step is not None
+                    else None
+                )
+                audible_start_str = (
+                    f"{audible_start_sec:.2f}s"
+                    if audible_start_sec is not None
+                    else "N/A"
+                )
+                after_input_str = (
+                    f"{audible_start_sec - input_duration_sec:+.2f}s"
+                    if audible_start_sec is not None
+                    else "N/A"
+                )
                 transcript = "".join(
                     event["piece"] for event in result["text_events"]
                 ).strip()
                 if not args.no_print_transcript:
                     print(
-                        f"ASR result [{input_path.stem} seed={seed}]: "
+                        f"Moshi audible start [{input_path.stem} seed={seed}]: "
+                        f"{audible_start_str} from stream start "
+                        f"({after_input_str} from input end)"
+                    )
+                    print(
+                        f"Moshi text output [{input_path.stem} seed={seed}]: "
                         f"{transcript or '(empty)'}"
                     )
                 logger.info(
-                    "  done: %d steps | latency=%s | text_tokens=%d | wall=%.1fs",
+                    "  done: %d steps | text_start=%s | audio_start=%s | "
+                    "text_tokens=%d | wall=%.1fs",
                     result["total_steps"],
                     latency_str,
+                    audible_start_str,
                     len(result["text_events"]),
                     wall_time,
                 )
