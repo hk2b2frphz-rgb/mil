@@ -93,7 +93,8 @@ echo "こんにちは。今日の予定を教えてください。" | python res
 
 This reads the text from stdin, synthesizes it to WAV under
 `<out-dir>/_tts_inputs/`, feeds that WAV to Moshi, saves about the first
-10 seconds of the response as `response.wav`, and prints the transcript result.
+10 seconds of the response as `response.wav`, and prints a chronological
+conversation timeline.
 
 ```bash
 python response_recorder.py \
@@ -233,11 +234,29 @@ to produce a complete reply.  Increase it for longer expected responses.
 ├── <input_stem>/
 │   └── seed_<N>/
 │       ├── response.wav       # Moshi's response audio (acoustic-delay corrected)
+│       ├── conversation_timeline.jsonl
+│       ├── conversation_timeline.txt
 │       ├── transcript.jsonl   # One JSON line per emitted text token
 │       ├── transcript.txt     # Plain-text concatenation of all pieces
 │       └── meta.json          # Per-trial metadata (schema below)
 ...
 ```
+
+### Timeline output
+
+The console and `conversation_timeline.txt` show user input and Moshi output
+on one timeline:
+
+```text
+Conversation timeline:
+[00:00.000] user  speech_start こんにちは
+[00:02.560] user  speech_end
+[00:03.120] moshi speech_start (audio starts)
+[00:03.200] moshi text_output こんにちは。どうしましたか。
+```
+
+`conversation_timeline.jsonl` stores the same events as JSON lines for later
+analysis.
 
 ### `transcript.jsonl` format
 

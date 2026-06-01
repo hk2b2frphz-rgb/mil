@@ -87,6 +87,16 @@ def get_input_duration_sec(path: str | Path) -> float:
         return 0.0
 
 
+def get_prompt_text(path: str | Path) -> Optional[str]:
+    """Return original text for synthesized prompts when available."""
+    text_path = Path(path).with_suffix(".txt")
+    if text_path.is_file():
+        with open(text_path, "r", encoding="utf-8") as f:
+            text = f.read().strip()
+            return text or None
+    return None
+
+
 def collect_input_files(inputs: list[str]) -> list[Path]:
     """Expand file/directory arguments into a list of .wav paths."""
     files: list[Path] = []
@@ -140,6 +150,7 @@ def synthesize_text_inputs(args: argparse.Namespace, out_dir: Path) -> list[Path
     wav_paths: list[Path] = []
     for index, text in enumerate(prompts, start=1):
         wav_path = tts_dir / f"{_safe_prompt_stem(text, index)}.wav"
+        text_path = wav_path.with_suffix(".txt")
         logger.info("Synthesizing text prompt %d/%d: %s", index, len(prompts), text)
         synthesize_text_to_wav(
             text=text,
@@ -147,6 +158,8 @@ def synthesize_text_inputs(args: argparse.Namespace, out_dir: Path) -> list[Path
             voice=args.tts_voice,
             rate=args.tts_rate,
         )
+        with open(text_path, "w", encoding="utf-8") as f:
+            f.write(text)
         wav_paths.append(wav_path)
     return wav_paths
 
@@ -563,6 +576,80 @@ def decode_audio(
     return pcm_out[0, 0].cpu().float().numpy()  # (samples,)
 
 
+def _fmt_time(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "--:--.---"
+    minutes = int(seconds // 60)
+    remainder = seconds - minutes * 60
+    return f"{minutes:02d}:{remainder:06.3f}"
+
+
+def build_conversation_timeline(
+    input_path: Path,
+    prompt_text: Optional[str],
+    input_duration_sec: float,
+    transcript: str,
+    first_response_latency_sec: Optional[float],
+    audible_response_start_sec: Optional[float],
+) -> list[dict]:
+    """Build chronological user/Moshi events for display and saving."""
+    events = [
+        {
+            "time_sec": 0.0,
+            "time": _fmt_time(0.0),
+            "speaker": "user",
+            "event": "speech_start",
+            "text": prompt_text or f"(audio input: {input_path.name})",
+        },
+        {
+            "time_sec": input_duration_sec,
+            "time": _fmt_time(input_duration_sec),
+            "speaker": "user",
+            "event": "speech_end",
+            "text": "",
+        },
+    ]
+    if audible_response_start_sec is not None:
+        events.append(
+            {
+                "time_sec": audible_response_start_sec,
+                "time": _fmt_time(audible_response_start_sec),
+                "speaker": "moshi",
+                "event": "speech_start",
+                "text": "(audio starts)",
+            }
+        )
+    if first_response_latency_sec is not None or transcript:
+        events.append(
+            {
+                "time_sec": first_response_latency_sec,
+                "time": _fmt_time(first_response_latency_sec),
+                "speaker": "moshi",
+                "event": "text_output",
+                "text": transcript or "(empty)",
+            }
+        )
+    return sorted(
+        events,
+        key=lambda event: (
+            float("inf") if event["time_sec"] is None else event["time_sec"],
+            event["speaker"],
+            event["event"],
+        ),
+    )
+
+
+def format_conversation_timeline(events: list[dict]) -> str:
+    lines = ["Conversation timeline:"]
+    for event in events:
+        text = f" {event['text']}" if event["text"] else ""
+        lines.append(
+            f"[{event['time']}] {event['speaker']:<5} "
+            f"{event['event']:<12}{text}"
+        )
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Output saving
 # ---------------------------------------------------------------------------
@@ -616,6 +703,7 @@ def save_trial_outputs(
 
     # ---- meta.json -------------------------------------------------------
     input_duration_sec = get_input_duration_sec(input_path)
+    prompt_text = get_prompt_text(input_path)
 
     first_response_latency_sec = (
         first_response_step / frame_rate
@@ -644,6 +732,20 @@ def save_trial_outputs(
         else None
     )
 
+    timeline = build_conversation_timeline(
+        input_path=input_path,
+        prompt_text=prompt_text,
+        input_duration_sec=input_duration_sec,
+        transcript=transcript.strip(),
+        first_response_latency_sec=first_response_latency_sec,
+        audible_response_start_sec=audible_response_start_sec,
+    )
+    with open(trial_dir / "conversation_timeline.jsonl", "w", encoding="utf-8") as f:
+        for event in timeline:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    with open(trial_dir / "conversation_timeline.txt", "w", encoding="utf-8") as f:
+        f.write(format_conversation_timeline(timeline) + "\n")
+
     # Resolve effective temperature/cfg values from args or defaults
     temp = args.temp if args.temp is not None else float("nan")
     temp_text = args.temp_text if args.temp_text is not None else float("nan")
@@ -653,6 +755,7 @@ def save_trial_outputs(
 
     meta = {
         "input_path": str(input_path.resolve()),
+        "prompt_text": prompt_text,
         "input_duration_sec": round(input_duration_sec, 4),
         "silence_sec": args.silence_sec,
         "seed": seed,
@@ -991,24 +1094,23 @@ def main() -> None:
                     if audible_start_sec is not None
                     else "N/A"
                 )
-                after_input_str = (
-                    f"{audible_start_sec - input_duration_sec:+.2f}s"
-                    if audible_start_sec is not None
-                    else "N/A"
-                )
                 transcript = "".join(
                     event["piece"] for event in result["text_events"]
                 ).strip()
                 if not args.no_print_transcript:
-                    print(
-                        f"Moshi audible start [{input_path.stem} seed={seed}]: "
-                        f"{audible_start_str} from stream start "
-                        f"({after_input_str} from input end)"
+                    timeline = build_conversation_timeline(
+                        input_path=input_path,
+                        prompt_text=get_prompt_text(input_path),
+                        input_duration_sec=input_duration_sec,
+                        transcript=transcript,
+                        first_response_latency_sec=(
+                            first_step / frame_rate
+                            if first_step is not None
+                            else None
+                        ),
+                        audible_response_start_sec=audible_start_sec,
                     )
-                    print(
-                        f"Moshi text output [{input_path.stem} seed={seed}]: "
-                        f"{transcript or '(empty)'}"
-                    )
+                    print(format_conversation_timeline(timeline))
                 logger.info(
                     "  done: %d steps | text_start=%s | audio_start=%s | "
                     "text_tokens=%d | wall=%.1fs",
