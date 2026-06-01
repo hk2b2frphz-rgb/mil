@@ -21,7 +21,11 @@ multiple random seeds.
 
 ## Installation (on the GPU server)
 
+Run these commands from the cloned `mos` folder:
+
 ```bash
+cd mos
+
 # 1. Install uv if needed
 pip install uv
 

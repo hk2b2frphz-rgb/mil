@@ -1,5 +1,5 @@
 [project]
-name = "moshimoshi-j-response-recorder"
+name = "mos"
 version = "0.1.0"
 description = "Feed WAV or text prompts into Moshi and save audio/text responses."
 readme = "README.md"
