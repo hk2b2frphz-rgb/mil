@@ -5,10 +5,10 @@ description = "Feed WAV or text prompts into Moshi and save audio/text responses
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "edge-tts",
     "huggingface-hub",
     "moshi",
     "numpy",
+    "pyopenjtalk",
     "pyttsx3",
     "sphn",
     "torch>=2.1.0",

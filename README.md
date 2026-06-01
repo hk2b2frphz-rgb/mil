@@ -47,13 +47,13 @@ source into the uv environment:
 uv pip install git+https://github.com/kyutai-labs/moshi.git
 ```
 
-`uv sync` installs the Python-side TTS dependencies (`edge-tts` and `pyttsx3`).
-No sudo is required. On Linux without an OS speech backend, the script falls
-back to `edge-tts`, which uses an online Microsoft Edge TTS service.
+`uv sync` installs local Python-side TTS dependencies (`pyopenjtalk` and
+`pyttsx3`). No sudo is required. Japanese stdin/text prompts use
+`pyopenjtalk` first, so TTS works locally without an online service.
 
 ```bash
 uv sync
-uv run python -c "import edge_tts; print('edge-tts OK')"
+uv run python -c "import pyopenjtalk; print('pyopenjtalk OK')"
 echo "こんにちは" | uv run python response_recorder.py --out-dir results/stdin/
 ```
 
@@ -64,9 +64,9 @@ If you intentionally use an already-active virtual environment instead of
 uv pip install pyttsx3
 ```
 
-The script tries TTS backends in this order: `pyttsx3`, `edge-tts`,
-`espeak-ng`, `espeak`, `pico2wave`, then Windows System.Speech. The default
-`edge-tts` voice is `ja-JP-NanamiNeural`; override it with `--tts-voice`.
+The script tries local TTS backends in this order: `pyopenjtalk`, `pyttsx3`,
+`espeak-ng`, `espeak`, `pico2wave`, then Windows System.Speech. `--tts-voice`
+only applies to backends that support voice selection.
 
 ---
 
@@ -112,8 +112,9 @@ python response_recorder.py \
 ```
 
 The generated prompt WAV files are saved under `<out-dir>/_tts_inputs/`.
-The script first tries `pyttsx3`, then falls back to Windows System.Speech.
-For Japanese prompts, install/select a Japanese OS voice when needed:
+The script first tries local Japanese TTS with `pyopenjtalk`, then falls back
+to other local system TTS backends. For OS-specific voices, select a voice when
+needed:
 
 ```bash
 python response_recorder.py \

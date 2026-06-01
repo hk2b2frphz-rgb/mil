@@ -10,8 +10,8 @@ torchaudio>=2.1.0
 # Audio I/O (used by moshi)
 sphn
 
-# Simple text-to-speech for text/stdin prompts
-edge-tts
+# Local text-to-speech for text/stdin prompts
+pyopenjtalk
 pyttsx3
 
 # Numerical

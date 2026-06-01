@@ -156,7 +156,10 @@ def synthesize_text_to_wav(
     voice: Optional[str],
     rate: int,
 ) -> None:
-    """Create a WAV prompt using pyttsx3, edge-tts, CLI TTS, or Windows SAPI."""
+    """Create a WAV prompt using local TTS backends."""
+    if synthesize_with_pyopenjtalk(text, wav_path):
+        return
+
     try:
         import pyttsx3  # type: ignore[import]
 
@@ -174,19 +177,16 @@ def synthesize_text_to_wav(
         if wav_path.exists() and wav_path.stat().st_size > 0:
             return
     except Exception as exc:
-        logger.info("pyttsx3 TTS unavailable, trying edge-tts: %s", exc)
-
-    if synthesize_with_edge_tts(text, wav_path, voice, rate):
-        return
+        logger.info("pyttsx3 TTS unavailable, trying command-line TTS: %s", exc)
 
     if synthesize_with_cli_tts(text, wav_path, voice, rate):
         return
 
     if os.name != "nt":
         raise RuntimeError(
-            "Text-to-speech requires pyttsx3, edge-tts, "
+            "Text-to-speech requires a local backend: pyopenjtalk, pyttsx3, "
             "espeak-ng/espeak/pico2wave, or Windows System.Speech. "
-            "Run `uv sync` to install edge-tts, or provide WAV files with "
+            "Run `uv sync` to install pyopenjtalk, or provide WAV files with "
             "--inputs."
         )
 
@@ -217,51 +217,23 @@ $synth.Dispose()
     )
 
 
-def synthesize_with_edge_tts(
-    text: str,
-    wav_path: Path,
-    voice: Optional[str],
-    rate: int,
-) -> bool:
-    """Use edge-tts without sudo, then convert its MP3 output to WAV."""
-    mp3_path = wav_path.with_suffix(".edge.mp3")
-    edge_voice = voice or "ja-JP-NanamiNeural"
-    edge_rate = max(-50, min(100, int((rate - 200) / 2)))
-    command = [
-        sys.executable,
-        "-m",
-        "edge_tts",
-        "--voice",
-        edge_voice,
-        "--rate",
-        f"{edge_rate:+d}%",
-        "--text",
-        text,
-        "--write-media",
-        str(mp3_path),
-    ]
+def synthesize_with_pyopenjtalk(text: str, wav_path: Path) -> bool:
+    """Use pyopenjtalk for local Japanese TTS."""
     try:
-        subprocess.run(command, check=True)
-        if not mp3_path.exists() or mp3_path.stat().st_size == 0:
-            return False
+        import pyopenjtalk  # type: ignore[import]
+        import sphn  # type: ignore[import]
 
-        import torch  # noqa: F401
-        import torchaudio  # type: ignore[import]
-
-        waveform, sample_rate = torchaudio.load(str(mp3_path))
-        if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
-        torchaudio.save(str(wav_path), waveform, sample_rate)
+        pcm, sample_rate = pyopenjtalk.tts(text)
+        pcm = np.asarray(pcm, dtype=np.float32)
+        peak = float(np.max(np.abs(pcm))) if pcm.size else 0.0
+        if peak > 1.0:
+            pcm = pcm / peak
+        sphn.write_wav(str(wav_path), pcm, int(sample_rate))
         if wav_path.exists() and wav_path.stat().st_size > 0:
-            logger.info("Synthesized prompt with edge-tts voice=%s", edge_voice)
+            logger.info("Synthesized prompt with pyopenjtalk")
             return True
     except Exception as exc:
-        logger.warning("edge-tts TTS failed: %s", exc)
-    finally:
-        try:
-            mp3_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        logger.warning("pyopenjtalk TTS failed: %s", exc)
     return False
 
 
