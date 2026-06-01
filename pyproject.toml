@@ -1,0 +1,27 @@
+[project]
+name = "moshimoshi-j-response-recorder"
+version = "0.1.0"
+description = "Feed WAV or text prompts into Moshi and save audio/text responses."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "huggingface-hub",
+    "moshi",
+    "numpy",
+    "pyttsx3",
+    "sphn",
+    "torch>=2.1.0",
+    "torchaudio>=2.1.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
+torchaudio = { index = "pytorch-cu121" }
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
