@@ -63,6 +63,18 @@ If you intentionally use an already-active virtual environment instead of
 uv pip install pyttsx3
 ```
 
+On Linux GPU servers, `pyttsx3` may also fail if the OS speech backend is not
+installed. Install a lightweight command-line TTS engine:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y espeak-ng
+echo "こんにちは" | uv run python response_recorder.py --tts-voice ja --out-dir results/stdin/
+```
+
+The script tries TTS backends in this order: `pyttsx3`, `espeak-ng`, `espeak`,
+`pico2wave`, then Windows System.Speech.
+
 ---
 
 ## Quick-start examples

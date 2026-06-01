@@ -14,6 +14,7 @@ import logging
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -155,7 +156,7 @@ def synthesize_text_to_wav(
     voice: Optional[str],
     rate: int,
 ) -> None:
-    """Create a WAV prompt using pyttsx3 when available, then Windows SAPI."""
+    """Create a WAV prompt using pyttsx3, command-line TTS, or Windows SAPI."""
     try:
         import pyttsx3  # type: ignore[import]
 
@@ -173,12 +174,17 @@ def synthesize_text_to_wav(
         if wav_path.exists() and wav_path.stat().st_size > 0:
             return
     except Exception as exc:
-        logger.info("pyttsx3 TTS unavailable, trying Windows SAPI: %s", exc)
+        logger.info("pyttsx3 TTS unavailable, trying command-line TTS: %s", exc)
+
+    if synthesize_with_cli_tts(text, wav_path, voice, rate):
+        return
 
     if os.name != "nt":
         raise RuntimeError(
-            "Text-to-speech requires pyttsx3 or Windows System.Speech. "
-            "Install pyttsx3, or provide WAV files with --inputs."
+            "Text-to-speech requires pyttsx3, espeak-ng/espeak/pico2wave, "
+            "or Windows System.Speech. On Ubuntu, try: "
+            "sudo apt-get install -y espeak-ng. Or provide WAV files with "
+            "--inputs."
         )
 
     env = os.environ.copy()
@@ -206,6 +212,37 @@ $synth.Dispose()
         check=True,
         env=env,
     )
+
+
+def synthesize_with_cli_tts(
+    text: str,
+    wav_path: Path,
+    voice: Optional[str],
+    rate: int,
+) -> bool:
+    """Try common command-line TTS engines available on Linux servers."""
+    engines = [
+        shutil.which("espeak-ng"),
+        shutil.which("espeak"),
+        shutil.which("pico2wave"),
+    ]
+    for engine in [path for path in engines if path]:
+        try:
+            name = Path(engine).name.lower()
+            if name in {"espeak-ng", "espeak"}:
+                command = [engine, "-w", str(wav_path), "-s", str(rate)]
+                if voice:
+                    command.extend(["-v", voice])
+                command.append(text)
+            else:
+                command = [engine, "-w", str(wav_path), text]
+            subprocess.run(command, check=True)
+            if wav_path.exists() and wav_path.stat().st_size > 0:
+                logger.info("Synthesized prompt with %s", name)
+                return True
+        except Exception as exc:
+            logger.warning("Command-line TTS failed (%s): %s", engine, exc)
+    return False
 
 
 # ---------------------------------------------------------------------------
