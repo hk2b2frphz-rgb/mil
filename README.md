@@ -97,7 +97,6 @@ Run a tiny three-case test from the cloned `mos` folder:
 
 ```bash
 uv sync
-export HF_TOKEN=...  # if your Gemma/Moshi access requires it
 
 uv run python scripts/generate_synthetic_moshi_training_data.py \
   --out-dir data/synthetic_loneliness_test \
@@ -108,6 +107,10 @@ uv run python scripts/generate_synthetic_moshi_training_data.py \
   --tts-speed-user 1.9 \
   --moshi-silence-sec 18
 ```
+
+`HF_TOKEN` is not required by this script. If the server cannot download a
+model because of Hugging Face permissions or rate limits, log in once with
+`huggingface-cli login`, or point `--gemma-model` at a local model directory.
 
 Output shape:
 
