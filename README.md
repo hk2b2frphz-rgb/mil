@@ -57,6 +57,12 @@ uv run python -c "import pyopenjtalk; print('pyopenjtalk OK')"
 echo "こんにちは" | uv run python response_recorder.py --out-dir results/stdin/
 ```
 
+Make the local TTS prompt faster with `--tts-speed`:
+
+```bash
+echo "こんにちは" | uv run python response_recorder.py --tts-speed 1.5 --out-dir results/fast-tts/
+```
+
 If you intentionally use an already-active virtual environment instead of
 `uv run`, install the missing package into that environment:
 
@@ -200,6 +206,7 @@ python response_recorder.py \
 | `--stdin` | auto for piped stdin | Read one text prompt from standard input |
 | `--tts-voice` | — | Optional TTS voice name |
 | `--tts-rate` | `200` | TTS speaking rate for `pyttsx3` |
+| `--tts-speed` | `1.25` | Speed multiplier for `pyopenjtalk` prompt audio |
 | `--silence-sec` | `15.0` | Silence appended after input |
 | `--seeds` | — | Comma-separated seed list |
 | `--num-trials` | — | Use seeds 0..N-1 (fallback when `--seeds` absent) |

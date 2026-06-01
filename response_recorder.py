@@ -157,6 +157,7 @@ def synthesize_text_inputs(args: argparse.Namespace, out_dir: Path) -> list[Path
             wav_path=wav_path,
             voice=args.tts_voice,
             rate=args.tts_rate,
+            speed=args.tts_speed,
         )
         with open(text_path, "w", encoding="utf-8") as f:
             f.write(text)
@@ -169,9 +170,10 @@ def synthesize_text_to_wav(
     wav_path: Path,
     voice: Optional[str],
     rate: int,
+    speed: float,
 ) -> None:
     """Create a WAV prompt using local TTS backends."""
-    if synthesize_with_pyopenjtalk(text, wav_path):
+    if synthesize_with_pyopenjtalk(text, wav_path, speed):
         return
 
     try:
@@ -231,7 +233,7 @@ $synth.Dispose()
     )
 
 
-def synthesize_with_pyopenjtalk(text: str, wav_path: Path) -> bool:
+def synthesize_with_pyopenjtalk(text: str, wav_path: Path, speed: float) -> bool:
     """Use pyopenjtalk for local Japanese TTS."""
     try:
         import pyopenjtalk  # type: ignore[import]
@@ -242,6 +244,7 @@ def synthesize_with_pyopenjtalk(text: str, wav_path: Path) -> bool:
         peak = float(np.max(np.abs(pcm))) if pcm.size else 0.0
         if peak > 1.0:
             pcm = pcm / peak
+        pcm = _speed_up_pcm(pcm, speed)
         sphn.write_wav(str(wav_path), pcm, int(sample_rate))
         if wav_path.exists() and wav_path.stat().st_size > 0:
             logger.info("Synthesized prompt with pyopenjtalk")
@@ -249,6 +252,19 @@ def synthesize_with_pyopenjtalk(text: str, wav_path: Path) -> bool:
     except Exception as exc:
         logger.warning("pyopenjtalk TTS failed: %s", exc)
     return False
+
+
+def _speed_up_pcm(pcm: np.ndarray, speed: float) -> np.ndarray:
+    """Change prompt duration with simple interpolation; speed > 1 is faster."""
+    if speed <= 0:
+        raise ValueError("--tts-speed must be greater than 0.")
+    if abs(speed - 1.0) < 1e-6 or pcm.size < 2:
+        return pcm.astype(np.float32)
+
+    new_len = max(1, int(round(pcm.size / speed)))
+    old_x = np.linspace(0.0, 1.0, num=pcm.size, endpoint=True)
+    new_x = np.linspace(0.0, 1.0, num=new_len, endpoint=True)
+    return np.interp(new_x, old_x, pcm).astype(np.float32)
 
 
 def synthesize_with_cli_tts(
@@ -965,6 +981,14 @@ def parse_args() -> argparse.Namespace:
         metavar="WPM",
         help="TTS speaking rate for pyttsx3. Default: 200. Windows SAPI "
              "maps this approximately to its -10..10 rate range.",
+    )
+    parser.add_argument(
+        "--tts-speed",
+        type=float,
+        default=1.25,
+        metavar="X",
+        help="Post-process speed multiplier for pyopenjtalk prompts. "
+             "Values greater than 1.0 make speech faster. Default: 1.25.",
     )
 
     # Experiment parameters
