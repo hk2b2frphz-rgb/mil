@@ -261,10 +261,11 @@ analysis.
 
 By default, the prompt is fed as a dual-stream history: user audio contains the
 full prompt, while the Moshi audio stream is forced to silence for the same
-duration. The script then saves only the continuation generated during the
-appended silence. This mirrors prompt-continuation workflows where the first
-seconds provide both streams and the model continues from that context. Use
-`--allow-overlap` to keep Moshi's original full-duplex behavior.
+duration. Any Moshi text sampled during that prompt window is removed from the
+history, so the continuation starts from `user audio + silent Moshi audio`
+rather than from a half-generated Moshi utterance. The script then saves only
+the continuation generated during the appended silence. Use `--allow-overlap`
+to keep Moshi's original full-duplex behavior.
 
 ### `transcript.jsonl` format
 

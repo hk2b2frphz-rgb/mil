@@ -505,12 +505,15 @@ def run_trial(
                     if codes is None:
                         continue
 
+                    prompt_phase = not allow_overlap and step < input_steps
                     depformer_replace_tokens = (
                         _make_silent_moshi_tokens(lm_gen, device)
-                        if not allow_overlap and step < input_steps
+                        if prompt_phase
                         else None
                     )
                     out = _lm_gen_step(lm_gen, codes, depformer_replace_tokens)
+                    if prompt_phase:
+                        _overwrite_current_text_as_zero(lm_gen)
                     if out is None:
                         continue
 
@@ -566,6 +569,28 @@ def _lm_gen_step(lm_gen, codes, depformer_replace_tokens):
             "falling back to normal step."
         )
         return lm_gen.step(codes)
+
+
+def _overwrite_current_text_as_zero(lm_gen) -> None:
+    """Remove sampled Moshi text from the prompt history."""
+    import torch
+
+    state = getattr(lm_gen, "_streaming_state", None)
+    lm_model = getattr(lm_gen, "lm_model", lm_gen)
+    if state is None:
+        return
+
+    cache_time = state.cache.shape[2]
+    positions = (state.offsets % cache_time)[:, None, None]
+    zero = torch.full(
+        (state.batch_size, 1, 1),
+        int(getattr(lm_model, "zero_token_id", -1)),
+        dtype=torch.long,
+        device=state.cache.device,
+    )
+    old_value = state.cache[:, :1].gather(-1, positions)
+    value = torch.where(state.exec_mask[:, None, None], zero, old_value)
+    state.cache[:, :1].scatter_(-1, positions, value)
 
 
 def _audio_tokens_are_decodable(audio_tok) -> bool:
