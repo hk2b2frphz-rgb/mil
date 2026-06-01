@@ -436,6 +436,7 @@ def run_trial(
     silence_sec: float,
     max_gen_sec: float,
     acoustic_delay: int,
+    allow_overlap: bool,
 ) -> dict:
     """
     Run a single inference trial.
@@ -463,6 +464,7 @@ def run_trial(
     )
 
     # ---- Determine number of steps to run --------------------------------
+    input_steps = (len(pcm) + frame_size - 1) // frame_size
     max_steps = int(max_gen_sec * frame_rate)
     total_frames = (len(full_pcm) + frame_size - 1) // frame_size
     n_steps = min(total_frames, max_steps)
@@ -474,6 +476,19 @@ def run_trial(
     text_events: list[dict] = []
     first_audio_step: Optional[int] = None
     first_response_step: Optional[int] = None
+    force_no_speech_tokens = None
+    can_force_no_speech = False
+    if not allow_overlap:
+        force_no_speech_tokens = _make_force_no_speech_tokens(lm_gen, device)
+        can_force_no_speech = (
+            force_no_speech_tokens is not None
+            and _supports_depformer_replace(lm_gen)
+        )
+        if not can_force_no_speech:
+            logger.warning(
+                "This moshi LMGen does not expose depformer_replace_tokens; "
+                "Moshi audio cannot be blocked during user input."
+            )
 
     # ---- Streaming inference loop ----------------------------------------
     with torch.no_grad():
@@ -503,20 +518,29 @@ def run_trial(
                     if codes is None:
                         continue
 
-                    # LM step -> (1, 1+num_codebooks, 1) or None during warmup
-                    out = lm_gen.step(codes)
+                    # Feed user audio throughout the prompt. While the user is
+                    # still speaking, force Moshi's own audio stream to
+                    # no-speech tokens so response generation starts afterward.
+                    depformer_replace_tokens = (
+                        force_no_speech_tokens
+                        if can_force_no_speech and step < input_steps
+                        else None
+                    )
+                    out = _lm_gen_step(lm_gen, codes, depformer_replace_tokens)
                     if out is None:
                         continue
 
                     # Split text token and audio tokens
                     text_id = int(out[0, 0, 0].item())
                     audio_tok = out[0, 1:, :].cpu()  # (num_codebooks, 1)
-                    if first_audio_step is None:
-                        first_audio_step = step
-                    audio_frames.append(audio_tok)
+                    response_phase = allow_overlap or step >= input_steps
+                    if response_phase and _audio_tokens_are_decodable(audio_tok):
+                        if first_audio_step is None:
+                            first_audio_step = step
+                        audio_frames.append(audio_tok)
 
                     # Decode text token; skip padding ids 0 and 3
-                    if text_id not in (0, 3):
+                    if response_phase and text_id not in (0, 3):
                         piece = text_tokenizer.id_to_piece(text_id)
                         piece = piece.replace("\u2581", " ")  # ▁ -> space
                         time_sec = round(step / frame_rate, 4)
@@ -530,9 +554,45 @@ def run_trial(
         "audio_frames": audio_frames,
         "text_events": text_events,
         "total_steps": n_steps,
+        "input_steps": input_steps,
+        "allow_overlap": allow_overlap,
         "first_audio_step": first_audio_step,
         "first_response_step": first_response_step,
     }
+
+
+def _supports_depformer_replace(lm_gen) -> bool:
+    try:
+        return "depformer_replace_tokens" in inspect.signature(lm_gen.step).parameters
+    except Exception:
+        return False
+
+
+def _make_force_no_speech_tokens(lm_gen, device: str):
+    """Build replacement tokens that keep Moshi's generated audio stream quiet."""
+    try:
+        import torch
+
+        lm_model = getattr(lm_gen, "lm_model", lm_gen)
+        dep_q = int(getattr(lm_model, "dep_q"))
+        token_id = int(getattr(lm_model, "zero_token_id", -1))
+        return torch.full((1, dep_q, 1), token_id, dtype=torch.long, device=device)
+    except Exception as exc:
+        logger.warning("Could not build no-speech replacement tokens: %s", exc)
+        return None
+
+
+def _lm_gen_step(lm_gen, codes, depformer_replace_tokens):
+    if depformer_replace_tokens is None:
+        return lm_gen.step(codes)
+    return lm_gen.step(codes, depformer_replace_tokens=depformer_replace_tokens)
+
+
+def _audio_tokens_are_decodable(audio_tok) -> bool:
+    try:
+        return bool((audio_tok >= 0).all().item())
+    except Exception:
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -676,6 +736,8 @@ def save_trial_outputs(
     audio_frames = trial_result["audio_frames"]
     text_events = trial_result["text_events"]
     total_steps = trial_result["total_steps"]
+    input_steps = trial_result.get("input_steps")
+    allow_overlap = trial_result.get("allow_overlap", False)
     first_audio_step = trial_result["first_audio_step"]
     first_response_step = trial_result["first_response_step"]
 
@@ -769,6 +831,8 @@ def save_trial_outputs(
         "sample_rate": sample_rate,
         "total_steps": total_steps,
         "input_end_step": input_end_step,
+        "input_steps": input_steps,
+        "allow_overlap": allow_overlap,
         "first_audio_step": first_audio_step,
         "first_audio_time_sec": first_audio_time_sec,
         "audible_response_start_step": audible_response_start_step,
@@ -961,6 +1025,14 @@ def parse_args() -> argparse.Namespace:
              "Use 0 or a negative value to save the full decoded response.",
     )
     parser.add_argument(
+        "--allow-overlap",
+        action="store_true",
+        help="Allow Moshi to speak while the user prompt is still being fed. "
+             "By default, user audio is fully fed first while Moshi's own "
+             "audio stream is forced to no-speech, then response generation "
+             "starts during the appended silence.",
+    )
+    parser.add_argument(
         "--no-print-transcript",
         action="store_true",
         help="Do not print the generated transcript/ASR-style result.",
@@ -1063,6 +1135,7 @@ def main() -> None:
                     silence_sec=args.silence_sec,
                     max_gen_sec=args.max_gen_sec,
                     acoustic_delay=acoustic_delay,
+                    allow_overlap=args.allow_overlap,
                 )
                 wall_time = time.time() - t0
 
