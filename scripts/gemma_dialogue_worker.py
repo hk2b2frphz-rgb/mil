@@ -60,6 +60,10 @@ def result_to_text(result: Any) -> str:
     return str(result)
 
 
+def progress(msg: str) -> None:
+    print(f"[gemma] {msg}", file=sys.stderr, flush=True)
+
+
 def main() -> None:
     args = parse_args()
     payload = json.loads(sys.stdin.read())
@@ -68,6 +72,8 @@ def main() -> None:
     else:
         prompts = [str(payload["prompt"])]
 
+    total = len(prompts)
+    progress(f"モデルをロード中: {args.model}")
     from transformers import pipeline
 
     kwargs: dict[str, Any] = {
@@ -86,6 +92,7 @@ def main() -> None:
             raise
         pipe = pipeline("text-generation", **kwargs)
 
+    progress(f"モデルロード完了。{total}件のプロンプトを生成します")
     generation_kwargs = {
         "max_new_tokens": args.max_new_tokens,
         "temperature": args.temperature,
@@ -93,7 +100,8 @@ def main() -> None:
         "return_full_text": False,
     }
     texts: list[str] = []
-    for prompt in prompts:
+    for i, prompt in enumerate(prompts, 1):
+        progress(f"生成中 ({i}/{total})...")
         messages = [
             {
                 "role": "user",
@@ -105,6 +113,7 @@ def main() -> None:
         except TypeError:
             result = pipe(prompt, **generation_kwargs)
         texts.append(result_to_text(result))
+        progress(f"完了 ({i}/{total})")
 
     if "prompts" in payload:
         print(json.dumps({"texts": texts}, ensure_ascii=False))

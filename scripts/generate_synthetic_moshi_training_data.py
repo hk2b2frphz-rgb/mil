@@ -619,7 +619,8 @@ class GemmaDialogueGenerator:
                 input=payload,
                 text=True,
                 encoding="utf-8",
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=None,  # stderrは親プロセスのターミナルにそのまま流す
                 timeout=self.args.gemma_timeout_sec,
                 check=False,
             )
@@ -635,7 +636,7 @@ class GemmaDialogueGenerator:
                 "`uv sync --project gemma_runtime`, or pass --gemma-python to "
                 "a Python environment that has Transformers/Gemma installed.\n"
                 f"command: {' '.join(command)}\n"
-                f"stderr:\n{proc.stderr.strip()}"
+                "(stderr output is shown above)"
             )
         try:
             data = json.loads(proc.stdout)
