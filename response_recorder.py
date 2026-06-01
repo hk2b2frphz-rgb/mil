@@ -9,6 +9,7 @@ Outputs: response.wav, transcript.jsonl, transcript.txt, meta.json per trial.
 """
 
 import argparse
+import inspect
 import json
 import logging
 import os
@@ -283,13 +284,7 @@ def load_models(args: argparse.Namespace):
     dtype = torch.float16 if args.half else torch.bfloat16
 
     logger.info("Loading checkpoint from %s ...", args.hf_repo)
-    checkpoint_info = loaders.CheckpointInfo.from_hf_repo(
-        args.hf_repo,
-        moshi_weight=args.moshi_weight,
-        mimi_weight=args.mimi_weight,
-        tokenizer=args.tokenizer,
-        config=args.config,
-    )
+    checkpoint_info = _checkpoint_info_from_args(loaders, args)
 
     logger.info("Loading Mimi ...")
     mimi = checkpoint_info.get_mimi(device=args.device)
@@ -322,6 +317,47 @@ def load_models(args: argparse.Namespace):
     logger.info("Acoustic delay: %d frames", acoustic_delay)
 
     return mimi, text_tokenizer, lm_gen, lm_gen_cfg, acoustic_delay
+
+
+def _checkpoint_info_from_args(loaders, args: argparse.Namespace):
+    """Call CheckpointInfo.from_hf_repo with names supported by this moshi."""
+    from_hf_repo = loaders.CheckpointInfo.from_hf_repo
+    signature = inspect.signature(from_hf_repo)
+    supported = set(signature.parameters)
+
+    keyword_aliases = {
+        "moshi_weight": ["moshi_weight", "moshi_weights", "moshi_name"],
+        "mimi_weight": ["mimi_weight", "mimi_weights", "mimi_name"],
+        "tokenizer": ["tokenizer", "tokenizer_name"],
+        "config": ["config", "config_path", "lm_config"],
+    }
+    values = {
+        "moshi_weight": args.moshi_weight,
+        "mimi_weight": args.mimi_weight,
+        "tokenizer": args.tokenizer,
+        "config": args.config,
+    }
+
+    kwargs = {}
+    ignored = []
+    for cli_name, value in values.items():
+        if value is None:
+            continue
+        for alias in keyword_aliases[cli_name]:
+            if alias in supported:
+                kwargs[alias] = value
+                break
+        else:
+            ignored.append(cli_name)
+
+    if ignored:
+        logger.warning(
+            "Installed moshi does not support local override option(s): %s. "
+            "Loading from --hf-repo only.",
+            ", ".join(f"--{name.replace('_', '-')}" for name in ignored),
+        )
+
+    return from_hf_repo(args.hf_repo, **kwargs)
 
 
 def _try_setattr(obj, name: str, value) -> None:
