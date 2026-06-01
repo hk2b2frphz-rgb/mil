@@ -522,10 +522,10 @@ def run_trial(
                             first_audio_step = step
                         audio_frames.append(audio_tok)
 
-                    # Decode text token; skip padding ids 0 and 3
-                    if response_phase and text_id not in (0, 3):
-                        piece = text_tokenizer.id_to_piece(text_id)
-                        piece = piece.replace("\u2581", " ")  # ▁ -> space
+                    # Decode valid text tokens only. Moshi can emit special
+                    # ungenerated/initial tokens outside the tokenizer vocab.
+                    piece = _decode_text_piece(text_tokenizer, text_id)
+                    if response_phase and piece is not None:
                         time_sec = round(step / frame_rate, 4)
                         text_events.append(
                             {"step": step, "time_sec": time_sec, "piece": piece}
@@ -645,6 +645,31 @@ def _audio_tokens_are_decodable(audio_tok) -> bool:
         return bool((audio_tok >= 0).all().item())
     except Exception:
         return True
+
+
+def _decode_text_piece(text_tokenizer, text_id: int) -> Optional[str]:
+    """Decode a Moshi text token if it is inside the tokenizer vocabulary."""
+    if text_id in (0, 3) or text_id < 0:
+        return None
+
+    vocab_size = None
+    for attr in ("get_piece_size", "vocab_size", "GetPieceSize"):
+        method = getattr(text_tokenizer, attr, None)
+        if callable(method):
+            try:
+                vocab_size = int(method())
+                break
+            except Exception:
+                pass
+    if vocab_size is not None and text_id >= vocab_size:
+        return None
+
+    try:
+        piece = text_tokenizer.id_to_piece(text_id)
+    except Exception:
+        logger.debug("Skipping out-of-range text token id: %s", text_id)
+        return None
+    return piece.replace("\u2581", " ")
 
 
 # ---------------------------------------------------------------------------
