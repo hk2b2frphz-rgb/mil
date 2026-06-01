@@ -259,10 +259,11 @@ Conversation timeline:
 `conversation_timeline.jsonl` stores the same events as JSON lines for later
 analysis.
 
-By default, the full user prompt audio is encoded with Mimi and prefetched into
-Moshi's context before response generation starts. During this context prefill,
-Moshi output is not sampled; the Moshi-side history is advanced as silence.
-Response generation starts during the appended silence after the prompt. Use
+By default, the prompt is fed as a dual-stream history: user audio contains the
+full prompt, while the Moshi audio stream is forced to silence for the same
+duration. The script then saves only the continuation generated during the
+appended silence. This mirrors prompt-continuation workflows where the first
+seconds provide both streams and the model continues from that context. Use
 `--allow-overlap` to keep Moshi's original full-duplex behavior.
 
 ### `transcript.jsonl` format
