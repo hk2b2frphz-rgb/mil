@@ -47,6 +47,22 @@ source into the uv environment:
 uv pip install git+https://github.com/kyutai-labs/moshi.git
 ```
 
+If you see `ModuleNotFoundError: No module named 'pyttsx3'`, refresh the uv
+environment and run through uv rather than the system Python:
+
+```bash
+uv sync
+uv run python -c "import pyttsx3; print('pyttsx3 OK')"
+echo "こんにちは" | uv run python response_recorder.py --out-dir results/stdin/
+```
+
+If you intentionally use an already-active virtual environment instead of
+`uv run`, install the missing package into that environment:
+
+```bash
+uv pip install pyttsx3
+```
+
 ---
 
 ## Quick-start examples
