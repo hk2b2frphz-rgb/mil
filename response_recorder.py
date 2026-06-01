@@ -476,19 +476,6 @@ def run_trial(
     text_events: list[dict] = []
     first_audio_step: Optional[int] = None
     first_response_step: Optional[int] = None
-    force_no_speech_tokens = None
-    can_force_no_speech = False
-    if not allow_overlap:
-        force_no_speech_tokens = _make_force_no_speech_tokens(lm_gen, device)
-        can_force_no_speech = (
-            force_no_speech_tokens is not None
-            and _supports_depformer_replace(lm_gen)
-        )
-        if not can_force_no_speech:
-            logger.warning(
-                "This moshi LMGen does not expose depformer_replace_tokens; "
-                "Moshi audio cannot be blocked during user input."
-            )
 
     # ---- Streaming inference loop ----------------------------------------
     with torch.no_grad():
@@ -518,15 +505,11 @@ def run_trial(
                     if codes is None:
                         continue
 
-                    # Feed user audio throughout the prompt. While the user is
-                    # still speaking, force Moshi's own audio stream to
-                    # no-speech tokens so response generation starts afterward.
-                    depformer_replace_tokens = (
-                        force_no_speech_tokens
-                        if can_force_no_speech and step < input_steps
-                        else None
-                    )
-                    out = _lm_gen_step(lm_gen, codes, depformer_replace_tokens)
+                    if not allow_overlap and step < input_steps:
+                        _prefill_user_audio_context(lm_gen, codes)
+                        continue
+
+                    out = lm_gen.step(codes)
                     if out is None:
                         continue
 
@@ -561,31 +544,100 @@ def run_trial(
     }
 
 
-def _supports_depformer_replace(lm_gen) -> bool:
-    try:
-        return "depformer_replace_tokens" in inspect.signature(lm_gen.step).parameters
-    except Exception:
-        return False
+def _prefill_user_audio_context(lm_gen, input_tokens) -> None:
+    """Advance LMGen state with user audio only, leaving Moshi silent in history."""
+    import torch
+
+    state = getattr(lm_gen, "_streaming_state", None)
+    if state is None:
+        raise RuntimeError("LMGen must be in streaming mode before prefill.")
+
+    lm_model = getattr(lm_gen, "lm_model", lm_gen)
+    needed_tokens = lm_model.num_codebooks - lm_model.dep_q - 1
+    if needed_tokens <= 0:
+        logger.warning("This Moshi model exposes no user audio stream to prefill.")
+    if input_tokens.shape[1] > needed_tokens:
+        input_tokens = input_tokens[:, :needed_tokens, :]
+
+    cache_time = state.cache.shape[2]
+    exec_mask = state.exec_mask[:, None, None]
+
+    if input_tokens.shape[1] > 0:
+        delays = lm_gen.delays_cuda[lm_model.dep_q + 1:]
+        delays = delays[: input_tokens.shape[1]]
+        write_positions = (state.offsets[:, None, None] + delays[:, None]) % cache_time
+        _scatter_with_mask(
+            state.cache[:, lm_model.dep_q + 1: lm_model.dep_q + 1 + input_tokens.shape[1]],
+            dim=-1,
+            index=write_positions,
+            value=input_tokens,
+            mask=exec_mask,
+        )
+
+    input_ = _build_lmgen_input(lm_gen, state, lm_model)
+    state.graphed_main(input_, state.condition_sum, state.condition_cross)
+
+    state.offsets = torch.where(state.exec_mask, state.offsets + 1, state.offsets)
+    state.offset_cpu += 1
+
+    zero_token = int(getattr(lm_model, "zero_token_id", -1))
+    positions = (state.offsets % cache_time)[:, None, None]
+    silent_tokens = torch.full(
+        (state.batch_size, lm_model.dep_q + 1, 1),
+        zero_token,
+        dtype=torch.long,
+        device=state.cache.device,
+    )
+    _scatter_with_mask(
+        state.cache[:, : lm_model.dep_q + 1],
+        dim=-1,
+        index=positions.expand_as(silent_tokens),
+        value=silent_tokens,
+        mask=exec_mask,
+    )
 
 
-def _make_force_no_speech_tokens(lm_gen, device: str):
-    """Build replacement tokens that keep Moshi's generated audio stream quiet."""
-    try:
-        import torch
+def _build_lmgen_input(lm_gen, state, lm_model):
+    """Gather the current delayed LMGen input without sampling output tokens."""
+    import torch
 
-        lm_model = getattr(lm_gen, "lm_model", lm_gen)
-        dep_q = int(getattr(lm_model, "dep_q"))
-        token_id = int(getattr(lm_model, "zero_token_id", -1))
-        return torch.full((1, dep_q, 1), token_id, dtype=torch.long, device=device)
-    except Exception as exc:
-        logger.warning("Could not build no-speech replacement tokens: %s", exc)
-        return None
+    cache_time = state.cache.shape[2]
+    is_init = state.offsets[:, None, None] <= lm_gen.delays_cuda[:, None]
+    is_init |= ~state.exec_mask[:, None, None]
+    positions = (state.offsets % cache_time)[:, None, None].expand_as(is_init)
+    input_ = state.cache.gather(dim=2, index=positions)
+    input_ = torch.where(is_init, state.initial, input_)
+
+    if getattr(lm_gen, "cfg_coef", 1.0) != 1.0:
+        zero = torch.full(
+            (1,),
+            lm_model.zero_token_id,
+            dtype=torch.long,
+            device=input_.device,
+        )
+        cfg_is_masked_until = getattr(state, "cfg_is_masked_until", None)
+        if cfg_is_masked_until is not None:
+            limit = lm_gen.delays_cuda[:, None] + cfg_is_masked_until.view(-1, 1, 1)
+            is_zeroed = state.offsets[:, None, None] <= limit
+            masked = torch.where(is_zeroed & ~is_init, zero, input_)
+            input_ = torch.cat([input_, masked], dim=0)
+        else:
+            input_ = input_.repeat(2, 1, 1)
+        if getattr(lm_gen, "cfg_is_no_text", False):
+            input_[state.batch_size:, :1] = torch.where(
+                ~is_init[:, :1],
+                zero,
+                input_[state.batch_size:, :1],
+            )
+    return input_
 
 
-def _lm_gen_step(lm_gen, codes, depformer_replace_tokens):
-    if depformer_replace_tokens is None:
-        return lm_gen.step(codes)
-    return lm_gen.step(codes, depformer_replace_tokens=depformer_replace_tokens)
+def _scatter_with_mask(tensor, dim, index, value, mask) -> None:
+    import torch
+
+    old_value = tensor.gather(dim, index)
+    value = torch.where(mask, value, old_value)
+    tensor.scatter_(dim, index, value)
 
 
 def _audio_tokens_are_decodable(audio_tok) -> bool:
@@ -1028,9 +1080,8 @@ def parse_args() -> argparse.Namespace:
         "--allow-overlap",
         action="store_true",
         help="Allow Moshi to speak while the user prompt is still being fed. "
-             "By default, user audio is fully fed first while Moshi's own "
-             "audio stream is forced to no-speech, then response generation "
-             "starts during the appended silence.",
+             "By default, user audio is prefetched into Moshi's context first, "
+             "with no Moshi output generated until the appended silence.",
     )
     parser.add_argument(
         "--no-print-transcript",
