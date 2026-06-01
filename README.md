@@ -78,6 +78,77 @@ only applies to backends that support voice selection.
 
 ## Quick-start examples
 
+### Synthetic training data: Gemma 4 + llm-jp-moshi
+
+`scripts/generate_synthetic_moshi_training_data.py` creates a small test
+dataset for Moshi fine-tuning experiments.  It is intended to be run on the
+GPU server, not on a lightweight local machine.
+
+The default mode is `moshi-selfplay`:
+
+1. Gemma 4 generates a Japanese loneliness/isolation support dialogue plan.
+2. Local TTS renders only the user's turns into the right channel.
+3. `llm-jp/llm-jp-moshi-v1` receives that user stream and generates the
+   counselor/Moshi stream into the left channel.
+4. The script writes stereo WAVs, per-WAV timestamp JSON, a manifest JSONL,
+   and a `dialogues.jsonl` log of the generated scripts.
+
+Run a tiny three-case test from the cloned `mos` folder:
+
+```bash
+uv sync
+export HF_TOKEN=...  # if your Gemma/Moshi access requires it
+
+uv run python scripts/generate_synthetic_moshi_training_data.py \
+  --out-dir data/synthetic_loneliness_test \
+  --num-dialogues 3 \
+  --mode moshi-selfplay \
+  --gemma-model google/gemma-4-E2B-it \
+  --moshi-hf-repo llm-jp/llm-jp-moshi-v1 \
+  --tts-speed-user 1.9 \
+  --moshi-silence-sec 18
+```
+
+Output shape:
+
+```text
+data/synthetic_loneliness_test/
+├── synthetic_moshi_train.jsonl
+├── dialogues.jsonl
+├── generation_run.json
+├── data_stereo/
+│   ├── sample_001_*.wav
+│   ├── sample_001_*.json
+│   └── ...
+└── sample_metadata/
+```
+
+The manifest lines follow the `moshi-finetune` convention:
+
+```json
+{"path": "data_stereo/sample_001_smalltalk_evening_001.wav", "duration": 42.1}
+```
+
+The WAV channel convention is:
+
+- left channel: Moshi / counselor stream
+- right channel: user stream
+
+For a lighter format check that does not load Moshi, render both speakers from
+the Gemma script with local TTS:
+
+```bash
+uv run python scripts/generate_synthetic_moshi_training_data.py \
+  --out-dir data/synthetic_scripted_test \
+  --num-dialogues 3 \
+  --mode scripted-stereo
+```
+
+`moshi-selfplay` uses Moshi's generated audio and Moshi text tokens as an
+approximate transcript. For train-grade data, manually review the generated
+WAV/JSON pairs and consider re-annotating the left channel with an ASR tool
+before long fine-tuning runs.
+
 ### Minimal run (one input file, three seeds, default model)
 
 ```bash
