@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from __future__ import annotations
 """
 孤独・孤立相談窓口を想定した use case カードを「軸の組み合わせ」で生成する。
 
@@ -15,6 +14,7 @@ from __future__ import annotations
 使い方:
   python scripts/build_use_cases.py --out-path data/use_cases/loneliness_100.jsonl --num 100
 """
+from __future__ import annotations
 
 import argparse
 import json
