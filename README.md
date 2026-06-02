@@ -80,27 +80,52 @@ only applies to backends that support voice selection.
 
 ### Qwen3-TTS による日本語対話データ生成（推奨・シンプル）
 
-`scripts/generate_qwen3_tts_data.py` は Qwen3-TTS (CosyVoice2 ベース) を使って、
-孤独・孤立相談窓口想定の日本語対話を音声合成し、Moshi fine-tune フォーマットで書き出します。
+`scripts/generate_qwen3_tts_data.py` は Qwen3-TTS のプリセット話者で日本語対話を
+音声合成し、Moshi fine-tune フォーマットで書き出します。
 **Gemma 不要**・**依存環境がシンプル**なため、まず最初にこちらを試してください。
 
 仕組み:
 
 1. ハードコードされた短い日本語対話テンプレートを使用（Gemma 生成は不要）。
-2. Qwen3-TTS が話者ごとに異なる声（user → `Chelsie`、moshi → `Cherry`）で各ターンを合成。
+2. Qwen3-TTS の `generate_custom_voice()` が話者ごとに異なるプリセット声で各ターンを合成
+   （デフォルト: user → `Ono_Anna`、moshi → `Serena`）。
 3. 相談員 (moshi) を左チャンネル、相談者 (user) を右チャンネルのステレオ WAV に配置。
 4. Moshi fine-tune manifest (`synthetic_moshi_train.jsonl`) と `dialogues.jsonl` を書き出し。
+
+依存パッケージ `qwen-tts` を `pyproject.toml` に含めているので `uv sync` で入ります
+（手動で入れる場合は `pip install -U qwen-tts`）。
 
 ```bash
 uv sync
 
 uv run python scripts/generate_qwen3_tts_data.py \
   --out-dir data/qwen3_tts_test \
-  --model Qwen/Qwen3-TTS \
+  --model Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
   --device cuda \
-  --dtype float16 \
+  --dtype bfloat16 \
+  --speaker-user Ono_Anna \
+  --speaker-moshi Serena \
   --num-dialogues 3
 ```
+
+実装は `qwen_tts.Qwen3TTSModel` を直接使い、以下の API を呼びます:
+
+```python
+from qwen_tts import Qwen3TTSModel
+model = Qwen3TTSModel.from_pretrained(model_id, device_map="cuda:0", dtype=torch.bfloat16)
+wavs, sr = model.generate_custom_voice(
+    text="...", language="Japanese", speaker="Ono_Anna", instruct=None,
+)
+```
+
+Qwen3-TTS CustomVoice 系の利用可能なプリセット話者:
+
+```
+Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, Sohee
+```
+
+`--instruct-user` / `--instruct-moshi` でスタイル指示（例: `"温かく穏やかなトーンで"`）を
+オプションで渡せます。
 
 出力ディレクトリ構造:
 
@@ -125,18 +150,20 @@ WAV チャンネル規約:
 - 左チャンネル: Moshi / 相談員
 - 右チャンネル: user / 相談者
 
-**Qwen3-TTS API について**: スクリプトは `AutoModel.from_pretrained(..., trust_remote_code=True)` で
-モデルを読み込み、`model.inference(text=..., speaker=...)` を呼びます。
-モデルの API が異なる場合は `Qwen3TTS.synthesize()` 内を修正してください。
-
 #### `generate_qwen3_tts_data.py` オプション
 
 | フラグ | デフォルト | 説明 |
 |---|---|---|
 | `--out-dir` | *(必須)* | 出力ディレクトリ |
-| `--model` | `Qwen/Qwen3-TTS` | Qwen3-TTS の HuggingFace モデル ID |
+| `--model` | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | Qwen3-TTS の HuggingFace モデル ID |
 | `--device` | `cuda` | `cuda` または `cpu` |
-| `--dtype` | `float16` | `float16` / `bfloat16` / `float32` / `auto` |
+| `--dtype` | `bfloat16` | `float16` / `bfloat16` / `float32` |
+| `--attn-impl` | `default` | `default` / `flash_attention_2` / `sdpa` / `eager`（flash-attn 未インストール時は自動フォールバック） |
+| `--language` | `Japanese` | `generate_custom_voice` に渡す language 文字列 |
+| `--speaker-user` | `Ono_Anna` | user 側プリセット話者 |
+| `--speaker-moshi` | `Serena` | moshi 側プリセット話者 |
+| `--instruct-user` | *(なし)* | user 発話のスタイル指示（任意） |
+| `--instruct-moshi` | *(なし)* | moshi 発話のスタイル指示（任意） |
 | `--num-dialogues` | `3` | 生成する対話数（最大 3、テンプレート数に依存） |
 | `--lead-in-sec` | `0.3` | 先頭の無音（秒） |
 | `--gap-sec` | `0.4` | ターン間の無音（秒） |

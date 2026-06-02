@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 """
-Qwen3-TTS を使ってシンプルな対話音声データを生成し、
+Qwen3-TTS を使ってシンプルな日本語対話の音声データを生成し、
 Moshi fine-tune フォーマット（ステレオWAV + JSONL manifest）で書き出す。
 
 出力ディレクトリ構造:
@@ -12,14 +12,20 @@ Moshi fine-tune フォーマット（ステレオWAV + JSONL manifest）で書�
       sample_001_<id>.wav         ← ステレオWAV (左=moshi/相談員, 右=user/相談者)
       sample_001_<id>.json        ← アライメント / メタデータ
 
-使い方:
+使い方（GPUサーバー上で）:
+  pip install -U qwen-tts        # または uv sync
   uv run python scripts/generate_qwen3_tts_data.py --out-dir ./output_qwen3
-  uv run python scripts/generate_qwen3_tts_data.py --out-dir ./output_qwen3 \
-      --model Qwen/Qwen3-TTS --device cuda --num-dialogues 5
 
-Qwen3-TTS は trust_remote_code=True で AutoModel として呼び出します。
-モデルが .inference(text, speaker) を持つ想定です（CosyVoice2 ベース）。
-API が異なる場合は Qwen3TTS.synthesize() を修正してください。
+  # 話者やモデルを変えたい場合
+  uv run python scripts/generate_qwen3_tts_data.py \
+      --out-dir ./output_qwen3 \
+      --model Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+      --speaker-user Ono_Anna \
+      --speaker-moshi Serena \
+      --num-dialogues 3
+
+Qwen3-TTS のプリセット話者 (CustomVoice モデル):
+  Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, Sohee
 """
 
 import argparse
@@ -30,7 +36,7 @@ import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -39,8 +45,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-SAMPLE_RATE = 24_000  # Qwen3-TTS / Moshi どちらも 24 kHz
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +99,12 @@ TEMPLATE_DIALOGUES: list[dict[str, Any]] = [
 ]
 
 
+VALID_SPEAKERS = {
+    "Vivian", "Serena", "Uncle_Fu", "Dylan",
+    "Eric", "Ryan", "Aiden", "Ono_Anna", "Sohee",
+}
+
+
 # ---------------------------------------------------------------------------
 # データクラス
 # ---------------------------------------------------------------------------
@@ -130,46 +140,89 @@ class AudioSegment:
 
 class Qwen3TTS:
     """
-    Qwen3-TTS (CosyVoice2 ベース) の薄いラッパー。
+    Qwen3-TTS (CustomVoice) の薄いラッパー。
 
-    Qwen3-TTS の推論 API は trust_remote_code=True で読み込んだ AutoModel を通じて
-    model.inference(text, speaker) を呼ぶ形式を想定しています。
-    実際の API が異なる場合はこのクラスの synthesize() を修正してください。
+    実体は qwen-tts パッケージの Qwen3TTSModel:
+        from qwen_tts import Qwen3TTSModel
+        model = Qwen3TTSModel.from_pretrained(...)
+        wavs, sr = model.generate_custom_voice(
+            text=..., language="Japanese", speaker="Vivian", instruct=...
+        )
     """
 
-    # Qwen3-TTS が提供するデフォルト話者（モデルカード記載のものを使用）
-    SPEAKER_USER  = "Chelsie"   # 相談者側に使う声
-    SPEAKER_MOSHI = "Cherry"    # 相談員側に使う声
-
-    def __init__(self, model_id: str, device: str, dtype_str: str):
+    def __init__(
+        self,
+        model_id: str,
+        device: str,
+        dtype_str: str,
+        attn_impl: str,
+        speaker_user: str,
+        speaker_moshi: str,
+        language: str,
+        instruct_user: str | None,
+        instruct_moshi: str | None,
+    ):
         self.model_id = model_id
         self.device = device
         self.dtype_str = dtype_str
+        self.attn_impl = attn_impl
+        self.speaker_user = speaker_user
+        self.speaker_moshi = speaker_moshi
+        self.language = language
+        self.instruct_user = instruct_user
+        self.instruct_moshi = instruct_moshi
         self.model = None
-        self.sample_rate = SAMPLE_RATE
+        self.sample_rate: int = 0
 
     def load(self) -> None:
         if self.model is not None:
             return
         import torch
-        from transformers import AutoModel
+        try:
+            from qwen_tts import Qwen3TTSModel  # type: ignore[import]
+        except ImportError as exc:
+            raise RuntimeError(
+                "qwen-tts package is required. Install with `pip install -U qwen-tts` "
+                "or add it to pyproject.toml and run `uv sync`."
+            ) from exc
 
         dtype_map = {
             "float16":  torch.float16,
             "bfloat16": torch.bfloat16,
             "float32":  torch.float32,
-            "auto":     "auto",
         }
-        torch_dtype = dtype_map.get(self.dtype_str, "auto")
+        torch_dtype = dtype_map.get(self.dtype_str, torch.bfloat16)
 
-        logger.info("Qwen3-TTS を読み込み中: %s (device=%s, dtype=%s)", self.model_id, self.device, self.dtype_str)
-        self.model = AutoModel.from_pretrained(
-            self.model_id,
-            trust_remote_code=True,
-            torch_dtype=torch_dtype,
+        device_map = self.device
+        if device_map == "cuda":
+            device_map = "cuda:0"
+
+        logger.info(
+            "Qwen3-TTS を読み込み中: %s (device_map=%s, dtype=%s, attn=%s)",
+            self.model_id, device_map, self.dtype_str, self.attn_impl,
         )
-        self.model = self.model.to(self.device)
-        self.model.eval()
+
+        load_kwargs: dict[str, Any] = {
+            "device_map": device_map,
+            "dtype": torch_dtype,
+        }
+        if self.attn_impl and self.attn_impl != "default":
+            load_kwargs["attn_implementation"] = self.attn_impl
+
+        try:
+            self.model = Qwen3TTSModel.from_pretrained(self.model_id, **load_kwargs)
+        except Exception as exc:
+            # flash_attention_2 が未インストールの場合などのフォールバック
+            if self.attn_impl == "flash_attention_2":
+                logger.warning(
+                    "flash_attention_2 の読み込みに失敗。デフォルトの attention で再試行します: %s",
+                    exc,
+                )
+                load_kwargs.pop("attn_implementation", None)
+                self.model = Qwen3TTSModel.from_pretrained(self.model_id, **load_kwargs)
+            else:
+                raise
+
         logger.info("Qwen3-TTS 読み込み完了")
 
     def synthesize(self, text: str, speaker_role: str) -> np.ndarray:
@@ -180,51 +233,56 @@ class Qwen3TTS:
         self.load()
         assert self.model is not None
 
-        voice = self.SPEAKER_USER if speaker_role == "user" else self.SPEAKER_MOSHI
+        if speaker_role == "user":
+            voice = self.speaker_user
+            instruct = self.instruct_user
+        else:
+            voice = self.speaker_moshi
+            instruct = self.instruct_moshi
+
+        kwargs: dict[str, Any] = {
+            "text": text,
+            "language": self.language,
+            "speaker": voice,
+        }
+        if instruct:
+            kwargs["instruct"] = instruct
 
         import torch
         with torch.no_grad():
-            # Qwen3-TTS (CosyVoice2) の標準 API
-            # モデルカードの例: audio, sr = model.inference(text="...", speaker="...")
-            try:
-                result = self.model.inference(text=text, speaker=voice)
-            except TypeError:
-                # キーワード引数の形式が異なる場合の fallback
-                result = self.model.inference(text, voice)
+            wavs, sr = self.model.generate_custom_voice(**kwargs)
 
-        # 結果が (audio_np, sample_rate) のタプルか、音声 Tensor かを正規化
-        if isinstance(result, (tuple, list)):
-            audio, sr = result[0], result[1]
-        else:
-            audio = result
-            sr = self.sample_rate
-
-        # Tensor → numpy
+        # wavs は numpy 配列のリスト
+        audio = wavs[0] if isinstance(wavs, (list, tuple)) else wavs
         if hasattr(audio, "cpu"):
             audio = audio.cpu().numpy()
         audio = np.asarray(audio, dtype=np.float32).squeeze()
 
-        # リサンプリングが必要な場合
         sr = int(sr)
-        if sr != self.sample_rate:
+        if self.sample_rate == 0:
+            self.sample_rate = sr
+            logger.info("Qwen3-TTS sample rate = %d Hz", sr)
+        elif sr != self.sample_rate:
             audio = _resample(audio, sr, self.sample_rate)
 
         logger.info(
-            "Qwen3-TTS 合成完了: speaker=%s voice=%s dur=%.2fs text=%r",
+            "Qwen3-TTS 合成完了: role=%s speaker=%s dur=%.2fs text=%r",
             speaker_role, voice, audio.size / self.sample_rate, text[:30],
         )
         return audio
 
 
 def _resample(pcm: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+    if orig_sr == target_sr:
+        return pcm
     try:
-        import torchaudio
         import torch
+        import torchaudio
         t = torch.from_numpy(pcm).unsqueeze(0)
         t = torchaudio.functional.resample(t, orig_sr, target_sr)
         return t.squeeze(0).numpy()
     except Exception:
-        # 粗いリサンプル（精度より動作優先）
+        # 粗いリサンプル（動作優先）
         ratio = target_sr / orig_sr
         n_out = int(len(pcm) * ratio)
         indices = (np.arange(n_out) / ratio).astype(np.int32)
@@ -310,14 +368,45 @@ def parse_args() -> argparse.Namespace:
         description="Qwen3-TTS で日本語対話音声データを生成し Moshi fine-tune フォーマットで保存する"
     )
     parser.add_argument("--out-dir", required=True, type=Path, help="出力ディレクトリ")
-    parser.add_argument("--model", default="Qwen/Qwen3-TTS", help="Qwen3-TTS モデル ID")
+    parser.add_argument(
+        "--model",
+        default="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        help="Qwen3-TTS の HuggingFace モデル ID（CustomVoice 系を推奨）",
+    )
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
-    parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16", "float32", "auto"])
-    parser.add_argument("--num-dialogues", type=int, default=3, help="生成する対話数（最大 %d）" % len(TEMPLATE_DIALOGUES))
+    parser.add_argument("--dtype", default="bfloat16",
+                        choices=["float16", "bfloat16", "float32"])
+    parser.add_argument(
+        "--attn-impl",
+        default="default",
+        choices=["default", "flash_attention_2", "sdpa", "eager"],
+        help="attn_implementation。flash_attention_2 は flash-attn が必要。",
+    )
+    parser.add_argument("--language", default="Japanese",
+                        help="generate_custom_voice に渡す language 文字列")
+    parser.add_argument("--speaker-user", default="Ono_Anna",
+                        help=f"user 側プリセット話者。候補: {sorted(VALID_SPEAKERS)}")
+    parser.add_argument("--speaker-moshi", default="Serena",
+                        help=f"moshi 側プリセット話者。候補: {sorted(VALID_SPEAKERS)}")
+    parser.add_argument("--instruct-user", default=None,
+                        help="user 発話のスタイル指示（任意、例: '落ち着いたトーンで'）")
+    parser.add_argument("--instruct-moshi", default=None,
+                        help="moshi 発話のスタイル指示（任意、例: '温かく穏やかなトーンで'）")
+    parser.add_argument("--num-dialogues", type=int, default=3,
+                        help=f"生成する対話数（最大 {len(TEMPLATE_DIALOGUES)}）")
     parser.add_argument("--lead-in-sec", type=float, default=0.3)
-    parser.add_argument("--gap-sec", type=float, default=0.4, help="ターン間の無音（秒）")
+    parser.add_argument("--gap-sec", type=float, default=0.4,
+                        help="ターン間の無音（秒）")
     parser.add_argument("--manifest-name", default="synthetic_moshi_train.jsonl")
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    for role, name in [("--speaker-user", args.speaker_user),
+                       ("--speaker-moshi", args.speaker_moshi)]:
+        if name not in VALID_SPEAKERS:
+            parser.error(
+                f"{role}={name!r} は無効です。候補: {sorted(VALID_SPEAKERS)}"
+            )
+    return args
 
 
 def main() -> None:
@@ -333,7 +422,17 @@ def main() -> None:
         if p.exists():
             p.unlink()
 
-    tts = Qwen3TTS(model_id=args.model, device=args.device, dtype_str=args.dtype)
+    tts = Qwen3TTS(
+        model_id=args.model,
+        device=args.device,
+        dtype_str=args.dtype,
+        attn_impl=args.attn_impl,
+        speaker_user=args.speaker_user,
+        speaker_moshi=args.speaker_moshi,
+        language=args.language,
+        instruct_user=args.instruct_user,
+        instruct_moshi=args.instruct_moshi,
+    )
     tts.load()
 
     templates = TEMPLATE_DIALOGUES[: args.num_dialogues]
@@ -370,6 +469,9 @@ def main() -> None:
                 "sample_rate": tts.sample_rate,
                 "duration_sec": round(duration, 4),
                 "tts_model": args.model,
+                "language": args.language,
+                "speaker_user": args.speaker_user,
+                "speaker_moshi": args.speaker_moshi,
                 "left_channel": "moshi",
                 "right_channel": "user",
                 "wall_time_sec": round(elapsed, 3),
