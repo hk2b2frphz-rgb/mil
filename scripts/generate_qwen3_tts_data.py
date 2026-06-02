@@ -495,6 +495,53 @@ def load_emotion_map(path: Path | None) -> dict[str, str]:
     return base
 
 
+def load_dialogues_from_jsonl(path: Path) -> list[dict[str, Any]]:
+    """外部 (Gemma) の dialogues.jsonl を読む。TEMPLATE_DIALOGUES と同じ形に整える。"""
+    out: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for i, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            raw_turns = row.get("turns") or []
+            turns: list[dict[str, Any]] = []
+            for t in raw_turns:
+                speaker = str(t.get("speaker", "")).strip().lower()
+                if speaker == "silence":
+                    try:
+                        dur = float(t.get("duration_sec", 2.0))
+                    except (TypeError, ValueError):
+                        dur = 2.0
+                    turns.append({
+                        "speaker": "silence",
+                        "duration_sec": dur,
+                        "note": t.get("note", ""),
+                    })
+                    continue
+                if speaker not in {"user", "moshi"}:
+                    continue
+                text = str(t.get("text", "")).strip()
+                if not text:
+                    continue
+                emotion = t.get("emotion")
+                turn = {"speaker": speaker, "text": text}
+                if emotion:
+                    turn["emotion"] = str(emotion)
+                turns.append(turn)
+            if not turns:
+                logger.warning("対話 %d 行目: turns 抽出失敗、スキップ", i)
+                continue
+            out.append({
+                "id": str(row.get("id") or row.get("source_use_case") or f"dialogue_{i:03d}"),
+                "category": str(row.get("category") or "unknown"),
+                "risk_level": str(row.get("risk_level") or "low"),
+                "title": str(row.get("title") or row.get("id") or f"dialogue {i}"),
+                "turns": turns,
+            })
+    return out
+
+
 def render_stereo(segments: list[AudioSegment], sample_rate: int, tail_sec: float = 0.5) -> np.ndarray:
     duration = max((s.end_sec for s in segments), default=0.0) + tail_sec
     n = max(1, int(math.ceil(duration * sample_rate)))
@@ -586,8 +633,17 @@ def parse_args() -> argparse.Namespace:
                         help="ターンの emotion ラベルを無視してプレーンに合成する（A/B比較用）")
     parser.add_argument("--emotion-map-file", type=Path, default=None,
                         help="感情ラベル→instruct のオーバーライド JSON 辞書ファイル")
-    parser.add_argument("--num-dialogues", type=int, default=len(TEMPLATE_DIALOGUES),
-                        help=f"生成する対話数（最大 {len(TEMPLATE_DIALOGUES)}）")
+    parser.add_argument(
+        "--dialogues-jsonl",
+        type=Path,
+        default=None,
+        help=(
+            "外部対話 JSONL（Gemma が出した dialogues.jsonl など）を読む。"
+            "未指定なら内蔵 TEMPLATE_DIALOGUES を使う。"
+        ),
+    )
+    parser.add_argument("--num-dialogues", type=int, default=None,
+                        help="生成する対話数。未指定なら全件。")
     parser.add_argument("--lead-in-sec", type=float, default=0.3)
     parser.add_argument("--gap-sec", type=float, default=0.4,
                         help="ターン間の無音（秒）")
@@ -645,7 +701,15 @@ def main() -> None:
     if args.no_emotion:
         logger.info("--no-emotion: ターン側 emotion ラベルを無視します")
 
-    templates = TEMPLATE_DIALOGUES[: args.num_dialogues]
+    if args.dialogues_jsonl is not None:
+        all_templates = load_dialogues_from_jsonl(args.dialogues_jsonl)
+        logger.info("対話 %d 件を %s から読み込みました", len(all_templates), args.dialogues_jsonl)
+    else:
+        all_templates = TEMPLATE_DIALOGUES
+    if args.num_dialogues is not None:
+        templates = all_templates[: args.num_dialogues]
+    else:
+        templates = all_templates
     for idx, tmpl in enumerate(templates, start=1):
         turns: list[DialogueTurn] = []
         for t in tmpl["turns"]:

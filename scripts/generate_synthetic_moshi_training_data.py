@@ -98,8 +98,11 @@ DEFAULT_USE_CASES: list[dict[str, Any]] = [
 
 @dataclass
 class DialogueTurn:
-    speaker: str
-    text: str
+    speaker: str  # "user" | "moshi" | "silence"
+    text: str = ""
+    emotion: str | None = None
+    duration_sec: float | None = None  # speaker=="silence" 用
+    note: str | None = None
 
 
 @dataclass
@@ -151,13 +154,15 @@ def parse_args() -> argparse.Namespace:
             "moshi-selfplay",
             "scripted-local-tts",
             "scripted-stereo",
+            "dialogues-only",
         ],
         default="scripted-moshi-tts",
         help=(
             "scripted-moshi-tts: render the generated script with Kyutai/Moshi "
             "TTS into stereo WAVs. moshi-selfplay: local TTS creates the user "
             "stream and llm-jp-moshi generates the counselor stream. "
-            "scripted-local-tts/scripted-stereo: local TTS renders both speakers."
+            "scripted-local-tts/scripted-stereo: local TTS renders both speakers. "
+            "dialogues-only: Gemma で対話 JSONL を生成して終了（音声合成は行わない）。"
         ),
     )
     parser.add_argument(
@@ -438,15 +443,33 @@ def dialogue_from_mapping(data: dict[str, Any], use_case: dict[str, Any]) -> Dia
     for item in raw_turns:
         if not isinstance(item, dict):
             continue
-        speaker = normalize_speaker(str(item.get("speaker", "")))
+        speaker_raw = str(item.get("speaker", "")).strip().lower()
+        if speaker_raw == "silence":
+            dur = item.get("duration_sec")
+            try:
+                dur_f = float(dur) if dur is not None else 2.0
+            except (TypeError, ValueError):
+                dur_f = 2.0
+            turns.append(DialogueTurn(
+                speaker="silence",
+                text="",
+                duration_sec=dur_f,
+                note=str(item.get("note") or "") or None,
+            ))
+            continue
+        speaker = normalize_speaker(speaker_raw)
         text = str(item.get("text", "")).strip()
         if speaker not in {"user", "moshi"} or not text:
             continue
-        turns.append(DialogueTurn(speaker=speaker, text=text))
+        emotion = item.get("emotion")
+        emotion = str(emotion) if emotion else None
+        turns.append(DialogueTurn(speaker=speaker, text=text, emotion=emotion))
 
     if not turns:
         raise ValueError("Dialogue contains no usable turns.")
-    if turns[0].speaker != "user":
+    # 先頭が silence や moshi の場合は use_case の opening を user 発話として差し込む
+    first_non_silence = next((t for t in turns if t.speaker != "silence"), None)
+    if first_non_silence is None or first_non_silence.speaker != "user":
         turns.insert(
             0,
             DialogueTurn(
@@ -735,6 +758,21 @@ def build_gemma_prompt(use_case: dict[str, Any], rng: random.Random) -> str:
             "一問一答になりすぎず会話を続ける",
         ]
     )
+
+    silence_pattern = str(use_case.get("silence_pattern", "none"))
+    if silence_pattern == "heavy":
+        silence_directive = (
+            '- 沈黙のターン {"speaker":"silence","duration_sec":3〜6,"note":"..."} を 3〜5 回挟む。'
+            "沈黙の直後は必ず moshi が穏やかに声をかける（moshi が連続して話してもよい）。"
+        )
+    elif silence_pattern == "occasional":
+        silence_directive = (
+            '- 沈黙のターン {"speaker":"silence","duration_sec":2〜4,"note":"..."} を 1〜2 回挟む。'
+            "沈黙の直後は moshi が穏やかに声をかける。"
+        )
+    else:
+        silence_directive = "- 沈黙ターンは入れない。"
+
     return f"""
 あなたは日本語の合成学習データを作る対話ライターです。
 目的は「孤独・孤立相談窓口」で使う、自然な雑談寄りの相談会話を作ることです。
@@ -746,15 +784,19 @@ use_case:
 
 制約:
 - 出力は JSON オブジェクトのみ。説明文や Markdown は入れない。
-- speaker は必ず "user" または "moshi"。
+- speaker は "user" / "moshi" / "silence" のいずれか。
 - 最初の turn は user。
-- turns は {turn_count} 件前後。
+- 通常ターン（user/moshi）は {turn_count} 件前後。沈黙は別カウント。
 - user の話し方: {user_style}。
 - moshi の話し方: {counselor_style}。
 - moshi は来訪を歓迎し、孤独感を軽く扱わず、すぐ解決策だけを出さない。
 - high/medium risk のニュアンスがある場合は、断定せず安全確認につながる短い問いを入れる。
 - 診断、説教、長い助言、緊急対応を装う表現は避ける。
 - 1 turn は音声化しやすい長さ、だいたい 8〜45 文字。
+- 各 user/moshi ターンには "emotion" を必ず付ける。候補:
+  user 側: hesitant, sad, lonely, anxious, relieved, grateful, neutral
+  moshi 側: warm, gentle, empathetic, encouraging, concerned, reassuring, neutral
+{silence_directive}
 
 JSON schema:
 {{
@@ -763,8 +805,9 @@ JSON schema:
   "risk_level": "{use_case.get("risk_level", "low")}",
   "title": "短いタイトル",
   "turns": [
-    {{"speaker": "user", "text": "相談者の発話"}},
-    {{"speaker": "moshi", "text": "相談員の発話"}}
+    {{"speaker": "user", "emotion": "hesitant", "text": "相談者の発話"}},
+    {{"speaker": "moshi", "emotion": "warm", "text": "相談員の発話"}},
+    {{"speaker": "silence", "duration_sec": 3.0, "note": "なぜ沈黙か簡単に"}}
   ],
   "generator_notes": "多様性や注意点を一文で"
 }}
@@ -1466,12 +1509,26 @@ def render_dataset(args: argparse.Namespace, dialogues: list[Dialogue]) -> None:
     logger.info("Done. Manifest: %s", manifest_path)
 
 
+def write_dialogues_only(args: argparse.Namespace, dialogues: list[Dialogue]) -> None:
+    out_dir = args.out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dialogues_path = out_dir / "dialogues.jsonl"
+    if dialogues_path.exists():
+        dialogues_path.unlink()
+    for dialogue in dialogues:
+        append_jsonl(dialogues_path, dialogue_to_json(dialogue))
+    logger.info("dialogues-only mode: wrote %d dialogues to %s", len(dialogues), dialogues_path)
+
+
 def main() -> None:
     args = parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     random.seed(args.seed)
     np.random.seed(args.seed)
     dialogues = generate_dialogues(args)
+    if args.mode == "dialogues-only":
+        write_dialogues_only(args, dialogues)
+        return
     render_dataset(args, dialogues)
 
 

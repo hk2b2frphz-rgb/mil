@@ -78,6 +78,91 @@ only applies to backends that support voice selection.
 
 ## Quick-start examples
 
+### 約 1 時間分の合成データで Moshi LoRA FT する（推奨フルパイプライン）
+
+孤独・孤立相談窓口向けの日本語ドメイン適応を、4 ステップで一気に回します。
+全部 GPU サーバー上で実行する想定です。
+
+```text
+1. use_cases.jsonl     (人手レス、軸の組み合わせで 100 件)
+        ↓ scripts/build_use_cases.py
+2. dialogues.jsonl     (Gemma 4 が emotion / silence 付きで生成)
+        ↓ scripts/generate_synthetic_moshi_training_data.py --mode dialogues-only
+3. stereo WAV + manifest  (Qwen3-TTS、moshi 固定 / user プール巡回)
+        ↓ scripts/generate_qwen3_tts_data.py --dialogues-jsonl ...
+4. Moshi LoRA fine-tune
+        ↓ torchrun -m train configs/moshi_lora_jp_loneliness.yaml
+```
+
+#### 一発で回す
+
+```bash
+# moshi-finetune を兄弟ディレクトリに clone しておく
+git clone https://github.com/kyutai-labs/moshi-finetune.git ../moshi-finetune
+
+# 各 uv 環境を sync 済みであることを確認
+uv sync                        # Moshi + Qwen3-TTS
+uv sync --project gemma_runtime  # Gemma 4
+
+# 4 ステップ一気通貫
+bash scripts/run_pipeline.sh
+```
+
+環境変数で各種調整可能 (`OUT_ROOT`, `NUM_CASES`, `GEMMA_MODEL`, `QWEN_TTS_MODEL`,
+`FT_CONFIG`, `MOSHI_FT_REPO`, `NPROC`)。途中で止めたい場合は `STEPS` で絞れます:
+
+```bash
+STEPS=use_cases,dialogues bash scripts/run_pipeline.sh   # 音声化前まで
+STEPS=audio bash scripts/run_pipeline.sh                 # 音声化だけ再実行
+```
+
+#### 個別ステップ
+
+```bash
+# 1. 100 件の多様な use case カードを軸組み合わせで作る
+python scripts/build_use_cases.py \
+  --out-path data/v1/use_cases.jsonl --num 100
+
+# 2. Gemma で対話 JSONL のみ生成（音声化はスキップ）
+uv run python scripts/generate_synthetic_moshi_training_data.py \
+  --out-dir data/v1/gemma_dialogues \
+  --use-cases-jsonl data/v1/use_cases.jsonl \
+  --num-dialogues 100 \
+  --mode dialogues-only \
+  --gemma-backend transformers-subprocess \
+  --allow-template-fallback
+
+# 3. Qwen3-TTS で音声化（emotion / silence ターン込み）
+uv run python scripts/generate_qwen3_tts_data.py \
+  --out-dir data/v1/training_set \
+  --dialogues-jsonl data/v1/gemma_dialogues/dialogues.jsonl
+
+# 4. Moshi LoRA FT
+cd ../moshi-finetune
+torchrun --nproc-per-node 1 -m train \
+  "$OLDPWD/configs/moshi_lora_jp_loneliness.yaml"
+```
+
+#### 多様性の設計（`build_use_cases.py`）
+
+軸を直積に近い形で組み合わせて 100 件を出します:
+
+| 軸 | バリエーション |
+|---|---|
+| situation | 20 種（夜の雑談 / 退職後 / 介護疲れ / 入院中 / 喪失 / SNS疲れ / …） |
+| age_band | 20代〜70代 |
+| gender | 男性 / 女性 |
+| risk_level | low:medium:high = 60:30:10 |
+| silence_pattern | none:occasional:heavy = 55:30:15（特定 situation は heavy 寄り） |
+| opening_kind | smalltalk / feelings / silence |
+
+#### データ量の目安
+
+100 対話 × 平均 35 秒 ≒ **約 1 時間**。長めの heavy silence パターンや medium/high
+risk の対話を含めると 1.0〜1.2 時間程度に着地します。
+
+---
+
 ### Qwen3-TTS による日本語対話データ生成（推奨・シンプル）
 
 `scripts/generate_qwen3_tts_data.py` は Qwen3-TTS のプリセット話者で日本語対話を

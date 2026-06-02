@@ -1,0 +1,42 @@
+# Moshi LoRA fine-tune config — Japanese loneliness counseling domain
+#
+# 約 1 時間分の合成音声 (Qwen3-TTS で生成) を使った軽量な LoRA FT。
+# 「動けば良い」段階。VRAM 24GB 1 GPU を想定。
+#
+# 実行例:
+#   torchrun --nproc-per-node 1 -m train configs/moshi_lora_jp_loneliness.yaml
+
+moshi_paths:
+  # 日本語 Moshi の重み。英語 Moshi に置き換えたい場合は
+  # kyutai/moshiko-pytorch-bf16 など。
+  hf_repo_id: "llm-jp/llm-jp-moshi-v1"
+
+run_dir: "./checkpoints/moshi_lora_jp_loneliness"
+
+# 1 サンプル最大 100 秒。テンプレ対話の長さに余裕を見て。
+duration_sec: 100
+
+# 単一 GPU 想定で小さく。複数 GPU なら 4〜8 に上げる。
+batch_size: 1
+
+# ~100 対話 × 数 epoch を想定して 1000 step。
+# まずは動作確認、その後増やす。
+max_steps: 1000
+
+data:
+  # generate_qwen3_tts_data.py が出す manifest を指す。
+  train_data: "./data/training_set_v1/synthetic_moshi_train.jsonl"
+
+lora:
+  enable: true
+  rank: 64
+  scaling: 2.0
+
+optim:
+  lr: 2e-6
+  weight_decay: 0.1
+
+# ログ / 保存頻度
+log_freq: 10
+ckpt_freq: 200
+seed: 0
