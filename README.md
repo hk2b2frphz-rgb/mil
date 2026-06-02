@@ -87,8 +87,12 @@ only applies to backends that support voice selection.
 仕組み:
 
 1. ハードコードされた短い日本語対話テンプレートを使用（Gemma 生成は不要）。
-2. Qwen3-TTS の `generate_custom_voice()` が話者ごとに異なるプリセット声で各ターンを合成
-   （デフォルト: user → `Ono_Anna`、moshi → `Serena`）。
+2. Qwen3-TTS の `generate_custom_voice()` が話者ごとに異なるプリセット声で各ターンを合成。
+   - **moshi 側は `--speaker-moshi` で固定**（デフォルト: `Serena`）
+   - **user 側は `--user-speaker-pool` のプールから対話ごとに 1 人ずつローテーション**
+     （デフォルトプール: `Ono_Anna, Sohee, Vivian, Dylan, Eric, Aiden`）。
+   - これにより「いつもの相談員（moshi）が、毎回違う相談者（user）と話す」
+     データセットになり、Moshi 側の汎化に効くことを期待。
 3. 相談員 (moshi) を左チャンネル、相談者 (user) を右チャンネルのステレオ WAV に配置。
 4. Moshi fine-tune manifest (`synthetic_moshi_train.jsonl`) と `dialogues.jsonl` を書き出し。
 
@@ -195,8 +199,9 @@ WAV チャンネル規約:
 | `--dtype` | `bfloat16` | `float16` / `bfloat16` / `float32` |
 | `--attn-impl` | `default` | `default` / `flash_attention_2` / `sdpa` / `eager`（flash-attn 未インストール時は自動フォールバック） |
 | `--language` | `Japanese` | `generate_custom_voice` に渡す language 文字列 |
-| `--speaker-user` | `Ono_Anna` | user 側プリセット話者 |
-| `--speaker-moshi` | `Serena` | moshi 側プリセット話者 |
+| `--speaker-user` | `Ono_Anna` | プール未指定時に使う user 側の固定話者 |
+| `--user-speaker-pool` | `Ono_Anna,Sohee,Vivian,Dylan,Eric,Aiden` | 対話ごとに順にローテーションする user 話者のカンマ区切り列。`''` を渡すと `--speaker-user` で固定 |
+| `--speaker-moshi` | `Serena` | moshi 側プリセット話者（固定） |
 | `--instruct-user` | *(なし)* | user 発話の既定スタイル指示（ターン側 emotion が無い場合のみ使う） |
 | `--instruct-moshi` | *(なし)* | moshi 発話の既定スタイル指示（ターン側 emotion が無い場合のみ使う） |
 | `--no-emotion` | off | テンプレートの emotion ラベルを無視する |

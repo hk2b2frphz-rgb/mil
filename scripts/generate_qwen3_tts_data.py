@@ -282,16 +282,22 @@ class Qwen3TTS:
         text: str,
         speaker_role: str,
         instruct: str | None = None,
+        speaker_override: str | None = None,
     ) -> np.ndarray:
         """
         speaker_role: "user" | "moshi"
         instruct: そのターンに使うスタイル指示。None なら既定にフォールバック。
+        speaker_override: ロールごとの既定話者の代わりに使う話者名（対話単位で
+            user 話者を切り替えるための引数）。
         返り値: float32 モノラル PCM (self.sample_rate Hz)
         """
         self.load()
         assert self.model is not None
 
-        voice = self.speaker_user if speaker_role == "user" else self.speaker_moshi
+        if speaker_override:
+            voice = speaker_override
+        else:
+            voice = self.speaker_user if speaker_role == "user" else self.speaker_moshi
         instruct = self.resolve_instruct(speaker_role, instruct)
 
         kwargs: dict[str, Any] = {
@@ -349,11 +355,23 @@ def _resample(pcm: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
 # ステレオ合成ユーティリティ
 # ---------------------------------------------------------------------------
 
-def build_segments(dialogue: Dialogue, tts: Qwen3TTS, lead_in_sec: float, gap_sec: float) -> list[AudioSegment]:
+def build_segments(
+    dialogue: Dialogue,
+    tts: Qwen3TTS,
+    lead_in_sec: float,
+    gap_sec: float,
+    user_speaker_override: str | None = None,
+) -> list[AudioSegment]:
     cursor = lead_in_sec
     segments: list[AudioSegment] = []
     for turn in dialogue.turns:
-        pcm = tts.synthesize(turn.text, turn.speaker, instruct=turn.instruct)
+        override = user_speaker_override if turn.speaker == "user" else None
+        pcm = tts.synthesize(
+            turn.text,
+            turn.speaker,
+            instruct=turn.instruct,
+            speaker_override=override,
+        )
         start = cursor
         end = start + pcm.size / tts.sample_rate
         segments.append(AudioSegment(
@@ -464,9 +482,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--language", default="Japanese",
                         help="generate_custom_voice に渡す language 文字列")
     parser.add_argument("--speaker-user", default="Ono_Anna",
-                        help=f"user 側プリセット話者。候補: {sorted(VALID_SPEAKERS)}")
+                        help=f"user 側プリセット話者（pool 未指定時の既定）。候補: {sorted(VALID_SPEAKERS)}")
+    parser.add_argument(
+        "--user-speaker-pool",
+        default="Ono_Anna,Sohee,Vivian,Dylan,Eric,Aiden",
+        help=(
+            "user 側で使う話者のプール（カンマ区切り）。対話ごとにこの順で1人ずつ割り当てる。"
+            "moshi 側は --speaker-moshi で固定のまま。空文字列 '' を渡すと --speaker-user で固定。"
+        ),
+    )
     parser.add_argument("--speaker-moshi", default="Serena",
-                        help=f"moshi 側プリセット話者。候補: {sorted(VALID_SPEAKERS)}")
+                        help=f"moshi 側プリセット話者（固定）。候補: {sorted(VALID_SPEAKERS)}")
     parser.add_argument("--instruct-user", default=None,
                         help="user 発話の既定スタイル指示（ターン側 emotion が無い場合に使う）")
     parser.add_argument("--instruct-moshi", default=None,
@@ -489,6 +515,18 @@ def parse_args() -> argparse.Namespace:
             parser.error(
                 f"{role}={name!r} は無効です。候補: {sorted(VALID_SPEAKERS)}"
             )
+
+    pool_raw = args.user_speaker_pool.strip()
+    if pool_raw:
+        pool = [s.strip() for s in pool_raw.split(",") if s.strip()]
+        invalid = [s for s in pool if s not in VALID_SPEAKERS]
+        if invalid:
+            parser.error(
+                f"--user-speaker-pool に無効な話者: {invalid}。候補: {sorted(VALID_SPEAKERS)}"
+            )
+        args.user_speaker_pool_list = pool
+    else:
+        args.user_speaker_pool_list = [args.speaker_user]
     return args
 
 
@@ -542,9 +580,16 @@ def main() -> None:
             turns=turns,
         )
 
-        logger.info("[%d/%d] 対話 %s を合成中 ...", idx, len(templates), dialogue.id)
+        user_voice = args.user_speaker_pool_list[(idx - 1) % len(args.user_speaker_pool_list)]
+        logger.info(
+            "[%d/%d] 対話 %s を合成中 (moshi=%s, user=%s) ...",
+            idx, len(templates), dialogue.id, args.speaker_moshi, user_voice,
+        )
         t0 = time.time()
-        segments = build_segments(dialogue, tts, args.lead_in_sec, args.gap_sec)
+        segments = build_segments(
+            dialogue, tts, args.lead_in_sec, args.gap_sec,
+            user_speaker_override=user_voice,
+        )
         stereo = render_stereo(segments, tts.sample_rate)
         elapsed = time.time() - t0
 
@@ -567,7 +612,8 @@ def main() -> None:
                 "duration_sec": round(duration, 4),
                 "tts_model": args.model,
                 "language": args.language,
-                "speaker_user": args.speaker_user,
+                "speaker_user": user_voice,
+                "speaker_user_pool": args.user_speaker_pool_list,
                 "speaker_moshi": args.speaker_moshi,
                 "left_channel": "moshi",
                 "right_channel": "user",
