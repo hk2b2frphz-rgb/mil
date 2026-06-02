@@ -22,14 +22,14 @@ import json
 import random
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, List, Set, Tuple
 
 # ---------------------------------------------------------------------------
 # 軸の定義（シンプルに、辞書ではなく素朴なリストで持つ）
 # ---------------------------------------------------------------------------
 
 # (id_token, situation, opening_kind, default_target_turns, prefers_silence)
-SITUATIONS: list[tuple[str, str, str, int, bool]] = [
+SITUATIONS: List[Tuple[str, str, str, int, bool]] = [
     ("evening_smalltalk",      "夜、なんとなく人と話したくて窓口に来た", "smalltalk", 8,  False),
     ("holiday_alone",          "休日に予定がなく、誰ともつながっていない感じが強い", "feelings", 8,  False),
     ("sns_fatigue",            "SNSを見ていると置いていかれた気持ちになる",         "feelings", 8,  False),
@@ -123,7 +123,7 @@ class UseCase:
     tone: str
 
 
-def weighted_choice(rng: random.Random, items: list[tuple[Any, int]]) -> Any:
+def weighted_choice(rng: random.Random, items: List[Tuple[Any, int]]) -> Any:
     population = [item for item, _ in items]
     weights = [w for _, w in items]
     return rng.choices(population, weights=weights, k=1)[0]
@@ -195,7 +195,7 @@ def main() -> None:
     rng = random.Random(args.seed)
     args.out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    seen_ids: set[str] = set()
+    seen_ids: Set[str] = set()
     written = 0
     with args.out_path.open("w", encoding="utf-8") as f:
         attempts = 0
