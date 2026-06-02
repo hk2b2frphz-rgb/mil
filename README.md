@@ -166,6 +166,32 @@ warm, gentle, empathetic, encouraging, concerned, reassuring
 出力 WAV と一緒に書かれる JSON のメタデータには、その対話で実際に使われた
 `emotion_map_used` がそのまま記録されるので、後から再現・比較できます。
 
+#### ユーザーの沈黙 / moshi 側からの声かけ
+
+孤独・孤立相談窓口を想定し、テンプレートには**ユーザーが言葉に詰まる / 長く沈黙する**
+パターンを含めています。沈黙中は moshi 側が穏やかに声をかけるよう、
+**moshi の連続ターン** + 沈黙ターンを混在させた構造です:
+
+```python
+{"speaker": "user",    "text": "うまく言えないんですけど…えっと…", "emotion": "hesitant"},
+{"speaker": "silence", "duration_sec": 3.5, "note": "ユーザーが言い淀んで黙ってしまう"},
+{"speaker": "moshi",   "text": "ゆっくりで大丈夫ですよ。",         "emotion": "gentle"},
+{"speaker": "silence", "duration_sec": 2.0},
+{"speaker": "moshi",   "text": "急がなくて大丈夫です。",            "emotion": "reassuring"},
+```
+
+実装上のポイント:
+
+- `speaker: "silence"` のターンは音声を合成せず、`duration_sec` ぶんだけ
+  **両チャンネルとも無音**の時間を挿入します
+- moshi が連続して話す形（user の応答なし）も自然に書けるので、
+  「沈黙→声かけ→さらに沈黙→さらに声かけ」のような窓口対応を再現できます
+- 出力 JSON のメタデータには `silences: [{start_sec, end_sec, duration_sec, note}, ...]`
+  として全沈黙区間が記録されます
+
+Moshi の学習用途では、これにより
+**「相手が話さなくても自分から会話を維持できる」挙動**を学習データに含められます。
+
 出力ディレクトリ構造:
 
 ```text

@@ -138,6 +138,62 @@ TEMPLATE_DIALOGUES: list[dict[str, Any]] = [
              "text": "よかった。また話しに来てくださいね。"},
         ],
     },
+    {
+        "id": "user_silence_001",
+        "category": "loneliness_light",
+        "risk_level": "low",
+        "title": "ユーザーが言葉に詰まる",
+        "turns": [
+            {"speaker": "user",  "emotion": "hesitant",
+             "text": "あの…ちょっと聞いてもらえますか。"},
+            {"speaker": "moshi", "emotion": "warm",
+             "text": "はい、もちろんです。お話ししてくださいね。"},
+            {"speaker": "user",  "emotion": "hesitant",
+             "text": "うまく言えないんですけど…えっと…"},
+            # ここから沈黙: ユーザーが言葉に詰まる
+            {"speaker": "silence", "duration_sec": 3.5,
+             "note": "ユーザーが言い淀んで黙ってしまう"},
+            {"speaker": "moshi", "emotion": "gentle",
+             "text": "ゆっくりで大丈夫ですよ。"},
+            {"speaker": "silence", "duration_sec": 2.0,
+             "note": "ユーザーがまだ考え中"},
+            {"speaker": "moshi", "emotion": "reassuring",
+             "text": "急がなくて大丈夫です。言葉が出てこない日もありますからね。"},
+            {"speaker": "user",  "emotion": "relieved",
+             "text": "…ありがとうございます。少し落ち着きました。"},
+            {"speaker": "moshi", "emotion": "warm",
+             "text": "よかったです。話せそうなところから、ぽつぽつで大丈夫ですよ。"},
+        ],
+    },
+    {
+        "id": "user_silence_002",
+        "category": "loneliness_deep",
+        "risk_level": "medium",
+        "title": "ユーザーが長く沈黙する",
+        "turns": [
+            {"speaker": "user",  "emotion": "sad",
+             "text": "もしもし…。"},
+            {"speaker": "moshi", "emotion": "warm",
+             "text": "もしもし、お電話ありがとうございます。聞いていますよ。"},
+            # 長めの沈黙
+            {"speaker": "silence", "duration_sec": 5.0,
+             "note": "ユーザーが何も言わない"},
+            {"speaker": "moshi", "emotion": "gentle",
+             "text": "大丈夫ですよ。話さなくても、つながっているだけで大丈夫です。"},
+            {"speaker": "silence", "duration_sec": 4.0,
+             "note": "まだ沈黙が続く"},
+            {"speaker": "moshi", "emotion": "concerned",
+             "text": "もしよかったら、今いる場所が安全かだけ、ひとこと教えてもらえますか。"},
+            {"speaker": "silence", "duration_sec": 2.5,
+             "note": "ためらいの沈黙"},
+            {"speaker": "user",  "emotion": "hesitant",
+             "text": "…家にいます。大丈夫です。"},
+            {"speaker": "moshi", "emotion": "reassuring",
+             "text": "ありがとうございます。安心しました。"},
+            {"speaker": "moshi", "emotion": "gentle",
+             "text": "話したくなったら、いつでも声を出してくださいね。"},
+        ],
+    },
 ]
 
 
@@ -153,10 +209,12 @@ VALID_SPEAKERS = {
 
 @dataclass
 class DialogueTurn:
-    speaker: str
-    text: str
+    speaker: str  # "user" | "moshi" | "silence"
+    text: str = ""
     emotion: str | None = None
-    instruct: str | None = None  # 解決後の Qwen3-TTS instruct 文字列（参照保存用）
+    instruct: str | None = None      # 解決後の Qwen3-TTS instruct 文字列（参照保存用）
+    duration_sec: float | None = None  # speaker=="silence" 用
+    note: str | None = None          # 沈黙の状況メモなど（学習対象外）
 
 
 @dataclass
@@ -361,10 +419,33 @@ def build_segments(
     lead_in_sec: float,
     gap_sec: float,
     user_speaker_override: str | None = None,
-) -> list[AudioSegment]:
+) -> tuple[list[AudioSegment], list[dict[str, Any]]]:
+    """
+    返り値: (音声セグメント列, 沈黙区間のメタデータ列)
+
+    speaker=="silence" のターンは音声を生成せず、duration_sec ぶんだけカーソルを
+    進めて両チャンネル無音とする。沈黙の前後では追加の gap_sec を入れない。
+    """
     cursor = lead_in_sec
     segments: list[AudioSegment] = []
+    silences: list[dict[str, Any]] = []
+    prev_was_silence = False
+
     for turn in dialogue.turns:
+        if turn.speaker == "silence":
+            dur = float(turn.duration_sec or 0.0)
+            silences.append({
+                "start_sec": round(cursor, 4),
+                "end_sec": round(cursor + dur, 4),
+                "duration_sec": round(dur, 4),
+                "note": turn.note or "",
+            })
+            cursor += dur
+            prev_was_silence = True
+            continue
+
+        # 直前が沈黙だった場合は、その沈黙が既にギャップを兼ねているので追加 gap は付けない
+        # （cursor は既に沈黙ぶん進んでいる）
         override = user_speaker_override if turn.speaker == "user" else None
         pcm = tts.synthesize(
             turn.text,
@@ -382,8 +463,12 @@ def build_segments(
             end_sec=end,
             pcm=pcm,
         ))
+        # 次のターンが沈黙の場合、そちら側で時間が積まれるので、ここでは常に gap_sec を足してよい
         cursor = end + gap_sec
-    return segments
+        prev_was_silence = False
+
+    _ = prev_was_silence  # 現状未使用だが将来の分岐用に保持
+    return segments, silences
 
 
 def resolve_emotion(emotion: str | None, emotion_map: dict[str, str]) -> str | None:
@@ -501,7 +586,7 @@ def parse_args() -> argparse.Namespace:
                         help="ターンの emotion ラベルを無視してプレーンに合成する（A/B比較用）")
     parser.add_argument("--emotion-map-file", type=Path, default=None,
                         help="感情ラベル→instruct のオーバーライド JSON 辞書ファイル")
-    parser.add_argument("--num-dialogues", type=int, default=3,
+    parser.add_argument("--num-dialogues", type=int, default=len(TEMPLATE_DIALOGUES),
                         help=f"生成する対話数（最大 {len(TEMPLATE_DIALOGUES)}）")
     parser.add_argument("--lead-in-sec", type=float, default=0.3)
     parser.add_argument("--gap-sec", type=float, default=0.4,
@@ -564,10 +649,19 @@ def main() -> None:
     for idx, tmpl in enumerate(templates, start=1):
         turns: list[DialogueTurn] = []
         for t in tmpl["turns"]:
+            speaker = t["speaker"]
+            if speaker == "silence":
+                turns.append(DialogueTurn(
+                    speaker="silence",
+                    text="",
+                    duration_sec=float(t.get("duration_sec", 2.0)),
+                    note=t.get("note"),
+                ))
+                continue
             emotion = None if args.no_emotion else t.get("emotion")
             instruct = resolve_emotion(emotion, emotion_map)
             turns.append(DialogueTurn(
-                speaker=t["speaker"],
+                speaker=speaker,
                 text=t["text"],
                 emotion=emotion,
                 instruct=instruct,
@@ -586,7 +680,7 @@ def main() -> None:
             idx, len(templates), dialogue.id, args.speaker_moshi, user_voice,
         )
         t0 = time.time()
-        segments = build_segments(
+        segments, silences = build_segments(
             dialogue, tts, args.lead_in_sec, args.gap_sec,
             user_speaker_override=user_voice,
         )
@@ -623,6 +717,7 @@ def main() -> None:
                     e: emotion_map[e]
                     for e in {t.emotion for t in dialogue.turns if t.emotion}
                 },
+                "silences": silences,
                 "dialogue": {
                     "id": dialogue.id,
                     "category": dialogue.category,
