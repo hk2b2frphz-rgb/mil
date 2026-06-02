@@ -35,7 +35,7 @@ mkdir -p "$OUT_ROOT"
 # 1. use case 100 件を生成（軸の組み合わせから）
 # ---------------------------------------------------------------------------
 if run_step use_cases; then
-    python scripts/build_use_cases.py \
+    uv run python scripts/build_use_cases.py \
         --out-path "$USE_CASES_PATH" \
         --num "$NUM_CASES"
 fi
