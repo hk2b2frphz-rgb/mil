@@ -124,8 +124,43 @@ Qwen3-TTS CustomVoice 系の利用可能なプリセット話者:
 Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, Sohee
 ```
 
-`--instruct-user` / `--instruct-moshi` でスタイル指示（例: `"温かく穏やかなトーンで"`）を
-オプションで渡せます。
+`--instruct-user` / `--instruct-moshi` で**全ターン共通**のスタイル指示（例:
+`"温かく穏やかなトーンで"`）をオプションで渡せます。
+
+#### ターン単位の感情ラベル制御（試験的）
+
+テンプレート対話の各ターンには `emotion` ラベル（`hesitant`, `sad`, `warm`,
+`empathetic`, `relieved`, `concerned` など）が付いていて、起動時に
+スクリプト内の `EMOTION_PRESETS` で **Qwen3-TTS の `instruct` 文字列に解決**されます。
+これにより、同じ対話の中で「ためらう」「沈む」「ほっとする」といった感情変化が
+音声側にも反映されます。
+
+利用可能なラベル一覧（試験的、`scripts/generate_qwen3_tts_data.py` 内の
+`EMOTION_PRESETS` に定義）:
+
+```
+neutral, hesitant, sad, lonely, anxious, relieved, grateful,
+warm, gentle, empathetic, encouraging, concerned, reassuring
+```
+
+優先順位は **ターンの `emotion`** > `--instruct-user` / `--instruct-moshi` > なし。
+
+| フラグ | 用途 |
+|---|---|
+| `--no-emotion` | ターンの `emotion` を無視してプレーンに合成（A/B 比較用） |
+| `--emotion-map-file path.json` | `{ "lonely": "別の指示文" }` のように一部だけ上書きする JSON |
+
+`emotion-map-file` の例:
+
+```json
+{
+  "lonely": "声のボリュームを落とし、夜の静けさを背負うように話して",
+  "concerned": "急かさず、相手のペースを尊重する穏やかなトーンで尋ねるように"
+}
+```
+
+出力 WAV と一緒に書かれる JSON のメタデータには、その対話で実際に使われた
+`emotion_map_used` がそのまま記録されるので、後から再現・比較できます。
 
 出力ディレクトリ構造:
 
@@ -162,8 +197,10 @@ WAV チャンネル規約:
 | `--language` | `Japanese` | `generate_custom_voice` に渡す language 文字列 |
 | `--speaker-user` | `Ono_Anna` | user 側プリセット話者 |
 | `--speaker-moshi` | `Serena` | moshi 側プリセット話者 |
-| `--instruct-user` | *(なし)* | user 発話のスタイル指示（任意） |
-| `--instruct-moshi` | *(なし)* | moshi 発話のスタイル指示（任意） |
+| `--instruct-user` | *(なし)* | user 発話の既定スタイル指示（ターン側 emotion が無い場合のみ使う） |
+| `--instruct-moshi` | *(なし)* | moshi 発話の既定スタイル指示（ターン側 emotion が無い場合のみ使う） |
+| `--no-emotion` | off | テンプレートの emotion ラベルを無視する |
+| `--emotion-map-file` | *(なし)* | 感情ラベル→instruct 文字列の上書き JSON |
 | `--num-dialogues` | `3` | 生成する対話数（最大 3、テンプレート数に依存） |
 | `--lead-in-sec` | `0.3` | 先頭の無音（秒） |
 | `--gap-sec` | `0.4` | ターン間の無音（秒） |

@@ -51,6 +51,28 @@ logger = logging.getLogger(__name__)
 # 対話テンプレート（孤独・孤立相談窓口想定の短い日本語対話）
 # ---------------------------------------------------------------------------
 
+# 感情ラベル → Qwen3-TTS の instruct 文字列。
+# 試験的なマッピング。最終的には fine-tune 結果を見て調整する。
+EMOTION_PRESETS: dict[str, str] = {
+    # 中立
+    "neutral":      "自然で落ち着いたトーンで話して",
+    # 相談者 (user) 側でよく使う感情
+    "hesitant":     "少し言い淀みながら、ためらうように話して",
+    "sad":          "声を少し落として、沈んだトーンで静かに話して",
+    "lonely":       "寂しさが滲むような、低めの静かなトーンで話して",
+    "anxious":      "不安が伝わるように、声を少し震わせ気味に話して",
+    "relieved":     "少しほっとした、肩の力が抜けたような穏やかなトーンで話して",
+    "grateful":     "感謝の気持ちを込めて、柔らかいトーンで話して",
+    # 相談員 (moshi) 側でよく使う感情
+    "warm":         "温かく、相手に寄り添うような穏やかなトーンで話して",
+    "gentle":       "やさしく語りかけるように、ゆっくり丁寧に話して",
+    "empathetic":   "共感を込めて、相手の気持ちを受け止めるように話して",
+    "encouraging": "やさしく背中を押すように、明るすぎず前向きなトーンで話して",
+    "concerned":    "心配する気持ちを込めて、落ち着いた声で慎重に話して",
+    "reassuring":   "安心させるように、ゆっくり穏やかに話して",
+}
+
+
 TEMPLATE_DIALOGUES: list[dict[str, Any]] = [
     {
         "id": "smalltalk_evening_001",
@@ -58,12 +80,18 @@ TEMPLATE_DIALOGUES: list[dict[str, Any]] = [
         "risk_level": "low",
         "title": "夜の雑談",
         "turns": [
-            {"speaker": "user",  "text": "こんばんは。相談というほどでもないんですが、少し話してもいいですか。"},
-            {"speaker": "moshi", "text": "もちろんです。来てくれてありがとうございます。どうぞゆっくり話してください。"},
-            {"speaker": "user",  "text": "最近、夜になると少し寂しくなるんですよね。"},
-            {"speaker": "moshi", "text": "そうですか。夜は特に静かになって、気持ちが大きくなることがありますよね。"},
-            {"speaker": "user",  "text": "そうなんです。誰かと話すとちょっと楽になります。"},
-            {"speaker": "moshi", "text": "ここで話してくれてよかったです。急がなくて大丈夫ですよ。"},
+            {"speaker": "user",  "emotion": "hesitant",
+             "text": "こんばんは。相談というほどでもないんですが、少し話してもいいですか。"},
+            {"speaker": "moshi", "emotion": "warm",
+             "text": "もちろんです。来てくれてありがとうございます。どうぞゆっくり話してください。"},
+            {"speaker": "user",  "emotion": "lonely",
+             "text": "最近、夜になると少し寂しくなるんですよね。"},
+            {"speaker": "moshi", "emotion": "empathetic",
+             "text": "そうですか。夜は特に静かになって、気持ちが大きくなることがありますよね。"},
+            {"speaker": "user",  "emotion": "relieved",
+             "text": "そうなんです。誰かと話すとちょっと楽になります。"},
+            {"speaker": "moshi", "emotion": "gentle",
+             "text": "ここで話してくれてよかったです。急がなくて大丈夫ですよ。"},
         ],
     },
     {
@@ -72,12 +100,18 @@ TEMPLATE_DIALOGUES: list[dict[str, Any]] = [
         "risk_level": "low",
         "title": "休日の孤独感",
         "turns": [
-            {"speaker": "user",  "text": "休日に予定がないと、自分だけ誰にも呼ばれてない気がします。"},
-            {"speaker": "moshi", "text": "その気持ち、わかります。休みの日って比べてしまうことがありますよね。"},
-            {"speaker": "user",  "text": "SNSを見ると余計に落ち込んでしまいます。"},
-            {"speaker": "moshi", "text": "見なくてもいいんですよ。今日はここでゆっくり話しましょう。"},
-            {"speaker": "user",  "text": "そうですね。少し気持ちが楽になりました。"},
-            {"speaker": "moshi", "text": "それはよかったです。いつでも話しに来てください。"},
+            {"speaker": "user",  "emotion": "sad",
+             "text": "休日に予定がないと、自分だけ誰にも呼ばれてない気がします。"},
+            {"speaker": "moshi", "emotion": "empathetic",
+             "text": "その気持ち、わかります。休みの日って比べてしまうことがありますよね。"},
+            {"speaker": "user",  "emotion": "anxious",
+             "text": "SNSを見ると余計に落ち込んでしまいます。"},
+            {"speaker": "moshi", "emotion": "reassuring",
+             "text": "見なくてもいいんですよ。今日はここでゆっくり話しましょう。"},
+            {"speaker": "user",  "emotion": "relieved",
+             "text": "そうですね。少し気持ちが楽になりました。"},
+            {"speaker": "moshi", "emotion": "encouraging",
+             "text": "それはよかったです。いつでも話しに来てください。"},
         ],
     },
     {
@@ -86,14 +120,22 @@ TEMPLATE_DIALOGUES: list[dict[str, Any]] = [
         "risk_level": "medium",
         "title": "助けを求めることへの躊躇",
         "turns": [
-            {"speaker": "user",  "text": "助けてって言いたいんですけど、迷惑だと思われそうで言えません。"},
-            {"speaker": "moshi", "text": "声を出すだけでも、とても勇気がいりますよね。"},
-            {"speaker": "user",  "text": "はい。自分で解決しないといけないと思って。"},
-            {"speaker": "moshi", "text": "ひとりで抱えてきたんですね。今ここで話してくれて、よかったです。"},
-            {"speaker": "user",  "text": "少し楽になった気がします。"},
-            {"speaker": "moshi", "text": "今夜、安全に過ごせそうですか？ひとこと聞かせてもらえますか。"},
-            {"speaker": "user",  "text": "はい、大丈夫です。"},
-            {"speaker": "moshi", "text": "よかった。また話しに来てくださいね。"},
+            {"speaker": "user",  "emotion": "hesitant",
+             "text": "助けてって言いたいんですけど、迷惑だと思われそうで言えません。"},
+            {"speaker": "moshi", "emotion": "empathetic",
+             "text": "声を出すだけでも、とても勇気がいりますよね。"},
+            {"speaker": "user",  "emotion": "sad",
+             "text": "はい。自分で解決しないといけないと思って。"},
+            {"speaker": "moshi", "emotion": "warm",
+             "text": "ひとりで抱えてきたんですね。今ここで話してくれて、よかったです。"},
+            {"speaker": "user",  "emotion": "relieved",
+             "text": "少し楽になった気がします。"},
+            {"speaker": "moshi", "emotion": "concerned",
+             "text": "今夜、安全に過ごせそうですか？ひとこと聞かせてもらえますか。"},
+            {"speaker": "user",  "emotion": "grateful",
+             "text": "はい、大丈夫です。"},
+            {"speaker": "moshi", "emotion": "reassuring",
+             "text": "よかった。また話しに来てくださいね。"},
         ],
     },
 ]
@@ -113,6 +155,8 @@ VALID_SPEAKERS = {
 class DialogueTurn:
     speaker: str
     text: str
+    emotion: str | None = None
+    instruct: str | None = None  # 解決後の Qwen3-TTS instruct 文字列（参照保存用）
 
 
 @dataclass
@@ -225,20 +269,30 @@ class Qwen3TTS:
 
         logger.info("Qwen3-TTS 読み込み完了")
 
-    def synthesize(self, text: str, speaker_role: str) -> np.ndarray:
+    def resolve_instruct(self, speaker_role: str, turn_instruct: str | None) -> str | None:
+        """ターン側で明示指定があればそれ、無ければ CLI 既定 (--instruct-*) を使う。"""
+        if turn_instruct:
+            return turn_instruct
+        if speaker_role == "user":
+            return self.instruct_user
+        return self.instruct_moshi
+
+    def synthesize(
+        self,
+        text: str,
+        speaker_role: str,
+        instruct: str | None = None,
+    ) -> np.ndarray:
         """
         speaker_role: "user" | "moshi"
+        instruct: そのターンに使うスタイル指示。None なら既定にフォールバック。
         返り値: float32 モノラル PCM (self.sample_rate Hz)
         """
         self.load()
         assert self.model is not None
 
-        if speaker_role == "user":
-            voice = self.speaker_user
-            instruct = self.instruct_user
-        else:
-            voice = self.speaker_moshi
-            instruct = self.instruct_moshi
+        voice = self.speaker_user if speaker_role == "user" else self.speaker_moshi
+        instruct = self.resolve_instruct(speaker_role, instruct)
 
         kwargs: dict[str, Any] = {
             "text": text,
@@ -266,8 +320,9 @@ class Qwen3TTS:
             audio = _resample(audio, sr, self.sample_rate)
 
         logger.info(
-            "Qwen3-TTS 合成完了: role=%s speaker=%s dur=%.2fs text=%r",
-            speaker_role, voice, audio.size / self.sample_rate, text[:30],
+            "Qwen3-TTS 合成完了: role=%s speaker=%s instruct=%r dur=%.2fs text=%r",
+            speaker_role, voice, (instruct or "")[:24],
+            audio.size / self.sample_rate, text[:30],
         )
         return audio
 
@@ -298,7 +353,7 @@ def build_segments(dialogue: Dialogue, tts: Qwen3TTS, lead_in_sec: float, gap_se
     cursor = lead_in_sec
     segments: list[AudioSegment] = []
     for turn in dialogue.turns:
-        pcm = tts.synthesize(turn.text, turn.speaker)
+        pcm = tts.synthesize(turn.text, turn.speaker, instruct=turn.instruct)
         start = cursor
         end = start + pcm.size / tts.sample_rate
         segments.append(AudioSegment(
@@ -311,6 +366,30 @@ def build_segments(dialogue: Dialogue, tts: Qwen3TTS, lead_in_sec: float, gap_se
         ))
         cursor = end + gap_sec
     return segments
+
+
+def resolve_emotion(emotion: str | None, emotion_map: dict[str, str]) -> str | None:
+    if not emotion:
+        return None
+    instruct = emotion_map.get(emotion)
+    if instruct is None:
+        logger.warning(
+            "未知の emotion=%r。EMOTION_PRESETS のキーを使うか --emotion-map-file を指定してください。",
+            emotion,
+        )
+    return instruct
+
+
+def load_emotion_map(path: Path | None) -> dict[str, str]:
+    base = dict(EMOTION_PRESETS)
+    if path is None:
+        return base
+    with path.open("r", encoding="utf-8") as f:
+        overrides = json.load(f)
+    if not isinstance(overrides, dict):
+        raise ValueError("--emotion-map-file は { 'label': 'instruct文字列' } の JSON を期待します。")
+    base.update({str(k): str(v) for k, v in overrides.items()})
+    return base
 
 
 def render_stereo(segments: list[AudioSegment], sample_rate: int, tail_sec: float = 0.5) -> np.ndarray:
@@ -389,9 +468,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--speaker-moshi", default="Serena",
                         help=f"moshi 側プリセット話者。候補: {sorted(VALID_SPEAKERS)}")
     parser.add_argument("--instruct-user", default=None,
-                        help="user 発話のスタイル指示（任意、例: '落ち着いたトーンで'）")
+                        help="user 発話の既定スタイル指示（ターン側 emotion が無い場合に使う）")
     parser.add_argument("--instruct-moshi", default=None,
-                        help="moshi 発話のスタイル指示（任意、例: '温かく穏やかなトーンで'）")
+                        help="moshi 発話の既定スタイル指示（ターン側 emotion が無い場合に使う）")
+    parser.add_argument("--no-emotion", action="store_true",
+                        help="ターンの emotion ラベルを無視してプレーンに合成する（A/B比較用）")
+    parser.add_argument("--emotion-map-file", type=Path, default=None,
+                        help="感情ラベル→instruct のオーバーライド JSON 辞書ファイル")
     parser.add_argument("--num-dialogues", type=int, default=3,
                         help=f"生成する対話数（最大 {len(TEMPLATE_DIALOGUES)}）")
     parser.add_argument("--lead-in-sec", type=float, default=0.3)
@@ -435,14 +518,28 @@ def main() -> None:
     )
     tts.load()
 
+    emotion_map = load_emotion_map(args.emotion_map_file)
+    if args.no_emotion:
+        logger.info("--no-emotion: ターン側 emotion ラベルを無視します")
+
     templates = TEMPLATE_DIALOGUES[: args.num_dialogues]
     for idx, tmpl in enumerate(templates, start=1):
+        turns: list[DialogueTurn] = []
+        for t in tmpl["turns"]:
+            emotion = None if args.no_emotion else t.get("emotion")
+            instruct = resolve_emotion(emotion, emotion_map)
+            turns.append(DialogueTurn(
+                speaker=t["speaker"],
+                text=t["text"],
+                emotion=emotion,
+                instruct=instruct,
+            ))
         dialogue = Dialogue(
             id=safe_stem(tmpl["id"], f"dialogue_{idx:03d}"),
             category=tmpl["category"],
             risk_level=tmpl["risk_level"],
             title=tmpl["title"],
-            turns=[DialogueTurn(t["speaker"], t["text"]) for t in tmpl["turns"]],
+            turns=turns,
         )
 
         logger.info("[%d/%d] 対話 %s を合成中 ...", idx, len(templates), dialogue.id)
@@ -475,6 +572,11 @@ def main() -> None:
                 "left_channel": "moshi",
                 "right_channel": "user",
                 "wall_time_sec": round(elapsed, 3),
+                "emotion_control": "off" if args.no_emotion else "on",
+                "emotion_map_used": {
+                    e: emotion_map[e]
+                    for e in {t.emotion for t in dialogue.turns if t.emotion}
+                },
                 "dialogue": {
                     "id": dialogue.id,
                     "category": dialogue.category,
