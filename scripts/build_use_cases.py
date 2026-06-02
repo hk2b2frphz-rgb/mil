@@ -13,7 +13,7 @@
   data/use_cases/loneliness_<N>.jsonl
 
 使い方:
-  python scripts/build_use_cases.py --out-path data/use_cases/loneliness_100.jsonl --num 100
+  uv run scripts/build_use_cases.py --out-path data/use_cases/loneliness_100.jsonl --num 100
 """
 from __future__ import annotations
 
