@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 孤独・孤立相談窓口を想定した use case カードを「軸の組み合わせ」で生成する。
 
