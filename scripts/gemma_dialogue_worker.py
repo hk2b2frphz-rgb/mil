@@ -80,17 +80,28 @@ def main() -> None:
         "model": args.model,
         "device_map": args.device_map,
         "trust_remote_code": args.trust_remote_code,
+        # SDPA は V100/A100 どちらでも使え、attention をネイティブ実装にして
+        # 推論を 1.2〜1.5x 程度高速化する。
+        "model_kwargs": {"attn_implementation": "sdpa"},
     }
     dtype = torch_dtype(args.dtype)
     if dtype != "auto":
         kwargs["torch_dtype"] = dtype
 
+    def _build_pipeline(task: str) -> Any:
+        try:
+            return pipeline(task, **kwargs)
+        except (TypeError, ValueError):
+            # 一部のモデルは model_kwargs/attn_implementation を受け付けない
+            fallback_kwargs = {k: v for k, v in kwargs.items() if k != "model_kwargs"}
+            return pipeline(task, **fallback_kwargs)
+
     try:
-        pipe = pipeline(args.task, **kwargs)
+        pipe = _build_pipeline(args.task)
     except Exception:
         if args.task == "text-generation":
             raise
-        pipe = pipeline("text-generation", **kwargs)
+        pipe = _build_pipeline("text-generation")
 
     progress(f"モデルロード完了。{total}件のプロンプトを生成します")
     generation_kwargs = {

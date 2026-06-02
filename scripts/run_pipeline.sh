@@ -143,8 +143,14 @@ fi
 # 2. Gemma で対話 JSONL を生成（音声合成はしない）
 # ---------------------------------------------------------------------------
 if run_step dialogues; then
+    # A100 なら bfloat16、V100 なら float16 を環境変数で指定可能
+    # 例: GEMMA_DTYPE=float16 ./scripts/run_pipeline.sh
+    GEMMA_DTYPE_VAL="${GEMMA_DTYPE:-bfloat16}"
+    GEMMA_MAX_NEW_TOKENS_VAL="${GEMMA_MAX_NEW_TOKENS:-900}"
     log_info "Gemma で対話を ${NUM_CASES} 件生成: $GEMMA_DIALOGUES_DIR"
-    log_info "  model: ${GEMMA_MODEL:-google/gemma-4-E2B-it}"
+    log_info "  model:          ${GEMMA_MODEL:-google/gemma-4-E2B-it}"
+    log_info "  dtype:          ${GEMMA_DTYPE_VAL}"
+    log_info "  max_new_tokens: ${GEMMA_MAX_NEW_TOKENS_VAL}"
     uv run python scripts/generate_synthetic_moshi_training_data.py \
         --out-dir "$GEMMA_DIALOGUES_DIR" \
         --use-cases-jsonl "$USE_CASES_PATH" \
@@ -152,6 +158,8 @@ if run_step dialogues; then
         --mode dialogues-only \
         --gemma-backend transformers-subprocess \
         --gemma-model "${GEMMA_MODEL:-google/gemma-4-E2B-it}" \
+        --gemma-dtype "${GEMMA_DTYPE_VAL}" \
+        --gemma-max-new-tokens "${GEMMA_MAX_NEW_TOKENS_VAL}" \
         --allow-template-fallback
     report_path "dialogues" "$GEMMA_DIALOGUES_DIR/dialogues.jsonl"
     end_step
