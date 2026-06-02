@@ -18,7 +18,6 @@
 import argparse
 import json
 import random
-from dataclasses import dataclass, asdict
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -106,18 +105,20 @@ TONES_BY_RISK = {
 }
 
 
-@dataclass
-class UseCase:
-    id: str
-    category: str
-    risk_level: str
-    situation: str
-    user_profile: str
-    opening: str
-    opening_kind: str
-    silence_pattern: str
-    target_turns: int
-    tone: str
+def make_use_case(id, category, risk_level, situation, user_profile,
+                  opening, opening_kind, silence_pattern, target_turns, tone):
+    return {
+        "id": id,
+        "category": category,
+        "risk_level": risk_level,
+        "situation": situation,
+        "user_profile": user_profile,
+        "opening": opening,
+        "opening_kind": opening_kind,
+        "silence_pattern": silence_pattern,
+        "target_turns": target_turns,
+        "tone": tone,
+    }
 
 
 def weighted_choice(rng, items):
@@ -168,7 +169,7 @@ def build_one(rng, index):
     user_profile = f"{age}{gender}。{situation}という背景がある。"
 
     use_case_id = f"{sit_token}_{age}_{gender}_{risk}_{silence_pattern}_{index:03d}"
-    return UseCase(
+    return make_use_case(
         id=use_case_id,
         category=category,
         risk_level=risk,
@@ -199,10 +200,10 @@ def main():
         while written < args.num and attempts < args.num * 20:
             attempts += 1
             uc = build_one(rng, written + 1)
-            if uc.id in seen_ids:
+            if uc["id"] in seen_ids:
                 continue
-            seen_ids.add(uc.id)
-            f.write(json.dumps(asdict(uc), ensure_ascii=False) + "\n")
+            seen_ids.add(uc["id"])
+            f.write(json.dumps(uc, ensure_ascii=False) + "\n")
             written += 1
 
     print(f"wrote {written} use cases to {args.out_path}")
