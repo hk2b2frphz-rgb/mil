@@ -15,17 +15,21 @@
 使い方:
   python scripts/build_use_cases.py --out-path data/use_cases/loneliness_100.jsonl --num 100
 """
+from __future__ import annotations
+
 import argparse
 import json
 import random
+from dataclasses import dataclass, asdict
 from pathlib import Path
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # 軸の定義（シンプルに、辞書ではなく素朴なリストで持つ）
 # ---------------------------------------------------------------------------
 
 # (id_token, situation, opening_kind, default_target_turns, prefers_silence)
-SITUATIONS = [
+SITUATIONS: list[tuple[str, str, str, int, bool]] = [
     ("evening_smalltalk",      "夜、なんとなく人と話したくて窓口に来た", "smalltalk", 8,  False),
     ("holiday_alone",          "休日に予定がなく、誰ともつながっていない感じが強い", "feelings", 8,  False),
     ("sns_fatigue",            "SNSを見ていると置いていかれた気持ちになる",         "feelings", 8,  False),
@@ -105,29 +109,27 @@ TONES_BY_RISK = {
 }
 
 
-def make_use_case(id, category, risk_level, situation, user_profile,
-                  opening, opening_kind, silence_pattern, target_turns, tone):
-    return {
-        "id": id,
-        "category": category,
-        "risk_level": risk_level,
-        "situation": situation,
-        "user_profile": user_profile,
-        "opening": opening,
-        "opening_kind": opening_kind,
-        "silence_pattern": silence_pattern,
-        "target_turns": target_turns,
-        "tone": tone,
-    }
+@dataclass
+class UseCase:
+    id: str
+    category: str
+    risk_level: str
+    situation: str
+    user_profile: str
+    opening: str
+    opening_kind: str
+    silence_pattern: str
+    target_turns: int
+    tone: str
 
 
-def weighted_choice(rng, items):
+def weighted_choice(rng: random.Random, items: list[tuple[Any, int]]) -> Any:
     population = [item for item, _ in items]
     weights = [w for _, w in items]
     return rng.choices(population, weights=weights, k=1)[0]
 
 
-def build_one(rng, index):
+def build_one(rng: random.Random, index: int) -> UseCase:
     sit_token, situation, opening_kind, target_turns, prefers_silence = rng.choice(SITUATIONS)
     age = rng.choice(AGE_BANDS)
     gender = rng.choice(GENDERS)
@@ -169,7 +171,7 @@ def build_one(rng, index):
     user_profile = f"{age}{gender}。{situation}という背景がある。"
 
     use_case_id = f"{sit_token}_{age}_{gender}_{risk}_{silence_pattern}_{index:03d}"
-    return make_use_case(
+    return UseCase(
         id=use_case_id,
         category=category,
         risk_level=risk,
@@ -183,7 +185,7 @@ def build_one(rng, index):
     )
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="loneliness window use cases generator")
     parser.add_argument("--out-path", type=Path, required=True)
     parser.add_argument("--num", type=int, default=100)
@@ -193,17 +195,17 @@ def main():
     rng = random.Random(args.seed)
     args.out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    seen_ids = set()
+    seen_ids: set[str] = set()
     written = 0
     with args.out_path.open("w", encoding="utf-8") as f:
         attempts = 0
         while written < args.num and attempts < args.num * 20:
             attempts += 1
             uc = build_one(rng, written + 1)
-            if uc["id"] in seen_ids:
+            if uc.id in seen_ids:
                 continue
-            seen_ids.add(uc["id"])
-            f.write(json.dumps(uc, ensure_ascii=False) + "\n")
+            seen_ids.add(uc.id)
+            f.write(json.dumps(asdict(uc), ensure_ascii=False) + "\n")
             written += 1
 
     print(f"wrote {written} use cases to {args.out_path}")
