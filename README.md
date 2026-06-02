@@ -78,11 +78,77 @@ only applies to backends that support voice selection.
 
 ## Quick-start examples
 
+### Qwen3-TTS による日本語対話データ生成（推奨・シンプル）
+
+`scripts/generate_qwen3_tts_data.py` は Qwen3-TTS (CosyVoice2 ベース) を使って、
+孤独・孤立相談窓口想定の日本語対話を音声合成し、Moshi fine-tune フォーマットで書き出します。
+**Gemma 不要**・**依存環境がシンプル**なため、まず最初にこちらを試してください。
+
+仕組み:
+
+1. ハードコードされた短い日本語対話テンプレートを使用（Gemma 生成は不要）。
+2. Qwen3-TTS が話者ごとに異なる声（user → `Chelsie`、moshi → `Cherry`）で各ターンを合成。
+3. 相談員 (moshi) を左チャンネル、相談者 (user) を右チャンネルのステレオ WAV に配置。
+4. Moshi fine-tune manifest (`synthetic_moshi_train.jsonl`) と `dialogues.jsonl` を書き出し。
+
+```bash
+uv sync
+
+uv run python scripts/generate_qwen3_tts_data.py \
+  --out-dir data/qwen3_tts_test \
+  --model Qwen/Qwen3-TTS \
+  --device cuda \
+  --dtype float16 \
+  --num-dialogues 3
+```
+
+出力ディレクトリ構造:
+
+```text
+data/qwen3_tts_test/
+├── synthetic_moshi_train.jsonl   ← Moshi fine-tune manifest
+├── dialogues.jsonl               ← 対話スクリプト
+└── data_stereo/
+    ├── sample_001_smalltalk_evening_001.wav
+    ├── sample_001_smalltalk_evening_001.json
+    └── ...
+```
+
+manifest の形式:
+
+```json
+{"path": "data_stereo/sample_001_smalltalk_evening_001.wav", "duration": 18.4}
+```
+
+WAV チャンネル規約:
+
+- 左チャンネル: Moshi / 相談員
+- 右チャンネル: user / 相談者
+
+**Qwen3-TTS API について**: スクリプトは `AutoModel.from_pretrained(..., trust_remote_code=True)` で
+モデルを読み込み、`model.inference(text=..., speaker=...)` を呼びます。
+モデルの API が異なる場合は `Qwen3TTS.synthesize()` 内を修正してください。
+
+#### `generate_qwen3_tts_data.py` オプション
+
+| フラグ | デフォルト | 説明 |
+|---|---|---|
+| `--out-dir` | *(必須)* | 出力ディレクトリ |
+| `--model` | `Qwen/Qwen3-TTS` | Qwen3-TTS の HuggingFace モデル ID |
+| `--device` | `cuda` | `cuda` または `cpu` |
+| `--dtype` | `float16` | `float16` / `bfloat16` / `float32` / `auto` |
+| `--num-dialogues` | `3` | 生成する対話数（最大 3、テンプレート数に依存） |
+| `--lead-in-sec` | `0.3` | 先頭の無音（秒） |
+| `--gap-sec` | `0.4` | ターン間の無音（秒） |
+| `--manifest-name` | `synthetic_moshi_train.jsonl` | manifest ファイル名 |
+
+---
+
 ### Synthetic training data: Gemma 4 + Moshi TTS
 
-`scripts/generate_synthetic_moshi_training_data.py` creates a small test
-dataset for Moshi fine-tuning experiments.  It is intended to be run on the
-GPU server, not on a lightweight local machine.
+`scripts/generate_synthetic_moshi_training_data.py` は Gemma 4 でスクリプトを生成してから
+Moshi TTS で音声化する、より高機能なパイプラインです。
+GPU サーバー上での実行を想定しており、Moshi と Gemma を別仮想環境で動かします。
 
 The default mode is `scripted-moshi-tts`:
 
