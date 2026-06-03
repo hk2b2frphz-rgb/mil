@@ -122,9 +122,11 @@ STEPS=audio bash scripts/run_pipeline.sh                 # 音声化だけ再実
 実験フォルダ単位で管理する:
 
 ```bash
-# 1 度 run_pipeline.sh で学習データを生成し、moshi-finetune 環境を準備しておく
-# その後はデータをコピーして実験ごとに学習だけ回す
+# 既存の run dir を流用して、学習だけ実験フォルダで回す
 bash scripts/run_experiment.sh exp001_lora_baseline ./data/runs/2026-06-02_130539
+
+# データ生成からまとめてやりたい場合（新しい本数で生成 → そのまま学習）
+bash scripts/generate_and_run.sh exp002_lora_3h_data 250
 ```
 
 各実験フォルダには:
