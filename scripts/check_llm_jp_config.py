@@ -28,7 +28,17 @@ from __future__ import annotations
 import os
 import sys
 import traceback
+from pathlib import Path
 from typing import Any, Callable
+
+# moshi-finetune のソース (finetune パッケージ) を import 可能にする。
+# 環境変数で上書き可能。デフォルトはリポジトリの兄弟ディレクトリ。
+_MOSHI_FT_REPO = Path(
+    os.environ.get("MOSHI_FT_REPO")
+    or (Path(__file__).resolve().parent.parent.parent / "moshi-finetune")
+).resolve()
+if (_MOSHI_FT_REPO / "finetune").is_dir():
+    sys.path.insert(0, str(_MOSHI_FT_REPO))
 
 
 REPO_ID = "llm-jp/llm-jp-moshi-v1"
