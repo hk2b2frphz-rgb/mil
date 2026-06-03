@@ -225,6 +225,14 @@ if run_step finetune; then
             sed -i.bak '/"whisper_timestamped"/d' "$MOSHI_FT_REPO/pyproject.toml"
             rm -f "$MOSHI_FT_REPO/uv.lock"
         fi
+
+        # sphn==0.1.12 の pin は moshi 本体 (sphn>=0.2.0,<0.3.0) と衝突する。
+        # 緩めて moshi に合わせる。
+        if grep -q '"sphn==0.1.12"' "$MOSHI_FT_REPO/pyproject.toml"; then
+            log_info "sphn の pin を moshi 本体に合わせて緩和（==0.1.12 → >=0.2.0,<0.3.0）"
+            sed -i.bak3 's/"sphn==0.1.12"/"sphn>=0.2.0,<0.3.0"/' "$MOSHI_FT_REPO/pyproject.toml"
+            rm -f "$MOSHI_FT_REPO/uv.lock"
+        fi
         # 過去に追加した extra-build-dependencies ブロックを撤去（効かなかった）
         if grep -q '\[tool.uv.extra-build-dependencies\]' "$MOSHI_FT_REPO/pyproject.toml"; then
             log_info "古い extra-build-dependencies ブロックを削除"
