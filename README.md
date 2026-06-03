@@ -1,832 +1,116 @@
-# Moshi Fixed-Input Response Recorder
+# moshimoshi-J
 
-Batch experiment tool that feeds **fixed audio files** into Moshi as the
-opening utterance and records Moshi's responses — both audio and text
-(inner-monologue transcript) — in a structured directory tree.
+日本語孤独・孤立相談窓口向けに Moshi (llm-jp/llm-jp-moshi-v1) を LoRA で
+ドメイン適応するためのパイプライン。合成データの生成から fine-tune まで一気通貫で回せる。
 
-Designed for reproducible comparison experiments: multiple input audios ×
-multiple random seeds.
+## パイプライン概要
 
----
-
-## Requirements
-
-- **GPU**: NVIDIA GPU with at least ~16 GB VRAM for bfloat16 inference
-  (e.g. A100, A40, RTX 4090).
-  For the full `moshiko-pytorch-bf16` checkpoint, ~24 GB is comfortable.
-- **CUDA**: matching driver and CUDA toolkit for your PyTorch wheel.
-- **Python**: 3.11+ recommended (type-union syntax `str | Path` is used).
-
----
-
-## Installation (on the GPU server)
-
-Run these commands from the cloned `mos` folder:
-
-```bash
-cd mos
-
-# 1. Install uv if needed
-pip install uv
-
-# 2. Create .venv and install dependencies
-uv sync
-
-# 3. Run inside the uv environment
-uv run python response_recorder.py --help
+```
+1. use_cases.jsonl          ← 軸の組み合わせで多様な相談ケースを生成
+       ↓ build_use_cases.py
+2. dialogues.jsonl          ← Gemma 4 が感情・沈黙付き対話スクリプトを生成
+       ↓ generate_synthetic_moshi_training_data.py
+3. ステレオ WAV + manifest  ← Qwen3-TTS で音声合成 (moshi=左ch, user=右ch)
+       ↓ generate_qwen3_tts_data.py
+4. Moshi LoRA fine-tune     ← moshi-finetune で学習
 ```
 
-`pyproject.toml` is configured for CUDA 12.1 PyTorch wheels via the
-`pytorch-cu121` index. If your GPU server uses a different CUDA wheel set,
-update the `[[tool.uv.index]]` URL and matching `tool.uv.sources` entries.
-
-If the `moshi` PyPI package is not available or is outdated, install from
-source into the uv environment:
+## セットアップ
 
 ```bash
-uv pip install git+https://github.com/kyutai-labs/moshi.git
-```
-
-`uv sync` installs local Python-side TTS dependencies (`pyopenjtalk` and
-`pyttsx3`). No sudo is required. Japanese stdin/text prompts use
-`pyopenjtalk` first, so TTS works locally without an online service.
-
-```bash
-uv sync
-uv run python -c "import pyopenjtalk; print('pyopenjtalk OK')"
-echo "こんにちは" | uv run python response_recorder.py --out-dir results/stdin/
-```
-
-Make the local TTS prompt faster with `--tts-speed`:
-
-```bash
-echo "こんにちは" | uv run python response_recorder.py --tts-speed 1.5 --out-dir results/fast-tts/
-```
-
-If you intentionally use an already-active virtual environment instead of
-`uv run`, install the missing package into that environment:
-
-```bash
-uv pip install pyttsx3
-```
-
-The script tries local TTS backends in this order: `pyopenjtalk`, `pyttsx3`,
-`espeak-ng`, `espeak`, `pico2wave`, then Windows System.Speech. `--tts-voice`
-only applies to backends that support voice selection.
-
----
-
-## Quick-start examples
-
-### 約 1 時間分の合成データで Moshi LoRA FT する（推奨フルパイプライン）
-
-孤独・孤立相談窓口向けの日本語ドメイン適応を、4 ステップで一気に回します。
-全部 GPU サーバー上で実行する想定です。
-
-```text
-1. use_cases.jsonl     (人手レス、軸の組み合わせで 100 件)
-        ↓ scripts/build_use_cases.py
-2. dialogues.jsonl     (Gemma 4 が emotion / silence 付きで生成)
-        ↓ scripts/generate_synthetic_moshi_training_data.py --mode dialogues-only
-3. stereo WAV + manifest  (Qwen3-TTS、moshi 固定 / user プール巡回)
-        ↓ scripts/generate_qwen3_tts_data.py --dialogues-jsonl ...
-4. Moshi LoRA fine-tune
-        ↓ torchrun -m train configs/moshi_lora_jp_loneliness.yaml
-```
-
-#### 一発で回す
-
-```bash
-# moshi-finetune を兄弟ディレクトリに clone しておく
+# moshi-finetune を兄弟ディレクトリに clone
 git clone https://github.com/kyutai-labs/moshi-finetune.git ../moshi-finetune
 
-# 各 uv 環境を sync 済みであることを確認
-uv sync                        # Moshi + Qwen3-TTS
-uv sync --project gemma_runtime  # Gemma 4
+# 依存の sync
+uv sync                           # Moshi + Qwen3-TTS
+uv sync --project gemma_runtime   # Gemma 4
+```
 
-# 4 ステップ一気通貫
+**要件**: Python 3.11+, NVIDIA GPU (A100 80GB 推奨), CUDA 対応 PyTorch
+
+## 使い方
+
+### フルパイプライン (データ生成 → 学習)
+
+```bash
+# 100 対話 (~1h) を生成して学習まで一気に回す
 bash scripts/run_pipeline.sh
-```
 
-環境変数で各種調整可能 (`OUT_ROOT`, `NUM_CASES`, `GEMMA_MODEL`, `QWEN_TTS_MODEL`,
-`FT_CONFIG`, `MOSHI_FT_REPO`, `NPROC`)。途中で止めたい場合は `STEPS` で絞れます:
-
-```bash
+# 対話数やステップを環境変数で調整
+NUM_CASES=250 bash scripts/run_pipeline.sh
 STEPS=use_cases,dialogues bash scripts/run_pipeline.sh   # 音声化前まで
-STEPS=audio bash scripts/run_pipeline.sh                 # 音声化だけ再実行
 ```
 
-#### 実験ベースで回す（推奨）
+### 実験ベース (推奨)
 
-ハイパラを変えて比較したい・後で振り返りたい場合は `experiments/` 配下の
-実験フォルダ単位で管理する:
+ハイパラを変えて比較する場合は `experiments/` 配下で管理する。
 
 ```bash
-# 既存の run dir を流用して、学習だけ実験フォルダで回す
+# 既存データで実験を起動
 bash scripts/run_experiment.sh exp001_lora_baseline ./data/runs/2026-06-02_130539
 
-# データ生成からまとめてやりたい場合（新しい本数で生成 → そのまま学習）
+# データ生成 + 実験をまとめて実行
 bash scripts/generate_and_run.sh exp002_lora_3h_data 250
-
-# DEBUG=1 を付けると、学習開始前にデータの先頭 3 件の対話本文と
-# tokenizer 往復チェックを流す（DEBUG_N=5 で件数調整）
-DEBUG=1 bash scripts/run_experiment.sh exp001_lora_baseline ./data/runs/2026-06-02_130539
 ```
 
-各実験フォルダには:
+詳細は [experiments/README.md](experiments/README.md) 参照。
 
-- `config.yaml` — moshi-finetune 用 YAML テンプレ（パスは launcher が埋める）
-- `HYPERPARAMS.md` — 値・選んだ根拠・参考文献・期待結果（必須）
-- `data/` — 学習データの hardlink コピー（git ignore）
-- `checkpoints/` — train.py の出力（git ignore）
-- `run.log` — stdout/stderr
-
-詳細は [experiments/README.md](experiments/README.md) を参照。
-
-#### 学習だけ再実行 / デバッグ用
-
-学習データが既にある状態で、finetune ステップだけを試したい・依存周りで詰まったとき
-のクリーンリラン手順。`OUT_ROOT` には既存の run dir（`./data/runs/<日付>` 等）を
-渡すこと。
-
-サーバー側でそのまま貼れるコマンド（`OUT_ROOT` は現状の run dir に固定済み。
-別の run を回す場合は `ls data/runs/` で確認して書き換える）:
+### 個別ステップ
 
 ```bash
-git pull
-cd ../moshi-finetune && git restore pyproject.toml && rm -f uv.lock && rm -rf .venv && cd -
-STEPS=finetune OUT_ROOT=./data/runs/2026-06-02_130539 bash scripts/run_pipeline.sh 2>&1 | tee /tmp/ft.log
-```
+# 1. use case 生成
+uv run python scripts/build_use_cases.py --out-path data/v1/use_cases.jsonl --num 100
 
-`tee` で端末にも `/tmp/ft.log` にもリアルタイム出力されます。終わった後に末尾だけ
-見たいときは別ターミナルで `tail -n 200 /tmp/ft.log`、走行中追跡なら `tail -f /tmp/ft.log`。
-
-ポイント:
-
-- `git restore pyproject.toml` … 過去の自動編集（whisper 除外 / sphn 緩和 / extra-build-deps）を一旦リセット。スクリプトが毎回張り直す。
-- `rm -f uv.lock` / `rm -rf .venv` … `.venv` が残っていると `run_pipeline.sh` の依存準備ブロックが丸ごとスキップされるので必ず消す。
-- `tee /tmp/ft.log` … エラー全文を残しつつ、末尾 100 行だけ流して原因 package を特定しやすくする。失敗時は `tail -200 /tmp/ft.log` で詳細を確認。
-- 主要トラブル対応は `scripts/run_pipeline.sh:188` 付近の finetune ステップに自動化済み:
-    - `whisper_timestamped` を依存から除外（openai-whisper sdist ビルド地雷の回避、annotate.py 専用なので学習に不要）
-    - `sphn==0.1.12` の pin を `>=0.2.0,<0.3.0` に緩和（moshi 本体の要求に合わせる）
-    - venv に `setuptools / wheel / pip` を先入れ → `uv sync --no-build-isolation`（legacy `setup.py` の `pkg_resources` import 対策）
-    - `torchrun` は PATH に無ければ `uv run --project ../moshi-finetune torchrun` 経由で起動
-
-#### モデル初期化で SIGSEGV (`exitcode: -11`) が出るとき（A100 環境固有）
-
-A100 80GB 上で `train: run_dir: ...` の直後に `[ERROR] failed (exitcode: -11) local_rank: 0` で死ぬ症状。NCCL の初期化までは正常に通り、**モデル初期化** で落ちる場合、ネイティブコード（おそらく SentencePiece）の segfault。
-
-**重要**: 同じコード・同じ HF リポジトリで **V100 側では動いていた**ので、tokenizer
-ファイル自体は SentencePiece が読める形式である。A100 環境側固有の問題を疑う:
-
-1. **HF キャッシュの partial download**: A100 マシンへ初回 fetch する途中で network が
-   切れた場合、サイズ不足/末尾欠損の状態で残る。`SentencePieceProcessor.Load` は
-   壊れたファイルを mmap して segfault する
-2. **sentencepiece バージョン差**: V100 側 venv と A100 側 venv で `sentencepiece` の
-   wheel が違うことがある（uv の依存解決が環境ごとに微妙に変わる）
-3. **A100 側ストレージが NFS / Lustre 等**: mmap が刺さる
-4. **glibc / CUDA driver 差での共有ライブラリ二重ロード競合**
-
-切り分けコマンド（順に試す）:
-
-```bash
-# (a) HF にあるファイルサイズと local cache のサイズを比較
-uv run --project ../moshi-finetune python <<'PY'
-from huggingface_hub import list_repo_files, HfApi, hf_hub_download
-import os
-api = HfApi()
-files = list_repo_files('llm-jp/llm-jp-moshi-v1')
-tok = [f for f in files if 'token' in f.lower() or f.endswith('.model')]
-print('tokenizer files:', tok)
-for f in tok:
-    info = api.get_paths_info(repo_id='llm-jp/llm-jp-moshi-v1', paths=[f])[0]
-    p = hf_hub_download('llm-jp/llm-jp-moshi-v1', f)
-    print(f'{f}: HF size={info.size}, local size={os.path.getsize(p)}, path={p}')
-PY
-
-# (b) sentencepiece の版を確認（V100 側と比較）
-uv run --project ../moshi-finetune python -c "import sentencepiece; print('sentencepiece', sentencepiece.__version__)"
-
-# (c) 強制再 download
-uv run --project ../moshi-finetune python -c "
-from huggingface_hub import snapshot_download
-snapshot_download('llm-jp/llm-jp-moshi-v1', force_download=True)
-print('redownloaded')
-"
-
-# (d) HF キャッシュをクリアして /tmp で取り直す（NFS 疑い回避）
-rm -rf ~/.cache/huggingface/hub/models--llm-jp--llm-jp-moshi-v1
-HF_HOME=/tmp/hf_cache bash scripts/run_experiment.sh exp001_lora_baseline ./data/runs/2026-06-02_130539
-```
-
-判断:
-
-- **(a) で local size が HF size より小さい**: partial download 確定 → (c) で再取得すれば直る
-- **(a) でサイズ一致**: ファイルは無事 → (b) の sentencepiece 版を V100 側と比較。違っていれば版固定が必要
-- **どちらも合っているのに死ぬ**: NFS 経由なら (d) で /tmp に逃がす
-- **(d) でも死ぬ**: dmesg で `segfault ... in libsentencepiece.so` などライブラリ名を確認。glibc / libstdc++ 不一致の可能性
-
-**避けるべき対処**:
-
-- `param_dtype` を `float16` に変える → 公式は bfloat16 前提、fp16 は `first_codebook_weight_multiplier=100` で NaN を誘発
-- crash の原因を追わずに rank / batch を闇雲に下げる → 症状が変わらず無駄
-
-#### llm-jp の config が loader で認識されているか確認
-
-llm-jp/llm-jp-moshi-v1 は同梱 config を `moshi_lm_kwargs.json` という名前で
-配布している（`config.json` ではない）。これが loader に届いていないと、
-内部の Kyutai 英語 Moshi デフォルト構造にフォールバックして shape が合わず、
-`safetensors` の state_dict load 中に native crash する。
-
-`scripts/check_llm_jp_config.py` は train.py のモデル init 経路を **ステップ毎** に
-踏み、各ステップで `[ OK ]` / `[FAIL]` を表示します。SIGSEGV がどこで起きているかを
-torchrun 起動なしで切り分けるのに使います:
-
-```bash
-uv run --project ../moshi-finetune python scripts/check_llm_jp_config.py
-```
-
-確認ステップ:
-
-1. `hf_hub_download(moshi_lm_kwargs.json)` — config の DL
-2. `CheckpointInfo.from_hf_repo(config_path=<local>)` — loader 構築
-3. `raw_config` が non-empty dict か
-4. moshi / mimi / tokenizer のローカルファイル存在
-5. meta-device モデル構築（`get_moshi(device='meta', load_weight=False)`）
-6. `safetensors.torch.load_file(moshi_weights)` — 15.4GB の重み読み込み
-7. bf16 への dtype 変換
-8. `model.load_state_dict(...)` — **形状不一致があると C++ 側で死ぬ典型ポイント**
-9. `model.cuda()` — GPU 転送
-
-すべて `[ OK ]` で終わっているのに train.py だけ落ちる場合、原因は data loader /
-mimi codec init / optimizer / NCCL 集合通信 のいずれか（モデル init より後）です。
-
-逆にステップ N で `[FAIL]` が出れば、その N がそのまま修正対象になります。
-
-#### 個別ステップ
-
-```bash
-# 1. 100 件の多様な use case カードを軸組み合わせで作る
-python scripts/build_use_cases.py \
-  --out-path data/v1/use_cases.jsonl --num 100
-
-# 2. Gemma で対話 JSONL のみ生成（音声化はスキップ）
+# 2. Gemma で対話生成
 uv run python scripts/generate_synthetic_moshi_training_data.py \
   --out-dir data/v1/gemma_dialogues \
   --use-cases-jsonl data/v1/use_cases.jsonl \
-  --num-dialogues 100 \
-  --mode dialogues-only \
-  --gemma-backend transformers-subprocess \
-  --allow-template-fallback
+  --num-dialogues 100 --mode dialogues-only \
+  --gemma-backend transformers-subprocess --allow-template-fallback
 
-# 3. Qwen3-TTS で音声化（emotion / silence ターン込み）
+# 3. Qwen3-TTS で音声合成
 uv run python scripts/generate_qwen3_tts_data.py \
   --out-dir data/v1/training_set \
   --dialogues-jsonl data/v1/gemma_dialogues/dialogues.jsonl
-
-# 4. Moshi LoRA FT
-cd ../moshi-finetune
-torchrun --nproc-per-node 1 -m train \
-  "$OLDPWD/configs/moshi_lora_jp_loneliness.yaml"
 ```
 
-#### 多様性の設計（`build_use_cases.py`）
+## 実験一覧
 
-軸を直積に近い形で組み合わせて 100 件を出します:
-
-| 軸 | バリエーション |
-|---|---|
-| situation | 20 種（夜の雑談 / 退職後 / 介護疲れ / 入院中 / 喪失 / SNS疲れ / …） |
-| age_band | 20代〜70代 |
-| gender | 男性 / 女性 |
-| risk_level | low:medium:high = 60:30:10 |
-| silence_pattern | none:occasional:heavy = 55:30:15（特定 situation は heavy 寄り） |
-| opening_kind | smalltalk / feelings / silence |
-
-#### データ量の目安
-
-100 対話 × 平均 35 秒 ≒ **約 1 時間**。長めの heavy silence パターンや medium/high
-risk の対話を含めると 1.0〜1.2 時間程度に着地します。
-
----
-
-### Qwen3-TTS による日本語対話データ生成（推奨・シンプル）
-
-`scripts/generate_qwen3_tts_data.py` は Qwen3-TTS のプリセット話者で日本語対話を
-音声合成し、Moshi fine-tune フォーマットで書き出します。
-**Gemma 不要**・**依存環境がシンプル**なため、まず最初にこちらを試してください。
-
-仕組み:
-
-1. ハードコードされた短い日本語対話テンプレートを使用（Gemma 生成は不要）。
-2. Qwen3-TTS の `generate_custom_voice()` が話者ごとに異なるプリセット声で各ターンを合成。
-   - **moshi 側は `--speaker-moshi` で固定**（デフォルト: `Serena`）
-   - **user 側は `--user-speaker-pool` のプールから対話ごとに 1 人ずつローテーション**
-     （デフォルトプール: `Ono_Anna, Sohee, Vivian, Dylan, Eric, Aiden`）。
-   - これにより「いつもの相談員（moshi）が、毎回違う相談者（user）と話す」
-     データセットになり、Moshi 側の汎化に効くことを期待。
-3. 相談員 (moshi) を左チャンネル、相談者 (user) を右チャンネルのステレオ WAV に配置。
-4. Moshi fine-tune manifest (`synthetic_moshi_train.jsonl`) と `dialogues.jsonl` を書き出し。
-
-依存パッケージ `qwen-tts` を `pyproject.toml` に含めているので `uv sync` で入ります
-（手動で入れる場合は `pip install -U qwen-tts`）。
-
-```bash
-uv sync
-
-uv run python scripts/generate_qwen3_tts_data.py \
-  --out-dir data/qwen3_tts_test \
-  --model Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
-  --device cuda \
-  --dtype bfloat16 \
-  --speaker-user Ono_Anna \
-  --speaker-moshi Serena \
-  --num-dialogues 3
-```
-
-実装は `qwen_tts.Qwen3TTSModel` を直接使い、以下の API を呼びます:
-
-```python
-from qwen_tts import Qwen3TTSModel
-model = Qwen3TTSModel.from_pretrained(model_id, device_map="cuda:0", dtype=torch.bfloat16)
-wavs, sr = model.generate_custom_voice(
-    text="...", language="Japanese", speaker="Ono_Anna", instruct=None,
-)
-```
-
-Qwen3-TTS CustomVoice 系の利用可能なプリセット話者:
-
-```
-Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, Sohee
-```
-
-`--instruct-user` / `--instruct-moshi` で**全ターン共通**のスタイル指示（例:
-`"温かく穏やかなトーンで"`）をオプションで渡せます。
-
-#### ターン単位の感情ラベル制御（試験的）
-
-テンプレート対話の各ターンには `emotion` ラベル（`hesitant`, `sad`, `warm`,
-`empathetic`, `relieved`, `concerned` など）が付いていて、起動時に
-スクリプト内の `EMOTION_PRESETS` で **Qwen3-TTS の `instruct` 文字列に解決**されます。
-これにより、同じ対話の中で「ためらう」「沈む」「ほっとする」といった感情変化が
-音声側にも反映されます。
-
-利用可能なラベル一覧（試験的、`scripts/generate_qwen3_tts_data.py` 内の
-`EMOTION_PRESETS` に定義）:
-
-```
-neutral, hesitant, sad, lonely, anxious, relieved, grateful,
-warm, gentle, empathetic, encouraging, concerned, reassuring
-```
-
-優先順位は **ターンの `emotion`** > `--instruct-user` / `--instruct-moshi` > なし。
-
-| フラグ | 用途 |
-|---|---|
-| `--no-emotion` | ターンの `emotion` を無視してプレーンに合成（A/B 比較用） |
-| `--emotion-map-file path.json` | `{ "lonely": "別の指示文" }` のように一部だけ上書きする JSON |
-
-`emotion-map-file` の例:
-
-```json
-{
-  "lonely": "声のボリュームを落とし、夜の静けさを背負うように話して",
-  "concerned": "急かさず、相手のペースを尊重する穏やかなトーンで尋ねるように"
-}
-```
-
-出力 WAV と一緒に書かれる JSON のメタデータには、その対話で実際に使われた
-`emotion_map_used` がそのまま記録されるので、後から再現・比較できます。
-
-#### ユーザーの沈黙 / moshi 側からの声かけ
-
-孤独・孤立相談窓口を想定し、テンプレートには**ユーザーが言葉に詰まる / 長く沈黙する**
-パターンを含めています。沈黙中は moshi 側が穏やかに声をかけるよう、
-**moshi の連続ターン** + 沈黙ターンを混在させた構造です:
-
-```python
-{"speaker": "user",    "text": "うまく言えないんですけど…えっと…", "emotion": "hesitant"},
-{"speaker": "silence", "duration_sec": 3.5, "note": "ユーザーが言い淀んで黙ってしまう"},
-{"speaker": "moshi",   "text": "ゆっくりで大丈夫ですよ。",         "emotion": "gentle"},
-{"speaker": "silence", "duration_sec": 2.0},
-{"speaker": "moshi",   "text": "急がなくて大丈夫です。",            "emotion": "reassuring"},
-```
-
-実装上のポイント:
-
-- `speaker: "silence"` のターンは音声を合成せず、`duration_sec` ぶんだけ
-  **両チャンネルとも無音**の時間を挿入します
-- moshi が連続して話す形（user の応答なし）も自然に書けるので、
-  「沈黙→声かけ→さらに沈黙→さらに声かけ」のような窓口対応を再現できます
-- 出力 JSON のメタデータには `silences: [{start_sec, end_sec, duration_sec, note}, ...]`
-  として全沈黙区間が記録されます
-
-Moshi の学習用途では、これにより
-**「相手が話さなくても自分から会話を維持できる」挙動**を学習データに含められます。
-
-出力ディレクトリ構造:
-
-```text
-data/qwen3_tts_test/
-├── synthetic_moshi_train.jsonl   ← Moshi fine-tune manifest
-├── dialogues.jsonl               ← 対話スクリプト
-└── data_stereo/
-    ├── sample_001_smalltalk_evening_001.wav
-    ├── sample_001_smalltalk_evening_001.json
-    └── ...
-```
-
-manifest の形式:
-
-```json
-{"path": "data_stereo/sample_001_smalltalk_evening_001.wav", "duration": 18.4}
-```
-
-WAV チャンネル規約:
-
-- 左チャンネル: Moshi / 相談員
-- 右チャンネル: user / 相談者
-
-#### `generate_qwen3_tts_data.py` オプション
-
-| フラグ | デフォルト | 説明 |
+| 実験 | データ量 | 狙い |
 |---|---|---|
-| `--out-dir` | *(必須)* | 出力ディレクトリ |
-| `--model` | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | Qwen3-TTS の HuggingFace モデル ID |
-| `--device` | `cuda` | `cuda` または `cpu` |
-| `--dtype` | `bfloat16` | `float16` / `bfloat16` / `float32` |
-| `--attn-impl` | `default` | `default` / `flash_attention_2` / `sdpa` / `eager`（flash-attn 未インストール時は自動フォールバック） |
-| `--language` | `Japanese` | `generate_custom_voice` に渡す language 文字列 |
-| `--speaker-user` | `Ono_Anna` | プール未指定時に使う user 側の固定話者 |
-| `--user-speaker-pool` | `Ono_Anna,Sohee,Vivian,Dylan,Eric,Aiden` | 対話ごとに順にローテーションする user 話者のカンマ区切り列。`''` を渡すと `--speaker-user` で固定 |
-| `--speaker-moshi` | `Serena` | moshi 側プリセット話者（固定） |
-| `--instruct-user` | *(なし)* | user 発話の既定スタイル指示（ターン側 emotion が無い場合のみ使う） |
-| `--instruct-moshi` | *(なし)* | moshi 発話の既定スタイル指示（ターン側 emotion が無い場合のみ使う） |
-| `--no-emotion` | off | テンプレートの emotion ラベルを無視する |
-| `--emotion-map-file` | *(なし)* | 感情ラベル→instruct 文字列の上書き JSON |
-| `--num-dialogues` | `3` | 生成する対話数（最大 3、テンプレート数に依存） |
-| `--lead-in-sec` | `0.3` | 先頭の無音（秒） |
-| `--gap-sec` | `0.4` | ターン間の無音（秒） |
-| `--manifest-name` | `synthetic_moshi_train.jsonl` | manifest ファイル名 |
+| `exp001_lora_baseline` | ~100 対話 (~1h) | LoRA rank=32 ベースライン |
+| `exp002_lora_3h_data` | ~250 対話 (~3h) | データ量の効果を検証 (ハイパラ同一) |
 
----
+## Response Recorder
 
-### Synthetic training data: Gemma 4 + Moshi TTS
-
-`scripts/generate_synthetic_moshi_training_data.py` は Gemma 4 でスクリプトを生成してから
-Moshi TTS で音声化する、より高機能なパイプラインです。
-GPU サーバー上での実行を想定しており、Moshi と Gemma を別仮想環境で動かします。
-
-The default mode is `scripted-moshi-tts`:
-
-1. Gemma 4 generates a Japanese loneliness/isolation support dialogue script.
-2. The main script calls Gemma through `scripts/gemma_dialogue_worker.py` as a
-   subprocess. No separate API server is required.
-3. Kyutai/Moshi TTS renders every script turn into audio.
-4. The script places counselor/Moshi turns in the left channel and user turns
-   in the right channel, then writes stereo WAVs, per-WAV timestamp JSON, a
-   manifest JSONL, and a `dialogues.jsonl` log.
-
-Moshi and Gemma still use separate Python environments because current Moshi
-packages can require `huggingface-hub<1.0`, while newer Gemma 4 support in
-Transformers can require a newer Hugging Face stack.  This is not an external
-server: the dataset program launches the Gemma worker process itself.  Set up
-both environments once:
-
-Run a tiny three-case test from the cloned `mos` folder:
+Moshi に固定音声を入力して応答を録音する実験ツール。
+ドメイン適応の前後比較に使う。
 
 ```bash
-# Moshi + TTS environment
-uv sync
+uv run python response_recorder.py \
+  --inputs prompts/hello.wav --seeds 0,1,2 --out-dir results/
 
-# Gemma-only runtime, isolated from Moshi dependencies
-uv sync --project gemma_runtime
-
-uv run python scripts/generate_synthetic_moshi_training_data.py \
-  --out-dir data/synthetic_loneliness_test \
-  --num-dialogues 3 \
-  --mode scripted-moshi-tts \
-  --gemma-backend transformers-subprocess \
-  --gemma-model google/gemma-4-E2B-it \
-  --moshi-tts-repo kyutai/tts-1.6b-en_fr
+# テキストプロンプトも可
+echo "こんにちは" | uv run python response_recorder.py --out-dir results/stdin/
 ```
 
-`HF_TOKEN` is not required by this script. If the model download needs Hugging
-Face credentials, run `huggingface-cli login` inside the relevant environment.
-For an offline/check-format run, use `--gemma-backend template`, or
-pre-generate dialogue JSONL and pass it with `--dialogues-jsonl`.
+`--hf-repo` でモデル指定、`--silence-sec` で応答待ち時間を調整。
+詳細は `python response_recorder.py --help` を参照。
 
-Important mode distinction:
-
-- `scripted-moshi-tts`: Gemma's script is the transcript, and Moshi/Kyutai TTS
-  synthesizes that script. Use this for script-faithful training data.
-- `moshi-selfplay`: user turns are rendered with local TTS, then
-  `llm-jp/llm-jp-moshi-v1` improvises the counselor stream from the user
-  audio. Use this to sample Moshi behavior, not to force a fixed script.
-- `scripted-local-tts` or `scripted-stereo`: local TTS renders both speakers
-  for quick format checks.
-
-The default Kyutai/Moshi TTS checkpoint above is the official open TTS model.
-If you have a Japanese-capable Moshi TTS checkpoint, pass it with
-`--moshi-tts-repo`.
-
-`llm-jp/llm-jp-moshi-v1` is a full-duplex spoken dialogue model, not a
-script-faithful text-to-speech checkpoint.  In this tool it is used only by
-`--mode moshi-selfplay`, where it generates its own counselor response from the
-user audio context.
-
-Output shape:
-
-```text
-data/synthetic_loneliness_test/
-├── synthetic_moshi_train.jsonl
-├── dialogues.jsonl
-├── generation_run.json
-├── data_stereo/
-│   ├── sample_001_*.wav
-│   ├── sample_001_*.json
-│   └── ...
-└── sample_metadata/
-```
-
-The manifest lines follow the `moshi-finetune` convention:
-
-```json
-{"path": "data_stereo/sample_001_smalltalk_evening_001.wav", "duration": 42.1}
-```
-
-The WAV channel convention is:
-
-- left channel: Moshi / counselor stream
-- right channel: user stream
-
-For a lighter format check that does not load Moshi TTS, render both speakers
-from the Gemma script with local TTS:
-
-```bash
-uv run python scripts/generate_synthetic_moshi_training_data.py \
-  --out-dir data/synthetic_scripted_test \
-  --num-dialogues 3 \
-  --mode scripted-local-tts \
-  --gemma-backend template
-```
-
-### Minimal run (one input file, three seeds, default model)
-
-```bash
-python response_recorder.py \
-    --inputs  prompts/hello.wav \
-    --seeds   0,1,2 \
-    --silence-sec 15 \
-    --out-dir results/
-```
-
-### Text prompt with simple TTS
-
-Pipe text on standard input:
-
-```bash
-echo "こんにちは。今日の予定を教えてください。" | python response_recorder.py \
-    --out-dir results/stdin/
-```
-
-This reads the text from stdin, synthesizes it to WAV under
-`<out-dir>/_tts_inputs/`, feeds that WAV to Moshi, saves about the first
-10 seconds of the response as `response.wav`, and prints a chronological
-conversation timeline.
-
-```bash
-python response_recorder.py \
-    --texts "こんにちは。今日の予定を教えてください。" \
-    --seeds 0,1,2 \
-    --out-dir results/text-prompt/
-```
-
-Multiple text prompts can be passed directly, or loaded from a UTF-8 text file
-with one prompt per line:
-
-```bash
-python response_recorder.py \
-    --text-file prompts.txt \
-    --out-dir results/text-file/
-```
-
-The generated prompt WAV files are saved under `<out-dir>/_tts_inputs/`.
-The script first tries local Japanese TTS with `pyopenjtalk`, then falls back
-to other local system TTS backends. For OS-specific voices, select a voice when
-needed:
-
-```bash
-python response_recorder.py \
-    --texts "もしもし、聞こえますか。" \
-    --tts-voice "Microsoft Haruka Desktop" \
-    --out-dir results/ja-tts/
-```
-
-### Multiple input files and more seeds
-
-```bash
-python response_recorder.py \
-    --inputs  prompts/hello.wav prompts/question.wav \
-    --seeds   0,1,2,3,4 \
-    --silence-sec 20 \
-    --out-dir results/multi/
-```
-
-### Entire directory of prompts
-
-```bash
-python response_recorder.py \
-    --inputs  prompts/ \
-    --seeds   0,1,2 \
-    --silence-sec 15 \
-    --out-dir results/
-```
-
-### Explicit model selection
-
-```bash
-python response_recorder.py \
-    --hf-repo llm-jp/llm-jp-moshi-v1 \
-    --inputs  prompts_ja/ \
-    --seeds   0,1 \
-    --silence-sec 20 \
-    --out-dir results/llm-jp-moshi/
-```
-
-### Local weights (no HF download)
-
-```bash
-python response_recorder.py \
-    --hf-repo    kyutai/moshiko-pytorch-bf16 \
-    --moshi-weight  /data/moshi/moshi.safetensors \
-    --mimi-weight   /data/moshi/mimi.safetensors \
-    --tokenizer     /data/moshi/tokenizer.model \
-    --config        /data/moshi/config.json \
-    --inputs        prompts/ \
-    --seeds         0,1,2 \
-    --out-dir       results/local/
-```
-
-### Override sampling parameters
-
-```bash
-python response_recorder.py \
-    --inputs  prompts/ \
-    --seeds   0 \
-    --temp      0.8 \
-    --temp-text 0.8 \
-    --cfg-coef  1.5 \
-    --max-gen-sec 45 \
-    --silence-sec 15 \
-    --out-dir results/high-temp/
-```
-
----
-
-## CLI reference
-
-| Flag | Default | Description |
-|---|---|---|
-| `--hf-repo` | `llm-jp/llm-jp-moshi-v1` | HuggingFace model repo |
-| `--moshi-weight` | — | Local path to Moshi weights |
-| `--mimi-weight` | — | Local path to Mimi weights |
-| `--tokenizer` | — | Local path to tokenizer |
-| `--config` | — | Local path to config file |
-| `--inputs` | — | WAV files or directories |
-| `--texts` | — | Text prompts to synthesize into WAV inputs |
-| `--text-file` | — | UTF-8 file with one prompt per line |
-| `--stdin` | auto for piped stdin | Read one text prompt from standard input |
-| `--tts-voice` | — | Optional TTS voice name |
-| `--tts-rate` | `200` | TTS speaking rate for `pyttsx3` |
-| `--tts-speed` | `1.25` | Speed multiplier for `pyopenjtalk` prompt audio |
-| `--silence-sec` | `15.0` | Silence appended after input |
-| `--seeds` | — | Comma-separated seed list |
-| `--num-trials` | — | Use seeds 0..N-1 (fallback when `--seeds` absent) |
-| `--out-dir` | *(required)* | Root output directory |
-| `--device` | `cuda` | `cuda` or `cpu` |
-| `--half` | bfloat16 | Pass to switch to float16 |
-| `--temp` | model default | Audio sampling temperature |
-| `--temp-text` | model default | Text sampling temperature |
-| `--cfg-coef` | model default | CFG coefficient |
-| `--max-gen-sec` | `60.0` | Per-trial generation cap (seconds) |
-| `--response-sec` | `10.0` | Seconds of response audio to save |
-| `--no-print-transcript` | off | Suppress transcript output |
-
----
-
-## Why `--silence-sec` matters
-
-Moshi is a full-duplex streaming model.  It generates output **only while
-input frames are being fed**.  Without silence appended to the end of the
-input utterance, the response would be cut off the moment the speech ends.
-
-`--silence-sec` (default 15 s) pads the input with zeros so Moshi has time
-to produce a complete reply.  Increase it for longer expected responses.
-
----
-
-## Output structure
+## ディレクトリ構成
 
 ```
-<out-dir>/
-├── run_metadata.json          # Global metadata (model, date, all CLI args)
-├── <input_stem>/
-│   └── seed_<N>/
-│       ├── response.wav       # Moshi's response audio (acoustic-delay corrected)
-│       ├── conversation_timeline.jsonl
-│       ├── conversation_timeline.txt
-│       ├── transcript.jsonl   # One JSON line per emitted text token
-│       ├── transcript.txt     # Plain-text concatenation of all pieces
-│       └── meta.json          # Per-trial metadata (schema below)
-...
+scripts/
+  run_pipeline.sh                  # E2E パイプライン
+  run_experiment.sh                # 実験単体起動
+  generate_and_run.sh              # データ生成 + 実験起動
+  build_use_cases.py               # use case 生成
+  generate_synthetic_moshi_training_data.py  # Gemma 対話生成
+  generate_qwen3_tts_data.py       # Qwen3-TTS 音声合成
+experiments/
+  exp001_lora_baseline/            # 各実験の config.yaml + HYPERPARAMS.md
+  exp002_lora_3h_data/
+configs/
+  moshi_lora_jp_loneliness.yaml    # パイプライン用 FT config
+data/runs/                         # 実行ごとの出力 (git ignore)
 ```
-
-### Timeline output
-
-The console and `conversation_timeline.txt` show user input and Moshi output
-on one timeline:
-
-```text
-Conversation timeline:
-[00:00.000] user  speech_start こんにちは
-[00:02.560] user  speech_end
-[00:03.120] moshi speech_start (audio starts)
-[00:03.200] moshi text_output こんにちは。どうしましたか。
-```
-
-`conversation_timeline.jsonl` stores the same events as JSON lines for later
-analysis.
-
-By default, Moshi runs in its normal full-duplex streaming mode: user audio is
-fed frame by frame, and Moshi can respond at any point while the prompt and
-appended silence are being fed. To test faster user prompts, increase
-`--tts-speed`.
-
-### `transcript.jsonl` format
-
-Each line is a JSON object:
-
-```json
-{"step": 42, "time_sec": 3.36, "piece": " hello"}
-```
-
-- `step`: frame index within the trial
-- `time_sec`: `step / frame_rate` (frame_rate = 12.5 Hz → 80 ms per step)
-- `piece`: decoded SentencePiece token (padding ids 0 and 3 already excluded,
-  `▁` replaced with a space)
-
-### `meta.json` schema
-
-```json
-{
-  "input_path": "/abs/path/to/prompt.wav",
-  "input_duration_sec": 2.56,
-  "silence_sec": 15.0,
-  "seed": 0,
-  "model_repo": "llm-jp/llm-jp-moshi-v1",
-  "dtype": "bfloat16",
-  "device": "cuda",
-  "temp": NaN,
-  "temp_text": NaN,
-  "cfg_coef": NaN,
-  "frame_rate": 12.5,
-  "sample_rate": 24000,
-  "total_steps": 225,
-  "input_end_step": 32,
-  "first_audio_step": 18,
-  "first_audio_time_sec": 1.44,
-  "audible_response_start_step": 20,
-  "audible_response_start_sec": 1.6,
-  "audible_start_after_input_sec": -0.96,
-  "first_response_step": 18,
-  "first_response_latency_sec": 1.44,
-  "wall_time_sec": 47.2,
-  "output_audio_sec": 14.08
-}
-```
-
-`NaN` appears for temperature/cfg fields when the model's built-in default
-was used (i.e. the corresponding CLI flag was not supplied).
-
-`first_response_latency_sec` is the latency to the **first non-padding text
-token**.  It is `null` when no text was generated.
-
-`first_audio_time_sec` is when Moshi first returned audio tokens. Because the
-codec has an acoustic delay, `audible_response_start_sec` is the estimated
-stream time where that audio becomes audible in `response.wav`.
-`audible_start_after_input_sec` compares that estimated audible start with the
-end of the prompt audio: negative means Moshi started speaking while the prompt
-was still being fed, positive means it started after the prompt ended.
-
----
-
-## Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Empty `response.wav` / blank transcript | `--silence-sec` too short | Increase to 20–30 s |
-| CUDA OOM | VRAM insufficient | Use a smaller model, or `--half` (float16) |
-| `ModuleNotFoundError: moshi` | Package not installed | `pip install moshi` or install from source |
-| Garbled text | Expected for some tokens; check `▁` replacement | No fix needed; output is still valid |
-| Trial skipped with `FAILED` | Per-trial exception | Check stderr; other trials continue |
