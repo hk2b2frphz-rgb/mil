@@ -225,29 +225,19 @@ if run_step finetune; then
             sed -i.bak '/"whisper_timestamped"/d' "$MOSHI_FT_REPO/pyproject.toml"
             rm -f "$MOSHI_FT_REPO/uv.lock"
         fi
-        # 各依存の sdist が setup.py で pkg_resources/setuptools に依存しているが、
-        # 最近の Python では setuptools が自動で入らない → uv の隔離ビルド環境で
-        # `ModuleNotFoundError: pkg_resources` が出る。
-        # 旧式 setup.py を持ちがちなパッケージに setuptools/wheel を inject する。
+        # 過去に追加した extra-build-dependencies ブロックを撤去（効かなかった）
         if grep -q '\[tool.uv.extra-build-dependencies\]' "$MOSHI_FT_REPO/pyproject.toml"; then
-            log_info "古い extra-build-dependencies ブロックを削除して再注入"
+            log_info "古い extra-build-dependencies ブロックを削除"
             sed -i.bak2 '/^\[tool\.uv\.extra-build-dependencies\]/,$d' "$MOSHI_FT_REPO/pyproject.toml"
         fi
-        log_info "sdist build 用に setuptools/wheel を inject"
-        cat >> "$MOSHI_FT_REPO/pyproject.toml" <<'TOML'
-
-[tool.uv.extra-build-dependencies]
-auditok = ["setuptools", "wheel"]
-sphn = ["setuptools", "wheel"]
-llvmlite = ["setuptools", "wheel"]
-numba = ["setuptools", "wheel"]
-submitit = ["setuptools", "wheel"]
-fire = ["setuptools", "wheel"]
-simple-parsing = ["setuptools", "wheel"]
-TOML
         rm -f "$MOSHI_FT_REPO/uv.lock"
-        log_info "moshi-finetune の依存を uv sync で準備"
-        ( cd "$MOSHI_FT_REPO" && uv sync )
+
+        # 旧式 setup.py が pkg_resources を import するので、隔離ビルドを切って
+        # venv に setuptools を入れた状態で sync する（uv 自身が勧める方法）。
+        log_info "venv を作成し setuptools/wheel/pip を先入れ"
+        ( cd "$MOSHI_FT_REPO" && uv venv && uv pip install --upgrade pip setuptools wheel )
+        log_info "moshi-finetune の依存を uv sync --no-build-isolation で準備"
+        ( cd "$MOSHI_FT_REPO" && uv sync --no-build-isolation )
     fi
 
     # 3) torchrun を解決: PATH にあれば直接、無ければ uv run 経由
