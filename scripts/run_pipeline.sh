@@ -248,6 +248,28 @@ if run_step finetune; then
         ( cd "$MOSHI_FT_REPO" && uv sync --no-build-isolation )
     fi
 
+    # interleaver.py への防御パッチ: 日本語 Moshi (llm-jp/llm-jp-moshi-v1) の
+    # tokenizer は encode("\n") が空 list を返すことがあり、`[-1]` で
+    # IndexError になる。空ならスペースを fallback にする。
+    INTERLEAVER="$MOSHI_FT_REPO/finetune/data/interleaver.py"
+    if [[ -f "$INTERLEAVER" ]] && ! grep -q 'AUTO_PATCH_NL_FALLBACK' "$INTERLEAVER"; then
+        log_info "interleaver.py に nl_piece fallback パッチを適用"
+        python3 - "$INTERLEAVER" <<'PY'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1])
+src = p.read_text()
+old = '    nl_piece = tokenizer.encode("\\n")[-1]'
+new = (
+    '    # AUTO_PATCH_NL_FALLBACK: JP tokenizer can return [] for "\\n"\n'
+    '    _nl_enc = tokenizer.encode("\\n") or tokenizer.encode(" ")\n'
+    '    nl_piece = _nl_enc[-1] if _nl_enc else 0'
+)
+if old in src:
+    src = src.replace(old, new, 1)
+    p.write_text(src)
+PY
+    fi
+
     # 3) torchrun を解決: PATH にあれば直接、無ければ uv run 経由
     TORCHRUN_CMD=()
     if command -v torchrun >/dev/null 2>&1; then
