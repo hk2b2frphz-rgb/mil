@@ -54,8 +54,12 @@ fi
 
 EXP_DATA_DIR="$EXP_DIR/data"
 EXP_TRAIN_SET="$EXP_DATA_DIR/training_set"
-EXP_TRAIN_MF="$EXP_DATA_DIR/train.jsonl"
-EXP_EVAL_MF="$EXP_DATA_DIR/eval.jsonl"
+# split manifest は training_set/ の中に置く。
+# sphn.dataset_jsonl は jsonl の "path" を **manifest のあるディレクトリ** を基点に
+# 解決するので、ここを training_set/ にしないと sample_xxx.wav が見つからずに
+# 空 dataset になり、最初の next(iter(dataset)) で StopIteration を出す。
+EXP_TRAIN_MF="$EXP_TRAIN_SET/train.jsonl"
+EXP_EVAL_MF="$EXP_TRAIN_SET/eval.jsonl"
 EXP_CKPT_DIR="$EXP_DIR/checkpoints"
 EXP_LOG="$EXP_DIR/run.log"
 RESOLVED_CONFIG="$EXP_DIR/_resolved.yaml"

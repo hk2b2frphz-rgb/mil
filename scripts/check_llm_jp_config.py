@@ -3,7 +3,7 @@
 Usage (from repo root):
     uv run --project ../moshi-finetune python scripts/check_llm_jp_config.py
     uv run --project ../moshi-finetune python scripts/check_llm_jp_config.py \\
-        --manifest experiments/exp001_lora_baseline/data/train.jsonl
+        --manifest experiments/exp001_lora_baseline/data/training_set/train.jsonl
 
 Mirrors the loading steps train.py performs but stops *between* each step so
 the failing one is obvious. Each step prints either [OK] or [FAIL] with a
@@ -290,7 +290,7 @@ def main(args) -> int:
         print(f"{PASS} model + mimi + tokenizer まで全て OK。")
         print("       次は --manifest <path/to/train.jsonl> を渡してデータパスも確認:")
         print("       uv run --project ../moshi-finetune python scripts/check_llm_jp_config.py \\")
-        print("           --manifest experiments/exp001_lora_baseline/data/train.jsonl")
+        print("           --manifest experiments/exp001_lora_baseline/data/training_set/train.jsonl")
         return 0
 
     import sphn
