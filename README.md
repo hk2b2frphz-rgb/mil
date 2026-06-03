@@ -116,6 +116,29 @@ STEPS=use_cases,dialogues bash scripts/run_pipeline.sh   # 音声化前まで
 STEPS=audio bash scripts/run_pipeline.sh                 # 音声化だけ再実行
 ```
 
+#### 学習だけ再実行 / デバッグ用
+
+学習データが既にある状態で、finetune ステップだけを試したい・依存周りで詰まったとき
+のクリーンリラン手順。`OUT_ROOT` には既存の run dir（`./data/runs/<日付>` 等）を
+渡すこと。
+
+```bash
+git pull
+cd ../moshi-finetune && git restore pyproject.toml && rm -f uv.lock && rm -rf .venv && cd -
+STEPS=finetune OUT_ROOT=./data/runs/<YYYY-MM-DD_HHMMSS> bash scripts/run_pipeline.sh 2>&1 | tee /tmp/ft.log | tail -100
+```
+
+ポイント:
+
+- `git restore pyproject.toml` … 過去の自動編集（whisper 除外 / sphn 緩和 / extra-build-deps）を一旦リセット。スクリプトが毎回張り直す。
+- `rm -f uv.lock` / `rm -rf .venv` … `.venv` が残っていると `run_pipeline.sh` の依存準備ブロックが丸ごとスキップされるので必ず消す。
+- `tee /tmp/ft.log` … エラー全文を残しつつ、末尾 100 行だけ流して原因 package を特定しやすくする。失敗時は `tail -200 /tmp/ft.log` で詳細を確認。
+- 主要トラブル対応は `scripts/run_pipeline.sh:188` 付近の finetune ステップに自動化済み:
+    - `whisper_timestamped` を依存から除外（openai-whisper sdist ビルド地雷の回避、annotate.py 専用なので学習に不要）
+    - `sphn==0.1.12` の pin を `>=0.2.0,<0.3.0` に緩和（moshi 本体の要求に合わせる）
+    - venv に `setuptools / wheel / pip` を先入れ → `uv sync --no-build-isolation`（legacy `setup.py` の `pkg_resources` import 対策）
+    - `torchrun` は PATH に無ければ `uv run --project ../moshi-finetune torchrun` 経由で起動
+
 #### 個別ステップ
 
 ```bash
