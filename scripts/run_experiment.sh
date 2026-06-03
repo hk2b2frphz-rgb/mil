@@ -134,31 +134,46 @@ if [[ ! -d "$MOSHI_FT_REPO/.venv" ]]; then
     exit 1
 fi
 
-# torchrun の解決
-TORCHRUN_CMD=()
-if command -v torchrun >/dev/null 2>&1; then
-    TORCHRUN_CMD=(torchrun)
-else
-    TORCHRUN_CMD=(uv run --project "$MOSHI_FT_REPO" torchrun)
-fi
-
 # CUDA_VISIBLE_DEVICES 既定値
+NPROC="${NPROC:-1}"
 if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
-    _nproc="${NPROC:-1}"
     _devs=""
-    for ((i=0; i<_nproc; i++)); do
+    for ((i=0; i<NPROC; i++)); do
         _devs+="${_devs:+,}$i"
     done
     export CUDA_VISIBLE_DEVICES="$_devs"
 fi
 
-echo "[exp] launching torchrun"
+# 単 GPU は python 直起動 (torchrun + FSDP 単 GPU の segfault 回避)
+# 複数 GPU は torchrun。USE_TORCHRUN=1 で単 GPU でも torchrun を強制可能。
+USE_TORCHRUN="${USE_TORCHRUN:-auto}"
+if [[ "$USE_TORCHRUN" == "auto" ]]; then
+    if [[ "$NPROC" -eq 1 ]]; then USE_TORCHRUN=0; else USE_TORCHRUN=1; fi
+fi
+
+if [[ "$USE_TORCHRUN" == "1" ]]; then
+    if command -v torchrun >/dev/null 2>&1; then
+        LAUNCH_CMD=(torchrun --nproc-per-node "$NPROC" --master_port "${MASTER_PORT:-29500}" -m train "$RESOLVED_CONFIG")
+    else
+        LAUNCH_CMD=(uv run --project "$MOSHI_FT_REPO" torchrun --nproc-per-node "$NPROC" --master_port "${MASTER_PORT:-29500}" -m train "$RESOLVED_CONFIG")
+    fi
+    LAUNCH_DESC="torchrun (nproc=$NPROC)"
+else
+    # 単 GPU 直起動。torchrun が export するはずの分散 env を自前で渡す。
+    export RANK=0 WORLD_SIZE=1 LOCAL_RANK=0
+    export MASTER_ADDR="${MASTER_ADDR:-localhost}"
+    export MASTER_PORT="${MASTER_PORT:-29500}"
+    LAUNCH_CMD=(uv run --project "$MOSHI_FT_REPO" python -m train "$RESOLVED_CONFIG")
+    LAUNCH_DESC="python direct (single GPU, no torchrun)"
+fi
+
+echo "[exp] launching: $LAUNCH_DESC"
 echo "       exp:     $EXP_NAME"
 echo "       config:  $RESOLVED_CONFIG"
 echo "       train:   $EXP_TRAIN_MF"
 echo "       eval:    $EXP_EVAL_MF"
 echo "       ckpt:    $EXP_CKPT_DIR"
-echo "       nproc:   ${NPROC:-1}"
+echo "       nproc:   $NPROC"
 echo "       CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 echo "       log:     $EXP_LOG"
 
@@ -168,8 +183,5 @@ echo "       log:     $EXP_LOG"
 (
     cd "$MOSHI_FT_REPO" && \
     CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
-    "${TORCHRUN_CMD[@]}" \
-        --nproc-per-node "${NPROC:-1}" \
-        --master_port "${MASTER_PORT:-29500}" \
-        -m train "$RESOLVED_CONFIG"
+    "${LAUNCH_CMD[@]}"
 ) 2>&1 | tee "$EXP_LOG"
