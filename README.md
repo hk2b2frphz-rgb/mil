@@ -168,51 +168,64 @@ STEPS=finetune OUT_ROOT=./data/runs/2026-06-02_130539 bash scripts/run_pipeline.
     - venv に `setuptools / wheel / pip` を先入れ → `uv sync --no-build-isolation`（legacy `setup.py` の `pkg_resources` import 対策）
     - `torchrun` は PATH に無ければ `uv run --project ../moshi-finetune torchrun` 経由で起動
 
-#### モデル初期化で SIGSEGV (`exitcode: -11`) が出るとき
+#### モデル初期化で SIGSEGV (`exitcode: -11`) が出るとき（A100 環境固有）
 
-A100 80GB 上で `train: run_dir: ...` を出した直後に `[ERROR] failed (exitcode: -11) local_rank: 0` で死ぬパターン。
-Python 例外ではなく **ネイティブコード（C/C++/Rust）の segfault** なので Traceback は出ない。
+A100 80GB 上で `train: run_dir: ...` の直後に `[ERROR] failed (exitcode: -11) local_rank: 0` で死ぬ症状。NCCL の初期化までは正常に通り、**モデル初期化** で落ちる場合、ネイティブコード（おそらく SentencePiece）の segfault。
 
-確認すべき典型原因（順に切り分け）:
+**重要**: 同じコード・同じ HF リポジトリで **V100 側では動いていた**ので、tokenizer
+ファイル自体は SentencePiece が読める形式である。A100 環境側固有の問題を疑う:
 
-1. **HF safetensors の mmap 失敗** — NFS / overlayfs / ディスク逼迫だと mmap が segfault
-2. **sphn (Rust) / mimi の native crash** — torch / numpy / sphn の ABI 不一致
-3. **NCCL native crash** — 1 GPU でも `torchrun` は NCCL 経由
-4. **CUDA driver と torch のずれ**
+1. **HF キャッシュの partial download**: A100 マシンへ初回 fetch する途中で network が
+   切れた場合、サイズ不足/末尾欠損の状態で残る。`SentencePieceProcessor.Load` は
+   壊れたファイルを mmap して segfault する
+2. **sentencepiece バージョン差**: V100 側 venv と A100 側 venv で `sentencepiece` の
+   wheel が違うことがある（uv の依存解決が環境ごとに微妙に変わる）
+3. **A100 側ストレージが NFS / Lustre 等**: mmap が刺さる
+4. **glibc / CUDA driver 差での共有ライブラリ二重ロード競合**
 
-切り分けコマンド:
+切り分けコマンド（順に試す）:
 
 ```bash
-# (1) モデルの事前 download だけ走らせて mmap 経路を分離
+# (a) HF にあるファイルサイズと local cache のサイズを比較
+uv run --project ../moshi-finetune python <<'PY'
+from huggingface_hub import list_repo_files, HfApi, hf_hub_download
+import os
+api = HfApi()
+files = list_repo_files('llm-jp/llm-jp-moshi-v1')
+tok = [f for f in files if 'token' in f.lower() or f.endswith('.model')]
+print('tokenizer files:', tok)
+for f in tok:
+    info = api.get_paths_info(repo_id='llm-jp/llm-jp-moshi-v1', paths=[f])[0]
+    p = hf_hub_download('llm-jp/llm-jp-moshi-v1', f)
+    print(f'{f}: HF size={info.size}, local size={os.path.getsize(p)}, path={p}')
+PY
+
+# (b) sentencepiece の版を確認（V100 側と比較）
+uv run --project ../moshi-finetune python -c "import sentencepiece; print('sentencepiece', sentencepiece.__version__)"
+
+# (c) 強制再 download
 uv run --project ../moshi-finetune python -c "
-from moshi.models import loaders
-ci = loaders.CheckpointInfo.from_hf_repo('llm-jp/llm-jp-moshi-v1')
-print('ok: model files cached')
-print('moshi:', ci.moshi_weights)
-print('mimi :', ci.mimi_weights)
+from huggingface_hub import snapshot_download
+snapshot_download('llm-jp/llm-jp-moshi-v1', force_download=True)
+print('redownloaded')
 "
-# ここで segfault → HF download / safetensors mmap が原因
 
-# (2) NCCL ログを出して再実行
-NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,COLL TORCH_CPP_LOG_LEVEL=INFO \
-  bash scripts/run_experiment.sh exp001_lora_baseline ./data/runs/2026-06-02_130539 2>&1 | tee /tmp/nccl.log
-tail -200 /tmp/nccl.log
-
-# (3) kernel メッセージで該当ライブラリを確認
-sudo dmesg | tail -50 | grep -iE "segfault|killed|oom|nvidia"
-# 例: "segfault at ... in libtorch_cuda.so" のような行が出れば該当ライブラリ確定
-
-# (4) HF キャッシュをクリア。NFS が疑わしいなら /tmp に逃がす
+# (d) HF キャッシュをクリアして /tmp で取り直す（NFS 疑い回避）
 rm -rf ~/.cache/huggingface/hub/models--llm-jp--llm-jp-moshi-v1
 HF_HOME=/tmp/hf_cache bash scripts/run_experiment.sh exp001_lora_baseline ./data/runs/2026-06-02_130539
 ```
 
-判断ポイント:
+判断:
 
-- `dmesg` に `libtorch_cuda.so` / `libsphn` / `libnccl` のいずれかが見えれば、それが crash 元
-- (1) で死ぬなら **(4) の HF_HOME=/tmp** で解決することが多い
-- (2) の NCCL 経路で死ぬなら `NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1` を export して再試行
-- **`param_dtype` を `float16` に変える対処は NG**（公式は bfloat16 前提。fp16 は動的範囲が狭く `first_codebook_weight_multiplier=100` で NaN を起こしやすい）
+- **(a) で local size が HF size より小さい**: partial download 確定 → (c) で再取得すれば直る
+- **(a) でサイズ一致**: ファイルは無事 → (b) の sentencepiece 版を V100 側と比較。違っていれば版固定が必要
+- **どちらも合っているのに死ぬ**: NFS 経由なら (d) で /tmp に逃がす
+- **(d) でも死ぬ**: dmesg で `segfault ... in libsentencepiece.so` などライブラリ名を確認。glibc / libstdc++ 不一致の可能性
+
+**避けるべき対処**:
+
+- `param_dtype` を `float16` に変える → 公式は bfloat16 前提、fp16 は `first_codebook_weight_multiplier=100` で NaN を誘発
+- crash の原因を追わずに rank / batch を闇雲に下げる → 症状が変わらず無駄
 
 #### 個別ステップ
 
