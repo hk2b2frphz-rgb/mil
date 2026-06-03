@@ -24,11 +24,11 @@ first_codebook_weight_multiplier: 100.
 text_padding_weight: 0.5
 
 duration_sec: 100       # 1 サンプル 100 秒上限。公式 example と同じ。
-batch_size: 1           # 24GB 1GPU 上限。grad_accum で実 bs を上げる。
-num_microbatches: 8     # 実 batch_size = 1 × 8 = 8。公式 16 を半分に。
-max_steps: 800          # 100 sample / effective_bs 8 → 12.5 step/epoch。約 64 epoch。
+batch_size: 8           # A100 80GB 1GPU 想定。公式 16 の半分を安全マージン込みで。
+num_microbatches: 1     # 実 batch_size = 8 × 1 = 8。grad_accum 不要。
+max_steps: 500          # 90 train sample / bs 8 = 11.25 step/epoch → ~44 epoch。
 max_norm: 1.0
-gradient_checkpointing: true
+gradient_checkpointing: true   # 80GB あっても安定性のため ON。OFF にすると速いが activations 巨大化。
 param_dtype: "bfloat16"
 
 optim:
@@ -38,14 +38,14 @@ optim:
 
 seed: 0
 log_freq: 5
-ckpt_freq: 100
+ckpt_freq: 50           # step 数を 500 に減らしたので保存頻度も比例して上げる
 num_ckpt_keep: 5
 save_adapters: true
 do_ckpt: true
 
 # 過学習監視
 do_eval: true
-eval_freq: 50
+eval_freq: 25           # step 50 ごとに ckpt が出るので、その半分の間隔で eval
 
 # run dir は launcher が埋める
 run_dir: ""

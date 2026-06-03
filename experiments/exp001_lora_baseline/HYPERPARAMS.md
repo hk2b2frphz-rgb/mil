@@ -6,9 +6,16 @@ llm-jp/llm-jp-moshi-v1 に日本語孤独感カウンセリング会話を LoRA 
 ## 出発点
 
 moshi-finetune 公式 example (`../moshi-finetune/example/moshi_7B.yaml`) を出発点に、
-**(a) 1 GPU 24GB に収まる構成**、**(b) 100 サンプル規模の小データに合わせた正則化**、
-**(c) 過学習を見える化する eval split** の 3 点だけ調整する方針。元 example の
-意図しない逸脱を避ける。
+**(a) A100 80GB 1 GPU での効率的な VRAM 利用**、**(b) 100 サンプル規模の小データに
+合わせた正則化**、**(c) 過学習を見える化する eval split** の 3 点だけ調整する方針。
+元 example の意図しない逸脱を避ける。
+
+## ハードウェア前提
+
+- **NVIDIA A100 80GB × 1**
+- bf16 (`param_dtype: "bfloat16"`) で運用
+- `gradient_checkpointing: true` で activations を節約しつつ batch を確保。
+  80GB あっても duration_sec=100 の長い audio を batch 詰めるとここが先に飽和する。
 
 ## 各ハイパラの根拠
 
@@ -35,32 +42,41 @@ moshi-finetune 公式 example (`../moshi-finetune/example/moshi_7B.yaml`) を出
 - **`weight_decay=0.1`** も公式と同値。LoRA のみ更新するので model 本体は
   動かず、LoRA パラメータへの L2 ペナルティとして機能。
 
-### バッチサイズ周り: `batch_size=1`, `num_microbatches=8`, `duration_sec=100`
+### バッチサイズ周り: `batch_size=8`, `num_microbatches=1`, `duration_sec=100`
 
-- **`batch_size=1`** は 24GB GPU の現実的上限。`duration_sec=100` で 100 秒の
-  audio + Mimi codes + LoRA grad で VRAM が埋まる。
-- **`num_microbatches=8`** で gradient accumulation。effective batch = 8。
-  公式 16 の半分だが、データ規模も小さいので step 数で吸収する。
+- **`batch_size=8`** は A100 80GB に対する安全マージン込みの設定。
+  公式 example は A100 80GB / H100 想定で `batch_size=16` を使うが、duration_sec=100 +
+  Moshi 7B + Mimi + LoRA + activations (gradient_checkpointing ON) で 80GB は意外と
+  ギリギリ。動作確認段階としては 8 から入り、OOM 余地が見えれば 12 / 16 に上げる。
+- **`num_microbatches=1`**: 24GB GPU のときは grad_accum で擬似的に batch を増やす
+  必要があったが、A100 80GB では実 batch をそのまま積めるので不要。grad_accum は
+  全体の step あたり時間も増えるので、不要なら外す方が学習が速い。
+- **effective batch = batch_size × num_microbatches × world_size = 8 × 1 × 1 = 8**。
+  公式 16 の半分だが、データ規模が公式想定の 1/30 程度なので妥当。
 - **`duration_sec=100`** は公式と同値。今回の対話は最長でも 90 秒前後なので
   全データが 1 サンプルに収まる。
 
-### 学習量: `max_steps=800`
+### 学習量: `max_steps=500`
 
-- 100 サンプル / effective batch 8 = 12.5 step/epoch → **約 64 epoch**。
-- 公式 example の 2000 step は bs=16 × ~10 epoch ＝ 160000 sample relative の
-  曝露で、今回データ規模では過剰 (=  100 epoch 越え）。
+- train split 90 sample / effective batch 8 = **約 11.25 step/epoch** → 500 step ≈
+  **約 44 epoch**。
+- 公式 example の 2000 step は bs=16 × ~10 epoch ＝ 大規模データ前提の曝露量で、
+  今回の 100 サンプル規模では同 step を回すと完全に過学習。
 - LoRA + 小データの一般的な経験則は **30–80 epoch**（QLoRA, Dettmers et al. 2023
   の Alpaca finetune が 3 epoch / 50k sample の規模感、データ量比から逆算）。
-  64 epoch はその上限寄りで、過学習し始めたら ckpt から戻す前提。
-- 不足だったら 1500 step に伸ばす、過学習なら 400 に縮める想定。
+  44 epoch は中央寄り。過学習が早く出るならさらに半減、loss がまだ下がっていれば
+  step を伸ばす。
+- 不足だったら 800 step に伸ばす、過学習なら 250 に縮める想定。
 
 ### 監視と保存
 
-- **`do_eval: true`, `eval_freq: 50`**: 50 step ごとに eval loss を出す。
+- **`do_eval: true`, `eval_freq: 25`**: 25 step ごとに eval loss を出す。
   公式 example は `do_eval: false` だが、小データではこれが無いと
-  best ckpt を選べない。
-- **`ckpt_freq: 100`, `num_ckpt_keep: 5`**: 100, 200, ..., 800 と
-  ある程度残し、最新 5 個を保持。eval loss を見て後で選別。
+  best ckpt を選べない。`ckpt_freq=50` の半分の間隔にして、各 ckpt の前後で
+  eval を 1 回ずつ得る形にしている。
+- **`ckpt_freq: 50`, `num_ckpt_keep: 5`**: 50, 100, ..., 500 と
+  10 個保存ポイントがあり、`num_ckpt_keep=5` なので末尾 5 個を保持。
+  eval loss を見て後で選別。
 - **`save_adapters: true`**: LoRA adapter のみ保存。`full_finetuning: false` の
   必須セット。
 - **`log_freq: 5`**: 5 step ごとに loss/lr を吐く。短時間で挙動を見たい初期実験向け。
