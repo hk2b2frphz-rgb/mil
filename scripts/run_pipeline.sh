@@ -6,24 +6,43 @@
 #
 # 各ステップは独立に再実行できる。途中で止めたい場合は --steps を絞る。
 
+# bash 強制（sh で起動されると process substitution が壊れる）
+if [[ -z "${BASH_VERSION:-}" ]]; then
+    echo "ERROR: bash で実行してください: bash scripts/run_pipeline.sh" >&2
+    exit 1
+fi
+
 set -euo pipefail
+
+# リポジトリルートを基準にする（どこから呼ばれても動くように）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
 
 # 実験管理: 実行ごとに日付付きの run dir を作る。
 # OUT_ROOT を明示指定した場合はそちらを優先する（再開・再現実行用）。
 RUN_ID="${RUN_ID:-$(date +%Y-%m-%d_%H%M%S)}"
-RUNS_ROOT="${RUNS_ROOT:-./data/runs}"
+RUNS_ROOT="${RUNS_ROOT:-$REPO_ROOT/data/runs}"
 OUT_ROOT="${OUT_ROOT:-$RUNS_ROOT/$RUN_ID}"
 NUM_CASES="${NUM_CASES:-100}"
-USE_CASES_PATH="$OUT_ROOT/use_cases.jsonl"
-GEMMA_DIALOGUES_DIR="$OUT_ROOT/gemma_dialogues"
-AUDIO_DIR="$OUT_ROOT/training_set"
-LOG_DIR="$OUT_ROOT/logs"
-FT_CONFIG="${FT_CONFIG:-./configs/moshi_lora_jp_loneliness.yaml}"
-MOSHI_FT_REPO="${MOSHI_FT_REPO:-../moshi-finetune}"
+FT_CONFIG="${FT_CONFIG:-$REPO_ROOT/configs/moshi_lora_jp_loneliness.yaml}"
+MOSHI_FT_REPO="${MOSHI_FT_REPO:-$REPO_ROOT/../moshi-finetune}"
 
 STEPS="${STEPS:-use_cases,dialogues,audio,finetune}"
 
-mkdir -p "$OUT_ROOT" "$LOG_DIR"
+mkdir -p "$OUT_ROOT"
+
+# 以降のパスは全て絶対化（後で cd しても壊れないように）
+OUT_ROOT="$(cd "$OUT_ROOT" && pwd)"
+LOG_DIR="$OUT_ROOT/logs"
+mkdir -p "$LOG_DIR"
+USE_CASES_PATH="$OUT_ROOT/use_cases.jsonl"
+GEMMA_DIALOGUES_DIR="$OUT_ROOT/gemma_dialogues"
+AUDIO_DIR="$OUT_ROOT/training_set"
+# FT_CONFIG / MOSHI_FT_REPO も絶対化（cd 後でも有効）
+FT_CONFIG="$(realpath -m "$FT_CONFIG")"
+MOSHI_FT_REPO_PARENT="$(realpath -m "$(dirname "$MOSHI_FT_REPO")")"
+MOSHI_FT_REPO="$MOSHI_FT_REPO_PARENT/$(basename "$MOSHI_FT_REPO")"
 
 # パイプライン全体のログ（標準出力/エラー両方を tee で保存）
 PIPELINE_LOG="$LOG_DIR/pipeline.log"
@@ -186,22 +205,38 @@ fi
 # 4. Moshi-finetune を起動（LoRA）
 # ---------------------------------------------------------------------------
 if run_step finetune; then
+    # 1) repo を用意（なければ clone）
     if [[ ! -d "$MOSHI_FT_REPO" ]]; then
-        log_warn "moshi-finetune repo not found at $MOSHI_FT_REPO"
-        echo "  Clone it first: git clone https://github.com/kyutai-labs/moshi-finetune.git ../moshi-finetune"
-        exit 1
+        log_warn "moshi-finetune repo not found at $MOSHI_FT_REPO — clone します"
+        mkdir -p "$MOSHI_FT_REPO_PARENT"
+        git clone https://github.com/kyutai-labs/moshi-finetune.git "$MOSHI_FT_REPO"
     fi
+
+    # 2) 依存を用意（.venv が無ければ uv sync）
+    if [[ ! -d "$MOSHI_FT_REPO/.venv" ]]; then
+        log_info "moshi-finetune の依存を uv sync で準備"
+        ( cd "$MOSHI_FT_REPO" && uv sync )
+    fi
+
+    # 3) torchrun を解決: PATH にあれば直接、無ければ uv run 経由
+    TORCHRUN_CMD=()
+    if command -v torchrun >/dev/null 2>&1; then
+        TORCHRUN_CMD=(torchrun)
+    else
+        log_info "torchrun が PATH に無いため uv run --project '$MOSHI_FT_REPO' 経由で実行"
+        TORCHRUN_CMD=(uv run --project "$MOSHI_FT_REPO" torchrun)
+    fi
+
     log_info "Moshi LoRA fine-tune を起動"
     log_info "  ft repo: $MOSHI_FT_REPO"
     log_info "  config:  $FT_CONFIG"
     log_info "  nproc:   ${NPROC:-1}"
-    # manifest のパスが config に書かれているので、相対パスを fix する。
-    # 上記 config はリポジトリルートから FT を起動する想定。
-    cd "$MOSHI_FT_REPO"
-    torchrun \
-        --nproc-per-node "${NPROC:-1}" \
-        --master_port "${MASTER_PORT:-29500}" \
-        -m train "$(realpath -m "$OLDPWD/$FT_CONFIG")"
+    # FT_CONFIG は既に絶対パスなのでそのまま渡せる
+    ( cd "$MOSHI_FT_REPO" && \
+        "${TORCHRUN_CMD[@]}" \
+            --nproc-per-node "${NPROC:-1}" \
+            --master_port "${MASTER_PORT:-29500}" \
+            -m train "$FT_CONFIG" )
     end_step
 fi
 
