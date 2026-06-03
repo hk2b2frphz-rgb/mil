@@ -214,17 +214,23 @@ if run_step finetune; then
 
     # 2) 依存を用意（.venv が無ければ uv sync）
     if [[ ! -d "$MOSHI_FT_REPO/.venv" ]]; then
-        # openai-whisper の sdist は build-system.requires に setuptools を
-        # 宣言していないので、uv の隔離ビルド環境で setuptools が無くて
-        # ビルドに失敗する。moshi-finetune の pyproject にビルド依存を
-        # 注入して回避する。
-        if ! grep -q 'tool.uv.extra-build-dependencies' "$MOSHI_FT_REPO/pyproject.toml"; then
-            log_info "openai-whisper のビルド用 setuptools/wheel を inject"
-            cat >> "$MOSHI_FT_REPO/pyproject.toml" <<'TOML'
-
-[tool.uv.extra-build-dependencies]
-openai-whisper = ["setuptools", "wheel"]
-TOML
+        # openai-whisper 20240930 の sdist は build-system.requires が
+        # 不完全で、uv の隔離ビルド環境で安定して落ちる。setuptools/wheel を
+        # extra-build-dependencies で渡しても setup.py が他の依存を
+        # import するため救済できない。
+        # whisper_timestamped 経由でしか入らず、annotate.py 専用 (train.py は
+        # 不要) なので、学習を通すために依存から落とす。
+        if grep -q '"whisper_timestamped"' "$MOSHI_FT_REPO/pyproject.toml"; then
+            log_info "moshi-finetune の pyproject から whisper_timestamped を除外（学習には不要、annotate.py 専用）"
+            sed -i.bak '/"whisper_timestamped"/d' "$MOSHI_FT_REPO/pyproject.toml"
+            rm -f "$MOSHI_FT_REPO/uv.lock"
+        fi
+        # 過去に追加した extra-build-dependencies ブロックがあれば撤去
+        # （前 commit で injection を試した名残）
+        if grep -q '\[tool.uv.extra-build-dependencies\]' "$MOSHI_FT_REPO/pyproject.toml"; then
+            log_info "古い extra-build-dependencies ブロックを削除"
+            # 該当行から次の [section] 直前 or EOF までを削除
+            sed -i.bak2 '/\[tool\.uv\.extra-build-dependencies\]/,/^\[/{/^\[tool\.uv\.extra-build-dependencies\]/d; /^openai-whisper/d}' "$MOSHI_FT_REPO/pyproject.toml"
             rm -f "$MOSHI_FT_REPO/uv.lock"
         fi
         log_info "moshi-finetune の依存を uv sync で準備"
