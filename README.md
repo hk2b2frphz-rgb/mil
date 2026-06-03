@@ -82,6 +82,36 @@ uv run python scripts/generate_qwen3_tts_data.py \
 | `exp002_lora_3h_data` | ~250 対話 (~3h) | データ量の効果を検証 (ハイパラ同一) |
 | `exp100_full_ft` | ~100 対話 (~1h) | フル fine-tuning で LoRA との比較 |
 
+## 学習済みモデルの利用
+
+### LoRA チェックポイントのマージ
+
+LoRA 実験のチェックポイントをベースモデルにマージして、推論に使える単一ファイルを生成する。
+
+```bash
+# マージ
+uv run --project ../moshi-finetune python scripts/merge_lora.py \
+  --lora-ckpt experiments/exp001_lora_baseline/checkpoints/<ts>/checkpoint_000500/consolidated/lora.safetensors \
+  --out merged_model/consolidated.safetensors
+
+# マージ済みモデルで推論
+uv run python response_recorder.py \
+  --moshi-weight merged_model/consolidated.safetensors \
+  --inputs prompts/hello.wav --out-dir results/lora_merged/
+```
+
+`--scaling` は checkpoint の `config.json` から自動取得される。
+
+### フル FT チェックポイント
+
+フル FT (exp100) の場合はマージ不要。チェックポイントをそのまま指定する。
+
+```bash
+uv run python response_recorder.py \
+  --moshi-weight experiments/exp100_full_ft/checkpoints/<ts>/checkpoint_000500/consolidated/consolidated.safetensors \
+  --inputs prompts/hello.wav --out-dir results/full_ft/
+```
+
 ## Response Recorder
 
 Moshi に固定音声を入力して応答を録音する実験ツール。
@@ -108,9 +138,11 @@ scripts/
   build_use_cases.py               # use case 生成
   generate_synthetic_moshi_training_data.py  # Gemma 対話生成
   generate_qwen3_tts_data.py       # Qwen3-TTS 音声合成
+  merge_lora.py                    # LoRA adapter をベースモデルにマージ
 experiments/
   exp001_lora_baseline/            # 各実験の config.yaml + HYPERPARAMS.md
   exp002_lora_3h_data/
+  exp100_full_ft/
 configs/
   moshi_lora_jp_loneliness.yaml    # パイプライン用 FT config
 data/runs/                         # 実行ごとの出力 (git ignore)
