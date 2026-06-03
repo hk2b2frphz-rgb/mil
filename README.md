@@ -227,6 +227,25 @@ HF_HOME=/tmp/hf_cache bash scripts/run_experiment.sh exp001_lora_baseline ./data
 - `param_dtype` を `float16` に変える → 公式は bfloat16 前提、fp16 は `first_codebook_weight_multiplier=100` で NaN を誘発
 - crash の原因を追わずに rank / batch を闇雲に下げる → 症状が変わらず無駄
 
+#### llm-jp の config が loader で認識されているか確認
+
+llm-jp/llm-jp-moshi-v1 は同梱 config を `moshi_lm_kwargs.json` という名前で
+配布している（`config.json` ではない）。これが loader に届いていないと、
+内部の Kyutai 英語 Moshi デフォルト構造にフォールバックして shape が合わず、
+`safetensors` の state_dict load 中に native crash する。
+
+`moshi_paths.config_path: "moshi_lm_kwargs.json"` が **実際に効いているか** を
+別建てで確認する小スクリプト:
+
+```bash
+uv run --project ../moshi-finetune python scripts/check_llm_jp_config.py
+```
+
+出力に `raw_config is None? False` と keys が並べば OK（config は届いている）。
+`True` が出るなら moshi 側 loader の API が想定と違うので、`scripts/check_llm_jp_config.py`
+が表示するヒントに従って `moshi.models.loaders` のソースを覗き、正しい引数名を
+特定して config.yaml を更新する。
+
 #### 個別ステップ
 
 ```bash
