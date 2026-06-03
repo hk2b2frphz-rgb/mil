@@ -214,6 +214,14 @@ if run_step finetune; then
 
     # 2) 依存を用意（.venv が無ければ uv sync）
     if [[ ! -d "$MOSHI_FT_REPO/.venv" ]]; then
+        # whisper_timestamped → openai-whisper の sdist ビルドが環境依存で
+        # よく落ちる。これは annotate.py 専用で train.py には不要なので、
+        # 学習を通すために依存から外す。
+        if grep -q '"whisper_timestamped"' "$MOSHI_FT_REPO/pyproject.toml"; then
+            log_info "moshi-finetune の pyproject から whisper_timestamped を除外（学習には不要）"
+            sed -i.bak '/"whisper_timestamped"/d' "$MOSHI_FT_REPO/pyproject.toml"
+            rm -f "$MOSHI_FT_REPO/uv.lock"
+        fi
         log_info "moshi-finetune の依存を uv sync で準備"
         ( cd "$MOSHI_FT_REPO" && uv sync )
     fi
