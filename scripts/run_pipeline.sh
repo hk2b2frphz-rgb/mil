@@ -280,14 +280,19 @@ if run_step finetune; then
         log_warn "  audio ステップが完了している必要があります。"
         exit 1
     fi
-    mkdir -p "$RUN_CKPT_DIR"
-    # train_data と run_dir の行を実パスに書き換え（他は据え置き）
+    # train.py が run_dir を自前で作るので、こちらでは作らない。
+    # train_data / run_dir を実パスに書き換え、overwrite_run_dir=true を
+    # 末尾に追加（既存があっても再実行で詰まらないように）。
     python3 - "$FT_CONFIG" "$RUN_FT_CONFIG" "$TRAIN_MANIFEST" "$RUN_CKPT_DIR" <<'PY'
 import re, sys, pathlib
 src, dst, manifest, ckpt = sys.argv[1:]
 text = pathlib.Path(src).read_text()
 text = re.sub(r'^(\s*train_data:\s*).*$', rf'\1"{manifest}"', text, flags=re.M)
 text = re.sub(r'^(\s*run_dir:\s*).*$',    rf'\1"{ckpt}"',    text, flags=re.M)
+if re.search(r'^\s*overwrite_run_dir\s*:', text, re.M):
+    text = re.sub(r'^(\s*overwrite_run_dir\s*:\s*).*$', r'\1true', text, flags=re.M)
+else:
+    text = text.rstrip() + "\n\n# auto-added by run_pipeline.sh\noverwrite_run_dir: true\n"
 pathlib.Path(dst).write_text(text)
 PY
 
