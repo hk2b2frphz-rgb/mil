@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+
+# Pipeline outputs (regenerable)
+data/
+
+# Per-experiment runtime artifacts (regenerable / heavy).
+# Keep config.yaml / HYPERPARAMS.md / notes.md / args.yaml under VCS,
+# discard everything else.
+experiments/*/data/
+experiments/*/checkpoints/
+experiments/*/run.log
+experiments/*/_resolved.yaml
+
+# editor
+.vscode/
+.idea/

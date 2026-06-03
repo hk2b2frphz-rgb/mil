@@ -116,6 +116,27 @@ STEPS=use_cases,dialogues bash scripts/run_pipeline.sh   # 音声化前まで
 STEPS=audio bash scripts/run_pipeline.sh                 # 音声化だけ再実行
 ```
 
+#### 実験ベースで回す（推奨）
+
+ハイパラを変えて比較したい・後で振り返りたい場合は `experiments/` 配下の
+実験フォルダ単位で管理する:
+
+```bash
+# 1 度 run_pipeline.sh で学習データを生成し、moshi-finetune 環境を準備しておく
+# その後はデータをコピーして実験ごとに学習だけ回す
+bash scripts/run_experiment.sh exp001_lora_baseline ./data/runs/2026-06-02_130539
+```
+
+各実験フォルダには:
+
+- `config.yaml` — moshi-finetune 用 YAML テンプレ（パスは launcher が埋める）
+- `HYPERPARAMS.md` — 値・選んだ根拠・参考文献・期待結果（必須）
+- `data/` — 学習データの hardlink コピー（git ignore）
+- `checkpoints/` — train.py の出力（git ignore）
+- `run.log` — stdout/stderr
+
+詳細は [experiments/README.md](experiments/README.md) を参照。
+
 #### 学習だけ再実行 / デバッグ用
 
 学習データが既にある状態で、finetune ステップだけを試したい・依存周りで詰まったとき

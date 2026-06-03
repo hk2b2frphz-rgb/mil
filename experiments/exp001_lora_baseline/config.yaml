@@ -1,0 +1,52 @@
+# exp001 — Japanese loneliness counseling LoRA baseline
+#
+# 設計意図と参考文献は HYPERPARAMS.md を参照。
+# データのパス (train_data / eval_data / run_dir) は
+# scripts/run_experiment.sh が起動時に書き換える。
+
+data:
+  train_data: ""   # auto-filled
+  eval_data: ""    # auto-filled (9:1 split)
+  shuffle: true
+
+moshi_paths:
+  hf_repo_id: "llm-jp/llm-jp-moshi-v1"
+
+full_finetuning: false
+lora:
+  enable: true
+  rank: 32          # moshi-finetune 公式 example の 128 を 1/4。データ規模に合わせる。
+  scaling: 2.0      # alpha = rank * scaling = 64。LoRA paper 慣例 (α ≈ 2r)。
+  ft_embed: false
+
+# moshi-finetune 公式 example と同値
+first_codebook_weight_multiplier: 100.
+text_padding_weight: 0.5
+
+duration_sec: 100       # 1 サンプル 100 秒上限。公式 example と同じ。
+batch_size: 1           # 24GB 1GPU 上限。grad_accum で実 bs を上げる。
+num_microbatches: 8     # 実 batch_size = 1 × 8 = 8。公式 16 を半分に。
+max_steps: 800          # 100 sample / effective_bs 8 → 12.5 step/epoch。約 64 epoch。
+max_norm: 1.0
+gradient_checkpointing: true
+param_dtype: "bfloat16"
+
+optim:
+  lr: 2e-6              # 公式 example と同値（OneCycleLR の peak）
+  weight_decay: 0.1     # 公式と同値
+  pct_start: 0.05       # OneCycleLR warmup 比率（全体の 5%）
+
+seed: 0
+log_freq: 5
+ckpt_freq: 100
+num_ckpt_keep: 5
+save_adapters: true
+do_ckpt: true
+
+# 過学習監視
+do_eval: true
+eval_freq: 50
+
+# run dir は launcher が埋める
+run_dir: ""
+overwrite_run_dir: true
