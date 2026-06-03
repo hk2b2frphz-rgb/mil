@@ -214,12 +214,17 @@ if run_step finetune; then
 
     # 2) 依存を用意（.venv が無ければ uv sync）
     if [[ ! -d "$MOSHI_FT_REPO/.venv" ]]; then
-        # whisper_timestamped → openai-whisper の sdist ビルドが環境依存で
-        # よく落ちる。これは annotate.py 専用で train.py には不要なので、
-        # 学習を通すために依存から外す。
-        if grep -q '"whisper_timestamped"' "$MOSHI_FT_REPO/pyproject.toml"; then
-            log_info "moshi-finetune の pyproject から whisper_timestamped を除外（学習には不要）"
-            sed -i.bak '/"whisper_timestamped"/d' "$MOSHI_FT_REPO/pyproject.toml"
+        # openai-whisper の sdist は build-system.requires に setuptools を
+        # 宣言していないので、uv の隔離ビルド環境で setuptools が無くて
+        # ビルドに失敗する。moshi-finetune の pyproject にビルド依存を
+        # 注入して回避する。
+        if ! grep -q 'tool.uv.extra-build-dependencies' "$MOSHI_FT_REPO/pyproject.toml"; then
+            log_info "openai-whisper のビルド用 setuptools/wheel を inject"
+            cat >> "$MOSHI_FT_REPO/pyproject.toml" <<'TOML'
+
+[tool.uv.extra-build-dependencies]
+openai-whisper = ["setuptools", "wheel"]
+TOML
             rm -f "$MOSHI_FT_REPO/uv.lock"
         fi
         log_info "moshi-finetune の依存を uv sync で準備"
