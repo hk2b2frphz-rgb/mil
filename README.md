@@ -80,6 +80,7 @@ uv run python scripts/generate_qwen3_tts_data.py \
 |---|---|---|
 | `exp001_lora_baseline` | ~100 対話 (~1h) | LoRA rank=32 ベースライン |
 | `exp002_lora_3h_data` | ~250 対話 (~3h) | データ量の効果を検証 (ハイパラ同一) |
+| `exp100_full_ft` | ~100 対話 (~1h) | フル fine-tuning で LoRA との比較 |
 
 ## Response Recorder
 
