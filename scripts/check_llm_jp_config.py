@@ -2,11 +2,17 @@
 
 Usage (from repo root):
     uv run --project ../moshi-finetune python scripts/check_llm_jp_config.py
+    uv run --project ../moshi-finetune python scripts/check_llm_jp_config.py \\
+        --manifest experiments/exp001_lora_baseline/data/train.jsonl
 
 Mirrors the loading steps train.py performs but stops *between* each step so
 the failing one is obvious. Each step prints either [OK] or [FAIL] with a
 short message. Exits non-zero on the first failure so it can be chained
 into other scripts.
+
+If a manifest jsonl is provided, additional steps run mimi, the text
+tokenizer, the interleaver, and one sample through the data loader to
+catch crashes that happen past model init.
 
 Steps:
     1. hf_hub_download(moshi_lm_kwargs.json)
@@ -65,7 +71,7 @@ def _step(name: str, fn: Callable[[], Any]) -> Any:
     return result
 
 
-def main() -> int:
+def main(args) -> int:
     print(f"{INFO} hf_repo_id : {REPO_ID}")
     print(f"{INFO} config file: {CONFIG_FILENAME}")
     print()
@@ -231,12 +237,110 @@ def main() -> int:
     else:
         print(f"{INFO} step: 9. model.cuda() — skipped (no CUDA visible)")
 
+    # ------------------------------------------------------------------
+    # 10. Mimi audio codec を CUDA に乗せる
+    # ------------------------------------------------------------------
+    def _build_mimi():
+        m = ci.get_mimi(device="cuda" if torch.cuda.is_available() else "cpu")
+        m.eval()
+        return m
+
+    mimi = _step("10. ci.get_mimi(device='cuda').eval()", _build_mimi)
+    print(f"       -> sample_rate={mimi.sample_rate} frame_rate={mimi.frame_rate}")
+
+    # ------------------------------------------------------------------
+    # 11. テキスト tokenizer
+    # ------------------------------------------------------------------
+    def _build_spm():
+        return ci.get_text_tokenizer()
+
+    spm = _step("11. ci.get_text_tokenizer()", _build_spm)
+
+    # ------------------------------------------------------------------
+    # 12. Interleaver 構築
+    # ------------------------------------------------------------------
+    from finetune.data.interleaver import Interleaver, InterleavedTokenizer
+
+    def _build_interleaver():
+        return Interleaver(
+            spm,
+            mimi.frame_rate,
+            model.text_padding_token_id,
+            model.end_of_text_padding_id,
+            model.zero_token_id,
+            keep_main_only=True,
+        )
+
+    interleaver = _step("12. Interleaver(spm, mimi.frame_rate, ...)", _build_interleaver)
+
+    # ------------------------------------------------------------------
+    # 13. InterleavedTokenizer
+    # ------------------------------------------------------------------
+    def _build_itok():
+        return InterleavedTokenizer(mimi, interleaver, duration_sec=100)
+
+    itok = _step("13. InterleavedTokenizer(mimi, interleaver, duration_sec=100)", _build_itok)
+
+    # ------------------------------------------------------------------
+    # 14. manifest を 1 件流す（指定があれば）
+    # ------------------------------------------------------------------
+    if not args.manifest:
+        print(f"{INFO} step: 14. sphn.dataset_jsonl — skipped (--manifest 未指定)")
+        print()
+        print(f"{PASS} model + mimi + tokenizer まで全て OK。")
+        print("       次は --manifest <path/to/train.jsonl> を渡してデータパスも確認:")
+        print("       uv run --project ../moshi-finetune python scripts/check_llm_jp_config.py \\")
+        print("           --manifest experiments/exp001_lora_baseline/data/train.jsonl")
+        return 0
+
+    import sphn
+
+    def _open_dataset():
+        ds = sphn.dataset_jsonl(
+            args.manifest,
+            duration_sec=itok.duration_sec,
+            num_threads=4,
+            sample_rate=mimi.sample_rate,
+            pad_last_segment=True,
+        )
+        return ds
+
+    dataset = _step(f"14. sphn.dataset_jsonl({args.manifest})", _open_dataset)
+
+    # ------------------------------------------------------------------
+    # 15. 1 サンプル取得
+    # ------------------------------------------------------------------
+    def _fetch_one():
+        it = iter(dataset)
+        sample = next(it)
+        return sample
+
+    sample = _step("15. next(iter(dataset))  (1 サンプル取得)", _fetch_one)
+    print(f"       -> keys: {list(sample.keys()) if hasattr(sample, 'keys') else type(sample)}")
+
+    # ------------------------------------------------------------------
+    # 16. mimi.encode + interleaver で 1 サンプルを通す
+    # ------------------------------------------------------------------
+    def _tokenize_one():
+        wav = sample["data"][..., : sample["unpadded_len"]]
+        out = itok(wav, sample["start_time_sec"], sample["path"])
+        return out
+
+    _step("16. InterleavedTokenizer(wav, ...) で 1 件 tokenize", _tokenize_one)
+
     print()
-    print(f"{PASS} all checks passed. "
-          f"If train.py still crashes, the cause is past model init "
-          f"(data loader, mimi codec, optimizer init, NCCL collective, etc).")
+    print(f"{PASS} 全ステップ通過。train.py で落ちる場合は optimizer init / NCCL collective / "
+          "学習ループ内のいずれかが原因。")
     return 0
 
 
+def _parse_args(argv):
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--manifest", default=None,
+                   help="train.jsonl への path。指定すると step 14-16 が走る。")
+    return p.parse_args(argv)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(_parse_args(sys.argv[1:])))
