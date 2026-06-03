@@ -105,20 +105,41 @@ fi
 
 # ---------------------------------------------------------------------------
 # 3) config.yaml の data.train_data / data.eval_data / run_dir を埋める
+#    moshi_paths.config_path が HF ファイル名のままだと train.py が file not found
+#    になるので、hf_hub_download で落としてからローカル絶対パスに差し替える。
 # ---------------------------------------------------------------------------
 echo "[exp] _resolved.yaml を生成"
-python3 - "$CONFIG_SRC" "$RESOLVED_CONFIG" "$EXP_TRAIN_MF" "$EXP_EVAL_MF" "$EXP_CKPT_DIR" <<'PY'
-import re, sys, pathlib
-src, dst, train, evald, ckpt = map(pathlib.Path, sys.argv[1:])
+python3 - "$CONFIG_SRC" "$RESOLVED_CONFIG" "$EXP_TRAIN_MF" "$EXP_EVAL_MF" "$EXP_CKPT_DIR" "$MOSHI_FT_REPO" <<'PY'
+import re, sys, pathlib, subprocess
+src, dst, train, evald, ckpt, ft_repo = sys.argv[1:]
+src = pathlib.Path(src); dst = pathlib.Path(dst)
 text = src.read_text()
 
 def sub_block_value(text, key, value):
-    # data: 下の "  key: ..." を書き換える簡易置換
     return re.sub(rf'^(\s*{re.escape(key)}\s*:\s*).*$', rf'\1"{value}"', text, flags=re.M)
 
 text = sub_block_value(text, "train_data", str(train))
 text = sub_block_value(text, "eval_data",  str(evald))
 text = sub_block_value(text, "run_dir",    str(ckpt))
+
+# moshi_paths.hf_repo_id と config_path を読み、config_path が HF 内のファイル名
+# っぽければ落として local 絶対パスに差し替える。
+m_repo = re.search(r'^\s*hf_repo_id\s*:\s*["\']?([^"\'\n]+)["\']?\s*$', text, re.M)
+m_conf = re.search(r'^(\s*config_path\s*:\s*)["\']?([^"\'\n]+)["\']?\s*$', text, re.M)
+if m_repo and m_conf:
+    hf_repo = m_repo.group(1).strip()
+    cfg     = m_conf.group(2).strip()
+    if cfg and "/" not in cfg and not pathlib.Path(cfg).is_absolute():
+        # uv 経由で hf_hub_download を呼んで落とす。huggingface_hub は moshi-finetune の
+        # 依存に入っているので uv run で叩ける。
+        out = subprocess.check_output([
+            "uv", "run", "--project", ft_repo, "python", "-c",
+            f"from huggingface_hub import hf_hub_download; print(hf_hub_download('{hf_repo}', '{cfg}'))",
+        ], text=True).strip().splitlines()
+        local_path = out[-1]
+        print(f"[exp] config_path: '{cfg}' -> '{local_path}'")
+        text = sub_block_value(text, "config_path", local_path)
+
 dst.write_text(text)
 PY
 

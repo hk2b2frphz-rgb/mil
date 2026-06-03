@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import sys
 
+from huggingface_hub import hf_hub_download
 from moshi.models import loaders
 
 
@@ -34,12 +35,18 @@ CONFIG_FILENAME = "moshi_lm_kwargs.json"
 
 def main() -> int:
     print(f"[check] hf_repo_id : {REPO_ID}")
-    print(f"[check] config_path: {CONFIG_FILENAME}")
+    print(f"[check] config file in repo: {CONFIG_FILENAME}")
+
+    # moshi の loader は config_path を「ローカルファイルパス」として読みに行くので、
+    # HF リポジトリのファイル名をそのまま渡すと FileNotFoundError になる。
+    # まず hf_hub_download で落としてから絶対パスを渡す。
+    local_config = hf_hub_download(REPO_ID, CONFIG_FILENAME)
+    print(f"[check] downloaded to: {local_config}")
     print()
 
     ci = loaders.CheckpointInfo.from_hf_repo(
         REPO_ID,
-        config_path=CONFIG_FILENAME,
+        config_path=local_config,
     )
 
     raw_config = getattr(ci, "raw_config", None)
