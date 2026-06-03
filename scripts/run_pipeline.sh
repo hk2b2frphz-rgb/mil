@@ -270,18 +270,40 @@ if run_step finetune; then
         log_info "CUDA_VISIBLE_DEVICES 未設定 → '$CUDA_VISIBLE_DEVICES' に自動設定"
     fi
 
+    # 元 config はリポジトリ固定のパスを持っているので、この run の実体に
+    # 合わせた一時コピーを作って渡す（train_data / run_dir を patch）。
+    RUN_FT_CONFIG="$OUT_ROOT/ft_config.yaml"
+    RUN_CKPT_DIR="$OUT_ROOT/checkpoints"
+    TRAIN_MANIFEST="$AUDIO_DIR/synthetic_moshi_train.jsonl"
+    if [[ ! -f "$TRAIN_MANIFEST" ]]; then
+        log_warn "train manifest が見つかりません: $TRAIN_MANIFEST"
+        log_warn "  audio ステップが完了している必要があります。"
+        exit 1
+    fi
+    mkdir -p "$RUN_CKPT_DIR"
+    # train_data と run_dir の行を実パスに書き換え（他は据え置き）
+    python3 - "$FT_CONFIG" "$RUN_FT_CONFIG" "$TRAIN_MANIFEST" "$RUN_CKPT_DIR" <<'PY'
+import re, sys, pathlib
+src, dst, manifest, ckpt = sys.argv[1:]
+text = pathlib.Path(src).read_text()
+text = re.sub(r'^(\s*train_data:\s*).*$', rf'\1"{manifest}"', text, flags=re.M)
+text = re.sub(r'^(\s*run_dir:\s*).*$',    rf'\1"{ckpt}"',    text, flags=re.M)
+pathlib.Path(dst).write_text(text)
+PY
+
     log_info "Moshi LoRA fine-tune を起動"
-    log_info "  ft repo: $MOSHI_FT_REPO"
-    log_info "  config:  $FT_CONFIG"
-    log_info "  nproc:   ${NPROC:-1}"
+    log_info "  ft repo:   $MOSHI_FT_REPO"
+    log_info "  config:    $RUN_FT_CONFIG  (元: $FT_CONFIG)"
+    log_info "  manifest:  $TRAIN_MANIFEST"
+    log_info "  ckpt:      $RUN_CKPT_DIR"
+    log_info "  nproc:     ${NPROC:-1}"
     log_info "  CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
-    # FT_CONFIG は既に絶対パスなのでそのまま渡せる
     ( cd "$MOSHI_FT_REPO" && \
         CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
         "${TORCHRUN_CMD[@]}" \
             --nproc-per-node "${NPROC:-1}" \
             --master_port "${MASTER_PORT:-29500}" \
-            -m train "$FT_CONFIG" )
+            -m train "$RUN_FT_CONFIG" )
     end_step
 fi
 
