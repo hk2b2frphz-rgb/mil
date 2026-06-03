@@ -257,12 +257,27 @@ if run_step finetune; then
         TORCHRUN_CMD=(uv run --project "$MOSHI_FT_REPO" torchrun)
     fi
 
+    # moshi-finetune の train.py は os.environ["CUDA_VISIBLE_DEVICES"] を
+    # 直読みするので、未設定だと KeyError になる。
+    # 未指定なら nproc に合わせて 0..N-1 をデフォルトにする。
+    if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+        _nproc="${NPROC:-1}"
+        _devs=""
+        for ((i=0; i<_nproc; i++)); do
+            _devs+="${_devs:+,}$i"
+        done
+        export CUDA_VISIBLE_DEVICES="$_devs"
+        log_info "CUDA_VISIBLE_DEVICES 未設定 → '$CUDA_VISIBLE_DEVICES' に自動設定"
+    fi
+
     log_info "Moshi LoRA fine-tune を起動"
     log_info "  ft repo: $MOSHI_FT_REPO"
     log_info "  config:  $FT_CONFIG"
     log_info "  nproc:   ${NPROC:-1}"
+    log_info "  CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
     # FT_CONFIG は既に絶対パスなのでそのまま渡せる
     ( cd "$MOSHI_FT_REPO" && \
+        CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
         "${TORCHRUN_CMD[@]}" \
             --nproc-per-node "${NPROC:-1}" \
             --master_port "${MASTER_PORT:-29500}" \
