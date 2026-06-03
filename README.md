@@ -127,6 +127,10 @@ bash scripts/run_experiment.sh exp001_lora_baseline ./data/runs/2026-06-02_13053
 
 # データ生成からまとめてやりたい場合（新しい本数で生成 → そのまま学習）
 bash scripts/generate_and_run.sh exp002_lora_3h_data 250
+
+# DEBUG=1 を付けると、学習開始前にデータの先頭 3 件の対話本文と
+# tokenizer 往復チェックを流す（DEBUG_N=5 で件数調整）
+DEBUG=1 bash scripts/run_experiment.sh exp001_lora_baseline ./data/runs/2026-06-02_130539
 ```
 
 各実験フォルダには:

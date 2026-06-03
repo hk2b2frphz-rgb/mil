@@ -224,6 +224,73 @@ echo "       CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 echo "       log:     $EXP_LOG"
 
 # ---------------------------------------------------------------------------
+# Debug プリント: 学習に入る前に、データセットの先頭サンプルの対話本文と
+# tokenizer round-trip を流す。DEBUG=1 で有効化。
+# ---------------------------------------------------------------------------
+if [[ "${DEBUG:-0}" == "1" ]]; then
+    echo
+    echo "[debug] DEBUG=1 が指定されたのでデータと tokenizer を点検します"
+    DEBUG_N="${DEBUG_N:-3}"
+    MOSHI_FT_REPO="$MOSHI_FT_REPO" \
+    EXP_TRAIN_MF="$EXP_TRAIN_MF" \
+    DEBUG_N="$DEBUG_N" \
+    uv run --project "$MOSHI_FT_REPO" python <<'PY'
+import json, os, pathlib, sys
+
+ft_repo = pathlib.Path(os.environ["MOSHI_FT_REPO"]).resolve()
+if (ft_repo / "finetune").is_dir():
+    sys.path.insert(0, str(ft_repo))
+
+mf = pathlib.Path(os.environ["EXP_TRAIN_MF"])
+n  = int(os.environ.get("DEBUG_N", "3"))
+
+print(f"[debug] manifest: {mf}")
+lines = [l for l in mf.read_text().splitlines() if l.strip()]
+print(f"[debug] manifest entries: {len(lines)} (先頭 {n} 件を表示)")
+
+# tokenizer 用意（cuda 使わない）
+from huggingface_hub import hf_hub_download
+from moshi.models import loaders
+local_cfg = hf_hub_download("llm-jp/llm-jp-moshi-v1", "moshi_lm_kwargs.json")
+ci = loaders.CheckpointInfo.from_hf_repo("llm-jp/llm-jp-moshi-v1", config_path=local_cfg)
+spm = ci.get_text_tokenizer()
+print(f"[debug] tokenizer vocab_size={spm.vocab_size()} bos={spm.bos_id()} eos={spm.eos_id()}")
+
+manifest_dir = mf.parent
+for i, line in enumerate(lines[:n]):
+    entry = json.loads(line)
+    wav_path = (manifest_dir / entry["path"]).resolve()
+    json_path = wav_path.with_suffix(".json")
+    print()
+    print(f"[debug] --- sample {i+1}/{n} ---")
+    print(f"[debug] wav : {wav_path.name}  ({entry.get('duration')} sec)")
+    if not json_path.exists():
+        print(f"[debug] (対応する {json_path.name} が無いのでテキストは表示できません)")
+        continue
+    meta = json.loads(json_path.read_text())
+    # alignments: [[text, [start, end], label], ...]
+    aligns = meta.get("alignments", [])
+    print(f"[debug] turns: {len(aligns)}")
+    for j, a in enumerate(aligns[:10]):
+        text, span, label = a
+        print(f"[debug]   [{j:02d}] ({label}) {span[0]:.2f}-{span[1]:.2f}s: {text}")
+    if aligns:
+        # 1 ターン目のテキストで encode→decode 確認
+        first_text = aligns[0][0]
+        ids = spm.encode(first_text)
+        back = spm.decode(ids)
+        print(f"[debug] round-trip check on first turn:")
+        print(f"[debug]   in : {first_text!r}")
+        print(f"[debug]   ids: {ids[:20]}{'...' if len(ids) > 20 else ''} (len={len(ids)})")
+        print(f"[debug]   out: {back!r}")
+        if back.strip() != first_text.strip():
+            print(f"[debug]   ⚠  round-trip mismatch — tokenizer がテキストを完全に往復できていません")
+print()
+print("[debug] 確認終了。学習を起動します。")
+PY
+fi
+
+# ---------------------------------------------------------------------------
 # 5) 起動。run.log にも tee。
 # ---------------------------------------------------------------------------
 (
