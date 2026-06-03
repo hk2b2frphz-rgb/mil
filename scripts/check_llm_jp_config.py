@@ -326,11 +326,101 @@ def main(args) -> int:
         out = itok(wav, sample["start_time_sec"], sample["path"])
         return out
 
-    _step("16. InterleavedTokenizer(wav, ...) で 1 件 tokenize", _tokenize_one)
+    one = _step("16. InterleavedTokenizer(wav, ...) で 1 件 tokenize", _tokenize_one)
+
+    # ------------------------------------------------------------------
+    # 17. (任意) LoRA checkpoint を当てる
+    # ------------------------------------------------------------------
+    if args.lora_ckpt:
+        import safetensors.torch as st
+
+        ckpt_path = Path(args.lora_ckpt)
+        if ckpt_path.is_dir():
+            cand = ckpt_path / "lora.safetensors"
+            if not cand.exists():
+                cand = ckpt_path / "consolidated.safetensors"
+            ckpt_path = cand
+
+        def _load_lora():
+            lora_sd = st.load_file(str(ckpt_path))
+            print(f"       -> {len(lora_sd)} tensors in {ckpt_path}")
+            for k in list(lora_sd.keys()):
+                lora_sd[k] = lora_sd[k].to(torch.bfloat16)
+            missing_unexpected = model.load_state_dict(lora_sd, strict=False, assign=True)
+            try:
+                missing = list(missing_unexpected.missing_keys)
+                unexpected = list(missing_unexpected.unexpected_keys)
+            except AttributeError:
+                missing, unexpected = [], []
+            print(f"       -> applied LoRA: missing={len(missing)} unexpected={len(unexpected)}")
+            if unexpected:
+                print(f"       -> first unexpected keys: {unexpected[:5]}")
+            return None
+
+        _step(f"17. LoRA checkpoint をロード ({ckpt_path.name})", _load_lora)
+    else:
+        print(f"{INFO} step: 17. LoRA checkpoint — skipped (--lora-ckpt 未指定)")
+
+    # ------------------------------------------------------------------
+    # 18-19. (--generate) 1 batch forward して GT vs predicted text を並べる
+    # ------------------------------------------------------------------
+    if not args.generate:
+        print()
+        print(f"{PASS} 全ステップ通過。 --generate で 1 batch forward して "
+              f"GT/モデル予測テキストを並べることもできます。")
+        return 0
+
+    from finetune.data.data_loader import Batch
+
+    def _forward_one():
+        codes = one.codes if hasattr(one, "codes") else one
+        if not isinstance(codes, torch.Tensor):
+            raise RuntimeError(f"unexpected tokenizer output type: {type(one)}")
+        codes = codes.unsqueeze(0).cuda() if codes.dim() == 2 else codes.cuda()
+        model.eval()
+        with torch.no_grad():
+            out = model(codes=codes, condition_tensors=None)
+        return codes, out
+
+    codes_batched, output = _step("18. model(codes=codes) で 1 batch forward", _forward_one)
+
+    def _decode_pred():
+        text_logits = output.text_logits      # [B, T, vocab]
+        # GT: 入力 codes の text 部分（model.audio_offset 個分の先頭がテキスト軸）
+        # text_padding_token_id / end_of_text_padding_id は表示時に除外
+        text_padding_ids = {model.text_padding_token_id, model.end_of_text_padding_id}
+        # codes は通常 [B, K, T]。テキスト軸が最初のもの。
+        if codes_batched.dim() == 3:
+            gt_text_ids = codes_batched[0, 0, :].tolist()
+        else:
+            gt_text_ids = codes_batched[0, :].tolist()
+        pred_text_ids = text_logits[0].argmax(dim=-1).tolist()
+
+        def _decode_filtered(ids):
+            keep = [i for i in ids if i not in text_padding_ids and i >= 0]
+            return spm.decode(keep)
+
+        gt_text = _decode_filtered(gt_text_ids)
+        pred_text = _decode_filtered(pred_text_ids)
+        print()
+        print("=" * 70)
+        print(" Ground truth text (interleaved input から復元):")
+        print("=" * 70)
+        print(gt_text)
+        print()
+        print("=" * 70)
+        print(" Model predicted text (teacher-forced argmax):")
+        print("=" * 70)
+        print(pred_text)
+        print("=" * 70)
+        return None
+
+    _step("19. 予測テキストを decode して表示", _decode_pred)
 
     print()
-    print(f"{PASS} 全ステップ通過。train.py で落ちる場合は optimizer init / NCCL collective / "
-          "学習ループ内のいずれかが原因。")
+    print(f"{PASS} 完了。GT と predicted が日本語として近いほど学習が進んでいる兆候。")
+    print("       完全一致は教師強制なので学習が進めば近づく。崩れた文字列ばかりなら")
+    print("       LoRA がまだ効いていない / lr が低すぎ / step 不足のサイン。")
     return 0
 
 
@@ -339,6 +429,13 @@ def _parse_args(argv):
     p = argparse.ArgumentParser()
     p.add_argument("--manifest", default=None,
                    help="train.jsonl への path。指定すると step 14-16 が走る。")
+    p.add_argument("--lora-ckpt", default=None,
+                   help="保存された LoRA ckpt の dir or safetensors path。"
+                        "例: experiments/exp001_lora_baseline/checkpoints/"
+                        "checkpoint_000200/consolidated")
+    p.add_argument("--generate", action="store_true",
+                   help="1 batch forward して GT と model predicted text を表示。"
+                        "--manifest が必須。--lora-ckpt 併用で学習中の進捗確認になる。")
     return p.parse_args(argv)
 
 
