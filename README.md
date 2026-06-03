@@ -122,10 +122,13 @@ STEPS=audio bash scripts/run_pipeline.sh                 # 音声化だけ再実
 のクリーンリラン手順。`OUT_ROOT` には既存の run dir（`./data/runs/<日付>` 等）を
 渡すこと。
 
+サーバー側でそのまま貼れるコマンド（`OUT_ROOT` は現状の run dir に固定済み。
+別の run を回す場合は `ls data/runs/` で確認して書き換える）:
+
 ```bash
 git pull
 cd ../moshi-finetune && git restore pyproject.toml && rm -f uv.lock && rm -rf .venv && cd -
-STEPS=finetune OUT_ROOT=./data/runs/<YYYY-MM-DD_HHMMSS> bash scripts/run_pipeline.sh 2>&1 | tee /tmp/ft.log | tail -100
+STEPS=finetune OUT_ROOT=./data/runs/2026-06-02_130539 bash scripts/run_pipeline.sh 2>&1 | tee /tmp/ft.log | tail -100
 ```
 
 ポイント:
