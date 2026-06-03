@@ -128,8 +128,11 @@ STEPS=audio bash scripts/run_pipeline.sh                 # 音声化だけ再実
 ```bash
 git pull
 cd ../moshi-finetune && git restore pyproject.toml && rm -f uv.lock && rm -rf .venv && cd -
-STEPS=finetune OUT_ROOT=./data/runs/2026-06-02_130539 bash scripts/run_pipeline.sh 2>&1 | tee /tmp/ft.log | tail -100
+STEPS=finetune OUT_ROOT=./data/runs/2026-06-02_130539 bash scripts/run_pipeline.sh 2>&1 | tee /tmp/ft.log
 ```
+
+`tee` で端末にも `/tmp/ft.log` にもリアルタイム出力されます。終わった後に末尾だけ
+見たいときは別ターミナルで `tail -n 200 /tmp/ft.log`、走行中追跡なら `tail -f /tmp/ft.log`。
 
 ポイント:
 
