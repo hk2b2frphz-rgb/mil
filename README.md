@@ -234,17 +234,30 @@ llm-jp/llm-jp-moshi-v1 は同梱 config を `moshi_lm_kwargs.json` という名�
 内部の Kyutai 英語 Moshi デフォルト構造にフォールバックして shape が合わず、
 `safetensors` の state_dict load 中に native crash する。
 
-`moshi_paths.config_path: "moshi_lm_kwargs.json"` が **実際に効いているか** を
-別建てで確認する小スクリプト:
+`scripts/check_llm_jp_config.py` は train.py のモデル init 経路を **ステップ毎** に
+踏み、各ステップで `[ OK ]` / `[FAIL]` を表示します。SIGSEGV がどこで起きているかを
+torchrun 起動なしで切り分けるのに使います:
 
 ```bash
 uv run --project ../moshi-finetune python scripts/check_llm_jp_config.py
 ```
 
-出力に `raw_config is None? False` と keys が並べば OK（config は届いている）。
-`True` が出るなら moshi 側 loader の API が想定と違うので、`scripts/check_llm_jp_config.py`
-が表示するヒントに従って `moshi.models.loaders` のソースを覗き、正しい引数名を
-特定して config.yaml を更新する。
+確認ステップ:
+
+1. `hf_hub_download(moshi_lm_kwargs.json)` — config の DL
+2. `CheckpointInfo.from_hf_repo(config_path=<local>)` — loader 構築
+3. `raw_config` が non-empty dict か
+4. moshi / mimi / tokenizer のローカルファイル存在
+5. meta-device モデル構築（`get_moshi(device='meta', load_weight=False)`）
+6. `safetensors.torch.load_file(moshi_weights)` — 15.4GB の重み読み込み
+7. bf16 への dtype 変換
+8. `model.load_state_dict(...)` — **形状不一致があると C++ 側で死ぬ典型ポイント**
+9. `model.cuda()` — GPU 転送
+
+すべて `[ OK ]` で終わっているのに train.py だけ落ちる場合、原因は data loader /
+mimi codec init / optimizer / NCCL 集合通信 のいずれか（モデル init より後）です。
+
+逆にステップ N で `[FAIL]` が出れば、その N がそのまま修正対象になります。
 
 #### 個別ステップ
 

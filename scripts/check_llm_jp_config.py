@@ -1,84 +1,209 @@
-"""Verify that moshi-finetune's loader picks up llm-jp's moshi_lm_kwargs.json.
+"""Stepwise sanity check for llm-jp/llm-jp-moshi-v1 + moshi-finetune.
 
 Usage (from repo root):
     uv run --project ../moshi-finetune python scripts/check_llm_jp_config.py
 
-Background:
-    llm-jp/llm-jp-moshi-v1 ships its architecture config as
-    `moshi_lm_kwargs.json` rather than the default `config.json` that
-    moshi-finetune's loader looks for. If the loader does not pick it up,
-    it falls back to the Kyutai English Moshi defaults (`loaders._lm_kwargs`)
-    and the resulting shape mismatch makes the safetensors state_dict load
-    crash natively (SIGSEGV / exitcode -11) during model initialization.
+Mirrors the loading steps train.py performs but stops *between* each step so
+the failing one is obvious. Each step prints either [OK] or [FAIL] with a
+short message. Exits non-zero on the first failure so it can be chained
+into other scripts.
 
-    This script reproduces the same loader path that train.py uses, but
-    stops just after the config is read so we can confirm:
-      - `raw_config is None`  -> loader silently ignored the override
-      - `raw_config is dict`  -> config was correctly attached
+Steps:
+    1. hf_hub_download(moshi_lm_kwargs.json)
+    2. CheckpointInfo.from_hf_repo with the local config path
+    3. raw_config presence / keys
+    4. model file presence (moshi weights, mimi weights, tokenizer)
+    5. meta-device model construction via get_moshi(...)
+    6. safetensors weight load
+    7. dtype conversion (bf16)
+    8. state_dict apply (model.load_state_dict)
+    9. model.cuda() (only if CUDA is available)
 
-Exit code:
-    0 if `raw_config` is a dict with at least one key.
-    1 otherwise (and prints a diagnostic message).
+Run as part of debugging exitcode -11 / model-init segfaults to localize
+the failure without launching torchrun.
 """
 
 from __future__ import annotations
 
+import os
 import sys
-
-from huggingface_hub import hf_hub_download
-from moshi.models import loaders
+import traceback
+from typing import Any, Callable
 
 
 REPO_ID = "llm-jp/llm-jp-moshi-v1"
 CONFIG_FILENAME = "moshi_lm_kwargs.json"
 
+PASS = "\033[1;32m[ OK ]\033[0m"
+FAIL = "\033[1;31m[FAIL]\033[0m"
+INFO = "\033[1;34m[INFO]\033[0m"
+
+
+def _step(name: str, fn: Callable[[], Any]) -> Any:
+    """Run fn(); on success print [OK] name; on failure print [FAIL] + traceback and exit 1."""
+    print(f"{INFO} step: {name}")
+    try:
+        result = fn()
+    except SystemExit:
+        raise
+    except BaseException as exc:  # also catches signals raised as exceptions
+        print(f"{FAIL} {name}")
+        print(f"       {type(exc).__name__}: {exc}")
+        traceback.print_exc(limit=4)
+        sys.exit(1)
+    print(f"{PASS} {name}")
+    return result
+
 
 def main() -> int:
-    print(f"[check] hf_repo_id : {REPO_ID}")
-    print(f"[check] config file in repo: {CONFIG_FILENAME}")
-
-    # moshi の loader は config_path を「ローカルファイルパス」として読みに行くので、
-    # HF リポジトリのファイル名をそのまま渡すと FileNotFoundError になる。
-    # まず hf_hub_download で落としてから絶対パスを渡す。
-    local_config = hf_hub_download(REPO_ID, CONFIG_FILENAME)
-    print(f"[check] downloaded to: {local_config}")
+    print(f"{INFO} hf_repo_id : {REPO_ID}")
+    print(f"{INFO} config file: {CONFIG_FILENAME}")
     print()
 
-    ci = loaders.CheckpointInfo.from_hf_repo(
-        REPO_ID,
-        config_path=local_config,
+    # ------------------------------------------------------------------
+    # 1. download config json
+    # ------------------------------------------------------------------
+    from huggingface_hub import hf_hub_download
+
+    local_config = _step(
+        "1. download moshi_lm_kwargs.json from HF",
+        lambda: hf_hub_download(REPO_ID, CONFIG_FILENAME),
+    )
+    print(f"       -> {local_config}")
+
+    # ------------------------------------------------------------------
+    # 2. CheckpointInfo.from_hf_repo(config_path=<local>)
+    # ------------------------------------------------------------------
+    from moshi.models import loaders
+
+    ci = _step(
+        "2. CheckpointInfo.from_hf_repo(config_path=<local>)",
+        lambda: loaders.CheckpointInfo.from_hf_repo(REPO_ID, config_path=local_config),
     )
 
-    raw_config = getattr(ci, "raw_config", None)
-    print(f"[check] raw_config is None? {raw_config is None}")
-    if raw_config is not None:
-        keys = sorted(raw_config.keys())
-        print(f"[check] raw_config keys ({len(keys)}): {keys}")
+    # ------------------------------------------------------------------
+    # 3. raw_config attached?
+    # ------------------------------------------------------------------
+    def _check_raw_config() -> dict:
+        raw = getattr(ci, "raw_config", None)
+        if raw is None:
+            raise RuntimeError(
+                "raw_config is None — loader silently ignored the override. "
+                "Inspect moshi.models.loaders to find the correct kwarg name."
+            )
+        if not raw:
+            raise RuntimeError("raw_config is an empty dict.")
+        return raw
+
+    raw_config = _step("3. raw_config is non-empty dict", _check_raw_config)
+    print(f"       -> {len(raw_config)} keys: {sorted(raw_config.keys())}")
+
+    # ------------------------------------------------------------------
+    # 4. model files reachable on disk
+    # ------------------------------------------------------------------
+    def _check_files() -> dict:
+        paths = {
+            "moshi_weights": getattr(ci, "moshi_weights", None),
+            "mimi_weights": getattr(ci, "mimi_weights", None),
+            "tokenizer": getattr(ci, "tokenizer", None)
+            or getattr(ci, "tokenizer_path", None),
+        }
+        for name, p in paths.items():
+            if p is None:
+                raise RuntimeError(f"{name} is None on CheckpointInfo")
+            if not os.path.exists(str(p)):
+                raise RuntimeError(f"{name} path does not exist on disk: {p}")
+            size = os.path.getsize(str(p))
+            print(f"       -> {name}: {p} ({size/1e6:.1f} MB)")
+        return paths
+
+    _step("4. model files exist locally", _check_files)
+
+    # ------------------------------------------------------------------
+    # 5. meta-device model construction
+    # ------------------------------------------------------------------
+    import torch
+
+    def _build_meta_model():
+        with torch.device("meta"):
+            model = ci.get_moshi(
+                device="meta",
+                dtype=torch.bfloat16,
+                lm_kwargs_overrides={
+                    "gradient_checkpointing": True,
+                    "lora": True,
+                    "lora_rank": 32,
+                    "lora_scaling": 2.0,
+                },
+                load_weight=False,
+            )
+        n_params = sum(p.numel() for p in model.parameters())
+        print(f"       -> total params: {n_params/1e9:.2f} B")
+        return model
+
+    model = _step("5. get_moshi(device='meta', load_weight=False)", _build_meta_model)
+
+    # ------------------------------------------------------------------
+    # 6. safetensors weight load
+    # ------------------------------------------------------------------
+    import safetensors.torch as st
+
+    def _load_weights():
+        moshi_path = getattr(ci, "moshi_weights")
+        sd = st.load_file(moshi_path)
+        print(f"       -> {len(sd)} tensors loaded from safetensors")
+        return sd
+
+    state_dict = _step("6. safetensors.torch.load_file(moshi_weights)", _load_weights)
+
+    # ------------------------------------------------------------------
+    # 7. dtype conversion
+    # ------------------------------------------------------------------
+    def _to_bf16():
+        for k in state_dict:
+            state_dict[k] = state_dict[k].to(torch.bfloat16)
+        return None
+
+    _step("7. convert state_dict tensors to bf16", _to_bf16)
+
+    # ------------------------------------------------------------------
+    # 8. load_state_dict (ここで shape mismatch があると C++ 側で死ぬ)
+    # ------------------------------------------------------------------
+    def _apply_state_dict():
+        missing_unexpected = model.load_state_dict(state_dict, strict=False, assign=True)
+        try:
+            missing = list(missing_unexpected.missing_keys)
+            unexpected = list(missing_unexpected.unexpected_keys)
+        except AttributeError:
+            missing, unexpected = [], []
+        print(f"       -> missing keys   : {len(missing)} (show up to 5: {missing[:5]})")
+        print(f"       -> unexpected keys: {len(unexpected)} (show up to 5: {unexpected[:5]})")
+        meta_params = [n for n, p in model.named_parameters() if p.is_meta]
+        if meta_params:
+            raise RuntimeError(
+                f"{len(meta_params)} parameters are still on meta after load_state_dict; "
+                f"first few: {meta_params[:5]}"
+            )
+        return None
+
+    _step("8. model.load_state_dict(state_dict, strict=False, assign=True)", _apply_state_dict)
+
+    # ------------------------------------------------------------------
+    # 9. move to GPU (only if CUDA is visible)
+    # ------------------------------------------------------------------
+    if torch.cuda.is_available():
+        def _to_cuda():
+            model.cuda()
+            return None
+
+        _step("9. model.cuda()", _to_cuda)
+    else:
+        print(f"{INFO} step: 9. model.cuda() — skipped (no CUDA visible)")
+
     print()
-    print(f"[check] moshi_weights: {ci.moshi_weights}")
-    print(f"[check] mimi_weights : {ci.mimi_weights}")
-    print(f"[check] tokenizer    : {getattr(ci, 'tokenizer', None) or getattr(ci, 'tokenizer_path', None)}")
-
-    if raw_config is None:
-        print()
-        print(
-            "[check] FAIL: loader did not pick up moshi_lm_kwargs.json.\n"
-            "        The config_path argument may be wired differently in this\n"
-            "        moshi version. Inspect the installed loaders.py and find\n"
-            "        the correct way to point at moshi_lm_kwargs.json:\n"
-            "          python -c \"import moshi.models.loaders as l, inspect; "
-            "print(inspect.getsourcefile(l))\""
-        )
-        return 1
-
-    if not raw_config:
-        print()
-        print("[check] FAIL: raw_config dict is empty.")
-        return 1
-
-    print()
-    print("[check] OK: config attached. If model init still segfaults, the cause")
-    print("       is elsewhere (state_dict key drift, sphn/mimi native init, etc).")
+    print(f"{PASS} all checks passed. "
+          f"If train.py still crashes, the cause is past model init "
+          f"(data loader, mimi codec, optimizer init, NCCL collective, etc).")
     return 0
 
 
