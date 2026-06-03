@@ -167,7 +167,8 @@ def main() -> int:
     _step("7. convert state_dict tensors to bf16", _to_bf16)
 
     # ------------------------------------------------------------------
-    # 8. load_state_dict (ここで shape mismatch があると C++ 側で死ぬ)
+    # 8. load_state_dict (shape mismatch があると C++ 側で死ぬ)
+    #    LoRA 層は checkpoint に無いため meta に残るのは正常。次の 8b で初期化する。
     # ------------------------------------------------------------------
     def _apply_state_dict():
         missing_unexpected = model.load_state_dict(state_dict, strict=False, assign=True)
@@ -179,14 +180,34 @@ def main() -> int:
         print(f"       -> missing keys   : {len(missing)} (show up to 5: {missing[:5]})")
         print(f"       -> unexpected keys: {len(unexpected)} (show up to 5: {unexpected[:5]})")
         meta_params = [n for n, p in model.named_parameters() if p.is_meta]
-        if meta_params:
+        non_lora_meta = [n for n in meta_params if "lora" not in n.lower()]
+        print(f"       -> meta params total: {len(meta_params)} (lora-only: {len(meta_params) - len(non_lora_meta)})")
+        if non_lora_meta:
             raise RuntimeError(
-                f"{len(meta_params)} parameters are still on meta after load_state_dict; "
-                f"first few: {meta_params[:5]}"
+                f"{len(non_lora_meta)} non-LoRA parameters are still on meta after "
+                f"load_state_dict; first few: {non_lora_meta[:5]}\n"
+                f"これは llm-jp の重みと moshi-finetune の LMModel のキー名がずれている兆候。"
             )
         return None
 
     _step("8. model.load_state_dict(state_dict, strict=False, assign=True)", _apply_state_dict)
+
+    # ------------------------------------------------------------------
+    # 8b. initialize LoRA layers (train.py / wrapped_model.py:147-150 と同じ処理)
+    # ------------------------------------------------------------------
+    from finetune.wrapped_model import initialize_lora_parameters
+
+    def _init_lora():
+        initialize_lora_parameters(model, torch.bfloat16)
+        remaining = [n for n, p in model.named_parameters() if p.is_meta]
+        if remaining:
+            raise RuntimeError(
+                f"After initialize_lora_parameters, {len(remaining)} params still on meta: "
+                f"{remaining[:5]}"
+            )
+        return None
+
+    _step("8b. initialize_lora_parameters(model, bfloat16)", _init_lora)
 
     # ------------------------------------------------------------------
     # 9. move to GPU (only if CUDA is visible)
