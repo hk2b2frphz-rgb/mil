@@ -159,6 +159,27 @@ if [[ ! -d "$MOSHI_FT_REPO/.venv" ]]; then
     exit 1
 fi
 
+# 単 GPU で BACKEND="nccl" のまま init_process_group → dist.barrier すると
+# 環境によっては無言で hang する。WORLD_SIZE=1 のときだけ gloo にする。
+DISTRIBUTED_PY="$MOSHI_FT_REPO/finetune/distributed.py"
+if [[ -f "$DISTRIBUTED_PY" ]] && ! grep -q 'AUTO_PATCH_BACKEND_WORLD1' "$DISTRIBUTED_PY"; then
+    echo "[exp] finetune/distributed.py の BACKEND を WORLD_SIZE=1 で gloo に分岐"
+    python3 - "$DISTRIBUTED_PY" <<'PY'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1])
+src = p.read_text()
+old = 'BACKEND = "nccl"'
+new = (
+    '# AUTO_PATCH_BACKEND_WORLD1: single GPU は gloo にして NCCL barrier hang を回避\n'
+    'import os as _os\n'
+    'BACKEND = "gloo" if _os.environ.get("WORLD_SIZE", "1") == "1" else "nccl"'
+)
+if old in src:
+    src = src.replace(old, new, 1)
+    p.write_text(src)
+PY
+fi
+
 # CUDA_VISIBLE_DEVICES 既定値
 NPROC="${NPROC:-1}"
 if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
