@@ -11,6 +11,10 @@ data:
 
 moshi_paths:
   hf_repo_id: "llm-jp/llm-jp-moshi-v1"
+  # llm-jp は config を `moshi_lm_kwargs.json` という名前で同梱しており、
+  # moshi-finetune がデフォルトで探す `config.json` ではない。明示しないと
+  # 内部デフォルト構造にフォールバックし、初期化時に segfault する。
+  config_path: "moshi_lm_kwargs.json"
 
 full_finetuning: false
 lora:

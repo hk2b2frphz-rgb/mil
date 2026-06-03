@@ -10,6 +10,10 @@ moshi_paths:
   # 日本語 Moshi の重み。英語 Moshi に置き換えたい場合は
   # kyutai/moshiko-pytorch-bf16 など。
   hf_repo_id: "llm-jp/llm-jp-moshi-v1"
+  # llm-jp 同梱の config は `moshi_lm_kwargs.json` という名前。
+  # 指定しないと moshi-finetune は `config.json` を探して見つからず、
+  # 内部の英語 Moshi デフォルト構造にフォールバックして初期化時 segfault する。
+  config_path: "moshi_lm_kwargs.json"
 
 run_dir: "./checkpoints/moshi_lora_jp_loneliness"
 
