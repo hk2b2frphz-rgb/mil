@@ -289,6 +289,25 @@ PY
 fi
 
 # CUDA_VISIBLE_DEVICES 既定値
+INTERLEAVER_PY="$MOSHI_FT_REPO/finetune/data/interleaver.py"
+if [[ -f "$INTERLEAVER_PY" ]] && ! grep -q 'AUTO_PATCH_NL_FALLBACK' "$INTERLEAVER_PY"; then
+    echo "[exp] finetune/data/interleaver.py に tokenizer newline fallback を適用"
+    python3 - "$INTERLEAVER_PY" <<'PY'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1])
+src = p.read_text()
+old = '    nl_piece = tokenizer.encode("\\n")[-1]'
+new = (
+    '    # AUTO_PATCH_NL_FALLBACK: JP tokenizer can return [] for "\\n"\n'
+    '    _nl_enc = tokenizer.encode("\\n") or tokenizer.encode(" ")\n'
+    '    nl_piece = _nl_enc[-1] if _nl_enc else 0'
+)
+if old in src:
+    src = src.replace(old, new, 1)
+    p.write_text(src)
+PY
+fi
+
 NPROC="${NPROC:-1}"
 if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
     _devs=""
