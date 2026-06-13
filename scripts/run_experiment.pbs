@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N job_run
+#PBS -l select=1:host=xvn_s:ncpus=8:ngpus=1:mem=64gb
+#PBS -l walltime=24:00:00
+#PBS -j oe
+
+# Full server job: generate synthetic data, then launch fine-tuning.
+#
+# Minimal submit:
+#   qsub scripts/run_experiment.pbs
+#
+# Common submit with WandB and hyperparameter overrides:
+#   qsub -v NUM_CASES=250,WANDB_PROJECT=dummy,HP_LR=5e-6,HP_LORA_RANK=64,HP_MAX_STEPS=800 scripts/run_experiment.pbs
+#
+# Optional variables:
+#   BASE_EXP=exp001_lora_baseline
+#   NUM_CASES=100
+#   HP_LR=2e-6
+#   HP_LORA_RANK=32
+#   HP_LORA_SCALING=2.0
+#   HP_BATCH_SIZE=8
+#   HP_NUM_MICROBATCHES=1
+#   HP_MAX_STEPS=500
+#   HP_CKPT_FREQ=50
+#   HP_EVAL_FREQ=25
+#   WANDB_PROJECT=dummy
+#   WANDB_RUN_NAME=run_<id>
+#   WANDB_API_KEY=<key>
+#   WANDB_OFFLINE=true
+#
+# If xvn_s is a queue rather than a host on your PBS cluster, replace the
+# select line above with the site's resource line and add:
+#   #PBS -q xvn_s
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+BASE_EXP="${BASE_EXP:-exp001_lora_baseline}"
+NUM_CASES="${NUM_CASES:-100}"
+NPROC="${NPROC:-1}"
+
+if ! [[ "$NUM_CASES" =~ ^[0-9]+$ ]] || [[ "$NUM_CASES" -lt 1 ]]; then
+    echo "ERROR: NUM_CASES must be a positive integer. got: $NUM_CASES" >&2
+    exit 1
+fi
+
+mkdir -p experiments/pbs_logs
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+RUN_ID="run_${JOB_ID_SHORT}"
+JOB_LOG="experiments/pbs_logs/${RUN_ID}.log"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
+export NPROC
+export RUN_ID
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export WANDB_RUN_NAME="${WANDB_RUN_NAME:-$RUN_ID}"
+
+echo "===== job ====="
+echo "job_id:     ${PBS_JOBID:-n/a}"
+echo "job_name:   ${PBS_JOBNAME:-n/a}"
+echo "host:       $(hostname)"
+echo "workdir:    $(pwd)"
+echo "run_id:     ${RUN_ID}"
+echo "base_exp:   ${BASE_EXP}"
+echo "num_cases:  ${NUM_CASES}"
+echo "job_log:    ${JOB_LOG}"
+echo "nproc:      ${NPROC}"
+echo "cuda:       ${CUDA_VISIBLE_DEVICES}"
+echo "wandb:      ${WANDB_PROJECT:-off}"
+echo "started_at: $(date -Iseconds)"
+echo "==============="
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH. Load the server environment/module before qsub." >&2
+    exit 1
+}
+
+if [[ -n "${WANDB_PROJECT:-}" ]]; then
+    if ! uv run --project ../moshi-finetune python -c "import wandb" >/dev/null 2>&1; then
+        echo "wandb is not installed in ../moshi-finetune; installing into that uv environment."
+        ( cd ../moshi-finetune && uv pip install wandb )
+    fi
+fi
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+else
+    echo "WARN: nvidia-smi is not available on PATH."
+fi
+
+echo
+echo "[1/2] generating data"
+RUN_ID="$RUN_ID" \
+NUM_CASES="$NUM_CASES" \
+STEPS=use_cases,dialogues,audio \
+bash scripts/run_pipeline.sh
+
+SRC_RUN_DIR="./data/runs/${RUN_ID}"
+if [[ ! -f "$SRC_RUN_DIR/training_set/synthetic_moshi_train.jsonl" ]]; then
+    echo "ERROR: generated manifest not found: $SRC_RUN_DIR/training_set/synthetic_moshi_train.jsonl" >&2
+    exit 1
+fi
+
+echo
+echo "[2/2] fine-tuning"
+bash scripts/run_experiment.sh "$BASE_EXP" "$SRC_RUN_DIR"
+
+echo "finished_at: $(date -Iseconds)"

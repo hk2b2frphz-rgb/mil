@@ -148,6 +148,113 @@ if m_repo and m_conf:
 dst.write_text(text)
 PY
 
+# Optional launch-time hyperparameter / wandb overrides.
+# Use HP_* env vars from PBS/qsub without editing experiment config files.
+python3 - "$RESOLVED_CONFIG" <<'PY'
+import os
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+
+TOP_LEVEL = {
+    "HP_BATCH_SIZE": "batch_size",
+    "HP_NUM_MICROBATCHES": "num_microbatches",
+    "HP_MAX_STEPS": "max_steps",
+    "HP_MAX_NORM": "max_norm",
+    "HP_DURATION_SEC": "duration_sec",
+    "HP_GRADIENT_CHECKPOINTING": "gradient_checkpointing",
+    "HP_PARAM_DTYPE": "param_dtype",
+    "HP_SEED": "seed",
+    "HP_LOG_FREQ": "log_freq",
+    "HP_CKPT_FREQ": "ckpt_freq",
+    "HP_NUM_CKPT_KEEP": "num_ckpt_keep",
+    "HP_DO_EVAL": "do_eval",
+    "HP_EVAL_FREQ": "eval_freq",
+}
+SECTIONS = {
+    "lora": {
+        "HP_LORA_ENABLE": "enable",
+        "HP_LORA_RANK": "rank",
+        "HP_LORA_SCALING": "scaling",
+        "HP_LORA_FT_EMBED": "ft_embed",
+    },
+    "optim": {
+        "HP_LR": "lr",
+        "HP_WEIGHT_DECAY": "weight_decay",
+        "HP_PCT_START": "pct_start",
+    },
+}
+
+
+def yaml_value(raw: str) -> str:
+    low = raw.lower()
+    if low in {"true", "false"}:
+        return low
+    if low in {"null", "none"}:
+        return "null"
+    if re.fullmatch(r"[-+]?\d+(\.\d+)?([eE][-+]?\d+)?", raw):
+        return raw
+    return '"' + raw.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def set_top_level(src: str, key: str, value: str) -> str:
+    line = f"{key}: {value}"
+    pat = rf"^{re.escape(key)}\s*:.*$"
+    if re.search(pat, src, flags=re.M):
+        return re.sub(pat, line, src, count=1, flags=re.M)
+    return src.rstrip() + "\n" + line + "\n"
+
+
+def set_section_value(src: str, section: str, key: str, value: str) -> str:
+    section_pat = rf"^{re.escape(section)}:\s*$"
+    match = re.search(section_pat, src, flags=re.M)
+    if not match:
+        return src.rstrip() + f"\n{section}:\n  {key}: {value}\n"
+    start = match.end()
+    next_match = re.search(r"^[A-Za-z0-9_][A-Za-z0-9_-]*:\s*", src[start:], flags=re.M)
+    end = start + next_match.start() if next_match else len(src)
+    block = src[start:end]
+    key_pat = rf"^(\s*){re.escape(key)}\s*:.*$"
+    if re.search(key_pat, block, flags=re.M):
+        block = re.sub(key_pat, rf"\1{key}: {value}", block, count=1, flags=re.M)
+    else:
+        if block and not block.endswith("\n"):
+            block += "\n"
+        block += f"  {key}: {value}\n"
+    return src[:start] + block + src[end:]
+
+
+for env_name, key in TOP_LEVEL.items():
+    raw = os.environ.get(env_name)
+    if raw:
+        text = set_top_level(text, key, yaml_value(raw))
+
+for section, mapping in SECTIONS.items():
+    for env_name, key in mapping.items():
+        raw = os.environ.get(env_name)
+        if raw:
+            text = set_section_value(text, section, key, yaml_value(raw))
+
+wandb_project = os.environ.get("WANDB_PROJECT")
+if wandb_project:
+    text = set_section_value(text, "wandb", "project", yaml_value(wandb_project))
+    text = set_section_value(
+        text,
+        "wandb",
+        "run_name",
+        yaml_value(os.environ.get("WANDB_RUN_NAME") or path.parent.name),
+    )
+    if os.environ.get("WANDB_API_KEY"):
+        text = set_section_value(text, "wandb", "key", yaml_value(os.environ["WANDB_API_KEY"]))
+    if os.environ.get("WANDB_OFFLINE"):
+        text = set_section_value(text, "wandb", "offline", yaml_value(os.environ["WANDB_OFFLINE"]))
+
+path.write_text(text)
+PY
+
 # ---------------------------------------------------------------------------
 # 4) moshi-finetune の依存（pyproject patch / venv / setuptools 等）は
 #    run_pipeline.sh の finetune ステップと同じ処理を ad-hoc に行う。
