@@ -148,7 +148,7 @@ if m_repo and m_conf:
 dst.write_text(text)
 PY
 
-# Optional launch-time hyperparameter / wandb overrides.
+# Optional launch-time hyperparameter overrides.
 # Use HP_* env vars from PBS/qsub without editing experiment config files.
 python3 - "$RESOLVED_CONFIG" <<'PY'
 import os
@@ -237,20 +237,6 @@ for section, mapping in SECTIONS.items():
         raw = os.environ.get(env_name)
         if raw:
             text = set_section_value(text, section, key, yaml_value(raw))
-
-wandb_project = os.environ.get("WANDB_PROJECT")
-if wandb_project:
-    text = set_section_value(text, "wandb", "project", yaml_value(wandb_project))
-    text = set_section_value(
-        text,
-        "wandb",
-        "run_name",
-        yaml_value(os.environ.get("WANDB_RUN_NAME") or path.parent.name),
-    )
-    if os.environ.get("WANDB_API_KEY"):
-        text = set_section_value(text, "wandb", "key", yaml_value(os.environ["WANDB_API_KEY"]))
-    if os.environ.get("WANDB_OFFLINE"):
-        text = set_section_value(text, "wandb", "offline", yaml_value(os.environ["WANDB_OFFLINE"]))
 
 path.write_text(text)
 PY
@@ -425,3 +411,20 @@ fi
     CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
     "${LAUNCH_CMD[@]}"
 ) 2>&1 | tee "$EXP_LOG"
+
+if [[ -n "${MLFLOW_EXPERIMENT_NAME:-}" || -n "${MLFLOW_TRACKING_URI:-}" ]]; then
+    echo "[exp] syncing metrics to MLflow"
+    if ! uv run python -c "import mlflow" >/dev/null 2>&1; then
+        echo "[exp] installing mlflow into project uv environment"
+        uv pip install mlflow
+    fi
+    MLFLOW_SYNC_CMD=(uv run python scripts/sync_mlflow_metrics.py
+        --run-dir "$EXP_CKPT_DIR" \
+        --config "$RESOLVED_CONFIG" \
+        --experiment "${MLFLOW_EXPERIMENT_NAME:-default}" \
+        --run-name "${MLFLOW_RUN_NAME:-$(basename "$EXP_CKPT_DIR")}")
+    if [[ -n "${MLFLOW_TRACKING_URI:-}" ]]; then
+        MLFLOW_SYNC_CMD+=(--tracking-uri "$MLFLOW_TRACKING_URI")
+    fi
+    "${MLFLOW_SYNC_CMD[@]}"
+fi

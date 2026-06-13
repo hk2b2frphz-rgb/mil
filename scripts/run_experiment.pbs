@@ -10,8 +10,8 @@
 # Minimal submit:
 #   qsub scripts/run_experiment.pbs
 #
-# Common submit with WandB and hyperparameter overrides:
-#   qsub -v NUM_CASES=250,WANDB_PROJECT=dummy,HP_LR=5e-6,HP_LORA_RANK=64,HP_MAX_STEPS=800 scripts/run_experiment.pbs
+# Common submit with MLflow and hyperparameter overrides:
+#   qsub -v NUM_CASES=250,MLFLOW_EXPERIMENT_NAME=dummy,HP_LR=5e-6,HP_LORA_RANK=64,HP_MAX_STEPS=800 scripts/run_experiment.pbs
 #
 # Optional variables:
 #   BASE_EXP=exp001_lora_baseline
@@ -24,10 +24,9 @@
 #   HP_MAX_STEPS=500
 #   HP_CKPT_FREQ=50
 #   HP_EVAL_FREQ=25
-#   WANDB_PROJECT=dummy
-#   WANDB_RUN_NAME=run_<id>
-#   WANDB_API_KEY=<key>
-#   WANDB_OFFLINE=true
+#   MLFLOW_EXPERIMENT_NAME=job_run
+#   MLFLOW_RUN_NAME=run_<id>
+#   MLFLOW_TRACKING_URI=file:/workspace/mlruns
 #
 # If xvn_s is a queue rather than a host on your PBS cluster, replace the
 # select line above with the site's resource line and add:
@@ -56,7 +55,8 @@ exec > >(tee -a "$JOB_LOG") 2>&1
 export NPROC
 export RUN_ID
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-export WANDB_RUN_NAME="${WANDB_RUN_NAME:-$RUN_ID}"
+export MLFLOW_RUN_NAME="${MLFLOW_RUN_NAME:-$RUN_ID}"
+export MLFLOW_EXPERIMENT_NAME="${MLFLOW_EXPERIMENT_NAME:-job_run}"
 
 echo "===== job ====="
 echo "job_id:     ${PBS_JOBID:-n/a}"
@@ -69,7 +69,7 @@ echo "num_cases:  ${NUM_CASES}"
 echo "job_log:    ${JOB_LOG}"
 echo "nproc:      ${NPROC}"
 echo "cuda:       ${CUDA_VISIBLE_DEVICES}"
-echo "wandb:      ${WANDB_PROJECT:-off}"
+echo "mlflow:     ${MLFLOW_EXPERIMENT_NAME:-off}"
 echo "started_at: $(date -Iseconds)"
 echo "==============="
 
@@ -78,10 +78,10 @@ command -v uv >/dev/null 2>&1 || {
     exit 1
 }
 
-if [[ -n "${WANDB_PROJECT:-}" ]]; then
-    if ! uv run --project ../moshi-finetune python -c "import wandb" >/dev/null 2>&1; then
-        echo "wandb is not installed in ../moshi-finetune; installing into that uv environment."
-        ( cd ../moshi-finetune && uv pip install wandb )
+if [[ -n "${MLFLOW_EXPERIMENT_NAME:-}" || -n "${MLFLOW_TRACKING_URI:-}" ]]; then
+    if ! uv run python -c "import mlflow" >/dev/null 2>&1; then
+        echo "mlflow is not installed in the project uv environment; installing it."
+        uv pip install mlflow
     fi
 fi
 
