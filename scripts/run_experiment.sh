@@ -71,6 +71,11 @@ MOSHI_FT_REPO="$(realpath -m "$MOSHI_FT_REPO")"
 
 mkdir -p "$EXP_DATA_DIR"
 
+if [[ "${REFRESH_EXP_DATA:-0}" == "1" ]]; then
+    echo "[exp] REFRESH_EXP_DATA=1: clearing previous experiment data"
+    rm -rf "$EXP_TRAIN_SET" "$EXP_TRAIN_MF" "$EXP_EVAL_MF"
+fi
+
 # ---------------------------------------------------------------------------
 # 1) training_set を実験フォルダにコピー（hardlink を試みて、ダメなら cp -r）
 # ---------------------------------------------------------------------------
