@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Generate one dataset, then run two or more hyperparameter patterns on it.
+# Generate one ~3h dataset, then run two or more LoRA hyperparameter patterns on it.
 
 set -euo pipefail
 
@@ -8,7 +8,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 BASE_EXP="${BASE_EXP:-exp001_lora_baseline}"
-NUM_CASES="${NUM_CASES:-100}"
+NUM_CASES="${NUM_CASES:-250}"
 SWEEP_PATTERNS="${SWEEP_PATTERNS:-h01 h02}"
 NPROC="${NPROC:-1}"
 RUN_ID="${RUN_ID:-run_$(date +%Y%m%d_%H%M%S)}"
@@ -42,9 +42,9 @@ apply_pattern() {
     HP_LORA_SCALING=2.0
     HP_BATCH_SIZE=8
     HP_NUM_MICROBATCHES=1
-    HP_MAX_STEPS=500
-    HP_CKPT_FREQ=50
-    HP_EVAL_FREQ=25
+    HP_MAX_STEPS=1200
+    HP_CKPT_FREQ=120
+    HP_EVAL_FREQ=60
     HP_LOG_FREQ=5
 
     case "$pattern" in

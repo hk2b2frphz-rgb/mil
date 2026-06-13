@@ -12,7 +12,7 @@ JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
 JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
 export RUN_ID="${RUN_ID:-s01_${JOB_ID_SHORT}}"
 export SWEEP_PATTERNS="${SWEEP_PATTERNS:-h01 h02}"
-export NUM_CASES="${NUM_CASES:-100}"
+export NUM_CASES="${NUM_CASES:-250}"
 export MLFLOW_EXPERIMENT_NAME="${MLFLOW_EXPERIMENT_NAME:-job_sweep}"
 export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-file:$PWD/mlruns}"
 

@@ -1,7 +1,8 @@
 # 10-pattern sweep
 
-Run five PBS jobs. Each job generates one dataset with the current data
-generation pipeline, then runs two training patterns on the same generated data.
+Run five PBS jobs. Each job generates one 250-dialogue dataset with the current
+data generation pipeline, then runs two LoRA training patterns on the same
+generated data.
 
 Submit:
 
@@ -15,7 +16,8 @@ qsub scripts/sweep_05.pbs
 
 Defaults:
 
-- `NUM_CASES=100`
+- `NUM_CASES=250`
+- LoRA baseline exposure: `max_steps=1200`, `ckpt_freq=120`, `eval_freq=60`
 - `MLFLOW_EXPERIMENT_NAME=job_sweep`
 - `MLFLOW_TRACKING_URI=file:$PWD/mlruns`
 - base experiment config: `exp001_lora_baseline`
