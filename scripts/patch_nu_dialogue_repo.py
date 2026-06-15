@@ -80,6 +80,27 @@ def patch_prepare_dataset(path: Path) -> bool:
     return True
 
 
+def patch_finetune_tracking(path: Path) -> bool:
+    src = path.read_text(encoding="utf-8")
+    if "AUTO_PATCH_WITH_TRACKING_DEFAULT" in src:
+        return False
+
+    old = """    if args.report_to is not None:
+        args.with_tracking = True
+"""
+    new = """    # AUTO_PATCH_WITH_TRACKING_DEFAULT:
+    # nu-dialogue/moshi-finetune references args.with_tracking even when
+    # --report_to is omitted. Default it explicitly for non-W&B runs.
+    args.with_tracking = False
+    if args.report_to is not None:
+        args.with_tracking = True
+"""
+    if old not in src:
+        raise RuntimeError(f"Could not locate report_to tracking block in {path}")
+    path.write_text(src.replace(old, new, 1), encoding="utf-8")
+    return True
+
+
 def main() -> int:
     args = parse_args()
     nu_repo = args.nu_repo.resolve()
@@ -91,6 +112,8 @@ def main() -> int:
         changes.append("tools/tokenize_text.py")
     if patch_prepare_dataset(nu_repo / "tools" / "prepare_dataset.py"):
         changes.append("tools/prepare_dataset.py")
+    if patch_finetune_tracking(nu_repo / "finetune.py"):
+        changes.append("finetune.py")
 
     if changes:
         print(f"[nu-patch] patched {', '.join(changes)}")
