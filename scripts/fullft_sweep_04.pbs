@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #PBS -S /bin/bash
 #PBS -N job_f04
+#PBS -q xan_s
 #PBS -l select=1:res=small
 #PBS -l walltime=12:00:00
 #PBS -j oe
