@@ -44,6 +44,51 @@ def main() -> int:
     from moshi.models import loaders
     from models import MoshiForFinetuning, extend_moshi_modules_for_user_stream
 
+    def clean_lm_kwargs(raw: dict) -> dict:
+        """Keep only LM constructor kwargs from a HF config-style JSON."""
+        lm_kwargs = dict(raw)
+        for key in (
+            "moshi_name",
+            "mimi_name",
+            "mimi_config_name",
+            "tokenizer_name",
+            "lora_name",
+            "model_type",
+            "lm_gen_config",
+            "tts_config",
+            "stt_config",
+            "model_id",
+        ):
+            lm_kwargs.pop(key, None)
+        return lm_kwargs
+
+    def load_moshi_lm_direct(
+        repo: str,
+        model_name: str,
+        config_name: str,
+        dtype: torch.dtype,
+    ):
+        model_path = hf_hub_download(repo, model_name)
+        if config_name:
+            config_path = hf_hub_download(repo, config_name)
+            lm_kwargs = clean_lm_kwargs(json.loads(Path(config_path).read_text()))
+            print(f"[nu-init] loaded LM kwargs directly from {repo}/{config_name}")
+        else:
+            lm_kwargs = deepcopy(loaders._lm_kwargs)
+            print("[nu-init] using default Moshi LM kwargs")
+
+        try:
+            moshi_lm = loaders.get_moshi_lm(
+                model_path,
+                lm_kwargs=lm_kwargs,
+                device="cpu",
+                dtype=dtype,
+            )
+        except TypeError:
+            print("[nu-init] WARNING: loaders.get_moshi_lm does not accept lm_kwargs; using package defaults")
+            moshi_lm = loaders.get_moshi_lm(model_path, device="cpu", dtype=dtype)
+        return moshi_lm, lm_kwargs
+
     def init_embedding_module(emb: nn.Embedding, retain_token_ids: list[int]) -> nn.Embedding:
         dtype = emb.weight.dtype
         emb_weights = emb.weight.data
@@ -73,23 +118,35 @@ def main() -> int:
         return 0
 
     config_name = args.moshi_lm_config_name.strip()
-    if config_name:
-        print(f"[nu-init] loading {args.moshi_lm_repo}/{args.moshi_lm_name} with config {config_name}")
-        config_path = hf_hub_download(args.moshi_lm_repo, config_name)
-        checkpoint = loaders.CheckpointInfo.from_hf_repo(
-            args.moshi_lm_repo,
-            moshi_weights=args.moshi_lm_name,
-            config_path=config_path,
-        )
-        moshi_lm_kwargs = deepcopy(checkpoint.lm_config or loaders._lm_kwargs)
-        moshi_lm = checkpoint.get_moshi(device="cpu", dtype=getattr(torch, args.model_dtype))
+    dtype = getattr(torch, args.model_dtype)
+    checkpoint_info_cls = getattr(loaders, "CheckpointInfo", None)
+    if config_name and checkpoint_info_cls is not None:
+        print(f"[nu-init] loading {args.moshi_lm_repo}/{args.moshi_lm_name} with CheckpointInfo")
+        try:
+            config_path = hf_hub_download(args.moshi_lm_repo, config_name)
+            checkpoint = checkpoint_info_cls.from_hf_repo(
+                args.moshi_lm_repo,
+                moshi_weights=args.moshi_lm_name,
+                config_path=config_path,
+            )
+            moshi_lm_kwargs = deepcopy(checkpoint.lm_config or loaders._lm_kwargs)
+            moshi_lm = checkpoint.get_moshi(device="cpu", dtype=dtype)
+        except Exception as exc:
+            print(f"[nu-init] WARNING: CheckpointInfo path failed ({exc}); falling back to direct load")
+            moshi_lm, moshi_lm_kwargs = load_moshi_lm_direct(
+                args.moshi_lm_repo,
+                args.moshi_lm_name,
+                config_name,
+                dtype,
+            )
     else:
-        print(f"[nu-init] loading {args.moshi_lm_repo}/{args.moshi_lm_name} with default Moshi config")
-        moshi_lm_kwargs = deepcopy(loaders._lm_kwargs)
-        moshi_lm = loaders.get_moshi_lm(
-            hf_hub_download(args.moshi_lm_repo, args.moshi_lm_name),
-            device="cpu",
-            dtype=getattr(torch, args.model_dtype),
+        if config_name:
+            print("[nu-init] CheckpointInfo is unavailable in this moshi package; using direct load")
+        moshi_lm, moshi_lm_kwargs = load_moshi_lm_direct(
+            args.moshi_lm_repo,
+            args.moshi_lm_name,
+            config_name,
+            dtype,
         )
 
     if args.init_text_embeddings:
@@ -107,7 +164,7 @@ def main() -> int:
         moshi_lm=moshi_lm,
         moshi_lm_kwargs=moshi_lm_kwargs,
     )
-    moshi_lm = moshi_lm.to(getattr(torch, args.model_dtype))
+    moshi_lm = moshi_lm.to(dtype)
 
     print(f"[nu-init] saving initialized model to {save_dir}")
     moshi_lm.save_pretrained(save_dir)

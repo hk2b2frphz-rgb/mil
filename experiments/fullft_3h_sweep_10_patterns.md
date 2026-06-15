@@ -59,6 +59,11 @@ The launcher converts that existing manifest into the nu-dialogue format under
 starts `accelerate launch`. Set `REFRESH_NU_DATA=1` if you want to rebuild the
 converted/tokenized nu data.
 
+If a previous run failed during nu text tokenization, rerun with
+`REFRESH_NU_DATA=1` once after pulling. The launcher now patches the
+nu-dialogue checkout to avoid `chars[0]["speaker"]` failures on utterance-level
+Japanese timestamps.
+
 Direct test without PBS:
 
 ```bash

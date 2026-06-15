@@ -55,6 +55,8 @@ if [[ "${NU_SKIP_UV_SYNC:-0}" != "1" && ! -d "$NU_MOSHI_FT_REPO/.venv" ]]; then
     (cd "$NU_MOSHI_FT_REPO" && uv sync --python "${NU_PYTHON:-3.12}")
 fi
 
+python3 scripts/patch_nu_dialogue_repo.py --nu-repo "$NU_MOSHI_FT_REPO"
+
 NPROC="${NPROC:-2}"
 if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
     devs=""
