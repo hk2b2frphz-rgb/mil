@@ -13,6 +13,7 @@ source scripts/setup_proxy.sh
 
 JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
 JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+source scripts/setup_pbs_distributed.sh
 export RUN_ID="${RUN_ID:-f04_${JOB_ID_SHORT}}"
 export SWEEP_PATTERNS="${SWEEP_PATTERNS:-f07 f08}"
 export NUM_CASES="${NUM_CASES:-250}"

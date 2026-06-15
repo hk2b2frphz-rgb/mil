@@ -57,6 +57,7 @@ fi
 mkdir -p experiments/pbs_logs
 JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
 JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+source scripts/setup_pbs_distributed.sh
 RUN_ID="run_${JOB_ID_SHORT}"
 JOB_LOG="experiments/pbs_logs/${RUN_ID}.log"
 exec > >(tee -a "$JOB_LOG") 2>&1
