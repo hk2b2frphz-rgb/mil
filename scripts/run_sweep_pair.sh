@@ -18,7 +18,8 @@ INPUT_SRC_RUN_DIR="${SRC_RUN_DIR:-}"
 export NPROC
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export MLFLOW_EXPERIMENT_NAME="${MLFLOW_EXPERIMENT_NAME:-job_sweep}"
-export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-file:$REPO_ROOT/mlruns}"
+export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-sqlite:///$REPO_ROOT/mlruns/mlflow.db}"
+export MLFLOW_ARTIFACT_ROOT="${MLFLOW_ARTIFACT_ROOT:-file:$REPO_ROOT/mlruns/artifacts}"
 
 if [[ -z "$INPUT_SRC_RUN_DIR" ]] && {
     ! [[ "$NUM_CASES" =~ ^[0-9]+$ ]] || [[ "$NUM_CASES" -lt 2 ]];
@@ -81,6 +82,7 @@ echo "src_run_dir: ${INPUT_SRC_RUN_DIR:-<generate new>}"
 echo "patterns:    $SWEEP_PATTERNS"
 echo "mlflow_exp:  $MLFLOW_EXPERIMENT_NAME"
 echo "mlflow_uri:  $MLFLOW_TRACKING_URI"
+echo "artifact:    $MLFLOW_ARTIFACT_ROOT"
 echo "cuda:        $CUDA_VISIBLE_DEVICES"
 echo "started_at:  $(date -Iseconds)"
 echo "================="

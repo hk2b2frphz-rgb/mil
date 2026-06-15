@@ -18,7 +18,8 @@ export RUN_ID="${RUN_ID:-s05_${JOB_ID_SHORT}}"
 export SWEEP_PATTERNS="${SWEEP_PATTERNS:-h09 h10}"
 export NUM_CASES="${NUM_CASES:-250}"
 export MLFLOW_EXPERIMENT_NAME="${MLFLOW_EXPERIMENT_NAME:-job_sweep}"
-export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-file:$PWD/mlruns}"
+export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-sqlite:///$PWD/mlruns/mlflow.db}"
+export MLFLOW_ARTIFACT_ROOT="${MLFLOW_ARTIFACT_ROOT:-file:$PWD/mlruns/artifacts}"
 
 mkdir -p experiments/pbs_logs
 exec > >(tee -a "experiments/pbs_logs/${RUN_ID}.log") 2>&1

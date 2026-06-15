@@ -22,9 +22,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--experiment", default=os.environ.get("MLFLOW_EXPERIMENT_NAME", "default"))
     parser.add_argument("--run-name", default=os.environ.get("MLFLOW_RUN_NAME"))
     parser.add_argument("--tracking-uri", default=os.environ.get("MLFLOW_TRACKING_URI"))
+    parser.add_argument("--artifact-root", default=os.environ.get("MLFLOW_ARTIFACT_ROOT"))
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--run-id-file", type=Path, default=None)
     return parser.parse_args()
+
+
+def ensure_sqlite_parent(tracking_uri: str | None) -> None:
+    if not tracking_uri or not tracking_uri.startswith("sqlite:///"):
+        return
+    db_path = Path(tracking_uri.removeprefix("sqlite:///"))
+    db_path.parent.mkdir(parents=True, exist_ok=True)
 
 
 def iter_jsonl(path: Path):
@@ -60,8 +68,13 @@ def main() -> None:
     import yaml
 
     run_dir = args.run_dir.resolve()
+    ensure_sqlite_parent(args.tracking_uri)
     if args.tracking_uri:
         mlflow.set_tracking_uri(args.tracking_uri)
+
+    experiment = mlflow.get_experiment_by_name(args.experiment)
+    if experiment is None:
+        mlflow.create_experiment(args.experiment, artifact_location=args.artifact_root)
     mlflow.set_experiment(args.experiment)
 
     run_name = args.run_name or run_dir.name

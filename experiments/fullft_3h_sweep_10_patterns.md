@@ -22,7 +22,8 @@ Defaults:
 - `BASE_EXP=exp100_full_ft`
 - `NUM_CASES=250`
 - `MLFLOW_EXPERIMENT_NAME=job_fullft_3h`
-- `MLFLOW_TRACKING_URI=file:$PWD/mlruns`
+- `MLFLOW_TRACKING_URI=sqlite:///$PWD/mlruns/mlflow.db`
+- `MLFLOW_ARTIFACT_ROOT=file:$PWD/mlruns/artifacts`
 - A100 80GB target
 
 | pattern | PBS | change from full-FT 3h baseline | purpose |

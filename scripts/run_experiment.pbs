@@ -32,7 +32,8 @@
 #   HP_EVAL_FREQ=25
 #   MLFLOW_EXPERIMENT_NAME=job_run
 #   MLFLOW_RUN_NAME=run_<id>
-#   MLFLOW_TRACKING_URI=file:/workspace/mlruns
+#   MLFLOW_TRACKING_URI=sqlite:////workspace/mlruns/mlflow.db
+#   MLFLOW_ARTIFACT_ROOT=file:/workspace/mlruns/artifacts
 #
 # If res=small is not available on your PBS cluster, replace the select line
 # above with the site's resource line.
@@ -67,6 +68,8 @@ export RUN_ID
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export MLFLOW_RUN_NAME="${MLFLOW_RUN_NAME:-$RUN_ID}"
 export MLFLOW_EXPERIMENT_NAME="${MLFLOW_EXPERIMENT_NAME:-job_run}"
+export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-sqlite:///$PWD/mlruns/mlflow.db}"
+export MLFLOW_ARTIFACT_ROOT="${MLFLOW_ARTIFACT_ROOT:-file:$PWD/mlruns/artifacts}"
 
 echo "===== job ====="
 echo "job_id:     ${PBS_JOBID:-n/a}"

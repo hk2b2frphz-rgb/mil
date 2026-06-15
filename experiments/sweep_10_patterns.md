@@ -19,7 +19,8 @@ Defaults:
 - `NUM_CASES=250`
 - LoRA baseline exposure: `max_steps=1200`, `ckpt_freq=120`, `eval_freq=60`
 - `MLFLOW_EXPERIMENT_NAME=job_sweep`
-- `MLFLOW_TRACKING_URI=file:$PWD/mlruns`
+- `MLFLOW_TRACKING_URI=sqlite:///$PWD/mlruns/mlflow.db`
+- `MLFLOW_ARTIFACT_ROOT=file:$PWD/mlruns/artifacts`
 - base experiment config: `exp001_lora_baseline`
 
 | pattern | PBS | change from baseline | purpose |

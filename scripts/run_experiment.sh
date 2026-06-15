@@ -366,6 +366,9 @@ if [[ -n "${MLFLOW_EXPERIMENT_NAME:-}" || -n "${MLFLOW_TRACKING_URI:-}" ]]; then
     if [[ -n "${MLFLOW_TRACKING_URI:-}" ]]; then
         MLFLOW_SYNC_CMD+=(--tracking-uri "$MLFLOW_TRACKING_URI")
     fi
+    if [[ -n "${MLFLOW_ARTIFACT_ROOT:-}" ]]; then
+        MLFLOW_SYNC_CMD+=(--artifact-root "$MLFLOW_ARTIFACT_ROOT")
+    fi
 
     "${MLFLOW_SYNC_CMD[@]}" || echo "[exp] WARN: initial MLflow sync failed" >&2
     MLFLOW_LIVE_SYNC_INTERVAL="${MLFLOW_LIVE_SYNC_INTERVAL:-300}"
