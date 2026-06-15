@@ -4,6 +4,8 @@
 #
 # Supported inputs:
 #   PROXY_URL=http://user:pass@proxy.example.com:8080
+# or an already exported proxy URL in any of:
+#   https_proxy, http_proxy, HTTPS_PROXY, HTTP_PROXY
 # or:
 #   PROXY_HOST=proxy.example.com
 #   PROXY_PORT=8080
@@ -16,6 +18,14 @@
 
 if [[ -n "${PROXY_URL:-}" ]]; then
     proxy_url="$PROXY_URL"
+elif [[ -n "${https_proxy:-}" ]]; then
+    proxy_url="$https_proxy"
+elif [[ -n "${http_proxy:-}" ]]; then
+    proxy_url="$http_proxy"
+elif [[ -n "${HTTPS_PROXY:-}" ]]; then
+    proxy_url="$HTTPS_PROXY"
+elif [[ -n "${HTTP_PROXY:-}" ]]; then
+    proxy_url="$HTTP_PROXY"
 elif [[ -n "${PROXY_HOST:-}" ]]; then
     proxy_scheme="${PROXY_SCHEME:-http}"
     proxy_host="$PROXY_HOST"
