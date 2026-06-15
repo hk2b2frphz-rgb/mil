@@ -312,6 +312,8 @@ if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
     done
     export CUDA_VISIBLE_DEVICES="$_devs"
 fi
+export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
+export MASTER_PORT="${MASTER_PORT:-29500}"
 
 # 単 GPU は python 直起動 (torchrun + FSDP 単 GPU の segfault 回避)
 # 複数 GPU は torchrun。USE_TORCHRUN=1 で単 GPU でも torchrun を強制可能。
@@ -321,17 +323,22 @@ if [[ "$USE_TORCHRUN" == "auto" ]]; then
 fi
 
 if [[ "$USE_TORCHRUN" == "1" ]]; then
+    TORCHRUN_ARGS=(
+        --nnodes 1
+        --node-rank 0
+        --nproc-per-node "$NPROC"
+        --master-addr "$MASTER_ADDR"
+        --master-port "$MASTER_PORT"
+    )
     if command -v torchrun >/dev/null 2>&1; then
-        LAUNCH_CMD=(torchrun --nproc-per-node "$NPROC" --master_port "${MASTER_PORT:-29500}" -m train "$RESOLVED_CONFIG")
+        LAUNCH_CMD=(torchrun "${TORCHRUN_ARGS[@]}" -m train "$RESOLVED_CONFIG")
     else
-        LAUNCH_CMD=(uv run --project "$MOSHI_FT_REPO" torchrun --nproc-per-node "$NPROC" --master_port "${MASTER_PORT:-29500}" -m train "$RESOLVED_CONFIG")
+        LAUNCH_CMD=(uv run --project "$MOSHI_FT_REPO" torchrun "${TORCHRUN_ARGS[@]}" -m train "$RESOLVED_CONFIG")
     fi
-    LAUNCH_DESC="torchrun (nproc=$NPROC)"
+    LAUNCH_DESC="torchrun (nnodes=1 node_rank=0 nproc=$NPROC master=$MASTER_ADDR:$MASTER_PORT)"
 else
     # 単 GPU 直起動。torchrun が export するはずの分散 env を自前で渡す。
     export RANK=0 WORLD_SIZE=1 LOCAL_RANK=0
-    export MASTER_ADDR="${MASTER_ADDR:-localhost}"
-    export MASTER_PORT="${MASTER_PORT:-29500}"
     LAUNCH_CMD=(uv run --project "$MOSHI_FT_REPO" python -m train "$RESOLVED_CONFIG")
     LAUNCH_DESC="python direct (single GPU, no torchrun)"
 fi
