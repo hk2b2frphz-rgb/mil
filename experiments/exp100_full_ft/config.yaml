@@ -22,8 +22,8 @@ first_codebook_weight_multiplier: 100.
 text_padding_weight: 0.5
 
 duration_sec: 100
-batch_size: 2           # フル FT は optimizer state が巨大。A100 80GB で安全に収まる値。
-num_microbatches: 4     # 実効 batch = 2 × 4 = 8 (exp001 と同等の曝露量)
+batch_size: 1           # フル FT は optimizer state が巨大。A100 80GB では per-forward を最小化する。
+num_microbatches: 8     # 実効 batch = 1 × 8 = 8 (exp001 と同等の曝露量)
 max_steps: 500          # exp001 と同じ step 数で比較
 max_norm: 1.0
 gradient_checkpointing: true

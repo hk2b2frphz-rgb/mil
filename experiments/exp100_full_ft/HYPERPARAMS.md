@@ -12,8 +12,8 @@ eval loss と対話品質を比較する。LoRA の表現力上限を超えら�
 | `full_finetuning` | false | **true** | 全パラメータ更新 |
 | `lora.enable` | true (rank=32) | **false** | LoRA 不使用 |
 | `save_adapters` | true | **false** | モデル全体を保存 |
-| `batch_size` | 8 | **2** | optimizer state (Adam: 2× model size) で VRAM 逼迫するため |
-| `num_microbatches` | 1 | **4** | 実効 batch = 2×4 = 8 で exp001 と同等 |
+| `batch_size` | 8 | **1** | full FT の activation/optimizer state で OOM しやすいため per-forward を最小化 |
+| `num_microbatches` | 1 | **8** | 実効 batch = 1×8 = 8 で exp001 と同等 |
 | `optim.lr` | 2e-6 | **5e-7** | 全パラメータが動くので 1/4 に下げる |
 
 ## ハードウェア前提
@@ -30,8 +30,8 @@ eval loss と対話品質を比較する。LoRA の表現力上限を超えら�
 - Activations (gradient checkpointing ON): ~10-20 GB (batch_size 依存)
 - 合計: ~52-62 GB → A100 80GB に収まる見込み
 
-batch_size=2 + microbatch=4 で grad accum し、実効 batch を exp001 と揃える。
-OOM が出たら batch_size=1 + microbatch=8 に下げる。
+batch_size=1 + microbatch=8 で grad accum し、実効 batch を exp001 と揃える。
+これでも OOM が出る場合は `duration_sec=80` などで系列長を下げる。
 
 ## 学習率
 

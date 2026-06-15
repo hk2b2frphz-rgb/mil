@@ -43,8 +43,8 @@ apply_pattern() {
     HP_LR=5e-7
     HP_WEIGHT_DECAY=0.1
     HP_PCT_START=0.05
-    HP_BATCH_SIZE=2
-    HP_NUM_MICROBATCHES=4
+    HP_BATCH_SIZE=1
+    HP_NUM_MICROBATCHES=8
     HP_MAX_STEPS=1200
     HP_CKPT_FREQ=120
     HP_EVAL_FREQ=60
@@ -58,7 +58,7 @@ apply_pattern() {
         f04) HP_WEIGHT_DECAY=0.01 ;;                 # weaker regularization
         f05) HP_WEIGHT_DECAY=0.2 ;;                  # stronger regularization
         f06) HP_PCT_START=0.10 ;;                    # longer warmup
-        f07) HP_BATCH_SIZE=1; HP_NUM_MICROBATCHES=8 ;; # lower memory, same effective batch
+        f07) HP_DURATION_SEC=80 ;;                     # shorter sequence, lower activation memory
         f08) HP_MAX_NORM=0.5 ;;                      # tighter gradient clipping
         f09) HP_MAX_STEPS=800; HP_CKPT_FREQ=80; HP_EVAL_FREQ=40 ;;   # shorter exposure
         f10) HP_MAX_STEPS=1600; HP_CKPT_FREQ=160; HP_EVAL_FREQ=80 ;; # longer exposure
@@ -69,7 +69,7 @@ apply_pattern() {
     esac
 
     export HP_LR HP_WEIGHT_DECAY HP_PCT_START
-    export HP_BATCH_SIZE HP_NUM_MICROBATCHES HP_MAX_STEPS
+    export HP_BATCH_SIZE HP_NUM_MICROBATCHES HP_MAX_STEPS HP_DURATION_SEC
     export HP_CKPT_FREQ HP_EVAL_FREQ HP_LOG_FREQ HP_MAX_NORM
 }
 
@@ -137,7 +137,7 @@ for pattern in $SWEEP_PATTERNS; do
     echo
     echo "[full-ft sweep] running $pattern"
     echo "  exp=$SWEEP_EXP_NAME"
-    echo "  lr=$HP_LR batch=$HP_BATCH_SIZE micro=$HP_NUM_MICROBATCHES steps=$HP_MAX_STEPS wd=$HP_WEIGHT_DECAY pct_start=$HP_PCT_START max_norm=$HP_MAX_NORM"
+    echo "  lr=$HP_LR batch=$HP_BATCH_SIZE micro=$HP_NUM_MICROBATCHES steps=$HP_MAX_STEPS wd=$HP_WEIGHT_DECAY pct_start=$HP_PCT_START max_norm=$HP_MAX_NORM duration=${HP_DURATION_SEC:-100}"
     bash scripts/run_experiment.sh "$SWEEP_EXP_NAME" "$SRC_RUN_DIR"
 done
 

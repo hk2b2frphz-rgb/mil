@@ -28,13 +28,13 @@ Defaults:
 
 | pattern | PBS | change from full-FT 3h baseline | purpose |
 |---|---:|---|---|
-| `f01` | 01 | `lr=5e-7`, `batch=2`, `micro=4`, `steps=1200` | 3h baseline |
+| `f01` | 01 | `lr=5e-7`, `batch=1`, `micro=8`, `steps=1200` | 3h low-memory baseline |
 | `f02` | 01 | `lr=1e-6` | faster adaptation / forgetting risk |
 | `f03` | 02 | `lr=2e-7` | conservative update |
 | `f04` | 02 | `weight_decay=0.01` | weaker regularization |
 | `f05` | 03 | `weight_decay=0.2` | stronger regularization |
 | `f06` | 03 | `pct_start=0.10` | longer warmup |
-| `f07` | 04 | `batch=1`, `micro=8` | lower memory, same effective batch |
+| `f07` | 04 | `duration_sec=80` | shorter sequence, lower activation memory |
 | `f08` | 04 | `max_norm=0.5` | tighter gradient clipping |
 | `f09` | 05 | `steps=800` | shorter exposure |
 | `f10` | 05 | `steps=1600` | longer exposure |
