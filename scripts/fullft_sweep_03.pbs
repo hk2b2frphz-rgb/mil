@@ -2,7 +2,7 @@
 #PBS -S /bin/bash
 #PBS -N job_f03
 #PBS -q xan_s
-#PBS -l select=1:res=small:ngpus=2
+#PBS -l select=1:res=middle
 #PBS -l walltime=12:00:00
 #PBS -j oe
 #PBS -V

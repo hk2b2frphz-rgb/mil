@@ -24,7 +24,7 @@ Defaults:
 - `MLFLOW_EXPERIMENT_NAME=job_fullft_3h`
 - `MLFLOW_TRACKING_URI=sqlite:///$PWD/mlruns/mlflow.db`
 - `MLFLOW_ARTIFACT_ROOT=file:$PWD/mlruns/artifacts`
-- A100 80GB x2 target for PBS sweep jobs
+- `res=middle` PBS resource, A100 80GB x2 target for full-FT sweep jobs
 
 | pattern | PBS | change from full-FT 3h baseline | purpose |
 |---|---:|---|---|
