@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #PBS -S /bin/bash
 #PBS -N job_f03
-#PBS -l select=1:host=xvn_s:ncpus=8:ngpus=1:mem=64gb
-#PBS -l walltime=48:00:00
+#PBS -l select=1:res=small
+#PBS -l walltime=12:00:00
 #PBS -j oe
 
 set -euo pipefail

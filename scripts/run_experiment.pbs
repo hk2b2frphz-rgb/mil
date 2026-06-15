@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #PBS -S /bin/bash
 #PBS -N job_run
-#PBS -l select=1:host=xvn_s:ncpus=8:ngpus=1:mem=64gb
-#PBS -l walltime=24:00:00
+#PBS -l select=1:res=small
+#PBS -l walltime=12:00:00
 #PBS -j oe
 
 # Full server job: generate synthetic data, then launch fine-tuning.
@@ -28,9 +28,8 @@
 #   MLFLOW_RUN_NAME=run_<id>
 #   MLFLOW_TRACKING_URI=file:/workspace/mlruns
 #
-# If xvn_s is a queue rather than a host on your PBS cluster, replace the
-# select line above with the site's resource line and add:
-#   #PBS -q xvn_s
+# If res=small is not available on your PBS cluster, replace the select line
+# above with the site's resource line.
 
 set -euo pipefail
 
