@@ -100,9 +100,14 @@ if [[ ! -f "$EXP_TRAIN_MF" || ! -f "$EXP_EVAL_MF" ]]; then
 import json, random, sys, pathlib
 src, train_out, eval_out = map(pathlib.Path, sys.argv[1:])
 lines = [l for l in src.read_text().splitlines() if l.strip()]
+if len(lines) < 2:
+    sys.exit(
+        f"[exp] ERROR: need >= 2 samples to split into train/eval, got {len(lines)}. "
+        "Increase NUM_CASES / dialogue count."
+    )
 rng = random.Random(0)
 rng.shuffle(lines)
-n_eval = max(1, len(lines) // 10)
+n_eval = min(max(1, len(lines) // 10), len(lines) - 1)
 eval_lines = lines[:n_eval]
 train_lines = lines[n_eval:]
 train_out.write_text("\n".join(train_lines) + "\n")
@@ -341,6 +346,41 @@ echo "       nproc:   $NPROC"
 echo "       CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 echo "       log:     $EXP_LOG"
 
+MLFLOW_ENABLED=0
+MLFLOW_SYNC_PID=""
+MLFLOW_SYNC_CMD=()
+if [[ -n "${MLFLOW_EXPERIMENT_NAME:-}" || -n "${MLFLOW_TRACKING_URI:-}" ]]; then
+    MLFLOW_ENABLED=1
+    echo "[exp] MLflow live sync enabled"
+    if ! uv run python -c "import mlflow" >/dev/null 2>&1; then
+        echo "[exp] installing mlflow into project uv environment"
+        uv pip install mlflow
+    fi
+    MLFLOW_RUN_ID_FILE="$EXP_DIR/mlflow_run_${RUN_TS}.id"
+    MLFLOW_SYNC_CMD=(uv run python scripts/sync_mlflow_metrics.py
+        --run-dir "$EXP_CKPT_DIR" \
+        --config "$RESOLVED_CONFIG" \
+        --experiment "${MLFLOW_EXPERIMENT_NAME:-default}" \
+        --run-name "${MLFLOW_RUN_NAME:-$(basename "$EXP_CKPT_DIR")}" \
+        --run-id-file "$MLFLOW_RUN_ID_FILE")
+    if [[ -n "${MLFLOW_TRACKING_URI:-}" ]]; then
+        MLFLOW_SYNC_CMD+=(--tracking-uri "$MLFLOW_TRACKING_URI")
+    fi
+
+    "${MLFLOW_SYNC_CMD[@]}" || echo "[exp] WARN: initial MLflow sync failed" >&2
+    MLFLOW_LIVE_SYNC_INTERVAL="${MLFLOW_LIVE_SYNC_INTERVAL:-300}"
+    if [[ "$MLFLOW_LIVE_SYNC_INTERVAL" != "0" ]]; then
+        (
+            while true; do
+                sleep "$MLFLOW_LIVE_SYNC_INTERVAL"
+                "${MLFLOW_SYNC_CMD[@]}" || echo "[exp] WARN: periodic MLflow sync failed" >&2
+            done
+        ) &
+        MLFLOW_SYNC_PID="$!"
+        echo "[exp] MLflow live sync interval: ${MLFLOW_LIVE_SYNC_INTERVAL}s"
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # Debug プリント: 学習に入る前に、データセットの先頭サンプルの対話本文と
 # tokenizer round-trip を流す。DEBUG=1 で有効化。
@@ -411,25 +451,26 @@ fi
 # ---------------------------------------------------------------------------
 # 5) 起動。run.log にも tee。
 # ---------------------------------------------------------------------------
+set +e
 (
     cd "$MOSHI_FT_REPO" && \
     CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
     "${LAUNCH_CMD[@]}"
 ) 2>&1 | tee "$EXP_LOG"
+TRAIN_STATUS=${PIPESTATUS[0]}
+set -e
 
-if [[ -n "${MLFLOW_EXPERIMENT_NAME:-}" || -n "${MLFLOW_TRACKING_URI:-}" ]]; then
-    echo "[exp] syncing metrics to MLflow"
-    if ! uv run python -c "import mlflow" >/dev/null 2>&1; then
-        echo "[exp] installing mlflow into project uv environment"
-        uv pip install mlflow
-    fi
-    MLFLOW_SYNC_CMD=(uv run python scripts/sync_mlflow_metrics.py
-        --run-dir "$EXP_CKPT_DIR" \
-        --config "$RESOLVED_CONFIG" \
-        --experiment "${MLFLOW_EXPERIMENT_NAME:-default}" \
-        --run-name "${MLFLOW_RUN_NAME:-$(basename "$EXP_CKPT_DIR")}")
-    if [[ -n "${MLFLOW_TRACKING_URI:-}" ]]; then
-        MLFLOW_SYNC_CMD+=(--tracking-uri "$MLFLOW_TRACKING_URI")
-    fi
-    "${MLFLOW_SYNC_CMD[@]}"
+if [[ -n "$MLFLOW_SYNC_PID" ]]; then
+    kill "$MLFLOW_SYNC_PID" >/dev/null 2>&1 || true
+    wait "$MLFLOW_SYNC_PID" 2>/dev/null || true
+fi
+
+if [[ "$MLFLOW_ENABLED" == "1" ]]; then
+    echo "[exp] final MLflow sync"
+    "${MLFLOW_SYNC_CMD[@]}" || echo "[exp] WARN: final MLflow sync failed" >&2
+fi
+
+if [[ "$TRAIN_STATUS" -ne 0 ]]; then
+    echo "[exp] ERROR: training failed with status $TRAIN_STATUS" >&2
+    exit "$TRAIN_STATUS"
 fi

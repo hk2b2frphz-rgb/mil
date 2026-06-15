@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -22,17 +23,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-name", default=os.environ.get("MLFLOW_RUN_NAME"))
     parser.add_argument("--tracking-uri", default=os.environ.get("MLFLOW_TRACKING_URI"))
     parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--run-id-file", type=Path, default=None)
     return parser.parse_args()
 
 
 def iter_jsonl(path: Path):
     if not path.exists():
         return
-    for line in path.read_text().splitlines():
+    for lineno, line in enumerate(path.read_text().splitlines(), start=1):
         line = line.strip()
         if not line:
             continue
-        yield json.loads(line)
+        try:
+            yield json.loads(line)
+        except json.JSONDecodeError as exc:
+            # 切り詰められた行などで全体が止まらないよう、スキップして継続する。
+            print(f"WARNING: skipping malformed JSONL at {path}:{lineno}: {exc}",
+                  file=sys.stderr)
+            continue
 
 
 def flatten(prefix: str, value: Any) -> dict[str, Any]:
@@ -57,7 +65,15 @@ def main() -> None:
     mlflow.set_experiment(args.experiment)
 
     run_name = args.run_name or run_dir.name
-    with mlflow.start_run(run_name=run_name):
+    run_id = None
+    if args.run_id_file and args.run_id_file.exists():
+        run_id = args.run_id_file.read_text().strip() or None
+
+    with mlflow.start_run(run_id=run_id, run_name=run_name) as active_run:
+        if args.run_id_file and not run_id:
+            args.run_id_file.parent.mkdir(parents=True, exist_ok=True)
+            args.run_id_file.write_text(active_run.info.run_id + "\n")
+
         mlflow.log_param("run_dir", str(run_dir))
         if args.config and args.config.exists():
             config = yaml.safe_load(args.config.read_text()) or {}
