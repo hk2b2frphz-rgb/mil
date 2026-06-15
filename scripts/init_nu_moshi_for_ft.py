@@ -43,6 +43,7 @@ def main() -> int:
     from huggingface_hub import hf_hub_download
     from moshi.models import loaders
     from models import MoshiForFinetuning, extend_moshi_modules_for_user_stream
+    from safetensors.torch import load_file
 
     def clean_lm_kwargs(raw: dict) -> dict:
         """Keep only LM constructor kwargs from a HF config-style JSON."""
@@ -70,22 +71,17 @@ def main() -> int:
     ):
         model_path = hf_hub_download(repo, model_name)
         if config_name:
+            from moshi.models import LMModel
+
             config_path = hf_hub_download(repo, config_name)
             lm_kwargs = clean_lm_kwargs(json.loads(Path(config_path).read_text()))
             print(f"[nu-init] loaded LM kwargs directly from {repo}/{config_name}")
+            moshi_lm = LMModel(device="cpu", dtype=dtype, **lm_kwargs).to(device="cpu", dtype=dtype)
+            state_dict = load_file(model_path, device="cpu")
+            moshi_lm.load_state_dict(state_dict, strict=True)
         else:
             lm_kwargs = deepcopy(loaders._lm_kwargs)
             print("[nu-init] using default Moshi LM kwargs")
-
-        try:
-            moshi_lm = loaders.get_moshi_lm(
-                model_path,
-                lm_kwargs=lm_kwargs,
-                device="cpu",
-                dtype=dtype,
-            )
-        except TypeError:
-            print("[nu-init] WARNING: loaders.get_moshi_lm does not accept lm_kwargs; using package defaults")
             moshi_lm = loaders.get_moshi_lm(model_path, device="cpu", dtype=dtype)
         return moshi_lm, lm_kwargs
 
