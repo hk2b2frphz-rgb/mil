@@ -64,6 +64,8 @@ def flatten(prefix: str, value: Any) -> dict[str, Any]:
 def main() -> None:
     args = parse_args()
 
+    os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
+
     import mlflow
     import yaml
 
