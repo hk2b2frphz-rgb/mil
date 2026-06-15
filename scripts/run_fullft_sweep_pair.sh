@@ -91,7 +91,13 @@ command -v uv >/dev/null 2>&1 || {
     exit 1
 }
 
-if ! uv run python -c "import mlflow" >/dev/null 2>&1; then
+echo "[full-ft sweep] checking MLflow availability"
+if command -v timeout >/dev/null 2>&1; then
+    MLFLOW_CHECK_CMD=(timeout "${MLFLOW_IMPORT_TIMEOUT:-120}" uv run python -c "import mlflow")
+else
+    MLFLOW_CHECK_CMD=(uv run python -c "import mlflow")
+fi
+if ! "${MLFLOW_CHECK_CMD[@]}" >/dev/null 2>&1; then
     echo "[full-ft sweep] installing mlflow into project uv environment"
     uv pip install mlflow
 fi

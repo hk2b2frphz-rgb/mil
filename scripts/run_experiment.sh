@@ -349,10 +349,28 @@ echo "       log:     $EXP_LOG"
 MLFLOW_ENABLED=0
 MLFLOW_SYNC_PID=""
 MLFLOW_SYNC_CMD=()
+run_mlflow_sync_once() {
+    local sync_timeout="${MLFLOW_SYNC_TIMEOUT:-60}"
+    if [[ ${#MLFLOW_SYNC_CMD[@]} -eq 0 ]]; then
+        return 0
+    fi
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$sync_timeout" "${MLFLOW_SYNC_CMD[@]}"
+    else
+        "${MLFLOW_SYNC_CMD[@]}"
+    fi
+}
+
 if [[ -n "${MLFLOW_EXPERIMENT_NAME:-}" || -n "${MLFLOW_TRACKING_URI:-}" ]]; then
     MLFLOW_ENABLED=1
     echo "[exp] MLflow live sync enabled"
-    if ! uv run python -c "import mlflow" >/dev/null 2>&1; then
+    echo "[exp] checking MLflow availability"
+    if command -v timeout >/dev/null 2>&1; then
+        MLFLOW_CHECK_CMD=(timeout "${MLFLOW_IMPORT_TIMEOUT:-120}" uv run python -c "import mlflow")
+    else
+        MLFLOW_CHECK_CMD=(uv run python -c "import mlflow")
+    fi
+    if ! "${MLFLOW_CHECK_CMD[@]}" >/dev/null 2>&1; then
         echo "[exp] installing mlflow into project uv environment"
         uv pip install mlflow
     fi
@@ -370,13 +388,12 @@ if [[ -n "${MLFLOW_EXPERIMENT_NAME:-}" || -n "${MLFLOW_TRACKING_URI:-}" ]]; then
         MLFLOW_SYNC_CMD+=(--artifact-root "$MLFLOW_ARTIFACT_ROOT")
     fi
 
-    "${MLFLOW_SYNC_CMD[@]}" || echo "[exp] WARN: initial MLflow sync failed" >&2
     MLFLOW_LIVE_SYNC_INTERVAL="${MLFLOW_LIVE_SYNC_INTERVAL:-300}"
     if [[ "$MLFLOW_LIVE_SYNC_INTERVAL" != "0" ]]; then
         (
             while true; do
+                run_mlflow_sync_once || echo "[exp] WARN: periodic MLflow sync failed" >&2
                 sleep "$MLFLOW_LIVE_SYNC_INTERVAL"
-                "${MLFLOW_SYNC_CMD[@]}" || echo "[exp] WARN: periodic MLflow sync failed" >&2
             done
         ) &
         MLFLOW_SYNC_PID="$!"
@@ -470,7 +487,7 @@ fi
 
 if [[ "$MLFLOW_ENABLED" == "1" ]]; then
     echo "[exp] final MLflow sync"
-    "${MLFLOW_SYNC_CMD[@]}" || echo "[exp] WARN: final MLflow sync failed" >&2
+    run_mlflow_sync_once || echo "[exp] WARN: final MLflow sync failed" >&2
 fi
 
 if [[ "$TRAIN_STATUS" -ne 0 ]]; then

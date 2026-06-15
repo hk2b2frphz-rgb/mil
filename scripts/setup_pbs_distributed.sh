@@ -4,6 +4,8 @@
 
 if [[ -z "${MASTER_PORT:-}" ]]; then
     pbs_job_key="${PBS_JOBID:-${JOB_ID_SHORT:-}}"
+    pbs_job_key="${pbs_job_key%%.*}"
+    pbs_job_key="${pbs_job_key%%[*}"
     pbs_job_digits="$(printf '%s' "$pbs_job_key" | tr -cd '0-9')"
 
     if [[ -n "$pbs_job_digits" ]]; then
