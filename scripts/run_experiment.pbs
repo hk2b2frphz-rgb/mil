@@ -13,9 +13,13 @@
 # Common submit with MLflow and hyperparameter overrides:
 #   qsub -v NUM_CASES=250,MLFLOW_EXPERIMENT_NAME=dummy,HP_LR=5e-6,HP_LORA_RANK=64,HP_MAX_STEPS=800 scripts/run_experiment.pbs
 #
+# Use an existing generated dataset instead of generating a new one:
+#   qsub -v SRC_RUN_DIR=./data/runs/<RUN_ID> scripts/run_experiment.pbs
+#
 # Optional variables:
 #   BASE_EXP=exp001_lora_baseline
 #   NUM_CASES=100
+#   SRC_RUN_DIR=./data/runs/<RUN_ID>
 #   HP_LR=2e-6
 #   HP_LORA_RANK=32
 #   HP_LORA_SCALING=2.0
@@ -38,8 +42,11 @@ cd "${PBS_O_WORKDIR:-$(pwd)}"
 BASE_EXP="${BASE_EXP:-exp001_lora_baseline}"
 NUM_CASES="${NUM_CASES:-100}"
 NPROC="${NPROC:-1}"
+INPUT_SRC_RUN_DIR="${SRC_RUN_DIR:-}"
 
-if ! [[ "$NUM_CASES" =~ ^[0-9]+$ ]] || [[ "$NUM_CASES" -lt 1 ]]; then
+if [[ -z "$INPUT_SRC_RUN_DIR" ]] && {
+    ! [[ "$NUM_CASES" =~ ^[0-9]+$ ]] || [[ "$NUM_CASES" -lt 1 ]];
+}; then
     echo "ERROR: NUM_CASES must be a positive integer. got: $NUM_CASES" >&2
     exit 1
 fi
@@ -65,6 +72,7 @@ echo "workdir:    $(pwd)"
 echo "run_id:     ${RUN_ID}"
 echo "base_exp:   ${BASE_EXP}"
 echo "num_cases:  ${NUM_CASES}"
+echo "src_run_dir:${INPUT_SRC_RUN_DIR:-<generate new>}"
 echo "job_log:    ${JOB_LOG}"
 echo "nproc:      ${NPROC}"
 echo "cuda:       ${CUDA_VISIBLE_DEVICES}"
@@ -91,15 +99,21 @@ else
 fi
 
 echo
-echo "[1/2] generating data"
-RUN_ID="$RUN_ID" \
-NUM_CASES="$NUM_CASES" \
-STEPS=use_cases,dialogues,audio \
-bash scripts/run_pipeline.sh
+if [[ -n "$INPUT_SRC_RUN_DIR" ]]; then
+    echo "[1/2] using existing data"
+    SRC_RUN_DIR="$INPUT_SRC_RUN_DIR"
+else
+    echo "[1/2] generating data"
+    RUN_ID="$RUN_ID" \
+    NUM_CASES="$NUM_CASES" \
+    STEPS=use_cases,dialogues,audio \
+    bash scripts/run_pipeline.sh
 
-SRC_RUN_DIR="./data/runs/${RUN_ID}"
+    SRC_RUN_DIR="./data/runs/${RUN_ID}"
+fi
+
 if [[ ! -f "$SRC_RUN_DIR/training_set/synthetic_moshi_train.jsonl" ]]; then
-    echo "ERROR: generated manifest not found: $SRC_RUN_DIR/training_set/synthetic_moshi_train.jsonl" >&2
+    echo "ERROR: training manifest not found: $SRC_RUN_DIR/training_set/synthetic_moshi_train.jsonl" >&2
     exit 1
 fi
 

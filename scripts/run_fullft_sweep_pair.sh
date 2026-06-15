@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Generate one ~3h dataset, then run two or more full fine-tuning patterns on it.
+# Generate one ~3h dataset or use SRC_RUN_DIR, then run two or more full
+# fine-tuning patterns on it.
 
 set -euo pipefail
 
@@ -12,13 +13,16 @@ NUM_CASES="${NUM_CASES:-250}"
 SWEEP_PATTERNS="${SWEEP_PATTERNS:-f01 f02}"
 NPROC="${NPROC:-1}"
 RUN_ID="${RUN_ID:-full_$(date +%Y%m%d_%H%M%S)}"
+INPUT_SRC_RUN_DIR="${SRC_RUN_DIR:-}"
 
 export NPROC
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export MLFLOW_EXPERIMENT_NAME="${MLFLOW_EXPERIMENT_NAME:-job_fullft_3h}"
 export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-file:$REPO_ROOT/mlruns}"
 
-if ! [[ "$NUM_CASES" =~ ^[0-9]+$ ]] || [[ "$NUM_CASES" -lt 2 ]]; then
+if [[ -z "$INPUT_SRC_RUN_DIR" ]] && {
+    ! [[ "$NUM_CASES" =~ ^[0-9]+$ ]] || [[ "$NUM_CASES" -lt 2 ]];
+}; then
     echo "ERROR: NUM_CASES must be an integer >= 2 for train/eval split. got: $NUM_CASES" >&2
     exit 1
 fi
@@ -72,6 +76,7 @@ echo "===== full-ft sweep ====="
 echo "run_id:      $RUN_ID"
 echo "base_exp:    $BASE_EXP"
 echo "num_cases:   $NUM_CASES"
+echo "src_run_dir: ${INPUT_SRC_RUN_DIR:-<generate new>}"
 echo "patterns:    $SWEEP_PATTERNS"
 echo "mlflow_exp:  $MLFLOW_EXPERIMENT_NAME"
 echo "mlflow_uri:  $MLFLOW_TRACKING_URI"
@@ -90,15 +95,21 @@ if ! uv run python -c "import mlflow" >/dev/null 2>&1; then
 fi
 
 echo
-echo "[full-ft sweep] generating shared 3h dataset"
-RUN_ID="$RUN_ID" \
-NUM_CASES="$NUM_CASES" \
-STEPS=use_cases,dialogues,audio \
-bash scripts/run_pipeline.sh
+if [[ -n "$INPUT_SRC_RUN_DIR" ]]; then
+    echo "[full-ft sweep] using existing shared dataset"
+    SRC_RUN_DIR="$INPUT_SRC_RUN_DIR"
+else
+    echo "[full-ft sweep] generating shared 3h dataset"
+    RUN_ID="$RUN_ID" \
+    NUM_CASES="$NUM_CASES" \
+    STEPS=use_cases,dialogues,audio \
+    bash scripts/run_pipeline.sh
 
-SRC_RUN_DIR="./data/runs/${RUN_ID}"
+    SRC_RUN_DIR="./data/runs/${RUN_ID}"
+fi
+
 if [[ ! -f "$SRC_RUN_DIR/training_set/synthetic_moshi_train.jsonl" ]]; then
-    echo "ERROR: generated manifest not found: $SRC_RUN_DIR/training_set/synthetic_moshi_train.jsonl" >&2
+    echo "ERROR: training manifest not found: $SRC_RUN_DIR/training_set/synthetic_moshi_train.jsonl" >&2
     exit 1
 fi
 
