@@ -181,3 +181,29 @@ configs/
   moshi_lora_jp_loneliness.yaml    # パイプライン用 FT config
 data/runs/                         # 実行ごとの出力 (git ignore)
 ```
+
+## Full-FT / LoRA repository split
+
+- Full fine-tuning: `nu-dialogue/moshi-finetune`, default checkout
+  `../moshi-finetune-nu-dialogue`.
+- LoRA fine-tuning: `kyutai-labs/moshi-finetune`, default checkout
+  `../moshi-finetune`.
+
+`scripts/run_fullft_sweep_pair.sh` uses the nu-dialogue repo and will clone it
+if `../moshi-finetune-nu-dialogue` is missing. `scripts/run_sweep_pair.sh` and
+`scripts/run_experiment.sh` keep using the Kyutai repo for LoRA.
+
+Existing generated data can be reused by pointing `SRC_RUN_DIR` at the run
+directory that contains `training_set/synthetic_moshi_train.jsonl`:
+
+```bash
+SRC_RUN_DIR=/path/to/data/runs/3h_dataset \
+SWEEP_PATTERNS="f01" \
+NPROC=2 \
+CUDA_VISIBLE_DEVICES=0,1 \
+bash scripts/run_fullft_sweep_pair.sh
+```
+
+PBS full-FT jobs (`scripts/fullft_sweep_*.pbs`) use `res=middle`, `NPROC=2`,
+and `CUDA_VISIBLE_DEVICES=0,1` by default. Details are in
+`experiments/fullft_3h_sweep_10_patterns.md`.

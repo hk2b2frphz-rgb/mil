@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Generate one ~3h dataset or use SRC_RUN_DIR, then run two or more full
-# fine-tuning patterns on it.
+# fine-tuning patterns on it with nu-dialogue/moshi-finetune.
 
 set -euo pipefail
 
@@ -11,15 +11,17 @@ cd "$REPO_ROOT"
 BASE_EXP="${BASE_EXP:-exp100_full_ft}"
 NUM_CASES="${NUM_CASES:-250}"
 SWEEP_PATTERNS="${SWEEP_PATTERNS:-f01 f02}"
-NPROC="${NPROC:-1}"
+NPROC="${NPROC:-2}"
 RUN_ID="${RUN_ID:-full_$(date +%Y%m%d_%H%M%S)}"
 INPUT_SRC_RUN_DIR="${SRC_RUN_DIR:-}"
 
 export NPROC
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 export MLFLOW_EXPERIMENT_NAME="${MLFLOW_EXPERIMENT_NAME:-job_fullft_3h}"
 export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-sqlite:///$REPO_ROOT/mlruns/mlflow.db}"
 export MLFLOW_ARTIFACT_ROOT="${MLFLOW_ARTIFACT_ROOT:-file:$REPO_ROOT/mlruns/artifacts}"
+export NU_MOSHI_FT_REPO="${NU_MOSHI_FT_REPO:-$REPO_ROOT/../moshi-finetune-nu-dialogue}"
+export NU_DATA_DIR="${NU_DATA_DIR:-$REPO_ROOT/data/nu_fullft/$RUN_ID}"
 
 if [[ -z "$INPUT_SRC_RUN_DIR" ]] && {
     ! [[ "$NUM_CASES" =~ ^[0-9]+$ ]] || [[ "$NUM_CASES" -lt 2 ]];
@@ -83,6 +85,9 @@ echo "mlflow_exp:  $MLFLOW_EXPERIMENT_NAME"
 echo "mlflow_uri:  $MLFLOW_TRACKING_URI"
 echo "artifact:    $MLFLOW_ARTIFACT_ROOT"
 echo "cuda:        $CUDA_VISIBLE_DEVICES"
+echo "nproc:       $NPROC"
+echo "nu_repo:     $NU_MOSHI_FT_REPO"
+echo "nu_data:     $NU_DATA_DIR"
 echo "started_at:  $(date -Iseconds)"
 echo "========================="
 
@@ -138,7 +143,7 @@ for pattern in $SWEEP_PATTERNS; do
     echo "[full-ft sweep] running $pattern"
     echo "  exp=$SWEEP_EXP_NAME"
     echo "  lr=$HP_LR batch=$HP_BATCH_SIZE micro=$HP_NUM_MICROBATCHES steps=$HP_MAX_STEPS wd=$HP_WEIGHT_DECAY pct_start=$HP_PCT_START max_norm=$HP_MAX_NORM duration=${HP_DURATION_SEC:-100}"
-    bash scripts/run_experiment.sh "$SWEEP_EXP_NAME" "$SRC_RUN_DIR"
+    bash scripts/run_nu_fullft_experiment.sh "$SWEEP_EXP_NAME" "$SRC_RUN_DIR"
 done
 
 echo
