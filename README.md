@@ -53,6 +53,40 @@ bash scripts/run_experiment.sh exp001_lora_baseline ./data/runs/2026-06-02_13053
 bash scripts/generate_and_run.sh exp002_lora_3h_data 250
 ```
 
+### 既存の学習データを指定して実行
+
+生成済みの学習データを使う場合は、`SRC_RUN_DIR` に
+`training_set/synthetic_moshi_train.jsonl` を含む run ディレクトリを指定する。
+
+```bash
+# 例:
+#   ./data/runs/3h_dataset/training_set/synthetic_moshi_train.jsonl
+
+export SRC_RUN_DIR=./data/runs/3h_dataset
+
+# full fine-tuning sweep。fullft_sweep_01.pbs はデフォルトで f01 f02 を実行する。
+qsub scripts/fullft_sweep_01.pbs
+
+# 必要なら sweep pattern を上書きする。
+export SWEEP_PATTERNS="f03 f04"
+qsub scripts/fullft_sweep_02.pbs
+```
+
+PBS を使わずにシェルから直接試す場合:
+
+```bash
+SRC_RUN_DIR=./data/runs/3h_dataset \
+SWEEP_PATTERNS="f01 f02" \
+bash scripts/run_fullft_sweep_pair.sh
+```
+
+同じ `SRC_RUN_DIR` は LoRA sweep と単発PBSにも使える。
+
+```bash
+qsub scripts/sweep_01.pbs
+qsub scripts/run_experiment.pbs
+```
+
 詳細は [experiments/README.md](experiments/README.md) 参照。
 
 ### 個別ステップ
