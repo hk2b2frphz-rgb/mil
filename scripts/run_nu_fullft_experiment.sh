@@ -76,7 +76,7 @@ NU_DATA_DIR="${NU_DATA_DIR:-$REPO_ROOT/data/nu_fullft/${RUN_ID:-$(basename "$SRC
 NU_DATA_DIR="$(realpath -m "$NU_DATA_DIR")"
 NU_LAUNCH_CONFIG="$EXP_DIR/nu_launch_${RUN_TS}.json"
 
-HP_LR="${HP_LR:-5e-7}"
+HP_LR="${HP_LR:-3e-5}"
 HP_WEIGHT_DECAY="${HP_WEIGHT_DECAY:-0.1}"
 HP_PCT_START="${HP_PCT_START:-0.05}"
 HP_BATCH_SIZE="${HP_BATCH_SIZE:-1}"
@@ -99,7 +99,7 @@ NU_MOSHI_LM_CONFIG_NAME="${NU_MOSHI_LM_CONFIG_NAME:-moshi_lm_kwargs.json}"
 NU_MODEL_DTYPE="${NU_MODEL_DTYPE:-float32}"
 NU_MODEL_DIR="${NU_MODEL_DIR:-$NU_MOSHI_FT_REPO/init_models/llm-jp-moshi-v1-both_streams-${NU_MODEL_DTYPE}}"
 NU_MODEL_DIR="$(realpath -m "$NU_MODEL_DIR")"
-NU_DEEPSPEED_CONFIG="${NU_DEEPSPEED_CONFIG:-$REPO_ROOT/configs/deepspeed_zero2_fp16_warmlr_act_ckpt.json}"
+NU_DEEPSPEED_CONFIG="${NU_DEEPSPEED_CONFIG:-$REPO_ROOT/configs/deepspeed_zero3_fp16_act_ckpt.json}"
 NU_DEEPSPEED_CONFIG="$(realpath -m "$NU_DEEPSPEED_CONFIG")"
 NU_TOKENIZE_AUDIO_WORKERS="${NU_TOKENIZE_AUDIO_WORKERS:-$NPROC}"
 NU_TOKENIZE_TEXT_WORKERS="${NU_TOKENIZE_TEXT_WORKERS:-4}"
@@ -112,11 +112,7 @@ import sys
 print(int(float(sys.argv[1]) * 12.5))
 PY
 )}"
-NU_WARMUP_STEPS="${NU_WARMUP_STEPS:-$(python3 - "$HP_MAX_STEPS" "$HP_PCT_START" <<'PY'
-import sys
-print(max(0, int(float(sys.argv[1]) * float(sys.argv[2]))))
-PY
-)}"
+NU_WARMUP_STEPS="${NU_WARMUP_STEPS:-0}"
 
 mkdir -p "$NU_DATA_DIR" "$NU_OUTPUT_DIR"
 

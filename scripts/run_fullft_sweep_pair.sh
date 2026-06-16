@@ -42,9 +42,11 @@ apply_pattern() {
     local pattern="$1"
     clear_hp_env
 
-    HP_LR=5e-7
+    # nu-dialogue/moshi-finetune default learning rate. Keep LR fixed across
+    # full-FT patterns; vary memory/regularization knobs instead.
+    HP_LR=3e-5
     HP_WEIGHT_DECAY=0.1
-    HP_PCT_START=0.05
+    HP_PCT_START=0
     HP_BATCH_SIZE=1
     HP_NUM_MICROBATCHES=8
     HP_MAX_STEPS=1200
@@ -52,15 +54,16 @@ apply_pattern() {
     HP_EVAL_FREQ=60
     HP_LOG_FREQ=5
     HP_MAX_NORM=1.0
+    HP_DURATION_SEC=60
 
     case "$pattern" in
-        f01) ;;                                      # 3h full-FT baseline
-        f02) HP_LR=1e-6 ;;                           # faster adaptation
-        f03) HP_LR=2e-7 ;;                           # conservative update
+        f01) ;;                                      # A100-safe fixed-LR baseline
+        f02) HP_DURATION_SEC=80 ;;                   # longer context, more memory
+        f03) HP_DURATION_SEC=40 ;;                   # shorter context, lower activation memory
         f04) HP_WEIGHT_DECAY=0.01 ;;                 # weaker regularization
         f05) HP_WEIGHT_DECAY=0.2 ;;                  # stronger regularization
-        f06) HP_PCT_START=0.10 ;;                    # longer warmup
-        f07) HP_DURATION_SEC=80 ;;                     # shorter sequence, lower activation memory
+        f06) HP_NUM_MICROBATCHES=16 ;;               # same microbatch, larger effective batch
+        f07) HP_DURATION_SEC=30 ;;                   # emergency low-memory context
         f08) HP_MAX_NORM=0.5 ;;                      # tighter gradient clipping
         f09) HP_MAX_STEPS=800; HP_CKPT_FREQ=80; HP_EVAL_FREQ=40 ;;   # shorter exposure
         f10) HP_MAX_STEPS=1600; HP_CKPT_FREQ=160; HP_EVAL_FREQ=80 ;; # longer exposure

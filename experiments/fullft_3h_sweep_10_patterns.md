@@ -37,9 +37,9 @@ Defaults:
 - `res=middle` PBS resource, A100 80GB x2 target for full-FT sweep jobs
 - `NPROC=2`, `CUDA_VISIBLE_DEVICES=0,1`
 - `NU_MOSHI_FT_REPO=$PWD/../moshi-finetune-nu-dialogue`
-- `NU_DEEPSPEED_CONFIG=$PWD/configs/deepspeed_zero2_fp16_warmlr_act_ckpt.json`
-  for the default A100 80GB x2 run. Override this with the repo's
-  `zero3-fp16-warmlr-act_ckpt.json` if memory is still tight.
+- `NU_DEEPSPEED_CONFIG=$PWD/configs/deepspeed_zero3_fp16_act_ckpt.json`
+  for the default A100 80GB x2 run. This uses fixed learning rate, no warmup
+  scheduler, and ZeRO-3 parameter/optimizer partitioning.
 
 Using an existing generated 3h dataset:
 
@@ -76,13 +76,13 @@ bash scripts/run_fullft_sweep_pair.sh
 
 | pattern | PBS | change from full-FT 3h baseline | purpose |
 |---|---:|---|---|
-| `f01` | 01 | `lr=5e-7`, `batch=1`, `micro=8`, `steps=1200` | 3h low-memory baseline |
-| `f02` | 01 | `lr=1e-6` | faster adaptation / forgetting risk |
-| `f03` | 02 | `lr=2e-7` | conservative update |
+| `f01` | 01 | `lr=3e-5`, `batch=1`, `micro=8`, `duration=60`, `steps=1200` | A100-safe fixed-LR baseline |
+| `f02` | 01 | `duration=80` | longer context, more activation memory |
+| `f03` | 02 | `duration=40` | shorter context, lower activation memory |
 | `f04` | 02 | `weight_decay=0.01` | weaker regularization |
 | `f05` | 03 | `weight_decay=0.2` | stronger regularization |
-| `f06` | 03 | `pct_start=0.10` | longer warmup |
-| `f07` | 04 | `duration_sec=80` | shorter sequence, lower activation memory |
+| `f06` | 03 | `micro=16` | larger effective batch without increasing per-GPU memory |
+| `f07` | 04 | `duration=30` | emergency low-memory context |
 | `f08` | 04 | `max_norm=0.5` | tighter gradient clipping |
 | `f09` | 05 | `steps=800` | shorter exposure |
 | `f10` | 05 | `steps=1600` | longer exposure |

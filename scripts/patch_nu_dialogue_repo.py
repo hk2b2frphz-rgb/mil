@@ -101,6 +101,65 @@ def patch_finetune_tracking(path: Path) -> bool:
     return True
 
 
+def patch_finetune_safe_means(path: Path) -> bool:
+    src = path.read_text(encoding="utf-8")
+    if "AUTO_PATCH_SAFE_EMPTY_MEAN" in src:
+        return False
+
+    marker = 'logger = get_logger(__name__)\n'
+    helper = '''logger = get_logger(__name__)
+
+
+# AUTO_PATCH_SAFE_EMPTY_MEAN:
+# Eval batches can contain streams with no valid text/user labels after
+# utterance-level timestamp conversion and length filtering. torch.mean([]) is
+# NaN, so use zero-valued tensors for logging-only empty means.
+def _safe_mean(values):
+    if values.numel() == 0:
+        return values.new_tensor(0.0)
+    return values.mean()
+'''
+    if marker not in src:
+        raise RuntimeError(f"Could not locate logger declaration in {path}")
+    src = src.replace(marker, helper, 1)
+
+    replacements = {
+        'text_accuracy[non_pad_indices].mean()': '_safe_mean(text_accuracy[non_pad_indices])',
+        'text_accuracy[pad_indices].mean()': '_safe_mean(text_accuracy[pad_indices])',
+        'audio_accuracy[..., 0][\n            audio_labels[..., 0] != moshi_lm.zero_token_id\n        ].mean()': '_safe_mean(audio_accuracy[..., 0][\n            audio_labels[..., 0] != moshi_lm.zero_token_id\n        ])',
+        'audio_accuracy[..., 1:8][\n            audio_labels[..., 1:8] != moshi_lm.zero_token_id\n        ].mean()': '_safe_mean(audio_accuracy[..., 1:8][\n            audio_labels[..., 1:8] != moshi_lm.zero_token_id\n        ])',
+        'audio_accuracy[..., 8][\n                    audio_labels[..., 8] != moshi_lm.zero_token_id\n                ].mean()': '_safe_mean(audio_accuracy[..., 8][\n                    audio_labels[..., 8] != moshi_lm.zero_token_id\n                ])',
+        'audio_accuracy[..., 9:][\n                    audio_labels[..., 9:] != moshi_lm.zero_token_id\n                ].mean()': '_safe_mean(audio_accuracy[..., 9:][\n                    audio_labels[..., 9:] != moshi_lm.zero_token_id\n                ])',
+        '    text_loss = 0.0': '    text_loss = tempformer_out.new_tensor(0.0)',
+        'temp_result["non_pad_losses"].mean().detach()': '_safe_mean(temp_result["non_pad_losses"]).detach()',
+        'temp_result["pad_losses"].mean().detach()': '_safe_mean(temp_result["pad_losses"]).detach()',
+        'dep_result["semantic_losses"].mean().detach()': '_safe_mean(dep_result["semantic_losses"]).detach()',
+        'dep_result["acoustic_losses"].mean().detach()': '_safe_mean(dep_result["acoustic_losses"]).detach()',
+        'dep_result["semantic_losses_user"].mean().detach()': '_safe_mean(dep_result["semantic_losses_user"]).detach()',
+        'dep_result["acoustic_losses_user"].mean().detach()': '_safe_mean(dep_result["acoustic_losses_user"]).detach()',
+    }
+    missing = []
+    for old, new in replacements.items():
+        if old not in src:
+            missing.append(old)
+        else:
+            src = src.replace(old, new)
+    if missing:
+        raise RuntimeError(f"Could not locate safe-mean targets in {path}: {missing[:2]}")
+
+    path.write_text(src, encoding="utf-8")
+    return True
+
+
+def patch_utils_data(path: Path) -> bool:
+    src = path.read_text(encoding="utf-8")
+    updated = src.replace("np.concat(", "np.concatenate(")
+    if updated == src:
+        return False
+    path.write_text(updated, encoding="utf-8")
+    return True
+
+
 def main() -> int:
     args = parse_args()
     nu_repo = args.nu_repo.resolve()
@@ -114,6 +173,10 @@ def main() -> int:
         changes.append("tools/prepare_dataset.py")
     if patch_finetune_tracking(nu_repo / "finetune.py"):
         changes.append("finetune.py")
+    if patch_finetune_safe_means(nu_repo / "finetune.py"):
+        changes.append("finetune.py:safe-means")
+    if patch_utils_data(nu_repo / "utils" / "data.py"):
+        changes.append("utils/data.py")
 
     if changes:
         print(f"[nu-patch] patched {', '.join(changes)}")
