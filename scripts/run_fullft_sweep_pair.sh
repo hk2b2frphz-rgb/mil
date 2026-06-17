@@ -43,8 +43,7 @@ apply_pattern() {
     local pattern="$1"
     clear_hp_env
 
-    # nu-dialogue/moshi-finetune default learning rate. Keep LR fixed across
-    # full-FT patterns; vary memory/regularization knobs instead.
+    # nu-dialogue/moshi-finetune default learning rate.
     HP_LR=3e-5
     HP_WEIGHT_DECAY=0.1
     HP_PCT_START=0
@@ -68,6 +67,10 @@ apply_pattern() {
         f08) HP_MAX_NORM=0.5 ;;                      # tighter gradient clipping
         f09) HP_MAX_STEPS=800; HP_CKPT_FREQ=80; HP_EVAL_FREQ=40 ;;   # shorter exposure
         f10) HP_MAX_STEPS=1600; HP_CKPT_FREQ=160; HP_EVAL_FREQ=80 ;; # longer exposure
+        lr_3e-5) ;;                                  # nu-dialogue default LR
+        lr_2e-5) HP_LR=2e-5 ;;                       # slightly lower LR
+        lr_1e-5) HP_LR=1e-5 ;;                       # lower LR
+        lr_5e-6) HP_LR=5e-6 ;;                       # conservative LR
         *)
             echo "ERROR: unknown full-FT sweep pattern: $pattern" >&2
             exit 1

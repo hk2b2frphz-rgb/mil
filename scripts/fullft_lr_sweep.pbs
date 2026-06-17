@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N full_lr_sweep
+#PBS -q xan_s
+#PBS -l select=1:res=middle
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+source scripts/setup_pbs_distributed.sh
+
+export RUN_ID="${RUN_ID:-full_lr_${JOB_ID_SHORT}}"
+export SWEEP_PATTERNS="${SWEEP_PATTERNS:-lr_3e-5,lr_2e-5,lr_1e-5,lr_5e-6}"
+export NUM_CASES="${NUM_CASES:-250}"
+export NPROC="${NPROC:-2}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+export MLFLOW_EXPERIMENT_NAME="${MLFLOW_EXPERIMENT_NAME:-job_fullft_lr}"
+export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-sqlite:///$PWD/mlruns/mlflow.db}"
+export MLFLOW_ARTIFACT_ROOT="${MLFLOW_ARTIFACT_ROOT:-file:$PWD/mlruns/artifacts}"
+export MLFLOW_LIVE_SYNC_INTERVAL="${MLFLOW_LIVE_SYNC_INTERVAL:-120}"
+
+mkdir -p experiments/pbs_logs
+exec > >(tee -a "experiments/pbs_logs/${RUN_ID}.log") 2>&1
+
+bash scripts/run_fullft_sweep_pair.sh

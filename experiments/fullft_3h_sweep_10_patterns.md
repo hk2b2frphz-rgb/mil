@@ -53,6 +53,15 @@ export SRC_RUN_DIR=/path/to/data/runs/3h_dataset
 qsub scripts/fullft_sweep.pbs
 ```
 
+Learning-rate-only sweep:
+
+```bash
+qsub -v SRC_RUN_DIR=/path/to/data/runs/3h_dataset scripts/fullft_lr_sweep.pbs
+
+# Shorter and safer for 12h walltime: submit one LR per PBS job.
+qsub -v SRC_RUN_DIR=/path/to/data/runs/3h_dataset,SWEEP_PATTERNS=lr_2e-5 scripts/fullft_lr_sweep.pbs
+```
+
 `SRC_RUN_DIR` must contain:
 
 ```text
@@ -98,6 +107,10 @@ bash scripts/run_fullft_sweep_pair.sh
 | `f08` | `max_norm=0.5` | tighter gradient clipping |
 | `f09` | `steps=800` | shorter exposure |
 | `f10` | `steps=1600` | longer exposure |
+| `lr_3e-5` | `lr=3e-5` | nu-dialogue default LR reference |
+| `lr_2e-5` | `lr=2e-5` | slightly lower LR |
+| `lr_1e-5` | `lr=1e-5` | lower LR |
+| `lr_5e-6` | `lr=5e-6` | conservative LR |
 
 Each pattern runs in its own `experiments/_fullft_sweeps/<RUN_ID>_<pattern>/`
 directory and logs to MLflow as `<RUN_ID>_<pattern>`. For nu-dialogue full-FT,

@@ -18,6 +18,15 @@ qsub -v SRC_RUN_DIR=/path/to/data/runs/3h_dataset,SWEEP_PATTERNS=h01,h02,h03,h04
 qsub -v SRC_RUN_DIR=/path/to/data/runs/3h_dataset,SWEEP_PATTERNS=h06,h07,h08,h09,h10 scripts/sweep_lora.pbs
 ```
 
+Learning-rate-only sweep:
+
+```bash
+qsub -v SRC_RUN_DIR=/path/to/data/runs/3h_dataset scripts/lora_lr_sweep.pbs
+
+# Shorter and safer for 12h walltime: submit one LR per PBS job.
+qsub -v SRC_RUN_DIR=/path/to/data/runs/3h_dataset,SWEEP_PATTERNS=lr_1e-6 scripts/lora_lr_sweep.pbs
+```
+
 Defaults:
 
 - `NUM_CASES=250`
@@ -39,6 +48,10 @@ Defaults:
 | `h08` | `batch_size=4`, `num_microbatches=2` | same effective batch, lower per-forward memory |
 | `h09` | `pct_start=0.10` | longer warmup |
 | `h10` | `weight_decay=0.01` | weaker regularization |
+| `lr_2e-6` | `lr=2e-6` | Kyutai example default LR reference |
+| `lr_1p5e-6` | `lr=1.5e-6` | slightly lower LR |
+| `lr_1e-6` | `lr=1e-6` | lower LR |
+| `lr_5e-7` | `lr=5e-7` | conservative LR |
 
 Each MLflow run name is `<RUN_ID>_<pattern>`.
 Each pattern runs in its own `experiments/_sweeps/<RUN_ID>_<pattern>/`

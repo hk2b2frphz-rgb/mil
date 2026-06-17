@@ -64,6 +64,10 @@ apply_pattern() {
         h08) HP_BATCH_SIZE=4; HP_NUM_MICROBATCHES=2 ;; # same effective batch, lower per-step memory
         h09) HP_PCT_START=0.10 ;;                    # longer warmup
         h10) HP_WEIGHT_DECAY=0.01 ;;                 # weaker regularization
+        lr_2e-6) ;;                                  # Kyutai example default LR
+        lr_1p5e-6) HP_LR=1.5e-6 ;;                   # slightly lower LR
+        lr_1e-6) HP_LR=1e-6 ;;                       # lower LR
+        lr_5e-7) HP_LR=5e-7 ;;                       # conservative LR
         *)
             echo "ERROR: unknown sweep pattern: $pattern" >&2
             exit 1
