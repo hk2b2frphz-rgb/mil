@@ -265,6 +265,9 @@ fi
 
 # 単 GPU で BACKEND="nccl" のまま init_process_group → dist.barrier すると
 # 環境によっては無言で hang する。WORLD_SIZE=1 のときだけ gloo にする。
+# Apply LoRA-side compatibility patches to the Kyutai moshi-finetune checkout.
+python3 "$REPO_ROOT/scripts/patch_kyutai_moshi_finetune.py" --ft-repo "$MOSHI_FT_REPO"
+
 DISTRIBUTED_PY="$MOSHI_FT_REPO/finetune/distributed.py"
 if [[ -f "$DISTRIBUTED_PY" ]] && ! grep -q 'AUTO_PATCH_BACKEND_WORLD1' "$DISTRIBUTED_PY"; then
     echo "[exp] finetune/distributed.py の BACKEND を WORLD_SIZE=1 で gloo に分岐"
