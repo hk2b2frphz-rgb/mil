@@ -35,6 +35,7 @@ clear_hp_env() {
     unset HP_LR HP_WEIGHT_DECAY HP_PCT_START
     unset HP_BATCH_SIZE HP_NUM_MICROBATCHES HP_MAX_STEPS
     unset HP_CKPT_FREQ HP_EVAL_FREQ HP_LOG_FREQ HP_MAX_NORM
+    unset HP_MAX_EPOCHS HP_EVAL_EVERY_EPOCH HP_CKPT_EVERY_EPOCH HP_WARMUP_EPOCHS
     unset HP_DURATION_SEC HP_GRADIENT_CHECKPOINTING HP_PARAM_DTYPE HP_SEED
     unset HP_LORA_RANK HP_LORA_SCALING HP_LORA_ENABLE HP_LORA_FT_EMBED
 }
@@ -43,21 +44,34 @@ apply_pattern() {
     local pattern="$1"
     clear_hp_env
 
-    # nu-dialogue/moshi-finetune default learning rate.
-    HP_LR=3e-5
+    # Data-matched full-FT baseline for ~3h (~250-case) synthetic data.
+    # Schedule is denominated in epochs and converted to steps by the runner
+    # from the real train-chunk count (steps_per_epoch). With train~225 and
+    # global batch 16 -> ~15 steps/epoch, so e.g. 12 epochs ~= 180 steps.
+    #
+    # LR is 1e-5 (not the nu-dialogue 3e-5 default): on this data volume full
+    # fine-tuning at 3e-5 overfits almost immediately. The 3e-5 reference is
+    # kept in the lr_* patterns below.
+    HP_LR=1e-5
     HP_WEIGHT_DECAY=0.1
     HP_PCT_START=0
     HP_BATCH_SIZE=1
     HP_NUM_MICROBATCHES=8
-    HP_MAX_STEPS=1200
-    HP_CKPT_FREQ=120
-    HP_EVAL_FREQ=60
     HP_LOG_FREQ=5
     HP_MAX_NORM=1.0
     HP_DURATION_SEC=60
 
+    # Data-matched, epoch-denominated schedule (converted to steps by the
+    # runner). Initial-experiment tuning: short total exposure, warmup ~1
+    # epoch, and eval at twice the checkpoint resolution so the overfitting
+    # onset is captured between saved checkpoints.
+    HP_MAX_EPOCHS=12          # total exposure (was ~80 epochs at 1200 steps)
+    HP_WARMUP_EPOCHS=1        # linear warmup (was ~3.3 epochs at 50 steps)
+    HP_EVAL_EVERY_EPOCH=0.5   # dense eval to locate the loss inflection
+    HP_CKPT_EVERY_EPOCH=1     # one checkpoint per epoch -> best epoch is kept
+
     case "$pattern" in
-        f01) ;;                                      # A100-safe fixed-LR baseline
+        f01) ;;                                      # data-matched fixed-LR baseline
         f02) HP_DURATION_SEC=80 ;;                   # longer context, more memory
         f03) HP_DURATION_SEC=40 ;;                   # shorter context, lower activation memory
         f04) HP_WEIGHT_DECAY=0.01 ;;                 # weaker regularization
@@ -65,9 +79,9 @@ apply_pattern() {
         f06) HP_NUM_MICROBATCHES=16 ;;               # same microbatch, larger effective batch
         f07) HP_DURATION_SEC=30 ;;                   # emergency low-memory context
         f08) HP_MAX_NORM=0.5 ;;                      # tighter gradient clipping
-        f09) HP_MAX_STEPS=800; HP_CKPT_FREQ=80; HP_EVAL_FREQ=40 ;;   # shorter exposure
-        f10) HP_MAX_STEPS=1600; HP_CKPT_FREQ=160; HP_EVAL_FREQ=80 ;; # longer exposure
-        lr_3e-5) ;;                                  # nu-dialogue default LR
+        f09) HP_MAX_EPOCHS=8 ;;                      # shorter exposure
+        f10) HP_MAX_EPOCHS=20 ;;                     # longer exposure
+        lr_3e-5) HP_LR=3e-5 ;;                       # nu-dialogue default LR (reference)
         lr_2e-5) HP_LR=2e-5 ;;                       # slightly lower LR
         lr_1e-5) HP_LR=1e-5 ;;                       # lower LR
         lr_5e-6) HP_LR=5e-6 ;;                       # conservative LR
@@ -78,8 +92,9 @@ apply_pattern() {
     esac
 
     export HP_LR HP_WEIGHT_DECAY HP_PCT_START
-    export HP_BATCH_SIZE HP_NUM_MICROBATCHES HP_MAX_STEPS HP_DURATION_SEC
-    export HP_CKPT_FREQ HP_EVAL_FREQ HP_LOG_FREQ HP_MAX_NORM
+    export HP_BATCH_SIZE HP_NUM_MICROBATCHES HP_DURATION_SEC
+    export HP_LOG_FREQ HP_MAX_NORM
+    export HP_MAX_EPOCHS HP_WARMUP_EPOCHS HP_EVAL_EVERY_EPOCH HP_CKPT_EVERY_EPOCH
 }
 
 echo "===== full-ft sweep ====="
@@ -149,7 +164,8 @@ for pattern in $SWEEP_PATTERNS; do
     echo
     echo "[full-ft sweep] running $pattern"
     echo "  exp=$SWEEP_EXP_NAME"
-    echo "  lr=$HP_LR batch=$HP_BATCH_SIZE micro=$HP_NUM_MICROBATCHES steps=$HP_MAX_STEPS wd=$HP_WEIGHT_DECAY pct_start=$HP_PCT_START max_norm=$HP_MAX_NORM duration=${HP_DURATION_SEC:-100}"
+    echo "  lr=$HP_LR batch=$HP_BATCH_SIZE micro=$HP_NUM_MICROBATCHES max_epochs=$HP_MAX_EPOCHS warmup_ep=$HP_WARMUP_EPOCHS eval_ep=$HP_EVAL_EVERY_EPOCH ckpt_ep=$HP_CKPT_EVERY_EPOCH wd=$HP_WEIGHT_DECAY max_norm=$HP_MAX_NORM duration=${HP_DURATION_SEC:-100}"
+    echo "  (epoch->step conversion is logged by the runner as steps_per_epoch)"
     bash scripts/run_nu_fullft_experiment.sh "$SWEEP_EXP_NAME" "$SRC_RUN_DIR"
 done
 

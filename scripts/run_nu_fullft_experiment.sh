@@ -262,6 +262,45 @@ data = json.load(open(sys.argv[1], encoding="utf-8"))
 print(data["splits"]["train"]["count"])
 PY
 )"
+
+# Steps per epoch for this dataset/parallelism. Used both to derive
+# num_train_epochs below and to translate any epoch-denominated schedule knobs
+# (HP_*_EPOCH*) into concrete step counts, so the schedule scales with data
+# volume instead of being hardcoded for one dataset size.
+STEPS_PER_EPOCH="$(python3 - "$TRAIN_COUNT" "$HP_BATCH_SIZE" "$NPROC" "$HP_NUM_MICROBATCHES" <<'PY'
+import math, sys
+train_count, per_device, nproc, accum = map(int, sys.argv[1:])
+global_batch = max(1, per_device * nproc * accum)
+print(max(1, math.ceil(train_count / global_batch)))
+PY
+)"
+
+# Epoch-denominated overrides. When set, they take precedence over the
+# step-based HP_* values and are converted using STEPS_PER_EPOCH. This keeps
+# the schedule data-matched (e.g. "12 epochs, eval every 0.5 epoch").
+epoch_to_steps() {  # <epochs> <floor>
+    python3 - "$1" "$STEPS_PER_EPOCH" "$2" <<'PY'
+import sys
+epochs, spe, floor = float(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
+print(max(floor, round(epochs * spe)))
+PY
+}
+if [[ -n "${HP_MAX_EPOCHS:-}" ]]; then
+    HP_MAX_STEPS="$(epoch_to_steps "$HP_MAX_EPOCHS" 1)"
+fi
+if [[ -n "${HP_EVAL_EVERY_EPOCH:-}" ]]; then
+    HP_EVAL_FREQ="$(epoch_to_steps "$HP_EVAL_EVERY_EPOCH" 1)"
+fi
+if [[ -n "${HP_CKPT_EVERY_EPOCH:-}" ]]; then
+    HP_CKPT_FREQ="$(epoch_to_steps "$HP_CKPT_EVERY_EPOCH" 1)"
+fi
+if [[ -n "${HP_WARMUP_EPOCHS:-}" ]]; then
+    NU_WARMUP_STEPS="$(epoch_to_steps "$HP_WARMUP_EPOCHS" 1)"
+fi
+echo "[nu-fullft] train_count=$TRAIN_COUNT steps_per_epoch=$STEPS_PER_EPOCH" \
+     "-> max_steps=$HP_MAX_STEPS eval_steps=$HP_EVAL_FREQ" \
+     "save_steps=$HP_CKPT_FREQ warmup_steps=$NU_WARMUP_STEPS"
+
 NU_NUM_TRAIN_EPOCHS="${NU_NUM_TRAIN_EPOCHS:-$(python3 - "$TRAIN_COUNT" "$HP_BATCH_SIZE" "$NPROC" "$HP_NUM_MICROBATCHES" "$HP_MAX_STEPS" <<'PY'
 import math, sys
 train_count, per_device, nproc, accum, max_steps = map(int, sys.argv[1:])

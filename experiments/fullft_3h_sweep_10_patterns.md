@@ -43,8 +43,9 @@ Defaults:
 - `NU_DEEPSPEED_CONFIG=$PWD/configs/deepspeed_zero3_fp16_warmlr_act_ckpt.json`
   for the default A100 80GB x2 run. This uses ZeRO-3
   parameter/optimizer partitioning and a short warmup to the fixed LR.
-- `HP_LR=3e-5` for full-FT by default, matching the nu-dialogue default.
-  LoRA sweeps keep the Kyutai example default `2e-6`.
+- `HP_LR=1e-5` for the full-FT baseline (the nu-dialogue `3e-5` default
+  overfits this data volume almost immediately; it is kept as the `lr_3e-5`
+  reference pattern). LoRA sweeps keep the Kyutai example default `2e-6`.
 
 Using an existing generated 3h dataset:
 
@@ -95,9 +96,22 @@ CUDA_VISIBLE_DEVICES=0,1 \
 bash scripts/run_fullft_sweep_pair.sh
 ```
 
-| pattern | change from full-FT 3h baseline | purpose |
+The full-FT baseline is data-matched and **epoch-denominated**: the schedule is
+specified in epochs and converted to steps by the runner from the real
+train-chunk count (`steps_per_epoch = ceil(train_count / global_batch)`). The
+runner logs the conversion (`train_count`, `steps_per_epoch`, resulting
+`max_steps`/`eval_steps`/`save_steps`/`warmup_steps`).
+
+Baseline: `lr=1e-5`, `batch=1`, `micro=8`, `duration=60`, `max_epochs=12`,
+`warmup=1 epoch`, `eval=every 0.5 epoch`, `ckpt=every 1 epoch`. At ~250 cases
+(train~225, global batch 16 -> ~15 steps/epoch) this is roughly `max_steps~180`,
+`warmup~15`, `eval_steps~8`, `save_steps~15` -> ~12 checkpoints and ~24 eval
+points. LR is `1e-5` (not the nu-dialogue `3e-5` default), which overfits this
+data volume almost immediately; the `3e-5` reference lives in `lr_3e-5`.
+
+| pattern | change from full-FT baseline | purpose |
 |---|---|---|
-| `f01` | `lr=3e-5`, `batch=1`, `micro=8`, `duration=60`, `steps=1200` | A100-safe fixed-LR baseline |
+| `f01` | (baseline) | data-matched fixed-LR baseline |
 | `f02` | `duration=80` | longer context, more activation memory |
 | `f03` | `duration=40` | shorter context, lower activation memory |
 | `f04` | `weight_decay=0.01` | weaker regularization |
@@ -105,12 +119,21 @@ bash scripts/run_fullft_sweep_pair.sh
 | `f06` | `micro=16` | larger effective batch without increasing per-GPU memory |
 | `f07` | `duration=30` | emergency low-memory context |
 | `f08` | `max_norm=0.5` | tighter gradient clipping |
-| `f09` | `steps=800` | shorter exposure |
-| `f10` | `steps=1600` | longer exposure |
+| `f09` | `max_epochs=8` | shorter exposure |
+| `f10` | `max_epochs=20` | longer exposure |
 | `lr_3e-5` | `lr=3e-5` | nu-dialogue default LR reference |
 | `lr_2e-5` | `lr=2e-5` | slightly lower LR |
 | `lr_1e-5` | `lr=1e-5` | lower LR |
 | `lr_5e-6` | `lr=5e-6` | conservative LR |
+
+Epoch knobs can also be overridden per run, e.g. to capture the very early
+overfitting region at higher resolution:
+
+```bash
+HP_MAX_EPOCHS=12 HP_EVAL_EVERY_EPOCH=0.25 HP_CKPT_EVERY_EPOCH=0.5 \
+SRC_RUN_DIR=/path/to/data/runs/3h_dataset SWEEP_PATTERNS=f01 \
+NPROC=2 CUDA_VISIBLE_DEVICES=0,1 bash scripts/run_fullft_sweep_pair.sh
+```
 
 Each pattern runs in its own `experiments/_fullft_sweeps/<RUN_ID>_<pattern>/`
 directory and logs to MLflow as `<RUN_ID>_<pattern>`. For nu-dialogue full-FT,
