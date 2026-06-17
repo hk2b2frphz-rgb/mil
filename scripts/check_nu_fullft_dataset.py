@@ -41,6 +41,57 @@ def load_split(data_dir: Path, split: str) -> pd.DataFrame | None:
     return pd.concat([pd.read_parquet(path) for path in files], ignore_index=True)
 
 
+def normalize_streams(value: Any, split: str, row_index: Any, speaker: str) -> np.ndarray:
+    """Return parquet A/B cell as int64 [9, T] even when pandas yields objects."""
+    try:
+        arr = np.asarray(value)
+    except Exception as exc:
+        raise ValueError(f"{split}:{row_index}:{speaker}: cannot read stream cell: {exc}") from exc
+
+    if arr.ndim == 2 and arr.shape[0] == 9:
+        try:
+            return arr.astype(np.int64, copy=False)
+        except (TypeError, ValueError):
+            pass
+    if arr.ndim == 2 and arr.shape[1] == 9:
+        try:
+            return arr.astype(np.int64, copy=False).T
+        except (TypeError, ValueError):
+            pass
+
+    try:
+        items = list(value)
+    except TypeError as exc:
+        raise ValueError(
+            f"{split}:{row_index}:{speaker}: expected nested streams, got {type(value).__name__}"
+        ) from exc
+
+    rows = []
+    for item in items:
+        try:
+            rows.append(np.asarray(item, dtype=np.int64).reshape(-1))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{split}:{row_index}:{speaker}: stream contains non-numeric or ragged values"
+            ) from exc
+
+    if len(rows) == 9:
+        lengths = {row.size for row in rows}
+        if len(lengths) != 1:
+            raise ValueError(
+                f"{split}:{row_index}:{speaker}: expected equal stream lengths, got {sorted(lengths)}"
+            )
+        return np.stack(rows, axis=0)
+
+    if rows and all(row.size == 9 for row in rows):
+        return np.stack(rows, axis=0).T
+
+    raise ValueError(
+        f"{split}:{row_index}:{speaker}: expected stream shape [9, T], "
+        f"got top-level length={len(rows)}"
+    )
+
+
 def summarize_split(
     data_dir: Path,
     split: str,
@@ -62,8 +113,8 @@ def summarize_split(
     post_filter_chunks = 0
 
     for _, row in df.iterrows():
-        main = np.asarray(row["A"], dtype=np.int64)
-        other = np.asarray(row["B"], dtype=np.int64)
+        main = normalize_streams(row["A"], split, row.name, "A")
+        other = normalize_streams(row["B"], split, row.name, "B")
         if main.ndim != 2 or other.ndim != 2 or main.shape[0] != 9 or other.shape[0] != 9:
             raise ValueError(
                 f"{split}: expected A/B shape [9, T], got A={main.shape}, B={other.shape}"
