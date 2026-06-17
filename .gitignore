@@ -4,6 +4,8 @@ __pycache__/
 
 # Pipeline outputs (regenerable)
 data/
+results/
+eval_runs/
 
 # Per-experiment runtime artifacts (regenerable / heavy).
 # Keep config.yaml / HYPERPARAMS.md / notes.md / args.yaml under VCS,
