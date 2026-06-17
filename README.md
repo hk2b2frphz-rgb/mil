@@ -64,12 +64,11 @@ bash scripts/generate_and_run.sh exp002_lora_3h_data 250
 
 export SRC_RUN_DIR=./data/runs/3h_dataset
 
-# full fine-tuning sweep。fullft_sweep_01.pbs はデフォルトで f01 f02 を実行する。
-qsub scripts/fullft_sweep_01.pbs
+# full fine-tuning sweep. Default is f01 only; override patterns for tuning.
+qsub scripts/fullft_sweep.pbs
 
 # 必要なら sweep pattern を上書きする。
-export SWEEP_PATTERNS="f03 f04"
-qsub scripts/fullft_sweep_02.pbs
+qsub -v SRC_RUN_DIR=./data/runs/3h_dataset,SWEEP_PATTERNS=f01,f04 scripts/fullft_sweep.pbs
 ```
 
 PBS を使わずにシェルから直接試す場合:
@@ -83,7 +82,7 @@ bash scripts/run_fullft_sweep_pair.sh
 同じ `SRC_RUN_DIR` は LoRA sweep と単発PBSにも使える。
 
 ```bash
-qsub scripts/sweep_01.pbs
+qsub -v SRC_RUN_DIR=./data/runs/3h_dataset,SWEEP_PATTERNS=h01,h02 scripts/sweep_lora.pbs
 qsub scripts/run_experiment.pbs
 ```
 
@@ -204,6 +203,12 @@ CUDA_VISIBLE_DEVICES=0,1 \
 bash scripts/run_fullft_sweep_pair.sh
 ```
 
-PBS full-FT jobs (`scripts/fullft_sweep_*.pbs`) use `res=middle`, `NPROC=2`,
-and `CUDA_VISIBLE_DEVICES=0,1` by default. Details are in
+PBS full-FT tuning uses `scripts/fullft_sweep.pbs` with `res=middle`,
+`NPROC=2`, and `CUDA_VISIBLE_DEVICES=0,1` by default. LoRA tuning uses
+`scripts/sweep_lora.pbs` with `res=small`. Details are in
 `experiments/fullft_3h_sweep_10_patterns.md`.
+
+For full fine-tuning, MLflow receives machine-readable stdout metrics from the
+nu-dialogue runner. The important curves are `train.loss`, `train.loss.text`,
+`train.loss.audio`, `eval.loss`, `eval.loss.text`, `eval.loss.audio`,
+`train.accuracy.*`, `eval.accuracy.*`, and `learning_rate.*`.

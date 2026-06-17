@@ -393,7 +393,7 @@ if [[ -n "${MLFLOW_EXPERIMENT_NAME:-}" || -n "${MLFLOW_TRACKING_URI:-}" ]]; then
         --output-dir "$NU_OUTPUT_DIR"
         --log-file "$EXP_LOG"
         --config "$NU_LAUNCH_CONFIG"
-        --experiment "${MLFLOW_EXPERIMENT_NAME:-job_fullft_3h}"
+        --experiment "${MLFLOW_EXPERIMENT_NAME:-job_fullft_hp}"
         --run-name "${MLFLOW_RUN_NAME:-$(basename "$EXP_NAME")}"
         --run-id-file "$MLFLOW_RUN_ID_FILE")
     if [[ -n "${MLFLOW_TRACKING_URI:-}" ]]; then

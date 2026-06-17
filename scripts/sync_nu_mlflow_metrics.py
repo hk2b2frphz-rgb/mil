@@ -19,6 +19,7 @@ TRAIN_RE = re.compile(
     r"\(text:\s*(?P<text>[-+0-9.eE]+),\s*audio:\s*(?P<audio>[-+0-9.eE]+)\)"
 )
 LR_RE = re.compile(r"'(?P<name>tempformer|depformer)':\s*'(?P<value>[-+0-9.eE]+)'")
+MILTO_METRICS_RE = re.compile(r"MILTO_METRICS\s+(?P<payload>\{.*\})")
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,12 +54,70 @@ def flatten(prefix: str, value: Any) -> dict[str, Any]:
     return {prefix: value}
 
 
+def mlflow_metric_name(split: str, raw_key: str) -> str:
+    if raw_key.startswith("learning_rate/"):
+        return raw_key.replace("/", ".")
+    return f"{split}.{raw_key.replace('/', '.')}"
+
+
+def add_metric_aliases(split: str, raw_key: str, value: float, metrics: dict[str, float]) -> None:
+    aliases = {
+        "loss/total": f"{split}.loss",
+        "loss/text_total": f"{split}.loss.text",
+        "loss/audio_total": f"{split}.loss.audio",
+    }
+    alias = aliases.get(raw_key)
+    if alias:
+        metrics[alias] = value
+
+
+def parse_miltoka_metrics(lines: list[str]) -> tuple[list[tuple[int, dict[str, float]]], set[tuple[str, int]]]:
+    events: list[tuple[int, dict[str, float]]] = []
+    seen: set[tuple[str, int]] = set()
+    for line in lines:
+        match = MILTO_METRICS_RE.search(line)
+        if not match:
+            continue
+        try:
+            payload = json.loads(match.group("payload"))
+        except json.JSONDecodeError as exc:
+            print(f"WARNING: could not parse MILTO_METRICS line: {exc}", file=sys.stderr)
+            continue
+        split = str(payload.get("split", "")).strip()
+        if split not in {"train", "eval"}:
+            continue
+        step = int(payload.get("step", 0))
+        raw_metrics = payload.get("metrics") or {}
+        if not isinstance(raw_metrics, dict):
+            continue
+        metrics: dict[str, float] = {}
+        if isinstance(payload.get("epoch"), (int, float)):
+            metrics[f"{split}.epoch"] = float(payload["epoch"])
+        for raw_key, raw_value in raw_metrics.items():
+            if not isinstance(raw_value, (int, float)):
+                continue
+            value = float(raw_value)
+            metrics[mlflow_metric_name(split, str(raw_key))] = value
+            add_metric_aliases(split, str(raw_key), value, metrics)
+        if metrics:
+            events.append((step, metrics))
+            seen.add((split, step))
+    return events, seen
+
+
 def iter_training_metrics(log_file: Path):
     if not log_file.exists():
         return
-    for line in log_file.read_text(encoding="utf-8", errors="replace").splitlines():
+    lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    miltoka_events, miltoka_seen = parse_miltoka_metrics(lines)
+    for step, metrics in miltoka_events:
+        yield step, metrics
+    for line in lines:
         match = TRAIN_RE.search(line)
         if not match:
+            continue
+        step = int(match.group("step"))
+        if ("train", step) in miltoka_seen:
             continue
         metrics = {
             "train.loss": float(match.group("loss")),
@@ -67,7 +126,7 @@ def iter_training_metrics(log_file: Path):
         }
         for lr_match in LR_RE.finditer(match.group("lrs")):
             metrics[f"learning_rate.{lr_match.group('name')}"] = float(lr_match.group("value"))
-        yield int(match.group("step")), metrics
+        yield step, metrics
 
 
 def safe_log_param(mlflow: Any, key: str, value: Any) -> None:
@@ -129,6 +188,10 @@ def main() -> None:
 
         if log_file.exists():
             mlflow.log_artifact(str(log_file), artifact_path="logs")
+        exp_dir = output_dir.parent.parent
+        if exp_dir.exists():
+            for health_json in sorted(exp_dir.glob("nu_dataset_health_*.json")):
+                mlflow.log_artifact(str(health_json), artifact_path="dataset_health")
         nu_config = output_dir / "config.json"
         if nu_config.exists():
             mlflow.log_artifact(str(nu_config), artifact_path="config")

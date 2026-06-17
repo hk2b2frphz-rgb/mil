@@ -151,6 +151,165 @@ def _safe_mean(values):
     return True
 
 
+def patch_finetune_mlflow_stdout_metrics(path: Path) -> bool:
+    src = path.read_text(encoding="utf-8")
+    if "AUTO_PATCH_MILTO_MLFLOW_STDOUT_METRICS_V2" in src:
+        return False
+
+    stdout_helper = '''# AUTO_PATCH_MILTO_MLFLOW_STDOUT_METRICS_V2:
+# Emit machine-readable train/eval metrics to stdout so the miltoka launcher can
+# sync them to MLflow even when nu-dialogue tracking integrations are disabled.
+def _metric_buffer_to_scalars(logging_buffer, accelerator, strip_prefix=""):
+    scalars = {}
+    for key, values in logging_buffer.items():
+        if not values:
+            continue
+        metric_key = key[len(strip_prefix):] if strip_prefix and key.startswith(strip_prefix) else key
+        local_values = torch.stack(
+            [value.detach().float().reshape(()) for value in values]
+        ).to(accelerator.device)
+        finite_values = local_values[torch.isfinite(local_values)]
+        if finite_values.numel() == 0:
+            local_sum_count = torch.zeros(2, device=accelerator.device)
+        else:
+            local_sum_count = torch.stack(
+                [
+                    finite_values.sum(),
+                    finite_values.new_tensor(float(finite_values.numel())),
+                ]
+            )
+        gathered_sum_count = accelerator.gather(local_sum_count).reshape(-1, 2)
+        total_sum = gathered_sum_count[:, 0].sum()
+        total_count = gathered_sum_count[:, 1].sum()
+        if total_count.item() == 0:
+            scalars[metric_key] = 0.0
+        else:
+            scalars[metric_key] = float((total_sum / total_count).item())
+    return scalars
+
+
+def _log_miltoka_metrics(split, step, epoch, metrics):
+    payload = {
+        "split": split,
+        "step": int(step),
+        "epoch": int(epoch),
+        "metrics": {
+            key: float(value)
+            for key, value in sorted(metrics.items())
+            if isinstance(value, (int, float)) and math.isfinite(float(value))
+        },
+    }
+    logger.info("MILTO_METRICS " + json.dumps(payload, sort_keys=True))
+'''
+
+    if "AUTO_PATCH_MILTO_MLFLOW_STDOUT_METRICS:" in src:
+        pattern = re.compile(
+            r"# AUTO_PATCH_MILTO_MLFLOW_STDOUT_METRICS:.*?\n\n# Parsing input arguments",
+            flags=re.S,
+        )
+        updated, count = pattern.subn(stdout_helper + "\n\n# Parsing input arguments", src, count=1)
+        if count != 1:
+            raise RuntimeError(f"Could not upgrade stdout metrics helper in {path}")
+        path.write_text(updated, encoding="utf-8")
+        return True
+
+    safe_mean_tail = '''def _safe_mean(values):
+    if values.numel() == 0:
+        return values.new_tensor(0.0)
+    return values.mean()
+'''
+    metrics_helper = '''def _safe_mean(values):
+    if values.numel() == 0:
+        return values.new_tensor(0.0)
+    return values.mean()
+
+
+''' + stdout_helper
+    if safe_mean_tail not in src:
+        raise RuntimeError(f"Could not locate _safe_mean helper in {path}")
+    src = src.replace(safe_mean_tail, metrics_helper, 1)
+
+    old_train = '''                    if args.with_tracking:
+                        gathered_metrics = accelerator.gather(
+                            {
+                                key: torch.tensor(values, device=accelerator.device)
+                                for key, values in logging_buffer.items()
+                            }
+                        )
+                        accelerator.log(
+                            {
+                                **{
+                                    key: values.nanmean()
+                                    for key, values in gathered_metrics.items()
+                                },
+                                "learning_rate/tempformer": optimizer.param_groups[0]["lr"],
+                                "learning_rate/depformer": optimizer.param_groups[1]["lr"],
+                            },
+                            step=current_steps,
+                        )
+                    logging_buffer = collections.defaultdict(list)  # reset
+'''
+    new_train = '''                    metrics_for_log = _metric_buffer_to_scalars(
+                        logging_buffer, accelerator, strip_prefix="training_"
+                    )
+                    metrics_for_log["learning_rate/tempformer"] = optimizer.param_groups[0]["lr"]
+                    metrics_for_log["learning_rate/depformer"] = optimizer.param_groups[1]["lr"]
+                    _log_miltoka_metrics("train", current_steps, epoch, metrics_for_log)
+                    if args.with_tracking:
+                        accelerator.log(
+                            {
+                                **{
+                                    f"training_{key}": value
+                                    for key, value in metrics_for_log.items()
+                                    if not key.startswith("learning_rate/")
+                                },
+                                "learning_rate/tempformer": optimizer.param_groups[0]["lr"],
+                                "learning_rate/depformer": optimizer.param_groups[1]["lr"],
+                            },
+                            step=current_steps,
+                        )
+                    logging_buffer = collections.defaultdict(list)  # reset
+'''
+    if old_train not in src:
+        raise RuntimeError(f"Could not locate training metrics block in {path}")
+    src = src.replace(old_train, new_train, 1)
+
+    old_eval = '''                    if args.with_tracking:
+                        gathered_metrics = accelerator.gather(
+                            {
+                                key: torch.tensor(values, device=accelerator.device)
+                                for key, values in eval_logging_buffer.items()
+                            }
+                        )
+                        accelerator.log(
+                            {key: values.nanmean() for key, values in gathered_metrics.items()},
+                            step=current_steps,
+                        )
+'''
+    new_eval = '''                    eval_metrics_for_log = _metric_buffer_to_scalars(
+                        eval_logging_buffer, accelerator, strip_prefix="evaluation_"
+                    )
+                    logger.info(
+                        f"Eval Steps: {current_steps}, "
+                        f"Loss: {eval_metrics_for_log.get('loss/total', 0.0):.5f} "
+                        f"(text: {eval_metrics_for_log.get('loss/text_total', 0.0):.5f}, "
+                        f"audio: {eval_metrics_for_log.get('loss/audio_total', 0.0):.5f})"
+                    )
+                    _log_miltoka_metrics("eval", current_steps, epoch, eval_metrics_for_log)
+                    if args.with_tracking:
+                        accelerator.log(
+                            {f"evaluation_{key}": value for key, value in eval_metrics_for_log.items()},
+                            step=current_steps,
+                        )
+'''
+    if old_eval not in src:
+        raise RuntimeError(f"Could not locate evaluation metrics block in {path}")
+    src = src.replace(old_eval, new_eval, 1)
+
+    path.write_text(src, encoding="utf-8")
+    return True
+
+
 def patch_utils_data(path: Path) -> bool:
     src = path.read_text(encoding="utf-8")
     updated = src.replace("np.concat(", "np.concatenate(")
@@ -175,6 +334,8 @@ def main() -> int:
         changes.append("finetune.py")
     if patch_finetune_safe_means(nu_repo / "finetune.py"):
         changes.append("finetune.py:safe-means")
+    if patch_finetune_mlflow_stdout_metrics(nu_repo / "finetune.py"):
+        changes.append("finetune.py:mlflow-stdout-metrics")
     if patch_utils_data(nu_repo / "utils" / "data.py"):
         changes.append("utils/data.py")
 

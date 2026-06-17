@@ -14,24 +14,27 @@ This sweep uses the current synthetic data generation pipeline with
 `NUM_CASES=250`, matching the existing ~3h data setting used by
 `exp002_lora_3h_data`.
 
-Run five PBS jobs. Each job generates one 250-dialogue dataset, then runs two
-full fine-tuning patterns on that same dataset.
+Use one PBS entrypoint and select full fine-tuning patterns with
+`SWEEP_PATTERNS`. The default PBS run executes `f01` only; pass the patterns you
+want to compare for hyperparameter tuning.
 
 Submit:
 
 ```bash
-qsub scripts/fullft_sweep_01.pbs
-qsub scripts/fullft_sweep_02.pbs
-qsub scripts/fullft_sweep_03.pbs
-qsub scripts/fullft_sweep_04.pbs
-qsub scripts/fullft_sweep_05.pbs
+qsub -v SRC_RUN_DIR=/path/to/data/runs/3h_dataset,SWEEP_PATTERNS=f01 scripts/fullft_sweep.pbs
+```
+
+For a small tuning comparison, submit only the conditions you want:
+
+```bash
+qsub -v SRC_RUN_DIR=/path/to/data/runs/3h_dataset,SWEEP_PATTERNS=f01,f04 scripts/fullft_sweep.pbs
 ```
 
 Defaults:
 
 - `BASE_EXP=exp100_full_ft`
 - `NUM_CASES=250`
-- `MLFLOW_EXPERIMENT_NAME=job_fullft_3h`
+- `MLFLOW_EXPERIMENT_NAME=job_fullft_hp`
 - `MLFLOW_TRACKING_URI=sqlite:///$PWD/mlruns/mlflow.db`
 - `MLFLOW_ARTIFACT_ROOT=file:$PWD/mlruns/artifacts`
 - `res=middle` PBS resource, A100 80GB x2 target for full-FT sweep jobs
@@ -47,7 +50,7 @@ Using an existing generated 3h dataset:
 
 ```bash
 export SRC_RUN_DIR=/path/to/data/runs/3h_dataset
-qsub scripts/fullft_sweep_01.pbs
+qsub scripts/fullft_sweep.pbs
 ```
 
 `SRC_RUN_DIR` must contain:
@@ -83,21 +86,24 @@ CUDA_VISIBLE_DEVICES=0,1 \
 bash scripts/run_fullft_sweep_pair.sh
 ```
 
-| pattern | PBS | change from full-FT 3h baseline | purpose |
-|---|---:|---|---|
-| `f01` | 01 | `lr=3e-5`, `batch=1`, `micro=8`, `duration=60`, `steps=1200` | A100-safe fixed-LR baseline |
-| `f02` | 01 | `duration=80` | longer context, more activation memory |
-| `f03` | 02 | `duration=40` | shorter context, lower activation memory |
-| `f04` | 02 | `weight_decay=0.01` | weaker regularization |
-| `f05` | 03 | `weight_decay=0.2` | stronger regularization |
-| `f06` | 03 | `micro=16` | larger effective batch without increasing per-GPU memory |
-| `f07` | 04 | `duration=30` | emergency low-memory context |
-| `f08` | 04 | `max_norm=0.5` | tighter gradient clipping |
-| `f09` | 05 | `steps=800` | shorter exposure |
-| `f10` | 05 | `steps=1600` | longer exposure |
+| pattern | change from full-FT 3h baseline | purpose |
+|---|---|---|
+| `f01` | `lr=3e-5`, `batch=1`, `micro=8`, `duration=60`, `steps=1200` | A100-safe fixed-LR baseline |
+| `f02` | `duration=80` | longer context, more activation memory |
+| `f03` | `duration=40` | shorter context, lower activation memory |
+| `f04` | `weight_decay=0.01` | weaker regularization |
+| `f05` | `weight_decay=0.2` | stronger regularization |
+| `f06` | `micro=16` | larger effective batch without increasing per-GPU memory |
+| `f07` | `duration=30` | emergency low-memory context |
+| `f08` | `max_norm=0.5` | tighter gradient clipping |
+| `f09` | `steps=800` | shorter exposure |
+| `f10` | `steps=1600` | longer exposure |
 
 Each pattern runs in its own `experiments/_fullft_sweeps/<RUN_ID>_<pattern>/`
 directory and logs to MLflow as `<RUN_ID>_<pattern>`. For nu-dialogue full-FT,
-MLflow metrics are parsed from the training stdout log, so `train.loss`,
-`train.loss.text`, `train.loss.audio`, and learning rates update during training
-when `MLFLOW_LIVE_SYNC_INTERVAL` is nonzero.
+MLflow metrics are parsed from the machine-readable `MILTO_METRICS` stdout log.
+The important curves are `train.loss`, `train.loss.text`, `train.loss.audio`,
+`eval.loss`, `eval.loss.text`, `eval.loss.audio`, `train.accuracy.*`,
+`eval.accuracy.*`, and `learning_rate.*`. The launch config, raw training log,
+nu config, and dataset health JSON are logged as artifacts. Live sync runs while
+training when `MLFLOW_LIVE_SYNC_INTERVAL` is nonzero.
