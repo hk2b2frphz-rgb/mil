@@ -122,7 +122,28 @@ if [[ "${REFRESH_NU_DATA:-0}" == "1" ]]; then
     mkdir -p "$NU_DATA_DIR"
 fi
 
+NEEDS_NU_DATA_PREP=0
 if [[ ! -f "$NU_DATA_DIR/manifest.json" ]]; then
+    NEEDS_NU_DATA_PREP=1
+elif ! python3 - "$NU_DATA_DIR/manifest.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = Path(sys.argv[1])
+data = json.loads(manifest.read_text(encoding="utf-8"))
+normalization = data.get("text_normalization") or {}
+if not normalization.get("enabled") or int(normalization.get("version", 0)) < 1:
+    sys.exit(1)
+PY
+then
+    echo "[nu-fullft] existing nu data predates text normalization; rebuilding"
+    rm -rf "$NU_DATA_DIR"
+    mkdir -p "$NU_DATA_DIR"
+    NEEDS_NU_DATA_PREP=1
+fi
+
+if [[ "$NEEDS_NU_DATA_PREP" == "1" ]]; then
     echo "[nu-fullft] preparing nu-dialogue raw dataset"
     python3 scripts/prepare_nu_fullft_dataset.py \
         --manifest "$SRC_MANIFEST" \

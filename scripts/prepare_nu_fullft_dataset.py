@@ -18,8 +18,11 @@ import argparse
 import json
 import os
 import random
+import re
 import shutil
 import sys
+import unicodedata
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -48,6 +51,17 @@ def parse_args() -> argparse.Namespace:
         help="How to place wav files into the nu raw data directory.",
     )
     parser.add_argument("--refresh", action="store_true")
+    parser.add_argument(
+        "--no-normalize-text",
+        action="store_true",
+        help="Disable Japanese punctuation/ellipsis normalization for transcript text.",
+    )
+    parser.add_argument(
+        "--normalization-examples",
+        type=int,
+        default=20,
+        help="Number of before/after text normalization examples to keep in manifest.json.",
+    )
     return parser.parse_args()
 
 
@@ -60,7 +74,60 @@ def speaker_from_label(label: str) -> str | None:
     return None
 
 
-def alignment_to_segment(item: Any) -> dict[str, str | float] | None:
+def normalize_transcript_text(text: str) -> tuple[str, list[str]]:
+    """Normalize Japanese dialogue punctuation before nu text tokenization."""
+    rules: list[str] = []
+
+    def remember(rule: str, before: str, after: str) -> str:
+        if after != before and rule not in rules:
+            rules.append(rule)
+        return after
+
+    text = text.strip()
+    text = remember("nfkc", text, unicodedata.normalize("NFKC", text))
+
+    before = text
+    text = re.sub(r"(?:\.{2,}|…+|‥+|・{3,})", "…", text)
+    text = remember("ellipsis", before, text)
+
+    before = text
+    text = re.sub(r"(?<!\d)\.(?!\d)", "。", text)
+    text = remember("period_to_japanese_full_stop", before, text)
+
+    before = text
+    text = text.translate(
+        str.maketrans(
+            {
+                ",": "、",
+                "?": "？",
+                "!": "！",
+                ":": "：",
+                ";": "；",
+                "(": "（",
+                ")": "）",
+                "[": "［",
+                "]": "］",
+            }
+        )
+    )
+    text = remember("ascii_punctuation_to_japanese", before, text)
+
+    before = text
+    text = re.sub(r"([。、！？])\1+", r"\1", text)
+    text = remember("repeated_japanese_punctuation", before, text)
+
+    before = text
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s*([。、！？：；…（）［］])\s*", r"\1", text)
+    text = remember("whitespace_around_punctuation", before, text)
+
+    return text, rules
+
+
+def alignment_to_segment(
+    item: Any,
+    normalize_text_enabled: bool,
+) -> tuple[dict[str, str | float], dict[str, Any] | None] | None:
     if isinstance(item, dict):
         text = str(item.get("word") or item.get("text") or "").strip()
         speaker = str(item.get("speaker") or item.get("label") or "").strip()
@@ -86,6 +153,12 @@ def alignment_to_segment(item: Any) -> dict[str, str | float] | None:
 
     if not text:
         return None
+    raw_text = text
+    rules: list[str] = []
+    if normalize_text_enabled:
+        text, rules = normalize_transcript_text(raw_text)
+    if not text:
+        return None
     try:
         start_f = float(start)
         end_f = float(end)
@@ -93,19 +166,32 @@ def alignment_to_segment(item: Any) -> dict[str, str | float] | None:
         return None
     if end_f <= start_f:
         return None
-    return {
+    segment = {
         "speaker": speaker,
         "word": text,
         "start": round(start_f, 4),
         "end": round(end_f, 4),
     }
+    change = (
+        {"before": raw_text, "after": text, "rules": rules}
+        if rules and raw_text != text
+        else None
+    )
+    return segment, change
 
 
-def read_samples(manifest: Path) -> tuple[list[PreparedSample], list[str]]:
+def read_samples(
+    manifest: Path,
+    normalize_text_enabled: bool,
+    normalization_examples: int,
+) -> tuple[list[PreparedSample], list[str], dict[str, Any]]:
     root = manifest.parent
     samples: list[PreparedSample] = []
     warnings: list[str] = []
     seen_stems: dict[str, int] = {}
+    rule_counts: Counter[str] = Counter()
+    examples: list[dict[str, Any]] = []
+    changed_segments = 0
 
     for lineno, line in enumerate(manifest.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
@@ -136,11 +222,24 @@ def read_samples(manifest: Path) -> tuple[list[PreparedSample], list[str]]:
             continue
 
         alignments = sidecar.get("alignments", [])
-        transcript = [
-            segment
-            for segment in (alignment_to_segment(item) for item in alignments)
-            if segment is not None
-        ]
+        transcript = []
+        for item in alignments:
+            converted = alignment_to_segment(item, normalize_text_enabled)
+            if converted is None:
+                continue
+            segment, change = converted
+            transcript.append(segment)
+            if change is not None:
+                changed_segments += 1
+                rule_counts.update(change["rules"])
+                if len(examples) < normalization_examples:
+                    examples.append(
+                        {
+                            "wav": wav_path.name,
+                            "speaker": segment["speaker"],
+                            **change,
+                        }
+                    )
         transcript.sort(key=lambda item: (float(item["start"]), str(item["speaker"])))
         speakers = {str(item["speaker"]) for item in transcript}
         if not {"A", "B"}.issubset(speakers):
@@ -164,7 +263,14 @@ def read_samples(manifest: Path) -> tuple[list[PreparedSample], list[str]]:
             )
         )
 
-    return samples, warnings
+    normalization_summary = {
+        "enabled": normalize_text_enabled,
+        "version": 1,
+        "changed_segments": changed_segments,
+        "rule_counts": dict(sorted(rule_counts.items())),
+        "examples": examples,
+    }
+    return samples, warnings, normalization_summary
 
 
 def place_wav(src: Path, dst: Path, link_mode: str) -> str:
@@ -230,7 +336,11 @@ def main() -> int:
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    samples, warnings = read_samples(manifest)
+    samples, warnings, normalization = read_samples(
+        manifest=manifest,
+        normalize_text_enabled=not args.no_normalize_text,
+        normalization_examples=max(0, args.normalization_examples),
+    )
     if len(samples) < 2:
         print(
             f"ERROR: need at least 2 usable samples for train/eval split, got {len(samples)}",
@@ -256,6 +366,7 @@ def main() -> int:
         "usable_count": len(samples),
         "skipped_count": len(warnings),
         "warnings": warnings[:200],
+        "text_normalization": normalization,
         "splits": {
             "train": write_split("train", train_samples, output_dir, args.link_mode),
         },
@@ -269,6 +380,18 @@ def main() -> int:
     print(f"[nu-data] source_manifest={manifest}")
     print(f"[nu-data] output_dir={output_dir}")
     print(f"[nu-data] train={len(train_samples)} eval={len(eval_samples)} skipped={len(warnings)}")
+    if normalization["enabled"]:
+        print(
+            "[nu-data] text normalization: "
+            f"changed_segments={normalization['changed_segments']} "
+            f"rules={normalization['rule_counts']}"
+        )
+        for example in normalization["examples"][:5]:
+            print(
+                "[nu-data] normalize: "
+                f"{example['before']!r} -> {example['after']!r} "
+                f"rules={example['rules']}"
+            )
     if warnings:
         print(f"[nu-data] warnings written to {summary_path}")
         for warning in warnings[:10]:

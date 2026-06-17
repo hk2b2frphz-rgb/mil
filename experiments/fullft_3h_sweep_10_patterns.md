@@ -67,6 +67,12 @@ eval has no valid chunks or labels, training stops before producing misleading
 NaN eval metrics. If a previous run failed during nu text tokenization, rerun
 with `REFRESH_NU_DATA=1` once after pulling.
 
+During nu data preparation, transcript text is normalized before tokenization:
+ellipsis variants (`...`, `．．．`, `・・・`) are unified to `…`, ASCII sentence
+punctuation is converted to Japanese punctuation where appropriate, and spaces
+around punctuation are removed. The before/after examples and rule counts are
+written to `data/nu_fullft/<RUN_ID>/manifest.json` under `text_normalization`.
+
 Direct test without PBS:
 
 ```bash
