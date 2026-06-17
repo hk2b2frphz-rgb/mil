@@ -30,6 +30,7 @@ def merge(base_state: dict[str, torch.Tensor],
     merged = dict(base_state)
 
     lora_a_keys = sorted(k for k in lora_state if "lora_A" in k)
+    applied = 0
     for a_key in lora_a_keys:
         b_key = a_key.replace("lora_A", "lora_B")
         if b_key not in lora_state:
@@ -48,6 +49,16 @@ def merge(base_state: dict[str, torch.Tensor],
         # LoRA: W' = W + B @ A * scaling
         delta = (lora_b @ lora_a) * scaling
         merged[weight_key] = (merged[weight_key].float() + delta).to(base_state[weight_key].dtype)
+        applied += 1
+
+    if applied == 0:
+        raise RuntimeError(
+            "No LoRA adapters were applied (0 of "
+            f"{len(lora_a_keys)} lora_A keys matched a base weight). "
+            "The checkpoint key naming likely does not match the base model; "
+            "refusing to save an unmodified base model as 'merged'."
+        )
+    print(f"[merge]   applied {applied}/{len(lora_a_keys)} LoRA adapters")
 
     return merged
 

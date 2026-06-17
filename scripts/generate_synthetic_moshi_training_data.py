@@ -1038,6 +1038,10 @@ def build_scripted_segments(
     cursor = args.lead_in_sec
     segments: list[AudioSegment] = []
     for turn in dialogue.turns:
+        if turn.speaker == "silence":
+            # 沈黙ターンは音声を作らず、duration_sec ぶんだけ無音を挟む。
+            cursor += float(turn.duration_sec or 0.0)
+            continue
         pcm = tts.synthesize(turn.text, turn.speaker)
         start = cursor
         end = start + pcm.size / tts.sample_rate
@@ -1069,7 +1073,10 @@ def build_user_prompt_segments(
     cursor = args.lead_in_sec
     segments: list[AudioSegment] = []
     for turn in dialogue.turns:
-        if turn.speaker == "user":
+        if turn.speaker == "silence":
+            # 沈黙ターンはスクリプト指定の duration_sec ぶんカーソルを進める。
+            cursor += float(turn.duration_sec or 0.0)
+        elif turn.speaker == "user":
             pcm = tts.synthesize(turn.text, "user")
             start = cursor
             end = start + pcm.size / tts.sample_rate

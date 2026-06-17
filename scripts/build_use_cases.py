@@ -192,6 +192,9 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
+    if args.num <= 0:
+        parser.error(f"--num must be a positive integer (got {args.num})")
+
     rng = random.Random(args.seed)
     args.out_path.parent.mkdir(parents=True, exist_ok=True)
 

@@ -9,6 +9,7 @@ Outputs: response.wav, transcript.jsonl, transcript.txt, meta.json per trial.
 """
 
 import argparse
+import hashlib
 import inspect
 import json
 import logging
@@ -109,6 +110,27 @@ def collect_input_files(inputs: list[str]) -> list[Path]:
         else:
             logger.warning("Input path not found, skipping: %s", inp)
     return files
+
+
+def build_unique_labels(input_files: list[Path]) -> dict[Path, str]:
+    """Map each input path to a unique output label.
+
+    Inputs that share a filename stem (e.g. ``hello.wav`` from two different
+    directories) would otherwise write to the same ``out_dir/<stem>/seed_N``
+    directory and overwrite each other. For colliding stems we append a short
+    hash of the resolved path to keep outputs distinct.
+    """
+    from collections import Counter
+
+    stem_counts = Counter(p.stem for p in input_files)
+    labels: dict[Path, str] = {}
+    for p in input_files:
+        if stem_counts[p.stem] > 1:
+            digest = hashlib.sha1(str(p.resolve()).encode("utf-8")).hexdigest()[:8]
+            labels[p] = f"{p.stem}_{digest}"
+        else:
+            labels[p] = p.stem
+    return labels
 
 
 def collect_text_prompts(args: argparse.Namespace) -> list[str]:
@@ -713,6 +735,7 @@ def save_trial_outputs(
     mimi,
     acoustic_delay: int,
     wall_time: float,
+    trial_label: str | None = None,
 ) -> None:
     """Write response.wav, transcript.jsonl, transcript.txt, meta.json."""
     import sphn  # type: ignore[import]
@@ -720,7 +743,8 @@ def save_trial_outputs(
     sample_rate = int(mimi.sample_rate)
     frame_rate = float(mimi.frame_rate)
 
-    trial_dir = out_dir / input_path.stem / f"seed_{seed}"
+    label = trial_label or input_path.stem
+    trial_dir = out_dir / label / f"seed_{seed}"
     trial_dir.mkdir(parents=True, exist_ok=True)
 
     audio_frames = trial_result["audio_frames"]
@@ -1036,6 +1060,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    if args.silence_sec < 0:
+        logger.error("--silence-sec must be >= 0 (got %s).", args.silence_sec)
+        sys.exit(2)
+
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1046,6 +1074,7 @@ def main() -> None:
         logger.error("No input WAV files or text prompts found. Exiting.")
         return
     logger.info("Found %d input file(s).", len(input_files))
+    input_labels = build_unique_labels(input_files)
 
     # ---- Parse seeds --------------------------------------------------------
     if args.seeds is not None:
@@ -1135,6 +1164,7 @@ def main() -> None:
                     mimi=mimi,
                     acoustic_delay=acoustic_delay,
                     wall_time=wall_time,
+                    trial_label=input_labels.get(input_path),
                 )
 
                 first_step = result["first_response_step"]

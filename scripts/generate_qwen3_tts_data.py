@@ -748,6 +748,14 @@ def main() -> None:
             dialogue, tts, args.lead_in_sec, args.gap_sec,
             user_speaker_override=user_voice,
         )
+        if not segments or tts.sample_rate == 0:
+            # 音声ターンが 0 件（沈黙のみ等）の対話。sample_rate が未確定で
+            # ゼロ除算になるため、合成せずスキップする。
+            logger.warning(
+                "[%d/%d] 対話 %s は音声ターンが無いためスキップします",
+                idx, len(templates), dialogue.id,
+            )
+            continue
         stereo = render_stereo(segments, tts.sample_rate)
         elapsed = time.time() - t0
 
