@@ -137,13 +137,60 @@ uv run python response_recorder.py \
 
 ### フル FT チェックポイント
 
-フル FT (exp100) の場合はマージ不要。チェックポイントをそのまま指定する。
+nu-dialogue runner はチェックポイントを `accelerator.save_state()` で保存するため、
+`step_<N>/pytorch_model/zero_pp_rank_*.pt` という **DeepSpeed ZeRO シャード**で
+出力される (`consolidated/...` のような単一ファイルは作られない)。推論に使うには
+2 段階で単一 weight に変換する。
+
+```
+step_<N>/  (ZeRO shard)
+   │ ① zero_to_fp32.py    … shard を統合 → fp32 単一ファイル (MoshiForFinetuning 形式)
+   ▼
+<ft_dir>/model.safetensors + moshi_lm_kwargs.json
+   │ ② clean_moshi.py     … 元の LMModel 形式へ変換
+   ▼
+<clean_dir>/model.safetensors   (素の Moshi 形式 = response_recorder が読める)
+```
+
+チェックポイントの保存先は
+`experiments/_fullft_sweeps/<RUN_ID>_<pattern>/checkpoints/nu_<ts>/step_<N>/`
+(sweep 経由の場合)。`<NU_MODEL_DIR>` は sweep が初期化したモデル置き場
+(デフォルト `../moshi-finetune-nu-dialogue/init_models/llm-jp-moshi-v1-both_streams-float32`)。
 
 ```bash
+# ① ZeRO シャード -> 単一 fp32 weight
+#    第1引数は step_<N> (pytorch_model/ の親)。--tag pytorch_model を明示する。
+#    出力先は事前に作らないこと (makedirs が exist_ok 無しのため既存だとエラー)。
+cd ../moshi-finetune-nu-dialogue
+uv run python tools/zero_to_fp32.py \
+  <run>/checkpoints/nu_<ts>/step_120 \
+  <run>/exported/step_120_ft \
+  --tag pytorch_model \
+  --safe_serialization \
+  --moshi_lm_kwargs_path <NU_MODEL_DIR>/moshi_lm_kwargs.json
+
+# ② 素の Moshi 形式へ変換
+#    学習が --model_user_stream (full-FT sweep のデフォルト) の場合は
+#    --remove_modules_for_user_stream を付けて dep_q=16 -> 8 に戻す。
+uv run python tools/clean_moshi.py \
+  --moshi_ft_dir <run>/exported/step_120_ft \
+  --save_dir     <run>/exported/step_120_clean \
+  --model_dtype bfloat16 \
+  --remove_modules_for_user_stream
+
+# ③ 推論
+cd ../miltoka
 uv run python response_recorder.py \
-  --moshi-weight experiments/exp100_full_ft/checkpoints/<ts>/checkpoint_000500/consolidated/consolidated.safetensors \
-  --inputs prompts/hello.wav --out-dir results/full_ft/
+  --moshi-weight <run>/exported/step_120_clean/model.safetensors \
+  --inputs prompts/hello.wav --seeds 0,1,2 --out-dir results/f01_step120/
 ```
+
+どの `step_<N>` を選ぶかは、`run_nu_<ts>.log` または MLflow の `eval.loss` が
+最小になった step を使う (full-FT baseline は 1 epoch ごとに checkpoint を保存)。
+
+手早く生成だけ確認するなら、① の出力を nu repo の `generate.py` が
+`MoshiForFinetuning.from_pretrained` で直接読めるので ② を省略できる
+(ただし response_recorder の before/after 比較とは別形式)。
 
 ## Response Recorder
 
