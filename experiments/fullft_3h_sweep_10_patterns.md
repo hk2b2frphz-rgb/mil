@@ -37,9 +37,11 @@ Defaults:
 - `res=middle` PBS resource, A100 80GB x2 target for full-FT sweep jobs
 - `NPROC=2`, `CUDA_VISIBLE_DEVICES=0,1`
 - `NU_MOSHI_FT_REPO=$PWD/../moshi-finetune-nu-dialogue`
-- `NU_DEEPSPEED_CONFIG=$PWD/configs/deepspeed_zero3_fp16_act_ckpt.json`
-  for the default A100 80GB x2 run. This uses fixed learning rate, no warmup
-  scheduler, and ZeRO-3 parameter/optimizer partitioning.
+- `NU_DEEPSPEED_CONFIG=$PWD/configs/deepspeed_zero3_fp16_warmlr_act_ckpt.json`
+  for the default A100 80GB x2 run. This uses ZeRO-3
+  parameter/optimizer partitioning and a short warmup to the fixed LR.
+- `HP_LR=3e-5` for full-FT by default, matching the nu-dialogue default.
+  LoRA sweeps keep the Kyutai example default `2e-6`.
 
 Using an existing generated 3h dataset:
 
@@ -59,10 +61,11 @@ The launcher converts that existing manifest into the nu-dialogue format under
 starts `accelerate launch`. Set `REFRESH_NU_DATA=1` if you want to rebuild the
 converted/tokenized nu data.
 
-If a previous run failed during nu text tokenization, rerun with
-`REFRESH_NU_DATA=1` once after pulling. The launcher now patches the
-nu-dialogue checkout to avoid `chars[0]["speaker"]` failures on utterance-level
-Japanese timestamps.
+After writing parquet, the launcher checks train/eval row counts, chunk counts
+after `min_length`/`max_length`, and non-padding main-speaker text labels. If
+eval has no valid chunks or labels, training stops before producing misleading
+NaN eval metrics. If a previous run failed during nu text tokenization, rerun
+with `REFRESH_NU_DATA=1` once after pulling.
 
 Direct test without PBS:
 

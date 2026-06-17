@@ -99,7 +99,7 @@ NU_MOSHI_LM_CONFIG_NAME="${NU_MOSHI_LM_CONFIG_NAME:-moshi_lm_kwargs.json}"
 NU_MODEL_DTYPE="${NU_MODEL_DTYPE:-float32}"
 NU_MODEL_DIR="${NU_MODEL_DIR:-$NU_MOSHI_FT_REPO/init_models/llm-jp-moshi-v1-both_streams-${NU_MODEL_DTYPE}}"
 NU_MODEL_DIR="$(realpath -m "$NU_MODEL_DIR")"
-NU_DEEPSPEED_CONFIG="${NU_DEEPSPEED_CONFIG:-$REPO_ROOT/configs/deepspeed_zero3_fp16_act_ckpt.json}"
+NU_DEEPSPEED_CONFIG="${NU_DEEPSPEED_CONFIG:-$REPO_ROOT/configs/deepspeed_zero3_fp16_warmlr_act_ckpt.json}"
 NU_DEEPSPEED_CONFIG="$(realpath -m "$NU_DEEPSPEED_CONFIG")"
 NU_TOKENIZE_AUDIO_WORKERS="${NU_TOKENIZE_AUDIO_WORKERS:-$NPROC}"
 NU_TOKENIZE_TEXT_WORKERS="${NU_TOKENIZE_TEXT_WORKERS:-4}"
@@ -112,7 +112,7 @@ import sys
 print(int(float(sys.argv[1]) * 12.5))
 PY
 )}"
-NU_WARMUP_STEPS="${NU_WARMUP_STEPS:-0}"
+NU_WARMUP_STEPS="${NU_WARMUP_STEPS:-50}"
 
 mkdir -p "$NU_DATA_DIR" "$NU_OUTPUT_DIR"
 
@@ -200,6 +200,17 @@ if [[ -d "$NU_DATA_DIR/raw/eval/audio" ]]; then
         echo "[nu-fullft] reusing eval parquet: $NU_DATA_DIR/processed/eval-*.parquet"
     fi
 fi
+
+echo "[nu-fullft] checking train/eval parquet health"
+(cd "$NU_MOSHI_FT_REPO" && \
+    uv run python "$REPO_ROOT/scripts/check_nu_fullft_dataset.py" \
+        --data-dir "$NU_DATA_DIR" \
+        --max-length "$NU_MAX_LENGTH" \
+        --min-length "$NU_MIN_LENGTH" \
+        --text-padding-id "${NU_TEXT_PADDING_ID:-3}" \
+        --end-of-text-padding-id "${NU_END_OF_TEXT_PADDING_ID:-0}" \
+        --output-json "$EXP_DIR/nu_dataset_health_${RUN_TS}.json" \
+        ${NU_REQUIRE_EVAL:+--require-eval})
 
 if [[ ! -f "$NU_MODEL_DIR/model.safetensors" || ! -f "$NU_MODEL_DIR/moshi_lm_kwargs.json" ]]; then
     echo "[nu-fullft] initializing full-FT model: $NU_MODEL_DIR"
