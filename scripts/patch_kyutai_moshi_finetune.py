@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Apply local runtime patches to kyutai-labs/moshi-finetune.
 
-The upstream LoRA training code can emit NaN eval loss when an eval segment has
-no valid text/audio target positions. This script is intentionally idempotent so
-it can run at every experiment launch.
+Patches applied (all idempotent, run at every experiment launch):
+- loss/eval/metrics: the upstream LoRA training code can emit NaN eval loss when
+  an eval segment has no valid text/audio target positions; average each
+  component only over batches with valid targets and expose eval batch counts.
+- data_loader: the eval loader only yielded full batches and dropped the
+  remainder, so an eval split smaller than batch_size produced zero eval batches
+  (eval loss / eval_num_samples == 0). Flush the final partial batch for eval.
 """
 
 from __future__ import annotations
@@ -209,6 +213,64 @@ def evaluate(
 '''
 
 
+DATA_LOADER_PY = '''from typing import Any, Iterator
+
+from .args import DataArgs
+from .dataset import build_dataset
+from .interleaver import Batch
+
+
+def build_data_loader(
+    instruct_tokenizer: Any,
+    args: DataArgs,
+    batch_size: int,
+    seed: int | None,
+    rank: int,
+    world_size: int,
+    is_eval: bool,
+) -> Iterator[Batch]:
+    if is_eval:
+        assert args.eval_data != "", "No eval data provided."
+    pretrain_data = args.train_data if not is_eval else args.eval_data
+
+    dataset = build_dataset(
+        pretrain_data=pretrain_data,
+        instruct_tokenizer=instruct_tokenizer,
+        seed=seed,
+        rank=rank,
+        world_size=world_size,
+        is_eval=is_eval,
+        shuffle_pretrain=args.shuffle,
+    )
+
+    sample_list = []
+    for sample in dataset:
+        assert sample.codes.dim() == 3
+        assert len(sample.codes) == 1
+        sample_list.append(sample)
+
+        if len(sample_list) == batch_size:
+            yield Batch.collate(sample_list)
+            sample_list = []
+
+    # AUTO_PATCH_FLUSH_EVAL_PARTIAL_BATCH: the eval loader is finite, so emit the
+    # remaining samples as a final (smaller) batch. Otherwise an eval split with
+    # fewer than batch_size samples -- or any non-multiple remainder -- yields
+    # zero batches and eval loss / eval_num_samples come out as 0. The train
+    # loader is infinite, so this branch never fires for training.
+    if is_eval and sample_list:
+        yield Batch.collate(sample_list)
+'''
+
+
+def patch_data_loader(path: Path) -> bool:
+    src = path.read_text()
+    if "AUTO_PATCH_FLUSH_EVAL_PARTIAL_BATCH" in src:
+        return False
+    path.write_text(DATA_LOADER_PY)
+    return True
+
+
 def patch_loss(path: Path) -> bool:
     src = path.read_text()
     if "AUTO_PATCH_SAFE_ZERO_WEIGHT_LOSS" in src and "compute_loss_weight" in src:
@@ -336,6 +398,7 @@ def main() -> None:
         repo / "finetune" / "eval.py",
         repo / "finetune" / "monitoring" / "metrics_logger.py",
         repo / "train.py",
+        repo / "finetune" / "data" / "data_loader.py",
     ]
     missing = [str(path) for path in required if not path.exists()]
     if missing:
@@ -347,6 +410,7 @@ def main() -> None:
         ("eval", patch_eval, required[1]),
         ("metrics_logger", patch_metrics_logger, required[2]),
         ("train", patch_train, required[3]),
+        ("data_loader", patch_data_loader, required[4]),
     ]:
         if func(path):
             changed.append(label)
