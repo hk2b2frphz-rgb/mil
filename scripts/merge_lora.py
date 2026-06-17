@@ -78,21 +78,31 @@ def main():
         print(f"ERROR: LoRA checkpoint not found: {lora_path}", file=sys.stderr)
         sys.exit(1)
 
-    # Try to read scaling from config.json next to lora.safetensors
+    # Try to read scaling from config.json next to lora.safetensors.
+    # NOTE: this config.json is the Moshi LM config (lm_config), not the train
+    # args, so its "lora" entry is typically a bool flag (or absent) rather than
+    # a {rank, scaling} dict. Only trust it when it really is a dict; otherwise
+    # fall back to the default and rely on --scaling.
     scaling = args.scaling
     if scaling is None:
         config_path = lora_path.parent / "config.json"
+        lora_cfg = {}
         if config_path.exists():
             import json
             config = json.loads(config_path.read_text())
-            lora_cfg = config.get("lora", {})
-            rank = lora_cfg.get("rank", 32)
-            lora_scaling = lora_cfg.get("scaling", 2.0)
-            scaling = lora_scaling
-            print(f"[merge] config.json: rank={rank}, scaling={scaling}")
+            maybe = config.get("lora")
+            if isinstance(maybe, dict):
+                lora_cfg = maybe
+        if "scaling" in lora_cfg:
+            scaling = lora_cfg["scaling"]
+            print(f"[merge] config.json lora: rank={lora_cfg.get('rank')}, scaling={scaling}")
         else:
             scaling = 2.0
-            print(f"[merge] config.json not found, using default scaling={scaling}")
+            reason = ("config.json not found" if not config_path.exists()
+                      else "config.json has no lora.scaling (it is the LM config)")
+            print(f"[merge] WARNING: {reason}; using default scaling={scaling}. "
+                  "Pass --scaling explicitly if your run used a different value "
+                  "(e.g. sweep patterns h06=1.0, h07=4.0).")
 
     print(f"[merge] Loading base model from {args.hf_repo}...")
     base_path = find_base_weights(args.hf_repo)
