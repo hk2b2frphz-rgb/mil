@@ -80,26 +80,29 @@ def main():
 
     # Try to read scaling from config.json next to lora.safetensors.
     # NOTE: this config.json is the Moshi LM config (lm_config), not the train
-    # args, so its "lora" entry is typically a bool flag (or absent) rather than
-    # a {rank, scaling} dict. Only trust it when it really is a dict; otherwise
-    # fall back to the default and rely on --scaling.
+    # args. kyutai stores the LoRA settings as TOP-LEVEL keys "lora_scaling" and
+    # "lora_rank" (the "lora" key itself is just the enable bool), so read those.
+    # Older/other configs may instead nest them under a "lora" dict.
     scaling = args.scaling
     if scaling is None:
         config_path = lora_path.parent / "config.json"
-        lora_cfg = {}
+        config = {}
         if config_path.exists():
             import json
             config = json.loads(config_path.read_text())
-            maybe = config.get("lora")
-            if isinstance(maybe, dict):
-                lora_cfg = maybe
-        if "scaling" in lora_cfg:
-            scaling = lora_cfg["scaling"]
-            print(f"[merge] config.json lora: rank={lora_cfg.get('rank')}, scaling={scaling}")
+        nested = config.get("lora")
+        nested = nested if isinstance(nested, dict) else {}
+        if "lora_scaling" in config:
+            scaling = config["lora_scaling"]
+            print(f"[merge] config.json: lora_rank={config.get('lora_rank')}, "
+                  f"lora_scaling={scaling}")
+        elif "scaling" in nested:
+            scaling = nested["scaling"]
+            print(f"[merge] config.json lora: rank={nested.get('rank')}, scaling={scaling}")
         else:
             scaling = 2.0
             reason = ("config.json not found" if not config_path.exists()
-                      else "config.json has no lora.scaling (it is the LM config)")
+                      else "config.json has no lora_scaling")
             print(f"[merge] WARNING: {reason}; using default scaling={scaling}. "
                   "Pass --scaling explicitly if your run used a different value "
                   "(e.g. sweep patterns h06=1.0, h07=4.0).")
