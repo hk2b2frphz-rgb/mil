@@ -135,6 +135,7 @@ def evaluate(
 
     text_loss = torch.tensor(0.0, device="cuda")
     audio_loss = torch.tensor(0.0, device="cuda")
+    nonfinite_batches = torch.tensor(0.0, device="cuda")
     model.eval()
     for batch in eval_data_loader:
         if int(num_samples.item()) >= max_eval_batches:
@@ -170,9 +171,7 @@ def evaluate(
                 first_codebook_weight_multiplier=args.first_codebook_weight_multiplier,
             )
 
-            text_count += (this_text_weight > 0).float()
-            audio_count += (this_audio_weight > 0).float()
-            text_loss += compute_loss_with_mask(
+            this_text_loss = compute_loss_with_mask(
                 output.text_logits,
                 text_target,
                 output.text_mask,
@@ -180,13 +179,43 @@ def evaluate(
                 text_padding_weight=args.text_padding_weight,
                 text_padding_ids=text_padding_ids,
             )
-            audio_loss += compute_loss_with_mask(
+            this_audio_loss = compute_loss_with_mask(
                 output.logits,
                 audio_target,
                 output.mask,
                 mode="audio",
                 first_codebook_weight_multiplier=args.first_codebook_weight_multiplier,
             )
+
+            # AUTO_PATCH_FINITE_EVAL_GUARD: a single non-finite batch (NaN/Inf
+            # logits from an unstable model, or a degenerate window) otherwise
+            # poisons the whole averaged eval metric. Accumulate only finite
+            # contributions, count how many batches were dropped, and log enough
+            # to localize the source (text vs audio, logits vs loss).
+            text_logits_finite = bool(torch.isfinite(output.text_logits).all().item())
+            audio_logits_finite = bool(torch.isfinite(output.logits).all().item())
+            text_loss_finite = bool(torch.isfinite(this_text_loss).item())
+            audio_loss_finite = bool(torch.isfinite(this_audio_loss).item())
+
+            if not (text_logits_finite and audio_logits_finite
+                    and text_loss_finite and audio_loss_finite):
+                nonfinite_batches += 1.0
+                main_logger_info(
+                    f"[eval] non-finite batch at step {state.step}: "
+                    f"text_logits_finite={text_logits_finite} "
+                    f"audio_logits_finite={audio_logits_finite} "
+                    f"text_loss_finite={text_loss_finite} "
+                    f"audio_loss_finite={audio_loss_finite} "
+                    f"text_weight={float(this_text_weight.item()):.1f} "
+                    f"audio_weight={float(this_audio_weight.item()):.1f}"
+                )
+
+            if text_loss_finite and text_logits_finite:
+                text_count += (this_text_weight > 0).float()
+                text_loss += this_text_loss
+            if audio_loss_finite and audio_logits_finite:
+                audio_count += (this_audio_weight > 0).float()
+                audio_loss += this_audio_loss
 
     main_logger_info("Eval finished!")
 
@@ -195,10 +224,19 @@ def evaluate(
     dist.all_reduce(audio_count, op=dist.ReduceOp.SUM)
     dist.all_reduce(text_loss, op=dist.ReduceOp.SUM)
     dist.all_reduce(audio_loss, op=dist.ReduceOp.SUM)
+    dist.all_reduce(nonfinite_batches, op=dist.ReduceOp.SUM)
 
     text_loss /= torch.clamp(text_count, min=1.0)
     audio_loss /= torch.clamp(audio_count, min=1.0)
     eval_loss = text_loss + audio_loss
+
+    if nonfinite_batches.item() > 0:
+        main_logger_info(
+            f"[eval] dropped {int(nonfinite_batches.item())} non-finite eval "
+            "batch(es); averaged over the finite ones only. Persistent "
+            "non-finite logits usually mean training has diverged (check LR / "
+            "param_dtype) rather than an eval-only problem."
+        )
 
     state.this_eval_loss = eval_loss.item()
     state.this_eval_perplexity = (2**eval_loss).item()
@@ -281,7 +319,9 @@ def patch_loss(path: Path) -> bool:
 
 def patch_eval(path: Path) -> bool:
     src = path.read_text()
-    if "AUTO_PATCH_VALID_EVAL_COUNTS" in src:
+    # Keyed on the latest marker so older patched checkouts are upgraded in
+    # place (the whole file is rewritten from EVAL_PY).
+    if "AUTO_PATCH_FINITE_EVAL_GUARD" in src:
         return False
     path.write_text(EVAL_PY)
     return True
