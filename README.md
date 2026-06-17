@@ -179,6 +179,10 @@ uv run python response_recorder.py \
 
 #### 手動で 2 段実行する場合
 
+`clean_moshi.py` は repo root の `models` パッケージを import するため、
+`tools/` から直接実行すると `ModuleNotFoundError: No module named 'models'`
+になる。`PYTHONPATH=.` を付けて nu repo root を通すこと。
+
 ```bash
 # ① ZeRO シャード -> 単一 fp32 weight
 #    第1引数は step_<N> (pytorch_model/ の親)。--tag pytorch_model を明示する。
@@ -194,7 +198,7 @@ uv run python tools/zero_to_fp32.py \
 # ② 素の Moshi 形式へ変換
 #    学習が --model_user_stream (full-FT sweep のデフォルト) の場合は
 #    --remove_modules_for_user_stream を付けて dep_q=16 -> 8 に戻す。
-uv run python tools/clean_moshi.py \
+PYTHONPATH=. uv run python tools/clean_moshi.py \
   --moshi_ft_dir <run>/exported/step_120_ft \
   --save_dir     <run>/exported/step_120_clean \
   --model_dtype bfloat16 \

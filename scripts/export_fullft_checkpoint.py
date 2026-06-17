@@ -96,7 +96,14 @@ def decide_remove_user_stream(kwargs_path: Path, override: bool | None) -> bool:
 def run(cmd: list[str], cwd: Path) -> None:
     log("running: " + " ".join(cmd))
     log(f"  (cwd={cwd})")
-    result = subprocess.run(cmd, cwd=str(cwd))
+    # The nu tools import the repo-root `models` package, but running
+    # `python tools/<x>.py` puts tools/ on sys.path[0] instead of the repo
+    # root (there is no tools/__init__.py). Put the repo root on PYTHONPATH so
+    # `from models import ...` resolves.
+    env = os.environ.copy()
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(cwd) + (os.pathsep + existing if existing else "")
+    result = subprocess.run(cmd, cwd=str(cwd), env=env)
     if result.returncode != 0:
         fail(f"command failed with exit code {result.returncode}: {' '.join(cmd)}")
 
