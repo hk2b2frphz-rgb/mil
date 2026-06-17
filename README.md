@@ -157,6 +157,28 @@ step_<N>/  (ZeRO shard)
 (sweep 経由の場合)。`<NU_MODEL_DIR>` は sweep が初期化したモデル置き場
 (デフォルト `../moshi-finetune-nu-dialogue/init_models/llm-jp-moshi-v1-both_streams-float32`)。
 
+#### 一発エクスポート (推奨)
+
+①② をまとめて実行する。`--remove_modules_for_user_stream` の要否は
+checkpoint の `moshi_lm_kwargs.json` (`dep_q`) から自動判定する。
+
+```bash
+uv run python scripts/export_fullft_checkpoint.py \
+  --step-dir <run>/checkpoints/nu_<ts>/step_120 \
+  --out-dir  <run>/exported/step_120_clean
+
+# 推論
+uv run python response_recorder.py \
+  --moshi-weight <run>/exported/step_120_clean/model.safetensors \
+  --inputs prompts/hello.wav --seeds 0,1,2 --out-dir results/f01_step120/
+```
+
+`--nu-repo` / `--moshi-lm-kwargs` で場所を上書き可。自動判定を上書きするなら
+`--remove-user-stream` / `--no-remove-user-stream`。中間生成物を残すなら
+`--keep-intermediate`。
+
+#### 手動で 2 段実行する場合
+
 ```bash
 # ① ZeRO シャード -> 単一 fp32 weight
 #    第1引数は step_<N> (pytorch_model/ の親)。--tag pytorch_model を明示する。
