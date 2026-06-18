@@ -32,7 +32,7 @@ export RUN_ID="${RUN_ID:-${MODEL_ID:-model}_${JOB_ID_SHORT}}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export HALF="${HALF:-1}"
 
-# Disable Triton / torch.compile — V100 lacks support for many Triton kernels.
+# Disable Triton / torch.compile -- V100 lacks support for many Triton kernels.
 export TORCHINDUCTOR_DISABLE=1
 export NO_TORCH_COMPILE="${NO_TORCH_COMPILE:-1}"
 export TORCH_COMPILE_DISABLE=1

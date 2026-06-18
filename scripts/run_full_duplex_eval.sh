@@ -26,7 +26,7 @@ FDB_TTS_SPEED="${FDB_TTS_SPEED:-1.1}"
 REFRESH_FDB_DATA="${REFRESH_FDB_DATA:-0}"
 HALF="${HALF:-1}"
 
-# Disable Triton / torch.compile — V100 lacks support for many Triton kernels.
+# Disable Triton / torch.compile -- V100 lacks support for many Triton kernels.
 export TORCHINDUCTOR_DISABLE=1
 export NO_TORCH_COMPILE="${NO_TORCH_COMPILE:-1}"
 export TORCH_COMPILE_DISABLE=1
