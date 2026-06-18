@@ -113,6 +113,10 @@ def extract_json_array(text: str) -> list[str]:
 
 def main() -> int:
     args = parse_args()
+    if args.num < 1:
+        raise SystemExit("--num must be a positive integer")
+    if args.per_prompt < 1:
+        raise SystemExit("--per-prompt must be a positive integer")
     rng = random.Random(args.seed)
 
     n_prompts = max(1, (args.num + args.per_prompt - 1) // args.per_prompt)

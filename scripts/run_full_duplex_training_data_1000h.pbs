@@ -16,8 +16,14 @@
 #     V100 and writes to its own directory. Self-contained shards give
 #     resumability (just re-submit failed indices) and avoid file collisions.
 #   - With 8 V100s available, the scheduler runs 8 sub-jobs at a time and
-#     queues the rest. 96 shards x 250 dialogues ~= 24000 dialogues. At an
-#     estimated ~150s average dialogue length this is ~1000h of stereo audio.
+#     queues the rest (select=1 reserves one V100 per sub-job). If this
+#     scheduler supports a concurrency cap, submit with "-J 0-95%8" to make
+#     the 8-at-a-time limit explicit instead of relying on free-GPU count.
+#     96 shards x 250 dialogues ~= 24000 dialogues. At an estimated ~150s
+#     average dialogue length this is ~1000h of stereo audio.
+#   - If a shard fails it is cheap to re-submit just that index. Lowering
+#     DIALOGUES_PER_SHARD (more, smaller shards) shrinks the work lost on any
+#     single failure, at the cost of more Gemma reloads.
 #   - Data generation only. No fine-tuning is launched here.
 #
 # Submit:
@@ -131,5 +137,18 @@ if [[ ! -s "$MANIFEST" ]]; then
     echo "ERROR: training manifest was not created: $MANIFEST" >&2
     exit 1
 fi
-echo "manifest:      $MANIFEST"
+
+# Guard against silently truncated shards: require at least MIN_FRACTION of the
+# requested dialogues. Some dialogues can legitimately be skipped (e.g. no audio
+# turns), so this is a floor, not an exact match. Re-submit this index if it
+# fails. Override the floor with MIN_SHARD_FRACTION_PCT.
+MANIFEST_ROWS="$(grep -c . "$MANIFEST" || true)"
+MIN_FRACTION_PCT="${MIN_SHARD_FRACTION_PCT:-80}"
+MIN_ROWS=$(( NUM_CASES * MIN_FRACTION_PCT / 100 ))
+if [[ "$MANIFEST_ROWS" -lt "$MIN_ROWS" ]]; then
+    echo "ERROR: shard produced only $MANIFEST_ROWS samples, expected >= $MIN_ROWS of $NUM_CASES." >&2
+    echo "Re-submit this array index: qsub -J ${SHARD_INDEX}-${SHARD_INDEX} scripts/run_full_duplex_training_data_1000h.pbs" >&2
+    exit 1
+fi
+echo "manifest:      $MANIFEST ($MANIFEST_ROWS samples)"
 echo "finished_at:   $(date -Iseconds)"

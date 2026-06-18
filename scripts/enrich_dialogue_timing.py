@@ -171,7 +171,20 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable the per-turn emotion smoothing pass.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.chars_per_sec <= 0:
+        parser.error("--chars-per-sec must be > 0")
+    if args.sec_per_aizuchi <= 0:
+        parser.error("--sec-per-aizuchi must be > 0")
+    if args.min_turn_sec < 0:
+        parser.error("--min-turn-sec must be >= 0")
+    if args.max_aizuchi_per_turn < 1:
+        parser.error("--max-aizuchi-per-turn must be >= 1")
+    if not 0.0 <= args.aizuchi_prob <= 1.0:
+        parser.error("--aizuchi-prob must be in [0, 1]")
+    if not 0.0 <= args.emotion_inertia <= 1.0:
+        parser.error("--emotion-inertia must be in [0, 1]")
+    return args
 
 
 def iter_jsonl(path: Path):
@@ -195,10 +208,12 @@ def split_into_chunks(text: str, k: int) -> list[str]:
         return [text]
     clauses = [c for c in CLAUSE_SPLIT_RE.split(text) if c.strip()]
     if len(clauses) <= 1:
-        # 句読点が無い場合は文字数で等分
+        # 句読点が無い場合は文字数で等分。ceil で割ることで最大 k チャンクに
+        # 収めつつ末尾文字を取りこぼさない。
         n = len(text)
-        size = max(1, n // k)
-        return [text[i : i + size] for i in range(0, n, size)][:k] or [text]
+        size = max(1, (n + k - 1) // k)
+        chunks = [text[i : i + size] for i in range(0, n, size)]
+        return chunks or [text]
     # clauses を k 個のチャンクへ均等にまとめる
     chunks: list[str] = []
     per = max(1, len(clauses) / k)

@@ -48,6 +48,20 @@ def parse_args() -> argparse.Namespace:
         default="shard_*",
         help="Glob (relative to --batch-dir) selecting shard directories.",
     )
+    parser.add_argument(
+        "--expected-shards",
+        type=int,
+        default=None,
+        help="If set, fail unless exactly this many shard directories are found.",
+    )
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help=(
+            "Allow merging despite missing shard manifests, missing wavs, or "
+            "empty shards. Without this, any such problem makes the merge fail."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -67,6 +81,8 @@ def main() -> int:
     total_rows = 0
     total_dur = 0.0
     missing = 0
+    missing_manifests: list[str] = []
+    empty_shards: list[str] = []
     seen_stems: set[str] = set()
     shard_summary: list[dict[str, object]] = []
 
@@ -77,6 +93,7 @@ def main() -> int:
             manifest = training / args.manifest_name
             if not manifest.is_file():
                 print(f"[merge] skip (no manifest): {shard.name}")
+                missing_manifests.append(shard.name)
                 continue
             shard_rows = 0
             for line in manifest.read_text(encoding="utf-8").splitlines():
@@ -115,6 +132,8 @@ def main() -> int:
                 for line in dialogues.read_text(encoding="utf-8").splitlines():
                     if line.strip():
                         df.write(line + "\n")
+            if shard_rows == 0:
+                empty_shards.append(shard.name)
             shard_summary.append({"shard": shard.name, "samples": shard_rows})
             print(f"[merge] {shard.name}: {shard_rows} samples")
 
@@ -124,6 +143,8 @@ def main() -> int:
         "total_samples": total_rows,
         "total_audio_hours": round(total_dur / 3600.0, 3),
         "missing_wavs": missing,
+        "missing_manifests": missing_manifests,
+        "empty_shards": empty_shards,
         "manifest": str(merged_manifest),
     }
     (args.out_dir / "merge_summary.json").write_text(
@@ -133,8 +154,28 @@ def main() -> int:
         f"[merge] wrote {total_rows} samples "
         f"({summary['total_audio_hours']} h) -> {merged_manifest}"
     )
+
+    problems: list[str] = []
+    if total_rows == 0:
+        problems.append("no samples were merged")
     if missing:
-        print(f"[merge] WARNING: {missing} manifest rows referenced missing wavs")
+        problems.append(f"{missing} manifest rows referenced missing wavs")
+    if missing_manifests:
+        problems.append(f"{len(missing_manifests)} shards had no manifest: {missing_manifests}")
+    if empty_shards:
+        problems.append(f"{len(empty_shards)} shards contributed 0 samples: {empty_shards}")
+    if args.expected_shards is not None and len(shard_dirs) != args.expected_shards:
+        problems.append(
+            f"found {len(shard_dirs)} shard dirs, expected {args.expected_shards}"
+        )
+
+    if problems:
+        prefix = "[merge] WARNING (--allow-partial): " if args.allow_partial else "[merge] ERROR: "
+        for p in problems:
+            print(prefix + p)
+        if not args.allow_partial:
+            print("[merge] Re-run failed shards, or pass --allow-partial to merge anyway.")
+            return 1
     return 0
 
 

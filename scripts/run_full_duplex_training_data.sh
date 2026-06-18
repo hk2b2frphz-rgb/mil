@@ -76,6 +76,9 @@ if has_step dialogues; then
         gemma_args+=(--allow-template-fallback)
     fi
     "${gemma_args[@]}"
+    # Drop any stale enriched file so a regenerated dialogues.jsonl is never
+    # rendered from previous-run enrichment.
+    rm -f "$DIALOGUES_ENRICHED"
 fi
 
 if has_step enrich; then
@@ -85,9 +88,10 @@ if has_step enrich; then
         --seed "$SEED"
 fi
 
-# Use the enriched dialogues for audio if they exist, otherwise the raw ones.
+# Use the enriched dialogues only if they exist and are at least as new as the
+# raw dialogues; otherwise fall back to the raw ones.
 AUDIO_DIALOGUES="$DIALOGUES_RAW"
-if [[ -s "$DIALOGUES_ENRICHED" ]]; then
+if [[ -s "$DIALOGUES_ENRICHED" && ! "$DIALOGUES_RAW" -nt "$DIALOGUES_ENRICHED" ]]; then
     AUDIO_DIALOGUES="$DIALOGUES_ENRICHED"
 fi
 
