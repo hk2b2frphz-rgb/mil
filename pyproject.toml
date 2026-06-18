@@ -16,6 +16,8 @@ dependencies = [
     "transformers>=4.51.0",
     "accelerate",
     "qwen-tts",
+    "scipy",
+    "silero-vad",
     "soundfile",
 ]
 

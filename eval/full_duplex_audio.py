@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import math
+import sys
 import wave
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -89,6 +91,46 @@ def energy_vad(
         [round(start, 4), round(end, 4)]
         for start, end in merged
         if end - start >= min_speech_sec
+    ]
+
+
+@lru_cache(maxsize=1)
+def _load_silero_model():
+    from silero_vad import load_silero_vad
+
+    return load_silero_vad()
+
+
+def silero_vad(pcm: np.ndarray, sample_rate: int) -> list[list[float]]:
+    try:
+        import torch
+        from silero_vad import get_speech_timestamps
+
+        model = _load_silero_model()
+    except Exception as exc:
+        print(
+            f"[fdb-vad] Silero unavailable ({exc}); using energy VAD fallback.",
+            file=sys.stderr,
+        )
+        return energy_vad(pcm, sample_rate)
+
+    pcm_16k = resample_linear(np.asarray(pcm, dtype=np.float32), sample_rate, 16000)
+    try:
+        timestamps = get_speech_timestamps(
+            torch.from_numpy(pcm_16k),
+            model,
+            sampling_rate=16000,
+            return_seconds=True,
+        )
+    except Exception as exc:
+        print(
+            f"[fdb-vad] Silero inference failed ({exc}); using energy VAD fallback.",
+            file=sys.stderr,
+        )
+        return energy_vad(pcm, sample_rate)
+    return [
+        [round(float(item["start"]), 4), round(float(item["end"]), 4)]
+        for item in timestamps
     ]
 
 

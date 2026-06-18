@@ -16,6 +16,10 @@ pyttsx3
 
 # Numerical
 numpy
+scipy
+
+# Language-agnostic VAD for Full-Duplex-Bench evaluation
+silero-vad
 
 # Model downloading (pulled in transitively by moshi, listed explicitly)
 huggingface_hub
