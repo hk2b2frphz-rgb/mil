@@ -174,7 +174,8 @@ def evaluate(
 
     text_loss = torch.tensor(0.0, device="cuda")
     audio_loss = torch.tensor(0.0, device="cuda")
-    nonfinite_batches = torch.tensor(0.0, device="cuda")
+    nonfinite_loss_batches = torch.tensor(0.0, device="cuda")
+    raw_nonfinite_logits_batches = torch.tensor(0.0, device="cuda")
     model.eval()
     for batch in eval_data_loader:
         if int(num_samples.item()) >= max_eval_batches:
@@ -226,21 +227,19 @@ def evaluate(
                 first_codebook_weight_multiplier=args.first_codebook_weight_multiplier,
             )
 
-            # AUTO_PATCH_FINITE_EVAL_GUARD: a single non-finite batch (NaN/Inf
-            # logits from an unstable model, or a degenerate window) otherwise
-            # poisons the whole averaged eval metric. Accumulate only finite
-            # contributions, count how many batches were dropped, and log enough
-            # to localize the source (text vs audio, logits vs loss).
+            # AUTO_PATCH_MASKED_LOSS_FINITE_GUARD: validity is determined by the
+            # masked loss, exactly as in training. Raw logits may contain
+            # non-finite values at zero-weight positions; rejecting the whole
+            # tensor in that case incorrectly drops an otherwise valid batch.
             text_logits_finite = bool(torch.isfinite(output.text_logits).all().item())
             audio_logits_finite = bool(torch.isfinite(output.logits).all().item())
             text_loss_finite = bool(torch.isfinite(this_text_loss).item())
             audio_loss_finite = bool(torch.isfinite(this_audio_loss).item())
 
-            if not (text_logits_finite and audio_logits_finite
-                    and text_loss_finite and audio_loss_finite):
-                nonfinite_batches += 1.0
+            if not (text_logits_finite and audio_logits_finite):
+                raw_nonfinite_logits_batches += 1.0
                 main_logger_info(
-                    f"[eval] non-finite batch at step {state.step}: "
+                    f"[eval] raw logits contain non-finite values at step {state.step}: "
                     f"text_logits_finite={text_logits_finite} "
                     f"audio_logits_finite={audio_logits_finite} "
                     f"text_loss_finite={text_loss_finite} "
@@ -249,10 +248,20 @@ def evaluate(
                     f"audio_weight={float(this_audio_weight.item()):.1f}"
                 )
 
-            if text_loss_finite and text_logits_finite:
+            if not (text_loss_finite and audio_loss_finite):
+                nonfinite_loss_batches += 1.0
+                main_logger_info(
+                    f"[eval] non-finite masked loss at step {state.step}: "
+                    f"text_loss_finite={text_loss_finite} "
+                    f"audio_loss_finite={audio_loss_finite} "
+                    f"text_weight={float(this_text_weight.item()):.1f} "
+                    f"audio_weight={float(this_audio_weight.item()):.1f}"
+                )
+
+            if text_loss_finite:
                 text_count += (this_text_weight > 0).float()
                 text_loss += this_text_loss
-            if audio_loss_finite and audio_logits_finite:
+            if audio_loss_finite:
                 audio_count += (this_audio_weight > 0).float()
                 audio_loss += this_audio_loss
 
@@ -263,7 +272,8 @@ def evaluate(
     dist.all_reduce(audio_count, op=dist.ReduceOp.SUM)
     dist.all_reduce(text_loss, op=dist.ReduceOp.SUM)
     dist.all_reduce(audio_loss, op=dist.ReduceOp.SUM)
-    dist.all_reduce(nonfinite_batches, op=dist.ReduceOp.SUM)
+    dist.all_reduce(nonfinite_loss_batches, op=dist.ReduceOp.SUM)
+    dist.all_reduce(raw_nonfinite_logits_batches, op=dist.ReduceOp.SUM)
 
     # AUTO_PATCH_REQUIRE_NONEMPTY_EVAL: a zero-sample evaluation is never a
     # meaningful metric. This most commonly means the finite generator was
@@ -279,19 +289,24 @@ def evaluate(
             "eval dataset produced no finite valid targets: "
             f"text_batches={int(text_count.item())}, "
             f"audio_batches={int(audio_count.item())}, "
-            f"nonfinite_batches={int(nonfinite_batches.item())}"
+            f"nonfinite_loss_batches={int(nonfinite_loss_batches.item())}, "
+            f"raw_nonfinite_logits_batches={int(raw_nonfinite_logits_batches.item())}"
         )
 
     text_loss /= torch.clamp(text_count, min=1.0)
     audio_loss /= torch.clamp(audio_count, min=1.0)
     eval_loss = text_loss + audio_loss
 
-    if nonfinite_batches.item() > 0:
+    if nonfinite_loss_batches.item() > 0:
         main_logger_info(
-            f"[eval] dropped {int(nonfinite_batches.item())} non-finite eval "
-            "batch(es); averaged over the finite ones only. Persistent "
-            "non-finite logits usually mean training has diverged (check LR / "
-            "param_dtype) rather than an eval-only problem."
+            f"[eval] dropped {int(nonfinite_loss_batches.item())} batch(es) "
+            "with non-finite masked loss; averaged over finite losses only."
+        )
+    if raw_nonfinite_logits_batches.item() > 0:
+        main_logger_info(
+            f"[eval] observed raw non-finite logits in "
+            f"{int(raw_nonfinite_logits_batches.item())} batch(es), but retained "
+            "batches whose masked text/audio losses were finite."
         )
 
     state.this_eval_loss = eval_loss.item()
@@ -377,7 +392,7 @@ def patch_eval(path: Path) -> bool:
     src = path.read_text()
     # Keyed on the latest marker so older patched checkouts are upgraded in
     # place (the whole file is rewritten from EVAL_PY).
-    if "AUTO_PATCH_REQUIRE_NONEMPTY_EVAL" in src:
+    if "AUTO_PATCH_MASKED_LOSS_FINITE_GUARD" in src:
         return False
     path.write_text(EVAL_PY)
     return True
