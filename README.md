@@ -28,6 +28,17 @@ uv sync --project gemma_runtime   # Gemma 4
 
 **要件**: Python 3.11+, NVIDIA GPU (A100 80GB 推奨), CUDA 対応 PyTorch
 
+PBS計算ノードで外部モデルを取得するためにプロキシが必要な環境では、
+送信元の`HTTP_PROXY`を暗黙利用せず明示的に渡す。
+
+```bash
+qsub -v PROXY_URL=http://<proxy-host>:<port>,MODEL_ID=base \
+  scripts/run_full_duplex_eval.pbs
+```
+
+`socket.getaddrinfo: Name or service not known`が出る場合は、指定した
+プロキシホストが計算ノードから名前解決できるか確認する。
+
 ## 使い方
 
 ### フルパイプライン (データ生成 → 学習)
