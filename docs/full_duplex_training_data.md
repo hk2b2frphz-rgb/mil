@@ -7,13 +7,58 @@ Full-duplex training data is generated independently through the repository's
 existing pipeline:
 
 1. `build_full_duplex_training_use_cases.py` creates varied support-window use
-   cases with a balanced full-duplex task label.
+   cases. By default 70% are free-form chat/listening cards (`duplex_task` is
+   null) and 30% are spread over the seven labeled tasks. Diversity comes from
+   combining situation, topic, conversation type, persona occupation, time of
+   day, and season axes (`build_use_cases.py`).
 2. `generate_synthetic_moshi_training_data.py` asks Gemma to write Japanese
    counselor dialogues and timing events.
-3. `generate_qwen3_tts_data.py` renders stereo audio with Moshi on the left and
-   the user/environment on the right.
-4. The usual Moshi fine-tuning launchers consume
+3. `enrich_dialogue_timing.py` post-processes the free-form dialogues: long user
+   turns are split at clause boundaries and short backchannels (aizuchi) are
+   layered in during the user's speech, so the data teaches frequent, fast
+   backchannels instead of one slow backchannel per turn. Labeled-task
+   dialogues are left untouched to preserve their strict validators.
+4. `generate_qwen3_tts_data.py` renders stereo audio with Moshi on the left and
+   the user/environment on the right. A short transition gap (`--gap-sec 0.2`)
+   reflects natural Japanese turn-taking.
+5. The usual Moshi fine-tuning launchers consume
    `training_set/synthetic_moshi_train.jsonl`.
+
+## Large-scale (~1000h) generation
+
+`run_full_duplex_training_data_1000h.pbs` is a PBS job array. Each sub-job is a
+self-contained shard (use_cases -> dialogues -> enrich -> audio) on one V100,
+writing to its own directory. With eight V100s the scheduler runs eight shards
+at a time and queues the rest, so no special throttling is needed. Self-
+contained shards are resumable: just re-submit failed indices.
+
+Minimal config to reach ~1000h within ~2 days on 8x V100:
+
+- 96 shards x 250 dialogues = 24,000 dialogues (~1000h at ~150s average).
+- Required aggregate throughput is ~2.6x real time (Gemma + Qwen3-TTS). Eight
+  V100s fully used is the minimum that meets the deadline; fewer cards will not.
+  If real RTF is slower, extend `walltime`, lower `DIALOGUES_PER_SHARD`, or
+  accept ~600-700h.
+
+```bash
+# Always run one pilot shard first to measure real throughput and the actual
+# average dialogue length before committing all 96 shards.
+qsub -J 0-0 scripts/run_full_duplex_training_data_1000h.pbs
+
+# Full run.
+qsub scripts/run_full_duplex_training_data_1000h.pbs
+
+# After all shards finish, merge into one manifest (CPU only, login node):
+uv run python scripts/merge_training_shards.py \
+  --batch-dir data/runs/fd_1000h \
+  --out-dir   data/runs/fd_1000h/merged
+
+# Fine-tune with the merged dataset:
+SRC_RUN_DIR=data/runs/fd_1000h/merged qsub scripts/fullft_sweep.pbs
+```
+
+The merge writes absolute wav paths, so no audio is copied. Useful overrides:
+`BATCH_ID`, `DIALOGUES_PER_SHARD`, `BASE_SEED`, `LISTENING_RATIO`, `GAP_SEC`.
 
 ## Generate a dataset
 

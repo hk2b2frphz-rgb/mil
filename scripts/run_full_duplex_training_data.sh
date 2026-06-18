@@ -10,10 +10,18 @@ OUT_ROOT="${OUT_ROOT:-$REPO_ROOT/data/runs/$RUN_ID}"
 NUM_CASES="${NUM_CASES:-140}"
 FULL_DUPLEX_TASKS="${FULL_DUPLEX_TASKS:-all}"
 SEED="${SEED:-0}"
-STEPS="${STEPS:-use_cases,dialogues,audio}"
+STEPS="${STEPS:-use_cases,dialogues,enrich,audio}"
+LISTENING_RATIO="${LISTENING_RATIO:-0.7}"
+
+# Natural Japanese turn-taking timing.
+# Short transition gap (Stivers et al. 2009: Japanese gaps are near-zero).
+GAP_SEC="${GAP_SEC:-0.2}"
+LEAD_IN_SEC="${LEAD_IN_SEC:-0.3}"
 
 USE_CASES_PATH="$OUT_ROOT/use_cases.jsonl"
 DIALOGUES_DIR="$OUT_ROOT/gemma_dialogues"
+DIALOGUES_RAW="$DIALOGUES_DIR/dialogues.jsonl"
+DIALOGUES_ENRICHED="$DIALOGUES_DIR/dialogues_enriched.jsonl"
 TRAINING_DIR="$OUT_ROOT/training_set"
 mkdir -p "$OUT_ROOT"
 
@@ -38,7 +46,8 @@ if has_step use_cases; then
         --out-path "$USE_CASES_PATH" \
         --num "$NUM_CASES" \
         --seed "$SEED" \
-        --tasks "$FULL_DUPLEX_TASKS"
+        --tasks "$FULL_DUPLEX_TASKS" \
+        --listening-ratio "$LISTENING_RATIO"
 fi
 
 if has_step dialogues; then
@@ -53,6 +62,7 @@ if has_step dialogues; then
         --gemma-model "${GEMMA_MODEL:-google/gemma-4-E2B-it}"
         --gemma-dtype "${GEMMA_DTYPE:-bfloat16}"
         --gemma-max-new-tokens "${GEMMA_MAX_NEW_TOKENS:-1100}"
+        --gemma-timeout-sec "${GEMMA_TIMEOUT_SEC:-7200}"
     )
     if [[ "${ALLOW_TEMPLATE_FALLBACK:-0}" == "1" ]]; then
         gemma_args+=(--allow-template-fallback)
@@ -60,13 +70,28 @@ if has_step dialogues; then
     "${gemma_args[@]}"
 fi
 
+if has_step enrich; then
+    uv run python scripts/enrich_dialogue_timing.py \
+        --in "$DIALOGUES_RAW" \
+        --out "$DIALOGUES_ENRICHED" \
+        --seed "$SEED"
+fi
+
+# Use the enriched dialogues for audio if they exist, otherwise the raw ones.
+AUDIO_DIALOGUES="$DIALOGUES_RAW"
+if [[ -s "$DIALOGUES_ENRICHED" ]]; then
+    AUDIO_DIALOGUES="$DIALOGUES_ENRICHED"
+fi
+
 if has_step audio; then
     uv run python scripts/generate_qwen3_tts_data.py \
         --out-dir "$TRAINING_DIR" \
-        --dialogues-jsonl "$DIALOGUES_DIR/dialogues.jsonl" \
+        --dialogues-jsonl "$AUDIO_DIALOGUES" \
         --model "${QWEN_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}" \
         --device "${TTS_DEVICE:-cuda}" \
         --dtype "${TTS_DTYPE:-bfloat16}" \
+        --gap-sec "$GAP_SEC" \
+        --lead-in-sec "$LEAD_IN_SEC" \
         --speaker-other "${TTS_SPEAKER_OTHER:-Dylan}" \
         --speaker-background "${TTS_SPEAKER_BACKGROUND:-Ryan}"
 fi

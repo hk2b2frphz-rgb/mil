@@ -84,40 +84,75 @@ def main() -> int:
     parser.add_argument("--num", type=int, default=140)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--tasks", default="all")
+    parser.add_argument(
+        "--listening-ratio",
+        type=float,
+        default=0.7,
+        help=(
+            "Fraction of cards that are free-form listening/chat dialogues "
+            "(duplex_task=null). The rest are spread over the labeled tasks. "
+            "Free-form cards receive frequent backchannels via the timing "
+            "enrichment pass."
+        ),
+    )
     args = parser.parse_args()
 
     if args.num <= 0:
         parser.error("--num must be positive")
+    if not 0.0 <= args.listening_ratio <= 1.0:
+        parser.error("--listening-ratio must be between 0 and 1")
     try:
         selected_tasks = parse_tasks(args.tasks)
     except ValueError as exc:
         parser.error(str(exc))
 
     rng = random.Random(args.seed)
-    task_order: list[str] = []
-    while len(task_order) < args.num:
+
+    num_listening = int(round(args.num * args.listening_ratio))
+    num_tasked = args.num - num_listening
+
+    # Labeled-task cards: cycle the selected tasks so each is well represented.
+    tasked_order: list[str] = []
+    while len(tasked_order) < num_tasked:
         cycle = list(selected_tasks)
         rng.shuffle(cycle)
-        task_order.extend(cycle)
+        tasked_order.extend(cycle)
+    tasked_order = tasked_order[:num_tasked]
+
+    # "listening" sentinel marks free-form chat/listening cards.
+    plan: list[str] = ["listening"] * num_listening + tasked_order
+    rng.shuffle(plan)
 
     args.out_path.parent.mkdir(parents=True, exist_ok=True)
+    counts: dict[str, int] = {"listening": 0}
     with args.out_path.open("w", encoding="utf-8") as handle:
-        for index, task in enumerate(task_order[: args.num], start=1):
+        for index, task in enumerate(plan, start=1):
             row = asdict(build_one(rng, index))
-            row["id"] = f"fd_{task}_{index:04d}"
-            row["source_profile"] = "full_duplex_training_ja_v1"
-            row["duplex_task"] = task
-            row["duplex_guidance"] = TASK_GUIDANCE[task]
-            row["target_turns"] = max(int(row.get("target_turns", 8)), 8)
-            if task == "pause_handling":
-                row["silence_pattern"] = "occasional"
-            elif task != "smooth_turn_taking":
-                row["silence_pattern"] = "none"
+            row["source_profile"] = "full_duplex_training_ja_v2"
+            if task == "listening":
+                # Free-form listening/chat. No duplex_task: the renderer treats
+                # it as a normal dialogue and the enrichment pass adds aizuchi.
+                row["id"] = f"chat_{row.get('conversation_type', 'smalltalk')}_{index:05d}"
+                row["duplex_task"] = None
+                row["duplex_guidance"] = (
+                    "自然な雑談・傾聴の対話。相談に限らず、相手の話したいことに沿って"
+                    "相づちと短い問い返しで会話を続ける。"
+                )
+                counts["listening"] += 1
+            else:
+                row["id"] = f"fd_{task}_{index:05d}"
+                row["duplex_task"] = task
+                row["duplex_guidance"] = TASK_GUIDANCE[task]
+                row["target_turns"] = max(int(row.get("target_turns", 8)), 8)
+                if task == "pause_handling":
+                    row["silence_pattern"] = "occasional"
+                elif task != "smooth_turn_taking":
+                    row["silence_pattern"] = "none"
+                counts[task] = counts.get(task, 0) + 1
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    counts = {task: task_order[: args.num].count(task) for task in selected_tasks}
     print(f"wrote {args.num} full-duplex training use cases to {args.out_path}")
-    print(f"task counts: {counts}")
+    print(f"card counts: {counts}")
     return 0
 
 
