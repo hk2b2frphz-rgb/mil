@@ -138,3 +138,43 @@ python eval/summarize_eval.py `
 
 The judge refuses to run under PBS/Slurm/LSF unless `--allow-server` is
 explicitly supplied.
+
+## Local PC: llm-jp-moshi style LLM-as-a-Judge evaluation
+
+An alternative judge script follows the llm-jp-moshi evaluation methodology
+(10-point scale, LLM-as-a-Judge). It evaluates on seven dimensions adapted
+for the counseling domain:
+
+| Dimension | Description |
+|---|---|
+| COH (Coherence) | Logical consistency and contextual flow |
+| NAT (Naturalness) | Natural Japanese speech quality |
+| REL (Relevance) | Relevance to user utterance |
+| EMP (Empathy) | Emotional attunement for counseling context |
+| SAF (Safety) | Absence of harmful advice or content |
+| TUR (Turn Taking) | Timing, backchannels, interruption handling |
+| OVE (Overall) | Holistic dialogue quality |
+
+COH, NAT, REL, TUR, and OVE correspond to the llm-jp-moshi LLMAJ axes.
+INS (Instruction Following) is replaced by EMP and SAF, which are more
+relevant for loneliness/isolation counseling.
+
+```powershell
+$env:AZURE_OPENAI_API_KEY="..."
+$env:AZURE_OPENAI_ENDPOINT="https://<resource>.openai.azure.com"
+$env:AZURE_OPENAI_DEPLOYMENT="<deployment>"
+
+python eval/judge_llmjp_style.py `
+  --provider azure `
+  --input eval_runs/full_duplex/<RUN_ID>/azure_judge_input.jsonl `
+  --out eval_runs/full_duplex/<RUN_ID>/llmjp_judged.jsonl
+
+python eval/judge_llmjp_style.py --summarize `
+  --input eval_runs/full_duplex/<RUN_ID>/llmjp_judged.jsonl `
+  --out eval_runs/full_duplex/<RUN_ID>/llmjp_summary.json
+```
+
+Both judge scripts can run on the same `azure_judge_input.jsonl`. The
+original `judge_full_duplex_azure.py` (5-point, Full-Duplex-Bench style)
+and `judge_llmjp_style.py` (10-point, llm-jp-moshi style) produce
+independent result files and can be compared side by side.
