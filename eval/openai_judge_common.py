@@ -71,15 +71,11 @@ def load_client(provider: str, model: str | None):
                 "and AZURE_OPENAI_DEPLOYMENT, unless --model is provided."
             )
         endpoint = endpoint.rstrip("/")
-        if api_version:
-            client = AzureOpenAI(
-                api_key=api_key,
-                azure_endpoint=endpoint,
-                api_version=api_version,
-            )
-        else:
-            base_url = endpoint if endpoint.endswith("/openai/v1") else f"{endpoint}/openai/v1/"
-            client = OpenAI(api_key=api_key, base_url=base_url)
+        client = AzureOpenAI(
+            api_key=api_key,
+            azure_endpoint=endpoint,
+            api_version=api_version or "2024-12-01-preview",
+        )
         return client, deployment
 
     if provider == "openai":
