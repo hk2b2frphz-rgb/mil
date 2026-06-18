@@ -2,6 +2,7 @@
 
 The Japanese Full-Duplex-Bench v1/v1.5 evaluation follows upstream commit
 `3e799c45a045256f47d5f1c9cda90157e2d2ec9e` with only documented English-to-Japanese adaptations. See [docs/full_duplex_evaluation.md](docs/full_duplex_evaluation.md).
+Evaluation input audio uses Qwen3-TTS, with automatic `pyopenjtalk` fallback when Qwen3-TTS is unavailable.
 
 日本語孤独・孤立相談窓口向けに Moshi (llm-jp/llm-jp-moshi-v1) を LoRA で
 ドメイン適応するためのパイプライン。合成データの生成から fine-tune まで一気通貫で回せる。

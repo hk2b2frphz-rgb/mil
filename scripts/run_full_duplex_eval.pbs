@@ -20,6 +20,11 @@
 #   FDB_TASKS=pause_handling,smooth_turn_taking,user_interruption
 #   FDB_SEEDS=0,1,2
 #   FDB_TAIL_SEC=8
+#   FDB_TTS_BACKEND=auto
+#   FDB_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+#   FDB_TTS_SPEAKER=Ono_Anna
+#   FDB_DEVICE=cuda
+#   FDB_DTYPE=bfloat16
 #   REFRESH_FDB_DATA=1
 
 set -euo pipefail
@@ -31,6 +36,11 @@ JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
 export RUN_ID="${RUN_ID:-${MODEL_ID:-model}_${JOB_ID_SHORT}}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export HALF="${HALF:-1}"
+export FDB_TTS_BACKEND="${FDB_TTS_BACKEND:-auto}"
+export FDB_TTS_MODEL="${FDB_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
+export FDB_TTS_SPEAKER="${FDB_TTS_SPEAKER:-Ono_Anna}"
+export FDB_DEVICE="${FDB_DEVICE:-cuda}"
+export FDB_DTYPE="${FDB_DTYPE:-bfloat16}"
 
 # Disable Triton / torch.compile -- V100 lacks support for many Triton kernels.
 export TORCHINDUCTOR_DISABLE=1

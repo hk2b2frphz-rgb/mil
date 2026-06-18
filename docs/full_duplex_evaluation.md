@@ -60,7 +60,9 @@ language adaptations.
 | External English ASR, including CrisperWhisper/parakeet, supplies transcripts. | Moshi's own Japanese text-token stream, written by `run_full_duplex_bench.py`, supplies transcripts and timestamps. |
 | `icc_gt_distribution.json[spk]` supplies the English human-annotated backchannel timing distribution. | No Japanese GT distribution currently exists. JSD is optional and returns `null` when GT or the case speaker key is absent. Activate it with `--backchannel-gt PATH` after a Japanese speaker-keyed GT JSON is prepared and scenario metadata contains `spk` or `speaker`. |
 | Silero VAD detects output speech. | Silero VAD remains the primary, language-agnostic detector. The existing energy VAD is used automatically with a one-line warning only when Silero cannot be imported, loaded, or run in an offline environment. |
-| English TTS creates benchmark input audio. | Existing `pyopenjtalk` synthesis creates Japanese input audio. |
+| English TTS creates benchmark input audio. | Qwen3-TTS (same as training pipeline). Auto-falls back to `pyopenjtalk` when GPU/qwen-tts is unavailable. |
+
+Matching train/eval TTS reduces acoustic mismatch between training and benchmark input speech.
 
 ## Server: V100 PBS evaluation
 

@@ -22,7 +22,12 @@ FDB_OUT_DIR="${FDB_OUT_DIR:-$REPO_ROOT/eval_runs/full_duplex/$RUN_ID}"
 FDB_TASKS="${FDB_TASKS:-all}"
 FDB_SEEDS="${FDB_SEEDS:-0}"
 FDB_TAIL_SEC="${FDB_TAIL_SEC:-8}"
-FDB_TTS_SPEED="${FDB_TTS_SPEED:-1.1}"
+FDB_TTS_BACKEND="${FDB_TTS_BACKEND:-auto}"
+FDB_TTS_MODEL="${FDB_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
+FDB_TTS_SPEAKER="${FDB_TTS_SPEAKER:-Ono_Anna}"
+FDB_DEVICE="${FDB_DEVICE:-cuda}"
+FDB_DTYPE="${FDB_DTYPE:-bfloat16}"
+FDB_TTS_SPEED="${FDB_TTS_SPEED:-1.0}"
 REFRESH_FDB_DATA="${REFRESH_FDB_DATA:-0}"
 HALF="${HALF:-1}"
 
@@ -68,6 +73,11 @@ if [[ "$REFRESH_FDB_DATA" == "1" || ! -f "$FDB_DATA_DIR/manifest.json" ]]; then
         uv run python eval/build_full_duplex_ja_dataset.py
         --scenarios "$FDB_SCENARIOS"
         --out-dir "$FDB_DATA_DIR"
+        --tts-backend "$FDB_TTS_BACKEND"
+        --tts-model "$FDB_TTS_MODEL"
+        --tts-speaker "$FDB_TTS_SPEAKER"
+        --device "$FDB_DEVICE"
+        --dtype "$FDB_DTYPE"
         --tts-speed "$FDB_TTS_SPEED"
         --overwrite
     )
