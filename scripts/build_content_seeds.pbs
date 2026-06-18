@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N fd_seeds
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -V
+
+# Build the concrete talking-point seed bank ONCE, before the 1000h array job.
+# All data-generation shards read this file read-only to diversify spoken
+# content. Run this first:
+#
+#   qsub scripts/build_content_seeds.pbs
+#
+# Useful overrides:
+#   SEEDS_OUT=data/content_seeds/seeds.jsonl
+#   NUM_SEEDS=3000
+#   GEMMA_MODEL=google/gemma-4-E2B-it
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+SEEDS_OUT="${SEEDS_OUT:-$PWD/data/content_seeds/seeds.jsonl}"
+NUM_SEEDS="${NUM_SEEDS:-3000}"
+GEMMA_MODEL="${GEMMA_MODEL:-google/gemma-4-E2B-it}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+
+mkdir -p experiments/pbs_logs
+exec > >(tee -a "experiments/pbs_logs/fd_seeds.log") 2>&1
+
+echo "===== Content seed bank ====="
+echo "job_id:    ${PBS_JOBID:-n/a}"
+echo "host:      $(hostname)"
+echo "out:       ${SEEDS_OUT}"
+echo "num:       ${NUM_SEEDS}"
+echo "model:     ${GEMMA_MODEL}"
+echo "started:   $(date -Iseconds)"
+echo "============================="
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH." >&2
+    exit 1
+}
+
+uv run python scripts/build_content_seeds.py \
+    --out "$SEEDS_OUT" \
+    --num "$NUM_SEEDS" \
+    --gemma-model "$GEMMA_MODEL" \
+    --gemma-dtype float16
+
+if [[ ! -s "$SEEDS_OUT" ]]; then
+    echo "ERROR: seed bank was not created: $SEEDS_OUT" >&2
+    exit 1
+fi
+echo "seeds:     $SEEDS_OUT"
+echo "finished:  $(date -Iseconds)"

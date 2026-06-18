@@ -869,6 +869,16 @@ def build_gemma_prompt(use_case: dict[str, Any], rng: random.Random) -> str:
     emotional_state = str(use_case.get("emotional_state") or "落ち着いている")
     emotional_state_hint = str(use_case.get("emotional_state_hint") or "")
 
+    talking_points = use_case.get("talking_points") or []
+    if isinstance(talking_points, list) and talking_points:
+        points_line = (
+            "- この対話で user が触れる具体的な話題(自然に会話へ織り込む。全部使わなくてよい): "
+            + " / ".join(str(p) for p in talking_points)
+            + "\n"
+        )
+    else:
+        points_line = ""
+
     duplex_task = str(use_case.get("duplex_task") or "")
     silence_pattern = str(use_case.get("silence_pattern", "none"))
     if duplex_task == "pause_handling":
@@ -967,7 +977,10 @@ use_case:
 - user の話し方: {user_style}。
 - moshi の話し方: {counselor_style}。
 - user の性格: {personality}（{personality_guidance}）。この性格が話し方や語彙に一貫して出るようにする。
-- user の今日の状態: {emotional_state}。{emotional_state_hint} 会話を通してこの状態を反映し、場面で感情が動くと emotion も変える。
+- user の今日の状態: {emotional_state}。{emotional_state_hint}
+- 感情はターンごとに激しく変えない。今日の状態を基調に、変化はゆっくり・段階的にする。
+  無理に前向きに回復させる必要はなく、沈んだまま終わってもよい。
+{points_line}- 他の対話と同じ定型の出だしや相づちにならないよう、表現や話の入り方を毎回変える。
 - moshi は来訪を歓迎し、孤独感を軽く扱わず、すぐ解決策だけを出さない。
 - high/medium risk のニュアンスがある場合は、断定せず安全確認につながる短い問いを入れる。
 - 診断、説教、長い助言、緊急対応を装う表現は避ける。

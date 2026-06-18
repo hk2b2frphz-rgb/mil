@@ -26,6 +26,13 @@
 # Smaller pilot (one shard, to measure real throughput and audio length first):
 #   qsub -J 0-0 scripts/run_full_duplex_training_data_1000h.pbs
 #
+# Recommended first: build the talking-point seed bank ONCE (content diversity).
+# All shards read it read-only. Skipped automatically if the file is absent.
+#   qsub scripts/build_content_seeds.pbs
+#   # or directly:
+#   uv run python scripts/build_content_seeds.py \
+#     --out data/content_seeds/seeds.jsonl --num 3000 --gemma-dtype float16
+#
 # After all shards finish, merge into one manifest (CPU only, run on login node):
 #   uv run python scripts/merge_training_shards.py \
 #     --batch-dir data/runs/fd_1000h \
@@ -72,6 +79,9 @@ export STEPS="${STEPS:-use_cases,dialogues,enrich,audio}"
 export LISTENING_RATIO="${LISTENING_RATIO:-0.7}"
 export GAP_SEC="${GAP_SEC:-0.2}"
 export LEAD_IN_SEC="${LEAD_IN_SEC:-0.3}"
+# Shared talking-point bank (read-only). Built once by build_content_seeds.pbs.
+# If the file does not exist, generation proceeds without content seeds.
+export CONTENT_SEEDS="${CONTENT_SEEDS:-$PWD/data/content_seeds/seeds.jsonl}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 # V100 does not support bfloat16 efficiently. Both generators run on one GPU.

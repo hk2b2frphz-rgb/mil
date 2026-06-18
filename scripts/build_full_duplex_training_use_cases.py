@@ -95,6 +95,22 @@ def main() -> int:
             "enrichment pass."
         ),
     )
+    parser.add_argument(
+        "--content-seeds",
+        type=Path,
+        default=None,
+        help=(
+            "Optional JSONL talking-point bank from build_content_seeds.py. "
+            "When set, 1-2 concrete talking points are sampled into each card "
+            "to diversify the actual spoken content."
+        ),
+    )
+    parser.add_argument(
+        "--seeds-per-card",
+        type=int,
+        default=2,
+        help="Max talking points injected per card when --content-seeds is set.",
+    )
     args = parser.parse_args()
 
     if args.num <= 0:
@@ -105,6 +121,24 @@ def main() -> int:
         selected_tasks = parse_tasks(args.tasks)
     except ValueError as exc:
         parser.error(str(exc))
+
+    content_seeds: list[str] = []
+    if args.content_seeds is not None:
+        if not args.content_seeds.is_file():
+            parser.error(f"--content-seeds file not found: {args.content_seeds}")
+        for line in args.content_seeds.read_text(encoding="utf-8-sig").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            text = str(row.get("text") if isinstance(row, dict) else row).strip()
+            if text:
+                content_seeds.append(text)
+        if not content_seeds:
+            parser.error(f"--content-seeds file had no usable seeds: {args.content_seeds}")
 
     rng = random.Random(args.seed)
 
@@ -129,6 +163,9 @@ def main() -> int:
         for index, task in enumerate(plan, start=1):
             row = asdict(build_one(rng, index))
             row["source_profile"] = "full_duplex_training_ja_v2"
+            if content_seeds and args.seeds_per_card > 0:
+                k = min(args.seeds_per_card, len(content_seeds))
+                row["talking_points"] = rng.sample(content_seeds, k=rng.randint(1, k))
             if task == "listening":
                 # Free-form listening/chat. No duplex_task: the renderer treats
                 # it as a normal dialogue and the enrichment pass adds aizuchi.

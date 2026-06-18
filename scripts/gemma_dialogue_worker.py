@@ -26,6 +26,7 @@ def parse_args() -> argparse.Namespace:
         default="auto",
     )
     parser.add_argument("--temperature", type=float, default=0.8)
+    parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--max-new-tokens", type=int, default=1400)
     parser.add_argument("--trust-remote-code", action="store_true")
     return parser.parse_args()
@@ -107,6 +108,7 @@ def main() -> None:
     generation_kwargs = {
         "max_new_tokens": args.max_new_tokens,
         "temperature": args.temperature,
+        "top_p": args.top_p,
         "do_sample": True,
         "return_full_text": False,
     }

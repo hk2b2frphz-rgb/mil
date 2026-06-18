@@ -14,17 +14,29 @@ existing pipeline:
    (`build_use_cases.py`). The emotional state biases per-turn emotion labels,
    which map to Qwen3-TTS delivery instructions (e.g. tearful/sobbing,
    high-tension, withdrawn) via `EMOTION_PRESETS`.
-2. `generate_synthetic_moshi_training_data.py` asks Gemma to write Japanese
-   counselor dialogues and timing events.
-3. `enrich_dialogue_timing.py` post-processes the free-form dialogues: long user
-   turns are split at clause boundaries and short backchannels (aizuchi) are
-   layered in during the user's speech, so the data teaches frequent, fast
-   backchannels instead of one slow backchannel per turn. Labeled-task
-   dialogues are left untouched to preserve their strict validators.
-4. `generate_qwen3_tts_data.py` renders stereo audio with Moshi on the left and
+2. `build_content_seeds.py` (optional, run once) uses Gemma to brainstorm a
+   bank of concrete, mundane talking points (e.g. "the bakery is closing this
+   month"). 1-2 are sampled into each card so the actual spoken content varies
+   instead of collapsing onto a few stock phrases.
+3. `generate_synthetic_moshi_training_data.py` asks Gemma to write Japanese
+   counselor dialogues and timing events. The prompt now carries the persona's
+   personality, today's emotional state, and the sampled talking points, tells
+   Gemma to vary the opening/phrasing, and to keep emotion gradual rather than
+   swinging every turn (no forced positive resolution). Sampling uses
+   `top_p=0.95`.
+4. `enrich_dialogue_timing.py` post-processes dialogues in two passes:
+   - Emotion smoothing (all dialogues, labels only): user emotions are grouped
+     (distress / anxious / positive / neutral) and constrained to adjacent
+     transitions with inertia, so a sobbing turn cannot flip to high-tension the
+     next turn. This only edits emotion labels, so task validators are safe.
+   - Backchannel injection (free-form dialogues only): long user turns are split
+     at clause boundaries and short aizuchi are layered in during the user's
+     speech, teaching frequent, fast backchannels instead of one slow one per
+     turn. Labeled-task structure is left untouched.
+5. `generate_qwen3_tts_data.py` renders stereo audio with Moshi on the left and
    the user/environment on the right. A short transition gap (`--gap-sec 0.2`)
    reflects natural Japanese turn-taking.
-5. The usual Moshi fine-tuning launchers consume
+6. The usual Moshi fine-tuning launchers consume
    `training_set/synthetic_moshi_train.jsonl`.
 
 ## Large-scale (~1000h) generation

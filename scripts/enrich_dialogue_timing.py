@@ -62,6 +62,67 @@ AIZUCHI_EMOTIONS = ["gentle", "warm", "empathetic", "reassuring"]
 # 句切り文字。ここで分割して句の終盤に相づちを置く。
 CLAUSE_SPLIT_RE = re.compile(r"(?<=[、。！？!?])")
 
+# 感情の平滑化用。ターンごとに激しく揺れないよう、感情を群にまとめて
+# 隣接群への移動のみ許し、慣性(同じ感情を保つ確率)を入れる。
+EMOTION_GROUP: dict[str, str] = {
+    "neutral": "neutral",
+    # 落ち込み・距離
+    "sad": "distress", "lonely": "distress", "tearful": "distress",
+    "sobbing": "distress", "weary": "distress", "withdrawn": "distress",
+    # 不安・高ぶり
+    "anxious": "anxious", "hesitant": "anxious",
+    "agitated": "anxious", "irritable": "anxious",
+    # 上向き・高揚
+    "relieved": "positive", "grateful": "positive",
+    "laughing": "positive", "high_tension": "positive",
+}
+# 隣接群(この範囲の遷移のみ許可。distress<->positive は neutral を経由させる)
+EMOTION_ADJ: dict[str, set[str]] = {
+    "neutral": {"neutral", "distress", "anxious", "positive"},
+    "distress": {"distress", "neutral", "anxious"},
+    "anxious": {"anxious", "neutral", "distress"},
+    "positive": {"positive", "neutral"},
+}
+
+
+def smooth_user_emotions(
+    turns: list[dict[str, Any]], rng: random.Random, inertia: float
+) -> int:
+    """user 発話の emotion 列を平滑化する。返り値は変更したターン数。
+
+    - 慣性: 確率 inertia で直前の感情を保つ(同じ気分が続く)。
+    - 隣接遷移のみ許可。離れた群へ飛ぶ場合は neutral を一段挟む。
+    moshi 側の感情は穏やかな帯に収まっているため触らない。
+    """
+    user_idx = [
+        i
+        for i, t in enumerate(turns)
+        if isinstance(t, dict) and str(t.get("speaker", "")).lower() == "user"
+    ]
+    if len(user_idx) <= 2:
+        return 0
+
+    changed = 0
+    prev_label: str | None = None
+    prev_group: str | None = None
+    for i in user_idx:
+        turn = turns[i]
+        label = str(turn.get("emotion") or "neutral")
+        group = EMOTION_GROUP.get(label, "neutral")
+        if prev_label is None:
+            chosen, chosen_group = label, group
+        elif rng.random() < inertia:
+            chosen, chosen_group = prev_label, prev_group or "neutral"
+        elif group == prev_group or group in EMOTION_ADJ.get(prev_group or "neutral", {"neutral"}):
+            chosen, chosen_group = label, group
+        else:
+            chosen, chosen_group = "neutral", "neutral"
+        if chosen != label:
+            turn["emotion"] = chosen
+            changed += 1
+        prev_label, prev_group = chosen, chosen_group
+    return changed
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -98,6 +159,17 @@ def parse_args() -> argparse.Namespace:
         "--max-aizuchi-per-turn",
         type=int,
         default=3,
+    )
+    parser.add_argument(
+        "--emotion-inertia",
+        type=float,
+        default=0.6,
+        help="Probability of holding the previous user emotion (higher = calmer arc).",
+    )
+    parser.add_argument(
+        "--no-emotion-smoothing",
+        action="store_true",
+        help="Disable the per-turn emotion smoothing pass.",
     )
     return parser.parse_args()
 
@@ -207,12 +279,21 @@ def enrich_user_turn(
 
 
 def enrich_dialogue(dialogue: dict[str, Any], rng: random.Random, args: argparse.Namespace) -> dict[str, Any]:
-    # ラベル付きタスクは厳密な検証規則を壊さないため触らない
-    if dialogue.get("duplex_task"):
-        return dialogue
     turns = dialogue.get("turns")
     if not isinstance(turns, list):
         return dialogue
+
+    # 1) 感情の平滑化はすべての対話に適用する。emotion ラベルのみを変えるので
+    #    ラベル付きタスクのタイミング検証規則は壊さない。
+    if not args.no_emotion_smoothing:
+        smooth_user_emotions(turns, rng, args.emotion_inertia)
+
+    # 2) 相づち挿入(ターン分割を伴う)は自由対話だけに適用する。
+    #    ラベル付きタスクは厳密な検証規則を壊さないため構造を触らない。
+    if dialogue.get("duplex_task"):
+        out = dict(dialogue)
+        out["turns"] = turns
+        return out
 
     new_turns: list[dict[str, Any]] = []
     for turn in turns:

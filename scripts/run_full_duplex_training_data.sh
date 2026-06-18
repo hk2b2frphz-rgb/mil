@@ -42,12 +42,20 @@ echo "tasks:      $FULL_DUPLEX_TASKS"
 echo "steps:      $STEPS"
 
 if has_step use_cases; then
-    uv run python scripts/build_full_duplex_training_use_cases.py \
-        --out-path "$USE_CASES_PATH" \
-        --num "$NUM_CASES" \
-        --seed "$SEED" \
-        --tasks "$FULL_DUPLEX_TASKS" \
+    uc_args=(
+        uv run python scripts/build_full_duplex_training_use_cases.py
+        --out-path "$USE_CASES_PATH"
+        --num "$NUM_CASES"
+        --seed "$SEED"
+        --tasks "$FULL_DUPLEX_TASKS"
         --listening-ratio "$LISTENING_RATIO"
+    )
+    # Optional concrete talking-point bank for content diversity.
+    if [[ -n "${CONTENT_SEEDS:-}" && -s "${CONTENT_SEEDS}" ]]; then
+        uc_args+=(--content-seeds "$CONTENT_SEEDS")
+        echo "[fdb] using content seeds: $CONTENT_SEEDS"
+    fi
+    "${uc_args[@]}"
 fi
 
 if has_step dialogues; then
