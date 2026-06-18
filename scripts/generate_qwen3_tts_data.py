@@ -215,6 +215,12 @@ class DialogueTurn:
     instruct: str | None = None      # 解決後の Qwen3-TTS instruct 文字列（参照保存用）
     duration_sec: float | None = None  # speaker=="silence" 用
     note: str | None = None          # 沈黙の状況メモなど（学習対象外）
+    timing: str = "sequential"       # "sequential" | "overlap_previous"
+    start_after_previous_start_sec: float | None = None
+    truncate_previous_after_sec: float | None = None
+    gain: float = 1.0
+    voice_role: str | None = None    # "user" | "other" | "background"
+    event: str | None = None
 
 
 @dataclass
@@ -224,6 +230,7 @@ class Dialogue:
     risk_level: str
     title: str
     turns: list[DialogueTurn]
+    duplex_task: str | None = None
 
 
 @dataclass
@@ -234,6 +241,8 @@ class AudioSegment:
     start_sec: float
     end_sec: float
     pcm: np.ndarray
+    event: str | None = None
+    voice_role: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -413,12 +422,23 @@ def _resample(pcm: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
 # ステレオ合成ユーティリティ
 # ---------------------------------------------------------------------------
 
+def truncate_alignment_text(text: str, kept_samples: int, total_samples: int) -> str:
+    if not text or total_samples <= 0 or kept_samples >= total_samples:
+        return text
+    ratio = max(0.0, min(1.0, kept_samples / total_samples))
+    keep_chars = max(1, min(len(text), int(math.ceil(len(text) * ratio))))
+    shortened = text[:keep_chars].rstrip("、。！？,.!? ")
+    return (shortened or text[:1]) + "…"
+
+
 def build_segments(
     dialogue: Dialogue,
     tts: Qwen3TTS,
     lead_in_sec: float,
     gap_sec: float,
     user_speaker_override: str | None = None,
+    other_speaker_override: str | None = None,
+    background_speaker_override: str | None = None,
 ) -> tuple[list[AudioSegment], list[dict[str, Any]]]:
     """
     返り値: (音声セグメント列, 沈黙区間のメタデータ列)
@@ -429,7 +449,7 @@ def build_segments(
     cursor = lead_in_sec
     segments: list[AudioSegment] = []
     silences: list[dict[str, Any]] = []
-    prev_was_silence = False
+    previous_segment: AudioSegment | None = None
 
     for turn in dialogue.turns:
         if turn.speaker == "silence":
@@ -441,33 +461,70 @@ def build_segments(
                 "note": turn.note or "",
             })
             cursor += dur
-            prev_was_silence = True
+            previous_segment = None
             continue
 
-        # 直前が沈黙だった場合は、その沈黙が既にギャップを兼ねているので追加 gap は付けない
-        # （cursor は既に沈黙ぶん進んでいる）
-        override = user_speaker_override if turn.speaker == "user" else None
+        override = None
+        if turn.speaker == "user":
+            if turn.voice_role == "background":
+                override = background_speaker_override or user_speaker_override
+            elif turn.voice_role == "other":
+                override = other_speaker_override or user_speaker_override
+            else:
+                override = user_speaker_override
         pcm = tts.synthesize(
             turn.text,
             turn.speaker,
             instruct=turn.instruct,
             speaker_override=override,
         )
-        start = cursor
+        gain = max(0.0, float(turn.gain))
+        if gain != 1.0:
+            pcm = np.asarray(pcm, dtype=np.float32) * gain
+        if turn.timing == "overlap_previous" and previous_segment is not None:
+            offset = max(0.0, float(turn.start_after_previous_start_sec or 0.0))
+            latest_overlap_start = max(
+                previous_segment.start_sec,
+                previous_segment.end_sec - 0.05,
+            )
+            start = min(previous_segment.start_sec + offset, latest_overlap_start)
+            if turn.truncate_previous_after_sec is not None:
+                stop = min(
+                    previous_segment.end_sec,
+                    start + max(0.0, float(turn.truncate_previous_after_sec)),
+                )
+                original_samples = previous_segment.pcm.size
+                keep = max(
+                    1,
+                    int(round((stop - previous_segment.start_sec) * tts.sample_rate)),
+                )
+                previous_segment.text = truncate_alignment_text(
+                    previous_segment.text,
+                    kept_samples=keep,
+                    total_samples=original_samples,
+                )
+                previous_segment.pcm = previous_segment.pcm[:keep]
+                previous_segment.end_sec = (
+                    previous_segment.start_sec
+                    + previous_segment.pcm.size / tts.sample_rate
+                )
+        else:
+            start = cursor
         end = start + pcm.size / tts.sample_rate
-        segments.append(AudioSegment(
+        segment = AudioSegment(
             speaker=turn.speaker,
             label="SPEAKER_MAIN" if turn.speaker == "moshi" else "SPEAKER_USER",
             text=turn.text,
             start_sec=start,
             end_sec=end,
             pcm=pcm,
-        ))
-        # 次のターンが沈黙の場合、そちら側で時間が積まれるので、ここでは常に gap_sec を足してよい
-        cursor = end + gap_sec
-        prev_was_silence = False
+            event=turn.event,
+            voice_role=turn.voice_role,
+        )
+        segments.append(segment)
+        cursor = max(item.end_sec for item in segments) + gap_sec
+        previous_segment = segment
 
-    _ = prev_was_silence  # 現状未使用だが将来の分岐用に保持
     return segments, silences
 
 
@@ -493,6 +550,15 @@ def load_emotion_map(path: Path | None) -> dict[str, str]:
         raise ValueError("--emotion-map-file は { 'label': 'instruct文字列' } の JSON を期待します。")
     base.update({str(k): str(v) for k, v in overrides.items()})
     return base
+
+
+def optional_float(value: Any, default: float | None = None) -> float | None:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def load_dialogues_from_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -528,6 +594,21 @@ def load_dialogues_from_jsonl(path: Path) -> list[dict[str, Any]]:
                 turn = {"speaker": speaker, "text": text}
                 if emotion:
                     turn["emotion"] = str(emotion)
+                timing = str(t.get("timing") or "sequential").strip().lower()
+                if timing in {"sequential", "overlap_previous"}:
+                    turn["timing"] = timing
+                for key in (
+                    "start_after_previous_start_sec",
+                    "truncate_previous_after_sec",
+                    "gain",
+                ):
+                    value = optional_float(t.get(key))
+                    if value is not None:
+                        turn[key] = value
+                for key in ("voice_role", "event"):
+                    value = str(t.get(key) or "").strip()
+                    if value:
+                        turn[key] = value
                 turns.append(turn)
             if not turns:
                 logger.warning("対話 %d 行目: turns 抽出失敗、スキップ", i)
@@ -537,9 +618,83 @@ def load_dialogues_from_jsonl(path: Path) -> list[dict[str, Any]]:
                 "category": str(row.get("category") or "unknown"),
                 "risk_level": str(row.get("risk_level") or "low"),
                 "title": str(row.get("title") or row.get("id") or f"dialogue {i}"),
+                "duplex_task": str(row.get("duplex_task") or "") or None,
                 "turns": turns,
             })
     return out
+
+
+def validate_duplex_dialogue(dialogue: dict[str, Any]) -> list[str]:
+    task = str(dialogue.get("duplex_task") or "")
+    if not task:
+        return []
+    turns = list(dialogue.get("turns") or [])
+    overlaps = [
+        turn for turn in turns if str(turn.get("timing") or "") == "overlap_previous"
+    ]
+    events = {str(turn.get("event") or ""): turn for turn in turns}
+    errors: list[str] = []
+
+    if task == "pause_handling":
+        valid_pause = False
+        for index, turn in enumerate(turns):
+            if (
+                turn.get("speaker") == "silence"
+                and float(optional_float(turn.get("duration_sec"), 0.0) or 0.0) >= 2.0
+                and 0 < index < len(turns) - 1
+                and turns[index - 1].get("speaker") == "user"
+                and turns[index + 1].get("speaker") == "user"
+            ):
+                valid_pause = True
+                break
+        if not valid_pause:
+            errors.append(
+                "pause_handling requires user -> silence>=2s -> user continuation"
+            )
+    elif task == "smooth_turn_taking":
+        if overlaps:
+            errors.append("smooth_turn_taking must not contain overlap_previous")
+    elif task == "backchannel":
+        turn = events.get("model_backchannel")
+        if not turn or turn.get("speaker") != "moshi" or turn not in overlaps:
+            errors.append("backchannel requires overlapping moshi event=model_backchannel")
+        elif turns.index(turn) == 0 or turns[turns.index(turn) - 1].get("speaker") != "user":
+            errors.append("model_backchannel must overlap a preceding user turn")
+    elif task == "user_interruption":
+        turn = events.get("user_interruption")
+        if not turn or turn.get("speaker") != "user" or turn not in overlaps:
+            errors.append("user_interruption requires an overlapping user event")
+        elif turns.index(turn) == 0 or turns[turns.index(turn) - 1].get("speaker") != "moshi":
+            errors.append("user_interruption must overlap a preceding moshi turn")
+        elif optional_float(turn.get("truncate_previous_after_sec")) is None:
+            errors.append("user_interruption requires truncate_previous_after_sec")
+    elif task == "user_backchannel":
+        turn = events.get("user_backchannel")
+        if not turn or turn.get("speaker") != "user" or turn not in overlaps:
+            errors.append("user_backchannel requires an overlapping user event")
+        elif turns.index(turn) == 0 or turns[turns.index(turn) - 1].get("speaker") != "moshi":
+            errors.append("user_backchannel must overlap a preceding moshi turn")
+        elif optional_float(turn.get("truncate_previous_after_sec")) is not None:
+            errors.append("user_backchannel must not truncate the model turn")
+    elif task == "talking_to_other":
+        turn = events.get("talking_to_other")
+        if not turn or turn.get("speaker") != "user" or turn not in overlaps:
+            errors.append("talking_to_other requires an overlapping user event")
+        elif turns.index(turn) == 0 or turns[turns.index(turn) - 1].get("speaker") != "moshi":
+            errors.append("talking_to_other must overlap a preceding moshi turn")
+    elif task == "background_speech":
+        turn = events.get("background_speech")
+        if not turn or turn.get("speaker") != "user" or turn not in overlaps:
+            errors.append("background_speech requires an overlapping user-channel event")
+        elif turns.index(turn) == 0 or turns[turns.index(turn) - 1].get("speaker") != "moshi":
+            errors.append("background_speech must overlap a preceding moshi turn")
+        elif str(turn.get("voice_role") or "") != "background":
+            errors.append("background_speech requires voice_role=background")
+        elif float(optional_float(turn.get("gain"), 1.0) or 0.0) >= 0.6:
+            errors.append("background_speech gain must be below 0.6")
+    else:
+        errors.append(f"unknown duplex_task={task!r}")
+    return errors
 
 
 def render_stereo(segments: list[AudioSegment], sample_rate: int, tail_sec: float = 0.5) -> np.ndarray:
@@ -625,6 +780,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--speaker-moshi", default="Serena",
                         help=f"moshi 側プリセット話者（固定）。候補: {sorted(VALID_SPEAKERS)}")
+    parser.add_argument(
+        "--speaker-other",
+        default="Dylan",
+        help=f"第三者発話に使うプリセット話者。候補: {sorted(VALID_SPEAKERS)}",
+    )
+    parser.add_argument(
+        "--speaker-background",
+        default="Ryan",
+        help=f"背景発話に使うプリセット話者。候補: {sorted(VALID_SPEAKERS)}",
+    )
     parser.add_argument("--instruct-user", default=None,
                         help="user 発話の既定スタイル指示（ターン側 emotion が無い場合に使う）")
     parser.add_argument("--instruct-moshi", default=None,
@@ -648,10 +813,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gap-sec", type=float, default=0.4,
                         help="ターン間の無音（秒）")
     parser.add_argument("--manifest-name", default="synthetic_moshi_train.jsonl")
+    parser.add_argument(
+        "--allow-invalid-duplex",
+        action="store_true",
+        help="Do not fail when a duplex_task dialogue is missing its required timing event.",
+    )
     args = parser.parse_args()
 
-    for role, name in [("--speaker-user", args.speaker_user),
-                       ("--speaker-moshi", args.speaker_moshi)]:
+    for role, name in [
+        ("--speaker-user", args.speaker_user),
+        ("--speaker-moshi", args.speaker_moshi),
+        ("--speaker-other", args.speaker_other),
+        ("--speaker-background", args.speaker_background),
+    ]:
         if name not in VALID_SPEAKERS:
             parser.error(
                 f"{role}={name!r} は無効です。候補: {sorted(VALID_SPEAKERS)}"
@@ -684,19 +858,6 @@ def main() -> None:
         if p.exists():
             p.unlink()
 
-    tts = Qwen3TTS(
-        model_id=args.model,
-        device=args.device,
-        dtype_str=args.dtype,
-        attn_impl=args.attn_impl,
-        speaker_user=args.speaker_user,
-        speaker_moshi=args.speaker_moshi,
-        language=args.language,
-        instruct_user=args.instruct_user,
-        instruct_moshi=args.instruct_moshi,
-    )
-    tts.load()
-
     emotion_map = load_emotion_map(args.emotion_map_file)
     if args.no_emotion:
         logger.info("--no-emotion: ターン側 emotion ラベルを無視します")
@@ -710,6 +871,29 @@ def main() -> None:
         templates = all_templates[: args.num_dialogues]
     else:
         templates = all_templates
+    if not args.allow_invalid_duplex:
+        validation_errors: list[str] = []
+        for template in templates:
+            for error in validate_duplex_dialogue(template):
+                validation_errors.append(f"{template.get('id', '<unknown>')}: {error}")
+        if validation_errors:
+            details = "\n".join(f"- {error}" for error in validation_errors[:20])
+            raise ValueError(
+                "Invalid full-duplex dialogue schema. Regenerate or fix dialogues.jsonl:\n"
+                + details
+            )
+    tts = Qwen3TTS(
+        model_id=args.model,
+        device=args.device,
+        dtype_str=args.dtype,
+        attn_impl=args.attn_impl,
+        speaker_user=args.speaker_user,
+        speaker_moshi=args.speaker_moshi,
+        language=args.language,
+        instruct_user=args.instruct_user,
+        instruct_moshi=args.instruct_moshi,
+    )
+    tts.load()
     for idx, tmpl in enumerate(templates, start=1):
         turns: list[DialogueTurn] = []
         for t in tmpl["turns"]:
@@ -729,6 +913,16 @@ def main() -> None:
                 text=t["text"],
                 emotion=emotion,
                 instruct=instruct,
+                timing=str(t.get("timing") or "sequential"),
+                start_after_previous_start_sec=optional_float(
+                    t.get("start_after_previous_start_sec")
+                ),
+                truncate_previous_after_sec=optional_float(
+                    t.get("truncate_previous_after_sec")
+                ),
+                gain=max(0.0, float(optional_float(t.get("gain"), 1.0) or 0.0)),
+                voice_role=str(t.get("voice_role") or "") or None,
+                event=str(t.get("event") or "") or None,
             ))
         dialogue = Dialogue(
             id=safe_stem(tmpl["id"], f"dialogue_{idx:03d}"),
@@ -736,6 +930,7 @@ def main() -> None:
             risk_level=tmpl["risk_level"],
             title=tmpl["title"],
             turns=turns,
+            duplex_task=str(tmpl.get("duplex_task") or "") or None,
         )
 
         user_voice = args.user_speaker_pool_list[(idx - 1) % len(args.user_speaker_pool_list)]
@@ -747,6 +942,8 @@ def main() -> None:
         segments, silences = build_segments(
             dialogue, tts, args.lead_in_sec, args.gap_sec,
             user_speaker_override=user_voice,
+            other_speaker_override=args.speaker_other,
+            background_speaker_override=args.speaker_background,
         )
         if not segments or tts.sample_rate == 0:
             # 音声ターンが 0 件（沈黙のみ等）の対話。sample_rate が未確定で
@@ -781,6 +978,8 @@ def main() -> None:
                 "speaker_user": user_voice,
                 "speaker_user_pool": args.user_speaker_pool_list,
                 "speaker_moshi": args.speaker_moshi,
+                "speaker_other": args.speaker_other,
+                "speaker_background": args.speaker_background,
                 "left_channel": "moshi",
                 "right_channel": "user",
                 "wall_time_sec": round(elapsed, 3),
@@ -790,11 +989,24 @@ def main() -> None:
                     for e in {t.emotion for t in dialogue.turns if t.emotion}
                 },
                 "silences": silences,
+                "duplex_task": dialogue.duplex_task,
+                "duplex_events": [
+                    {
+                        "event": seg.event,
+                        "speaker": seg.speaker,
+                        "voice_role": seg.voice_role,
+                        "start_sec": round(seg.start_sec, 4),
+                        "end_sec": round(seg.end_sec, 4),
+                    }
+                    for seg in segments
+                    if seg.event
+                ],
                 "dialogue": {
                     "id": dialogue.id,
                     "category": dialogue.category,
                     "risk_level": dialogue.risk_level,
                     "title": dialogue.title,
+                    "duplex_task": dialogue.duplex_task,
                     "turns": [asdict(t) for t in dialogue.turns],
                 },
             },
@@ -805,6 +1017,7 @@ def main() -> None:
             "category": dialogue.category,
             "risk_level": dialogue.risk_level,
             "title": dialogue.title,
+            "duplex_task": dialogue.duplex_task,
             "turns": [asdict(t) for t in dialogue.turns],
         })
         append_jsonl(manifest_path, {

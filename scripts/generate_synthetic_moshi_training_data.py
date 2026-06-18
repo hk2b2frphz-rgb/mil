@@ -103,6 +103,12 @@ class DialogueTurn:
     emotion: str | None = None
     duration_sec: float | None = None  # speaker=="silence" 用
     note: str | None = None
+    timing: str = "sequential"  # "sequential" | "overlap_previous"
+    start_after_previous_start_sec: float | None = None
+    truncate_previous_after_sec: float | None = None
+    gain: float = 1.0
+    voice_role: str | None = None  # "user" | "other" | "background"
+    event: str | None = None
 
 
 @dataclass
@@ -114,6 +120,7 @@ class Dialogue:
     source_use_case: str
     turns: list[DialogueTurn]
     generator_notes: str = ""
+    duplex_task: str | None = None
 
 
 @dataclass
@@ -124,6 +131,8 @@ class AudioSegment:
     start_sec: float
     end_sec: float
     pcm: np.ndarray
+    event: str | None = None
+    voice_role: str | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -422,6 +431,15 @@ def normalize_speaker(value: str) -> str:
     return value
 
 
+def optional_float(value: Any, default: float | None = None) -> float | None:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def extract_json_object(text: str) -> dict[str, Any]:
     text = text.strip()
     if text.startswith("```"):
@@ -463,7 +481,27 @@ def dialogue_from_mapping(data: dict[str, Any], use_case: dict[str, Any]) -> Dia
             continue
         emotion = item.get("emotion")
         emotion = str(emotion) if emotion else None
-        turns.append(DialogueTurn(speaker=speaker, text=text, emotion=emotion))
+        timing = str(item.get("timing") or "sequential").strip().lower()
+        if timing not in {"sequential", "overlap_previous"}:
+            timing = "sequential"
+        gain = optional_float(item.get("gain"), 1.0)
+        turns.append(
+            DialogueTurn(
+                speaker=speaker,
+                text=text,
+                emotion=emotion,
+                timing=timing,
+                start_after_previous_start_sec=optional_float(
+                    item.get("start_after_previous_start_sec")
+                ),
+                truncate_previous_after_sec=optional_float(
+                    item.get("truncate_previous_after_sec")
+                ),
+                gain=max(0.0, float(gain if gain is not None else 1.0)),
+                voice_role=str(item.get("voice_role") or "") or None,
+                event=str(item.get("event") or "") or None,
+            )
+        )
 
     if not turns:
         raise ValueError("Dialogue contains no usable turns.")
@@ -487,6 +525,10 @@ def dialogue_from_mapping(data: dict[str, Any], use_case: dict[str, Any]) -> Dia
         source_use_case=str(use_case.get("id") or dialogue_id),
         turns=turns,
         generator_notes=str(data.get("generator_notes") or ""),
+        duplex_task=str(
+            data.get("duplex_task") or use_case.get("duplex_task") or ""
+        )
+        or None,
     )
 
 
@@ -740,6 +782,69 @@ def pipeline_result_to_text(result: Any) -> str:
     return str(result)
 
 
+def build_duplex_prompt_section(use_case: dict[str, Any]) -> str:
+    task = str(use_case.get("duplex_task") or "").strip()
+    if not task:
+        return ""
+
+    task_rules = {
+        "pause_handling": (
+            "user発話を前半、2〜3秒のsilence、後半に分ける。"
+            "後半が終わる前にmoshiの長い返答を置かない。"
+        ),
+        "smooth_turn_taking": (
+            "通常の交互対話にする。timingはすべてsequentialで、重なりを入れない。"
+        ),
+        "backchannel": (
+            "長めのuser発話の直後に短いmoshi相槌を置き、"
+            'その相槌へ "timing":"overlap_previous", '
+            '"start_after_previous_start_sec":1.0〜2.5, '
+            '"event":"model_backchannel" を付ける。その後userが続きを話す。'
+        ),
+        "user_interruption": (
+            "moshiのやや長い発話の直後にuserの訂正または重要情報を置き、"
+            'user側へ "timing":"overlap_previous", '
+            '"start_after_previous_start_sec":0.8〜1.8, '
+            '"truncate_previous_after_sec":0.15〜0.35, '
+            '"event":"user_interruption" を付ける。その次にmoshiが訂正内容へ応答する。'
+        ),
+        "user_backchannel": (
+            "moshiの説明の直後にuserの「はい」「うん」などを置き、"
+            'user側へ "timing":"overlap_previous", '
+            '"start_after_previous_start_sec":0.8〜1.8, '
+            '"event":"user_backchannel" を付ける。truncate_previous_after_secは付けず、'
+            "次のmoshi発話で同じ説明を自然に続ける。"
+        ),
+        "talking_to_other": (
+            "moshiの発話の直後にuserが近くの人へ向けた短い発話を置き、"
+            'user側へ "timing":"overlap_previous", '
+            '"start_after_previous_start_sec":0.8〜1.8, '
+            '"voice_role":"user", "event":"talking_to_other" を付ける。'
+            "次のmoshi発話は横の人への発話へ直接回答せず、元の相談を続ける。"
+        ),
+        "background_speech": (
+            "moshiの発話の直後にニュースまたは駅案内の短い背景発話をuser側として置き、"
+            'その背景発話へ "timing":"overlap_previous", '
+            '"start_after_previous_start_sec":0.8〜1.8, '
+            '"voice_role":"background", "gain":0.25〜0.4, '
+            '"event":"background_speech" を付ける。'
+            "次のmoshi発話は背景内容へ反応せず、元の相談を続ける。"
+        ),
+    }
+    rule = task_rules.get(task)
+    if rule is None:
+        return ""
+    return f"""
+
+full-duplex学習パターン:
+- duplex_task: {task}
+- {rule}
+- overlap_previous は必ず直前の音声ターンに重ねる。
+- timingを省略したターンはsequentialとして扱う。
+- gainは通常1.0。背景発話以外を不必要に小さくしない。
+""".rstrip()
+
+
 def build_gemma_prompt(use_case: dict[str, Any], rng: random.Random) -> str:
     turn_count = int(use_case.get("target_turns", rng.choice([6, 8, 10])))
     user_style = rng.choice(
@@ -759,8 +864,14 @@ def build_gemma_prompt(use_case: dict[str, Any], rng: random.Random) -> str:
         ]
     )
 
+    duplex_task = str(use_case.get("duplex_task") or "")
     silence_pattern = str(use_case.get("silence_pattern", "none"))
-    if silence_pattern == "heavy":
+    if duplex_task == "pause_handling":
+        silence_directive = (
+            '- 2〜3秒の沈黙ターン {"speaker":"silence","duration_sec":2〜3,'
+            '"note":"userが言葉を探している"} を入れ、その直後はuserが同じ発話を続ける。'
+        )
+    elif silence_pattern == "heavy":
         silence_directive = (
             '- 沈黙のターン {"speaker":"silence","duration_sec":3〜6,"note":"..."} を 3〜5 回挟む。'
             "沈黙の直後は必ず moshi が穏やかに声をかける（moshi が連続して話してもよい）。"
@@ -772,6 +883,67 @@ def build_gemma_prompt(use_case: dict[str, Any], rng: random.Random) -> str:
         )
     else:
         silence_directive = "- 沈黙ターンは入れない。"
+    duplex_section = build_duplex_prompt_section(use_case)
+    schema_turn_examples = {
+        "pause_handling": """
+    {"speaker": "user", "emotion": "hesitant", "text": "発話の前半"},
+    {"speaker": "silence", "duration_sec": 2.4, "note": "userが言葉を探している"},
+    {"speaker": "user", "emotion": "sad", "text": "同じ発話の続き"},
+    {"speaker": "moshi", "emotion": "empathetic", "text": "続きを受け止める応答"}
+""".strip(),
+        "smooth_turn_taking": """
+    {"speaker": "user", "emotion": "hesitant", "text": "相談者の発話"},
+    {"speaker": "moshi", "emotion": "warm", "text": "発話終了後の自然な応答"}
+""".strip(),
+        "backchannel": """
+    {"speaker": "user", "emotion": "sad", "text": "長めの相談者発話"},
+    {"speaker": "moshi", "emotion": "gentle", "text": "うん。",
+      "timing": "overlap_previous", "start_after_previous_start_sec": 1.5,
+      "event": "model_backchannel"},
+    {"speaker": "user", "emotion": "sad", "text": "相談者の続き"},
+    {"speaker": "moshi", "emotion": "empathetic", "text": "内容を受け止める応答"}
+""".strip(),
+        "user_interruption": """
+    {"speaker": "user", "emotion": "hesitant", "text": "相談者の発話"},
+    {"speaker": "moshi", "emotion": "warm", "text": "やや長い相談員の発話"},
+    {"speaker": "user", "emotion": "neutral", "text": "訂正または重要情報",
+      "timing": "overlap_previous", "start_after_previous_start_sec": 1.2,
+      "truncate_previous_after_sec": 0.25, "event": "user_interruption"},
+    {"speaker": "moshi", "emotion": "empathetic", "text": "割り込み内容への応答"}
+""".strip(),
+        "user_backchannel": """
+    {"speaker": "user", "emotion": "hesitant", "text": "相談者の発話"},
+    {"speaker": "moshi", "emotion": "warm", "text": "相談員の説明"},
+    {"speaker": "user", "emotion": "neutral", "text": "はい。",
+      "timing": "overlap_previous", "start_after_previous_start_sec": 1.0,
+      "event": "user_backchannel"},
+    {"speaker": "moshi", "emotion": "warm", "text": "同じ話題の自然な続き"}
+""".strip(),
+        "talking_to_other": """
+    {"speaker": "user", "emotion": "hesitant", "text": "相談者の発話"},
+    {"speaker": "moshi", "emotion": "warm", "text": "相談員の発話"},
+    {"speaker": "user", "emotion": "neutral", "text": "少し待ってて。",
+      "timing": "overlap_previous", "start_after_previous_start_sec": 1.0,
+      "voice_role": "user", "event": "talking_to_other"},
+    {"speaker": "moshi", "emotion": "warm", "text": "元の相談を維持する応答"}
+""".strip(),
+        "background_speech": """
+    {"speaker": "user", "emotion": "hesitant", "text": "相談者の発話"},
+    {"speaker": "moshi", "emotion": "warm", "text": "相談員の発話"},
+    {"speaker": "user", "emotion": "neutral", "text": "まもなく電車が到着します。",
+      "timing": "overlap_previous", "start_after_previous_start_sec": 1.0,
+      "gain": 0.32, "voice_role": "background", "event": "background_speech"},
+    {"speaker": "moshi", "emotion": "warm", "text": "元の相談を維持する応答"}
+""".strip(),
+    }
+    schema_turn_example = schema_turn_examples.get(
+        duplex_task,
+        """
+    {"speaker": "user", "emotion": "hesitant", "text": "相談者の発話"},
+    {"speaker": "moshi", "emotion": "warm", "text": "相談員の発話"},
+    {"speaker": "silence", "duration_sec": 3.0, "note": "なぜ沈黙か簡単に"}
+""".strip(),
+    )
 
     return f"""
 あなたは日本語の合成学習データを作る対話ライターです。
@@ -797,24 +969,128 @@ use_case:
   user 側: hesitant, sad, lonely, anxious, relieved, grateful, neutral
   moshi 側: warm, gentle, empathetic, encouraging, concerned, reassuring, neutral
 {silence_directive}
+{duplex_section}
 
 JSON schema:
 {{
   "id": "{use_case.get("id", "dialogue")}",
   "category": "{use_case.get("category", "unknown")}",
   "risk_level": "{use_case.get("risk_level", "low")}",
+  "duplex_task": "{use_case.get("duplex_task", "")}",
   "title": "短いタイトル",
   "turns": [
-    {{"speaker": "user", "emotion": "hesitant", "text": "相談者の発話"}},
-    {{"speaker": "moshi", "emotion": "warm", "text": "相談員の発話"}},
-    {{"speaker": "silence", "duration_sec": 3.0, "note": "なぜ沈黙か簡単に"}}
+{schema_turn_example}
   ],
   "generator_notes": "多様性や注意点を一文で"
 }}
 """.strip()
 
 
+def template_full_duplex_dialogue(use_case: dict[str, Any]) -> Dialogue:
+    opening = str(use_case.get("opening", "少し話してもいいですか。"))
+    case_id = str(use_case.get("id", "full_duplex_template"))
+    task = str(use_case.get("duplex_task") or "smooth_turn_taking")
+
+    if task == "pause_handling":
+        turns = [
+            DialogueTurn("user", opening.rstrip("。")),
+            DialogueTurn("silence", duration_sec=2.4, note="userが言葉を探している"),
+            DialogueTurn("user", "それで、夜になると少し不安が強くなるんです。"),
+            DialogueTurn("moshi", "言葉を探しながら話してくれたんですね。ゆっくりで大丈夫です。"),
+        ]
+    elif task == "backchannel":
+        turns = [
+            DialogueTurn("user", "仕事から帰って部屋が静かになると、今日も誰とも話さなかったなって思って。"),
+            DialogueTurn(
+                "moshi",
+                "うん。",
+                timing="overlap_previous",
+                start_after_previous_start_sec=1.5,
+                event="model_backchannel",
+            ),
+            DialogueTurn("user", "その時間がいちばん寂しく感じるんです。"),
+            DialogueTurn("moshi", "一日を振り返る静かな時間に、寂しさが強くなるんですね。"),
+        ]
+    elif task == "user_interruption":
+        turns = [
+            DialogueTurn("user", opening),
+            DialogueTurn("moshi", "では、まず気分を変えるために外へ出る方法も考えてみましょうか。"),
+            DialogueTurn(
+                "user",
+                "あ、外出の話ではなくて、今は誰かに気持ちを聞いてほしいんです。",
+                timing="overlap_previous",
+                start_after_previous_start_sec=1.1,
+                truncate_previous_after_sec=0.25,
+                event="user_interruption",
+            ),
+            DialogueTurn("moshi", "ごめんなさい、先を急いでしまいました。今の気持ちから聞かせてください。"),
+        ]
+    elif task == "user_backchannel":
+        turns = [
+            DialogueTurn("user", opening),
+            DialogueTurn("moshi", "無理に答えを出さず、まず今の寂しさが強くなる時間を一緒に見ていきましょう。"),
+            DialogueTurn(
+                "user",
+                "はい。",
+                timing="overlap_previous",
+                start_after_previous_start_sec=1.0,
+                event="user_backchannel",
+            ),
+            DialogueTurn("moshi", "朝と夜では、どちらのほうがつらく感じますか。"),
+        ]
+    elif task == "talking_to_other":
+        turns = [
+            DialogueTurn("user", opening),
+            DialogueTurn("moshi", "最近いちばん寂しさが強くなった場面から、話せる範囲で聞かせてください。"),
+            DialogueTurn(
+                "user",
+                "ごめん、今電話しているから少し待ってて。",
+                timing="overlap_previous",
+                start_after_previous_start_sec=1.0,
+                voice_role="user",
+                event="talking_to_other",
+            ),
+            DialogueTurn("moshi", "大丈夫ですよ。落ち着いたら、さっきの続きからゆっくり話しましょう。"),
+        ]
+    elif task == "background_speech":
+        turns = [
+            DialogueTurn("user", opening),
+            DialogueTurn("moshi", "ここでは急がなくて大丈夫です。話しやすいところから聞かせてください。"),
+            DialogueTurn(
+                "user",
+                "まもなく二番線に電車が到着します。黄色い線までお下がりください。",
+                timing="overlap_previous",
+                start_after_previous_start_sec=1.0,
+                gain=0.32,
+                voice_role="background",
+                event="background_speech",
+            ),
+            DialogueTurn("moshi", "今は、どんなことがいちばん心に残っていますか。"),
+        ]
+    else:
+        turns = [
+            DialogueTurn("user", opening),
+            DialogueTurn("moshi", "来てくれてありがとうございます。少しずつで大丈夫ですよ。"),
+            DialogueTurn("user", "夜になると、誰ともつながっていない感じがします。"),
+            DialogueTurn("moshi", "夜の静かな時間に、その感じが強くなるんですね。"),
+        ]
+
+    return Dialogue(
+        id=safe_stem(case_id, "full_duplex_template"),
+        category=str(use_case.get("category", "unknown")),
+        risk_level=str(use_case.get("risk_level", "low")),
+        title=str(use_case.get("situation", case_id)),
+        source_use_case=case_id,
+        turns=turns,
+        generator_notes="Full-duplex deterministic fallback template.",
+        duplex_task=task,
+    )
+
+
 def template_dialogue(use_case: dict[str, Any]) -> Dialogue:
+    if use_case.get("duplex_task"):
+        return template_full_duplex_dialogue(use_case)
+
     opening = str(use_case.get("opening", "少し話してもいいですか。"))
     case_id = str(use_case.get("id", "template_dialogue"))
     if str(use_case.get("risk_level", "low")) == "medium":
@@ -1030,6 +1306,15 @@ def normalize_stereo(stereo: np.ndarray) -> np.ndarray:
     return stereo.astype(np.float32)
 
 
+def truncate_alignment_text(text: str, kept_samples: int, total_samples: int) -> str:
+    if not text or total_samples <= 0 or kept_samples >= total_samples:
+        return text
+    ratio = max(0.0, min(1.0, kept_samples / total_samples))
+    keep_chars = max(1, min(len(text), int(math.ceil(len(text) * ratio))))
+    shortened = text[:keep_chars].rstrip("、。！？,.!? ")
+    return (shortened or text[:1]) + "…"
+
+
 def build_scripted_segments(
     dialogue: Dialogue,
     tts: Any,
@@ -1037,25 +1322,60 @@ def build_scripted_segments(
 ) -> list[AudioSegment]:
     cursor = args.lead_in_sec
     segments: list[AudioSegment] = []
+    previous_segment: AudioSegment | None = None
     for turn in dialogue.turns:
         if turn.speaker == "silence":
             # 沈黙ターンは音声を作らず、duration_sec ぶんだけ無音を挟む。
             cursor += float(turn.duration_sec or 0.0)
+            previous_segment = None
             continue
         pcm = tts.synthesize(turn.text, turn.speaker)
-        start = cursor
-        end = start + pcm.size / tts.sample_rate
-        segments.append(
-            AudioSegment(
-                speaker=turn.speaker,
-                label="SPEAKER_MAIN" if turn.speaker == "moshi" else "SPEAKER_USER",
-                text=turn.text,
-                start_sec=start,
-                end_sec=end,
-                pcm=pcm,
+        gain = max(0.0, float(turn.gain))
+        if gain != 1.0:
+            pcm = np.asarray(pcm, dtype=np.float32) * gain
+        if turn.timing == "overlap_previous" and previous_segment is not None:
+            offset = max(0.0, float(turn.start_after_previous_start_sec or 0.0))
+            latest_overlap_start = max(
+                previous_segment.start_sec,
+                previous_segment.end_sec - 0.05,
             )
+            start = min(previous_segment.start_sec + offset, latest_overlap_start)
+            if turn.truncate_previous_after_sec is not None:
+                stop = min(
+                    previous_segment.end_sec,
+                    start + max(0.0, float(turn.truncate_previous_after_sec)),
+                )
+                original_samples = previous_segment.pcm.size
+                keep = max(
+                    1,
+                    int(round((stop - previous_segment.start_sec) * tts.sample_rate)),
+                )
+                previous_segment.text = truncate_alignment_text(
+                    previous_segment.text,
+                    kept_samples=keep,
+                    total_samples=original_samples,
+                )
+                previous_segment.pcm = previous_segment.pcm[:keep]
+                previous_segment.end_sec = (
+                    previous_segment.start_sec
+                    + previous_segment.pcm.size / tts.sample_rate
+                )
+        else:
+            start = cursor
+        end = start + pcm.size / tts.sample_rate
+        segment = AudioSegment(
+            speaker=turn.speaker,
+            label="SPEAKER_MAIN" if turn.speaker == "moshi" else "SPEAKER_USER",
+            text=turn.text,
+            start_sec=start,
+            end_sec=end,
+            pcm=pcm,
+            event=turn.event,
+            voice_role=turn.voice_role,
         )
-        cursor = end + args.turn_gap_sec
+        segments.append(segment)
+        cursor = max(item.end_sec for item in segments) + args.turn_gap_sec
+        previous_segment = segment
     return segments
 
 

@@ -40,6 +40,29 @@ bash scripts/run_experiment.sh exp001_lora_baseline ./data/runs/2026-06-02_13053
 実行後は `args.yaml` と `checkpoints/` で結果を保存し、`notes.md` に
 所感・eval loss 曲線・best ckpt を書き残す運用。
 
+## チェックポイントの推論用変換
+
+LoRAマージ:
+
+```bash
+qsub -v \
+LORA_CKPT=/path/to/checkpoint/consolidated/lora.safetensors,\
+OUT_WEIGHT=/path/to/merged/consolidated.safetensors \
+scripts/merge_lora.pbs
+```
+
+Full-FT ZeRO checkpointのexport:
+
+```bash
+qsub -v \
+STEP_DIR=/path/to/checkpoints/nu_<timestamp>/step_120,\
+OUT_DIR=/path/to/exported/step_120_clean \
+scripts/export_fullft_checkpoint.pbs
+```
+
+どちらも既存の出力先は上書きしない。出力先を省略した場合はPBSジョブIDを
+含むディレクトリへ保存する。
+
 ## 新しい実験を追加するとき
 
 1. `cp -r exp001_lora_baseline expNNN_<short_name>`

@@ -36,3 +36,15 @@ python eval/summarize_eval.py \
 
 The judge script exits if it sees `PBS_JOBID`, `SLURM_JOB_ID`, or `LSB_JOBID`,
 unless `--allow-server` is passed.
+
+## Full-duplex Japanese evaluation
+
+For the V100/PBS Full-Duplex-Bench-JA workflow, see
+[`docs/full_duplex_evaluation.md`](../docs/full_duplex_evaluation.md).
+
+The server job completes inference and deterministic benchmark evaluation, then
+writes `azure_judge_input.jsonl`. Azure judging is a separate local-PC command.
+
+The independent full-duplex **training-data** pipeline is documented in
+[`docs/full_duplex_training_data.md`](../docs/full_duplex_training_data.md).
+The fixed evaluation cases are not reused as training text.

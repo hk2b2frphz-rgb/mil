@@ -107,6 +107,21 @@ uv run python scripts/generate_qwen3_tts_data.py \
   --dialogues-jsonl data/v1/gemma_dialogues/dialogues.jsonl
 ```
 
+### Full-duplex 学習データ
+
+固定の評価14ケースとは別に、Gemmaで内容を生成し、Qwen3-TTSで実際の
+同時発話を左右チャンネルへ配置する。
+
+```bash
+NUM_CASES=140 RUN_ID=full_duplex_v1 \
+bash scripts/run_full_duplex_training_data.sh
+
+# PBS / V100
+qsub scripts/run_full_duplex_training_data.pbs
+```
+
+詳細は [docs/full_duplex_training_data.md](docs/full_duplex_training_data.md) 参照。
+
 ## 実験一覧
 
 | 実験 | データ量 | 狙い |
@@ -126,6 +141,12 @@ LoRA 実験のチェックポイントをベースモデルにマージして、
 uv run --project ../moshi-finetune python scripts/merge_lora.py \
   --lora-ckpt experiments/exp001_lora_baseline/checkpoints/<ts>/checkpoint_000500/consolidated/lora.safetensors \
   --out merged_model/consolidated.safetensors
+
+# PBS
+qsub -v \
+LORA_CKPT=/path/to/checkpoint/consolidated/lora.safetensors,\
+OUT_WEIGHT=/path/to/merged/consolidated.safetensors \
+scripts/merge_lora.pbs
 
 # マージ済みモデルで推論
 uv run python response_recorder.py \
@@ -166,6 +187,12 @@ checkpoint の `moshi_lm_kwargs.json` (`dep_q`) から自動判定する。
 uv run python scripts/export_fullft_checkpoint.py \
   --step-dir <run>/checkpoints/nu_<ts>/step_120 \
   --out-dir  <run>/exported/step_120_clean
+
+# PBS
+qsub -v \
+STEP_DIR=/path/to/checkpoints/nu_<ts>/step_120,\
+OUT_DIR=/path/to/exported/step_120_clean \
+scripts/export_fullft_checkpoint.pbs
 
 # 推論
 uv run python response_recorder.py \
