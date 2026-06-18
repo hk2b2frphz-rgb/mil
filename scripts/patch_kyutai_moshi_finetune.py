@@ -2,18 +2,57 @@
 """Apply local runtime patches to kyutai-labs/moshi-finetune.
 
 Patches applied (all idempotent, run at every experiment launch):
+- optimizer: add a selectable warmup-then-constant learning-rate schedule while
+  preserving the upstream OneCycleLR default.
 - loss/eval/metrics: the upstream LoRA training code can emit NaN eval loss when
   an eval segment has no valid text/audio target positions; average each
   component only over batches with valid targets and expose eval batch counts.
 - data_loader: the eval loader only yielded full batches and dropped the
   remainder, so an eval split smaller than batch_size produced zero eval batches
   (eval loss / eval_num_samples == 0). Flush the final partial batch for eval.
+- train: rebuild the finite eval generator for every evaluation. The upstream
+  code creates it once, so only the first evaluation sees data and every later
+  evaluation silently records zero samples.
 """
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
+
+
+def patch_args(path: Path) -> bool:
+    src = path.read_text()
+    marker = 'scheduler: str = "one_cycle"'
+    if marker in src:
+        return False
+
+    old = '''class OptimArgs(Serializable):
+    lr: float = 1e-4
+    weight_decay: float = 0.1
+    pct_start: float = 0.05
+'''
+    new = '''class OptimArgs(Serializable):
+    lr: float = 1e-4
+    weight_decay: float = 0.1
+    pct_start: float = 0.05
+    # "one_cycle" keeps the upstream behavior. "warmup_constant" linearly
+    # warms up for pct_start * max_steps, then holds lr constant.
+    scheduler: str = "one_cycle"
+
+    def __post_init__(self) -> None:
+        if self.scheduler not in {"one_cycle", "warmup_constant"}:
+            raise ValueError(
+                "optim.scheduler must be 'one_cycle' or 'warmup_constant', "
+                f"got {self.scheduler!r}"
+            )
+        if not 0.0 <= self.pct_start <= 1.0:
+            raise ValueError(f"optim.pct_start must be in [0, 1], got {self.pct_start}")
+'''
+    if old not in src:
+        raise RuntimeError(f"expected OptimArgs block not found in {path}")
+    path.write_text(src.replace(old, new, 1))
+    return True
 
 
 LOSS_PY = '''import torch
@@ -226,6 +265,23 @@ def evaluate(
     dist.all_reduce(audio_loss, op=dist.ReduceOp.SUM)
     dist.all_reduce(nonfinite_batches, op=dist.ReduceOp.SUM)
 
+    # AUTO_PATCH_REQUIRE_NONEMPTY_EVAL: a zero-sample evaluation is never a
+    # meaningful metric. This most commonly means the finite generator was
+    # reused after exhaustion, the manifest resolved no audio, or the split is
+    # too small for the distributed world size.
+    if num_samples.item() <= 0:
+        raise RuntimeError(
+            "eval dataset yielded zero batches; check that eval_data contains "
+            "valid audio paths and rebuild the eval loader for every evaluation"
+        )
+    if text_count.item() <= 0 or audio_count.item() <= 0:
+        raise RuntimeError(
+            "eval dataset produced no finite valid targets: "
+            f"text_batches={int(text_count.item())}, "
+            f"audio_batches={int(audio_count.item())}, "
+            f"nonfinite_batches={int(nonfinite_batches.item())}"
+        )
+
     text_loss /= torch.clamp(text_count, min=1.0)
     audio_loss /= torch.clamp(audio_count, min=1.0)
     eval_loss = text_loss + audio_loss
@@ -321,7 +377,7 @@ def patch_eval(path: Path) -> bool:
     src = path.read_text()
     # Keyed on the latest marker so older patched checkouts are upgraded in
     # place (the whole file is rewritten from EVAL_PY).
-    if "AUTO_PATCH_FINITE_EVAL_GUARD" in src:
+    if "AUTO_PATCH_REQUIRE_NONEMPTY_EVAL" in src:
         return False
     path.write_text(EVAL_PY)
     return True
@@ -399,17 +455,88 @@ def patch_metrics_logger(path: Path) -> bool:
 
 def patch_train(path: Path) -> bool:
     src = path.read_text()
-    if 'getattr(state, "this_text_eval_batches", None)' in src:
-        return False
+    changed = False
 
-    old = '''            eval_logs = get_eval_logs(
+    if "AUTO_PATCH_SELECTABLE_LR_SCHEDULER" not in src:
+        old_scheduler = '''    scheduler = lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=args.optim.lr,
+        total_steps=args.max_steps,
+        pct_start=args.optim.pct_start,
+    )
+'''
+        new_scheduler = '''    # AUTO_PATCH_SELECTABLE_LR_SCHEDULER: retain the upstream
+    # OneCycleLR default, while allowing a fair warmup-then-constant comparison.
+    if args.optim.scheduler == "one_cycle":
+        scheduler = lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=args.optim.lr,
+            total_steps=args.max_steps,
+            pct_start=args.optim.pct_start,
+        )
+    elif args.optim.scheduler == "warmup_constant":
+        warmup_steps = int(args.max_steps * args.optim.pct_start)
+
+        def lr_lambda(step: int) -> float:
+            if warmup_steps <= 0:
+                return 1.0
+            return min(float(step + 1) / float(warmup_steps), 1.0)
+
+        scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+    else:
+        raise ValueError(f"unknown optimizer scheduler: {args.optim.scheduler!r}")
+'''
+        if old_scheduler not in src:
+            raise RuntimeError(f"expected scheduler block not found in {path}")
+        src = src.replace(old_scheduler, new_scheduler, 1)
+        changed = True
+
+    if "AUTO_PATCH_REBUILD_EVAL_LOADER" not in src:
+        old_eval_loader = '''    if args.do_eval:
+        eval_data_loader = build_data_loader(
+            instruct_tokenizer=interleaved_tokenizer,
+            args=args.data,
+            batch_size=args.batch_size,
+            seed=None,
+            rank=get_rank(),  # DDP rank
+            world_size=get_world_size(),  # DDP world_size
+            is_eval=True,
+        )
+'''
+        new_eval_loader = '''    if args.do_eval:
+        # AUTO_PATCH_REBUILD_EVAL_LOADER: build_data_loader returns a finite
+        # generator for eval. Return a fresh one for every evaluation instead
+        # of reusing the exhausted generator from the first eval.
+        def build_eval_data_loader():
+            return build_data_loader(
+                instruct_tokenizer=interleaved_tokenizer,
+                args=args.data,
+                batch_size=args.batch_size,
+                seed=None,
+                rank=get_rank(),  # DDP rank
+                world_size=get_world_size(),  # DDP world_size
+                is_eval=True,
+            )
+'''
+        if old_eval_loader not in src:
+            raise RuntimeError(f"expected eval data loader block not found in {path}")
+        src = src.replace(old_eval_loader, new_eval_loader, 1)
+        old_eval_call = "            evaluate(model, eval_data_loader, state, args)"
+        new_eval_call = "            evaluate(model, build_eval_data_loader(), state, args)"
+        if old_eval_call not in src:
+            raise RuntimeError(f"expected evaluate call not found in {path}")
+        src = src.replace(old_eval_call, new_eval_call, 1)
+        changed = True
+
+    if 'getattr(state, "this_text_eval_batches", None)' not in src:
+        old = '''            eval_logs = get_eval_logs(
                 state.step,
                 avg_loss,
                 state.this_eval_perplexity,
                 state.this_eval_loss,
             )
 '''
-    new = '''            eval_logs = get_eval_logs(
+        new = '''            eval_logs = get_eval_logs(
                 state.step,
                 avg_loss,
                 state.this_eval_perplexity,
@@ -421,10 +548,14 @@ def patch_train(path: Path) -> bool:
                 getattr(state, "this_audio_eval_batches", None),
             )
 '''
-    if old not in src:
-        raise RuntimeError(f"expected eval log block not found in {path}")
-    path.write_text(src.replace(old, new, 1))
-    return True
+        if old not in src:
+            raise RuntimeError(f"expected eval log block not found in {path}")
+        src = src.replace(old, new, 1)
+        changed = True
+
+    if changed:
+        path.write_text(src)
+    return changed
 
 
 def main() -> None:
@@ -439,6 +570,7 @@ def main() -> None:
         repo / "finetune" / "monitoring" / "metrics_logger.py",
         repo / "train.py",
         repo / "finetune" / "data" / "data_loader.py",
+        repo / "finetune" / "args.py",
     ]
     missing = [str(path) for path in required if not path.exists()]
     if missing:
@@ -451,6 +583,7 @@ def main() -> None:
         ("metrics_logger", patch_metrics_logger, required[2]),
         ("train", patch_train, required[3]),
         ("data_loader", patch_data_loader, required[4]),
+        ("args", patch_args, required[5]),
     ]:
         if func(path):
             changed.append(label)

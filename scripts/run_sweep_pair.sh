@@ -30,7 +30,7 @@ if [[ -z "$INPUT_SRC_RUN_DIR" ]] && {
 fi
 
 clear_hp_env() {
-    unset HP_LR HP_WEIGHT_DECAY HP_PCT_START
+    unset HP_LR HP_WEIGHT_DECAY HP_PCT_START HP_LR_SCHEDULER
     unset HP_LORA_RANK HP_LORA_SCALING HP_LORA_ENABLE HP_LORA_FT_EMBED
     unset HP_BATCH_SIZE HP_NUM_MICROBATCHES HP_MAX_STEPS
     unset HP_CKPT_FREQ HP_EVAL_FREQ HP_LOG_FREQ HP_MAX_NORM
@@ -44,6 +44,7 @@ apply_pattern() {
     HP_LR=2e-6
     HP_WEIGHT_DECAY=0.1
     HP_PCT_START=0.05
+    HP_LR_SCHEDULER=warmup_constant
     HP_LORA_RANK=32
     HP_LORA_SCALING=2.0
     HP_BATCH_SIZE=8
@@ -54,7 +55,7 @@ apply_pattern() {
     HP_LOG_FREQ=5
 
     case "$pattern" in
-        h01) ;;                                      # baseline
+        h01) ;;                                      # fixed 2e-6 after 5% warmup
         h02) HP_LR=5e-6 ;;                           # higher learning rate
         h03) HP_LR=1e-6 ;;                           # lower learning rate
         h04) HP_LORA_RANK=64 ;;                      # larger adapter
@@ -68,13 +69,21 @@ apply_pattern() {
         lr_1p5e-6) HP_LR=1.5e-6 ;;                   # slightly lower LR
         lr_1e-6) HP_LR=1e-6 ;;                       # lower LR
         lr_5e-7) HP_LR=5e-7 ;;                       # conservative LR
+        fixed_1e-6)
+            HP_LR=1e-6
+            HP_LR_SCHEDULER=warmup_constant
+            ;;                                        # 5% warmup, then fixed LR
+        onecycle_2e-6)
+            HP_LR=2e-6
+            HP_LR_SCHEDULER=one_cycle
+            ;;                                        # previous baseline reference
         *)
             echo "ERROR: unknown sweep pattern: $pattern" >&2
             exit 1
             ;;
     esac
 
-    export HP_LR HP_WEIGHT_DECAY HP_PCT_START
+    export HP_LR HP_WEIGHT_DECAY HP_PCT_START HP_LR_SCHEDULER
     export HP_LORA_RANK HP_LORA_SCALING HP_BATCH_SIZE HP_NUM_MICROBATCHES
     export HP_MAX_STEPS HP_CKPT_FREQ HP_EVAL_FREQ HP_LOG_FREQ
 }

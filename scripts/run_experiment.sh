@@ -195,6 +195,7 @@ SECTIONS = {
         "HP_LR": "lr",
         "HP_WEIGHT_DECAY": "weight_decay",
         "HP_PCT_START": "pct_start",
+        "HP_LR_SCHEDULER": "scheduler",
     },
 }
 
@@ -318,6 +319,18 @@ fi
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export MASTER_PORT="${MASTER_PORT:-29500}"
 
+# Match the full-FT launcher's fail-fast dataset health check. This verifies
+# that both manifests contain usable records, all referenced audio files exist,
+# and every distributed rank is expected to receive at least one eval chunk.
+LORA_DATASET_HEALTH="$EXP_DIR/lora_dataset_health_${RUN_TS}.json"
+echo "[exp] checking LoRA train/eval dataset health"
+python3 "$REPO_ROOT/scripts/check_lora_dataset.py" \
+    --train-manifest "$EXP_TRAIN_MF" \
+    --eval-manifest "$EXP_EVAL_MF" \
+    --config "$RESOLVED_CONFIG" \
+    --world-size "$NPROC" \
+    --output-json "$LORA_DATASET_HEALTH"
+
 # 単 GPU は python 直起動 (torchrun + FSDP 単 GPU の segfault 回避)
 # 複数 GPU は torchrun。USE_TORCHRUN=1 で単 GPU でも torchrun を強制可能。
 USE_TORCHRUN="${USE_TORCHRUN:-auto}"
@@ -388,6 +401,7 @@ if [[ -n "${MLFLOW_EXPERIMENT_NAME:-}" || -n "${MLFLOW_TRACKING_URI:-}" ]]; then
     MLFLOW_SYNC_CMD=(uv run python scripts/sync_mlflow_metrics.py
         --run-dir "$EXP_CKPT_DIR" \
         --config "$RESOLVED_CONFIG" \
+        --dataset-health "$LORA_DATASET_HEALTH" \
         --experiment "${MLFLOW_EXPERIMENT_NAME:-default}" \
         --run-name "${MLFLOW_RUN_NAME:-$(basename "$EXP_CKPT_DIR")}" \
         --run-id-file "$MLFLOW_RUN_ID_FILE")

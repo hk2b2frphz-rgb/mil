@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tracking-uri", default=os.environ.get("MLFLOW_TRACKING_URI"))
     parser.add_argument("--artifact-root", default=os.environ.get("MLFLOW_ARTIFACT_ROOT"))
     parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--dataset-health", type=Path, default=None)
     parser.add_argument("--run-id-file", type=Path, default=None)
     return parser.parse_args()
 
@@ -96,6 +97,8 @@ def main() -> None:
                 if isinstance(value, (str, int, float, bool)) or value is None:
                     mlflow.log_param(key, value)
             mlflow.log_artifact(str(args.config), artifact_path="config")
+        if args.dataset_health and args.dataset_health.exists():
+            mlflow.log_artifact(str(args.dataset_health), artifact_path="dataset")
 
         for tag in ("train", "eval"):
             metrics_path = run_dir / f"metrics.{tag}.jsonl"
