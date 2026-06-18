@@ -61,13 +61,13 @@ def load_client(provider: str, model: str | None):
         ) from exc
 
     if provider == "azure":
-        api_key = os.environ.get("AZURE_OPENAI_API_KEY")
+        api_key = os.environ.get("AZURE_OPENAI_KEY")
         endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
         deployment = model or os.environ.get("AZURE_OPENAI_DEPLOYMENT")
         api_version = os.environ.get("AZURE_OPENAI_API_VERSION")
         if not api_key or not endpoint or not deployment:
             raise SystemExit(
-                "Azure judge requires AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, "
+                "Azure judge requires AZURE_OPENAI_KEY, AZURE_OPENAI_ENDPOINT, "
                 "and AZURE_OPENAI_DEPLOYMENT, unless --model is provided."
             )
         endpoint = endpoint.rstrip("/")

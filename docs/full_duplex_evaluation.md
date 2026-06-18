@@ -122,7 +122,7 @@ Gemma/Qwen3-TTS training pipeline is documented in
 Copy only `azure_judge_input.jsonl` to the local PC, then run:
 
 ```powershell
-$env:AZURE_OPENAI_API_KEY="..."
+$env:AZURE_OPENAI_KEY="..."
 $env:AZURE_OPENAI_ENDPOINT="https://<resource>.openai.azure.com"
 $env:AZURE_OPENAI_DEPLOYMENT="<deployment>"
 
@@ -160,7 +160,7 @@ INS (Instruction Following) is replaced by EMP and SAF, which are more
 relevant for loneliness/isolation counseling.
 
 ```powershell
-$env:AZURE_OPENAI_API_KEY="..."
+$env:AZURE_OPENAI_KEY="..."
 $env:AZURE_OPENAI_ENDPOINT="https://<resource>.openai.azure.com"
 $env:AZURE_OPENAI_DEPLOYMENT="<deployment>"
 

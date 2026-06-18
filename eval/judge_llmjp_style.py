@@ -12,7 +12,7 @@ and Overall.  This script replaces Instruction Following with Empathy and
 Safety, which are more relevant for the counseling domain.
 
 Usage (local PC only):
-    $env:AZURE_OPENAI_API_KEY="..."
+    $env:AZURE_OPENAI_KEY="..."
     $env:AZURE_OPENAI_ENDPOINT="https://<resource>.openai.azure.com"
     $env:AZURE_OPENAI_DEPLOYMENT="<deployment>"
 

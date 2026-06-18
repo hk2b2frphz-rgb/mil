@@ -78,7 +78,7 @@ pip install openai
 For Azure OpenAI:
 
 ```powershell
-$env:AZURE_OPENAI_API_KEY="..."
+$env:AZURE_OPENAI_KEY="..."
 $env:AZURE_OPENAI_ENDPOINT="https://<resource>.openai.azure.com"
 $env:AZURE_OPENAI_DEPLOYMENT="<deployment-name>"
 # Optional for classic dated Azure OpenAI API deployments:
