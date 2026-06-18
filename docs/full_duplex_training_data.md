@@ -10,7 +10,10 @@ existing pipeline:
    cases. By default 70% are free-form chat/listening cards (`duplex_task` is
    null) and 30% are spread over the seven labeled tasks. Diversity comes from
    combining situation, topic, conversation type, persona occupation, time of
-   day, and season axes (`build_use_cases.py`).
+   day, personality (12 temperaments), and emotional state axes
+   (`build_use_cases.py`). The emotional state biases per-turn emotion labels,
+   which map to Qwen3-TTS delivery instructions (e.g. tearful/sobbing,
+   high-tension, withdrawn) via `EMOTION_PRESETS`.
 2. `generate_synthetic_moshi_training_data.py` asks Gemma to write Japanese
    counselor dialogues and timing events.
 3. `enrich_dialogue_timing.py` post-processes the free-form dialogues: long user

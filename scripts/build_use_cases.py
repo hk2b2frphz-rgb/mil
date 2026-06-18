@@ -119,7 +119,34 @@ TIME_OF_DAY = [
     ("late_night","深夜"),
 ]
 
-SEASONS = ["春", "夏", "秋", "冬"]
+# 話者の性格・気質（対話を通して一貫する）。話し方の幅を作る。
+# (id_token, label, guidance)
+PERSONALITIES: list[tuple[str, str, str]] = [
+    ("quiet",       "物静かで口数が少ない",       "短い返答が多く、間が空きやすい。"),
+    ("talkative",   "おしゃべりで話が長い",       "一つの話題を長く話し、脱線もする。"),
+    ("cheerful",    "明るく前向き",               "つらい話でも時々冗談や笑いを交える。"),
+    ("worrier",     "心配性で慎重",               "確認や言い直しが多く、不安を口にする。"),
+    ("dependent",   "人懐っこく甘え上手",         "相手に頼り、相づちや反応を求める。"),
+    ("reserved",    "遠慮がちで気を遣う",         "申し訳なさを口にし、本音を出すのが遅い。"),
+    ("cynical",     "皮肉っぽく斜に構える",       "自虐や皮肉を交えつつ、本心は隠しがち。"),
+    ("earnest",     "まじめで几帳面",             "順序立てて丁寧に話す。"),
+    ("emotional",   "涙もろく感情的",             "感情の起伏が大きく、声に出やすい。"),
+    ("easygoing",   "飄々としてマイペース",       "深刻ぶらず、淡々と自分のペースで話す。"),
+    ("shorttemper", "短気で苛立ちやすい",         "苛立ちや不満が言葉に出やすい。"),
+    ("calmnatured", "穏やかで落ち着いている",     "感情を荒げず、ゆったり話す。"),
+]
+
+# その日の感情状態・声の出し方。落ち着きを多数派にしつつ強い状態も混ぜる。
+# (id_token, label, emotion_hint, weight)
+EMOTIONAL_STATES: list[tuple[str, str, str, int]] = [
+    ("steady",       "落ち着いている",   "neutral / relieved 寄り。",                    34),
+    ("low",          "気分が沈んでいる", "sad / lonely / weary を多めに。",              22),
+    ("anxious",      "不安が強い",       "anxious / hesitant を多めに。",                14),
+    ("tearful",      "涙ぐんでいる",     "tearful を交え、強い場面で sobbing も使う。",  10),
+    ("high_tension", "ハイテンション",   "high_tension / laughing を多めに、早口気味。", 8),
+    ("agitated",     "気持ちが高ぶる",   "agitated / irritable を交える。",              7),
+    ("withdrawn",    "ふさぎ込んでいる", "withdrawn を多めに、声が小さく途切れがち。",   5),
+]
 
 # (id_token, opening_template)
 OPENING_TEMPLATES = {
@@ -203,7 +230,10 @@ class UseCase:
     conversation_guidance: str = ""
     topic: str = ""
     time_of_day: str = ""
-    season: str = ""
+    personality: str = ""
+    personality_guidance: str = ""
+    emotional_state: str = ""
+    emotional_state_hint: str = ""
 
 
 def weighted_choice(rng: random.Random, items: list[tuple[Any, int]]) -> Any:
@@ -220,7 +250,10 @@ def build_one(rng: random.Random, index: int) -> UseCase:
     risk = weighted_choice(rng, RISK_WEIGHTS)
     topic = rng.choice(TOPICS)
     time_token, time_label = rng.choice(TIME_OF_DAY)
-    season = rng.choice(SEASONS)
+    pers_token, pers_label, pers_guidance = rng.choice(PERSONALITIES)
+    state_token, state_label, state_hint, _ = weighted_choice(
+        rng, [(item, item[3]) for item in EMOTIONAL_STATES]
+    )
     conv_token, conv_label, conv_guidance, _ = weighted_choice(
         rng, [(item, item[3]) for item in CONVERSATION_TYPES]
     )
@@ -264,11 +297,13 @@ def build_one(rng: random.Random, index: int) -> UseCase:
 
     user_profile = (
         f"{age}{gender}、{occupation}。{situation}という背景がある。"
-        f"今日は{time_label}、{season}の時期に話している。"
+        f"性格は{pers_label}({pers_guidance})。"
+        f"今日は{time_label}に話していて、{state_label}様子。"
     )
 
     use_case_id = (
-        f"{sit_token}_{conv_token}_{age}_{gender}_{risk}_{silence_pattern}_{index:05d}"
+        f"{sit_token}_{conv_token}_{pers_token}_{state_token}_"
+        f"{age}_{gender}_{risk}_{silence_pattern}_{index:05d}"
     )
     return UseCase(
         id=use_case_id,
@@ -285,7 +320,10 @@ def build_one(rng: random.Random, index: int) -> UseCase:
         conversation_guidance=conv_guidance,
         topic=topic,
         time_of_day=time_label,
-        season=season,
+        personality=pers_label,
+        personality_guidance=pers_guidance,
+        emotional_state=state_label,
+        emotional_state_hint=state_hint,
     )
 
 

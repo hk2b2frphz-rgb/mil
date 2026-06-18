@@ -864,6 +864,11 @@ def build_gemma_prompt(use_case: dict[str, Any], rng: random.Random) -> str:
         ]
     )
 
+    personality = str(use_case.get("personality") or "ふつう")
+    personality_guidance = str(use_case.get("personality_guidance") or "自然に話す。")
+    emotional_state = str(use_case.get("emotional_state") or "落ち着いている")
+    emotional_state_hint = str(use_case.get("emotional_state_hint") or "")
+
     duplex_task = str(use_case.get("duplex_task") or "")
     silence_pattern = str(use_case.get("silence_pattern", "none"))
     if duplex_task == "pause_handling":
@@ -961,13 +966,17 @@ use_case:
 - 通常ターン（user/moshi）は {turn_count} 件前後。沈黙は別カウント。
 - user の話し方: {user_style}。
 - moshi の話し方: {counselor_style}。
+- user の性格: {personality}（{personality_guidance}）。この性格が話し方や語彙に一貫して出るようにする。
+- user の今日の状態: {emotional_state}。{emotional_state_hint} 会話を通してこの状態を反映し、場面で感情が動くと emotion も変える。
 - moshi は来訪を歓迎し、孤独感を軽く扱わず、すぐ解決策だけを出さない。
 - high/medium risk のニュアンスがある場合は、断定せず安全確認につながる短い問いを入れる。
 - 診断、説教、長い助言、緊急対応を装う表現は避ける。
 - 1 turn は音声化しやすい長さ、だいたい 8〜45 文字。
 - 各 user/moshi ターンには "emotion" を必ず付ける。候補:
-  user 側: hesitant, sad, lonely, anxious, relieved, grateful, neutral
-  moshi 側: warm, gentle, empathetic, encouraging, concerned, reassuring, neutral
+  user 側: hesitant, sad, lonely, anxious, relieved, grateful, neutral,
+           tearful, sobbing, high_tension, agitated, withdrawn, weary, irritable, laughing
+  moshi 側: warm, gentle, empathetic, encouraging, concerned, reassuring, soothing, neutral
+  user の emotion は上記「今日の状態」に沿って選ぶ（例: 涙ぐんでいる→tearful/sobbing、ハイテンション→high_tension/laughing）。
 {silence_directive}
 {duplex_section}
 
