@@ -12,6 +12,7 @@ FULL_DUPLEX_TASKS="${FULL_DUPLEX_TASKS:-all}"
 SEED="${SEED:-0}"
 STEPS="${STEPS:-use_cases,dialogues,enrich,audio}"
 LISTENING_RATIO="${LISTENING_RATIO:-0.7}"
+TTS_BACKEND="${TTS_BACKEND:-qwen3}"
 
 # Natural Japanese turn-taking timing.
 # Short transition gap (Stivers et al. 2009: Japanese gaps are near-zero).
@@ -91,21 +92,49 @@ fi
 # Use the enriched dialogues only if they exist and are at least as new as the
 # raw dialogues; otherwise fall back to the raw ones.
 AUDIO_DIALOGUES="$DIALOGUES_RAW"
-if [[ -s "$DIALOGUES_ENRICHED" && ! "$DIALOGUES_RAW" -nt "$DIALOGUES_ENRICHED" ]]; then
+if [[ -n "${DIALOGUES_JSONL:-}" ]]; then
+    AUDIO_DIALOGUES="$DIALOGUES_JSONL"
+elif [[ -s "$DIALOGUES_ENRICHED" && ! "$DIALOGUES_RAW" -nt "$DIALOGUES_ENRICHED" ]]; then
     AUDIO_DIALOGUES="$DIALOGUES_ENRICHED"
 fi
 
 if has_step audio; then
-    uv run python scripts/generate_qwen3_tts_data.py \
-        --out-dir "$TRAINING_DIR" \
-        --dialogues-jsonl "$AUDIO_DIALOGUES" \
-        --model "${QWEN_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}" \
-        --device "${TTS_DEVICE:-cuda}" \
-        --dtype "${TTS_DTYPE:-bfloat16}" \
-        --gap-sec "$GAP_SEC" \
-        --lead-in-sec "$LEAD_IN_SEC" \
-        --speaker-other "${TTS_SPEAKER_OTHER:-Dylan}" \
+    audio_args=(
+        uv run python scripts/generate_qwen3_tts_data.py
+        --out-dir "$TRAINING_DIR"
+        --dialogues-jsonl "$AUDIO_DIALOGUES"
+        --tts-backend "$TTS_BACKEND"
+        --model "${QWEN_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
+        --device "${TTS_DEVICE:-cuda}"
+        --dtype "${TTS_DTYPE:-bfloat16}"
+        --gap-sec "$GAP_SEC"
+        --lead-in-sec "$LEAD_IN_SEC"
+        --speaker-other "${TTS_SPEAKER_OTHER:-Dylan}"
         --speaker-background "${TTS_SPEAKER_BACKGROUND:-Ryan}"
+    )
+    if [[ "$TTS_BACKEND" == "moss-ttsd" ]]; then
+        audio_args+=(
+            --moss-model "${MOSS_TTS_MODEL:-OpenMOSS-Team/MOSS-TTSD-v1.0}"
+            --moss-codec-model "${MOSS_CODEC_MODEL:-OpenMOSS-Team/MOSS-Audio-Tokenizer}"
+        )
+        if [[ -n "${MOSS_REF_USER:-}" ]]; then
+            audio_args+=(--moss-ref-user "$MOSS_REF_USER")
+            [[ -n "${MOSS_REF_TEXT_USER:-}" ]] && audio_args+=(--moss-ref-text-user "$MOSS_REF_TEXT_USER")
+        fi
+        if [[ -n "${MOSS_REF_MOSHI:-}" ]]; then
+            audio_args+=(--moss-ref-moshi "$MOSS_REF_MOSHI")
+            [[ -n "${MOSS_REF_TEXT_MOSHI:-}" ]] && audio_args+=(--moss-ref-text-moshi "$MOSS_REF_TEXT_MOSHI")
+        fi
+        if [[ -n "${MOSS_REF_OTHER:-}" ]]; then
+            audio_args+=(--moss-ref-other "$MOSS_REF_OTHER")
+            [[ -n "${MOSS_REF_TEXT_OTHER:-}" ]] && audio_args+=(--moss-ref-text-other "$MOSS_REF_TEXT_OTHER")
+        fi
+        if [[ -n "${MOSS_REF_BACKGROUND:-}" ]]; then
+            audio_args+=(--moss-ref-background "$MOSS_REF_BACKGROUND")
+            [[ -n "${MOSS_REF_TEXT_BACKGROUND:-}" ]] && audio_args+=(--moss-ref-text-background "$MOSS_REF_TEXT_BACKGROUND")
+        fi
+    fi
+    "${audio_args[@]}"
 fi
 
 echo "manifest: $TRAINING_DIR/synthetic_moshi_train.jsonl"

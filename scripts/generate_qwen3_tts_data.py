@@ -29,6 +29,7 @@ Qwen3-TTS のプリセット話者 (CustomVoice モデル):
 """
 
 import argparse
+import gc
 import json
 import logging
 import math
@@ -410,6 +411,265 @@ class Qwen3TTS:
         return audio
 
 
+class MossTTSD:
+    """MOSS-TTSD per-utterance voice-cloning adapter."""
+
+    ROLES = ("user", "moshi", "other", "background")
+    DEFAULT_REF_TEXT = (
+        "こんにちは、今日はよろしくお願いします。"
+        "ゆっくりお話しできればと思います。"
+    )
+    DEFAULT_REF_SPEAKERS = {
+        "moshi": "Serena",
+        "user": "Ono_Anna",
+        "other": "Dylan",
+        "background": "Ryan",
+    }
+
+    def __init__(
+        self,
+        model_name: str,
+        codec_model_name: str,
+        ref_audio_paths: dict[str, Path],
+        ref_texts: dict[str, str],
+        device: str,
+        dtype: str,
+    ):
+        self.model_name = model_name
+        self.codec_model_name = codec_model_name
+        self.ref_audio_paths = ref_audio_paths
+        self.ref_texts = ref_texts
+        self.device = device
+        self.dtype = dtype
+        self.model = None
+        self.processor = None
+        self.sample_rate: int = 0
+        self._reference_codes: dict[str, Any] = {}
+        self._prompt_audio_codes: dict[str, Any] = {}
+
+    def load(self) -> None:
+        if self.model is not None:
+            return
+
+        import torch
+        import torchaudio
+        try:
+            from transformers import AutoModel, AutoProcessor
+        except ImportError as exc:
+            raise RuntimeError(
+                "MOSS-TTSD requires transformers and its audio dependencies. "
+                "Run `uv sync` and ensure ffmpeg is available on the cluster."
+            ) from exc
+
+        dtype_map = {
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "float32": torch.float32,
+        }
+        torch_dtype = dtype_map.get(self.dtype, torch.bfloat16)
+        device = "cuda:0" if self.device == "cuda" else self.device
+
+        if device.startswith("cuda"):
+            torch.backends.cuda.enable_cudnn_sdp(False)
+            torch.backends.cuda.enable_flash_sdp(True)
+            torch.backends.cuda.enable_mem_efficient_sdp(True)
+            torch.backends.cuda.enable_math_sdp(True)
+
+        logger.info(
+            "Loading MOSS-TTSD: %s (codec=%s, device=%s, dtype=%s)",
+            self.model_name, self.codec_model_name, device, self.dtype,
+        )
+        self.processor = AutoProcessor.from_pretrained(
+            self.model_name,
+            trust_remote_code=True,
+        )
+        self.processor.audio_tokenizer = AutoModel.from_pretrained(
+            self.codec_model_name,
+            trust_remote_code=True,
+        ).to(device)
+        self.processor.audio_tokenizer.eval()
+        self.model = AutoModel.from_pretrained(
+            self.model_name,
+            trust_remote_code=True,
+            torch_dtype=torch_dtype,
+        ).to(device)
+        self.model.eval()
+
+        target_sr = int(self.processor.model_config.sampling_rate)
+        for role in self.ROLES:
+            wav, sr = torchaudio.load(str(self.ref_audio_paths[role]))
+            if wav.shape[0] > 1:
+                wav = wav.mean(dim=0, keepdim=True)
+            if int(sr) != target_sr:
+                wav = torchaudio.functional.resample(wav, int(sr), target_sr)
+            audio_codes = self.processor.encode_audios_from_wav(
+                [wav], sampling_rate=target_sr,
+            )
+            self._reference_codes[role] = audio_codes
+            self._prompt_audio_codes[role] = audio_codes[0]
+        logger.info("MOSS-TTSD loaded; model sample rate = %d Hz", target_sr)
+
+    def _resolve_role(
+        self,
+        speaker_role: str,
+        speaker_override: str | None,
+    ) -> str:
+        if speaker_override in self.ROLES:
+            return str(speaker_override)
+        if speaker_role in self.ROLES:
+            return speaker_role
+        logger.warning("Unknown MOSS-TTSD role=%r; using user reference", speaker_role)
+        return "user"
+
+    @staticmethod
+    def _tag_s1(text: str) -> str:
+        text = re.sub(r"^\s*\[S[1-5]\]\s*", "", text).strip()
+        return f"[S1] {text}"
+
+    def synthesize(
+        self,
+        text: str,
+        speaker_role: str,
+        instruct: str | None = None,
+        speaker_override: str | None = None,
+    ) -> np.ndarray:
+        self.load()
+        assert self.model is not None
+        assert self.processor is not None
+
+        import torch
+
+        role = self._resolve_role(speaker_role, speaker_override)
+        if instruct:
+            logger.debug(
+                "MOSS-TTSD ignores instruct=%r for role=%s",
+                instruct[:48], role,
+            )
+
+        conversations = [[
+            self.processor.build_user_message(
+                text=(
+                    f"{self._tag_s1(self.ref_texts[role])} "
+                    f"{self._tag_s1(text)}"
+                ),
+                reference=self._reference_codes[role],
+            ),
+            self.processor.build_assistant_message(
+                audio_codes_list=[self._prompt_audio_codes[role]],
+            ),
+        ]]
+        batch = self.processor(conversations, mode="continuation")
+        device = next(self.model.parameters()).device
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+
+        with torch.no_grad():
+            outputs = self.model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=2000,
+            )
+        messages = self.processor.decode(outputs)
+        if not messages or not messages[0].audio_codes_list:
+            raise RuntimeError("MOSS-TTSD returned no decoded audio")
+        audio = messages[0].audio_codes_list[0]
+        if hasattr(audio, "detach"):
+            audio = audio.detach().cpu().numpy()
+        audio = np.asarray(audio, dtype=np.float32).squeeze()
+        if audio.ndim != 1:
+            audio = audio.reshape(-1)
+
+        output_sr = int(self.processor.model_config.sampling_rate)
+        if self.sample_rate == 0:
+            self.sample_rate = output_sr
+            logger.info("MOSS-TTSD sample rate = %d Hz", output_sr)
+        elif output_sr != self.sample_rate:
+            audio = _resample(audio, output_sr, self.sample_rate)
+
+        logger.info(
+            "MOSS-TTSD synthesis complete role=%s dur=%.2fs text=%r",
+            role, audio.size / self.sample_rate, text[:30],
+        )
+        return audio.astype(np.float32, copy=False)
+
+
+def resolve_moss_references(
+    args: argparse.Namespace,
+) -> tuple[dict[str, Path], dict[str, str]]:
+    """Resolve explicit MOSS references and generate any missing defaults."""
+    ref_audio_paths: dict[str, Path] = {}
+    ref_texts: dict[str, str] = {}
+    missing_roles: list[str] = []
+
+    for role in MossTTSD.ROLES:
+        path = getattr(args, f"moss_ref_{role}")
+        text = getattr(args, f"moss_ref_text_{role}")
+        if path is not None:
+            ref_audio_paths[role] = path
+            ref_texts[role] = text.strip()
+        else:
+            missing_roles.append(role)
+
+    if not missing_roles:
+        return ref_audio_paths, ref_texts
+
+    refs_dir = args.out_dir / "moss_default_refs"
+    refs_dir.mkdir(parents=True, exist_ok=True)
+    roles_to_generate = [
+        role
+        for role in missing_roles
+        if not (refs_dir / f"{role}_{MossTTSD.DEFAULT_REF_SPEAKERS[role]}.wav").is_file()
+    ]
+
+    if roles_to_generate:
+        logger.info(
+            "Generating default MOSS-TTSD references with Qwen3-TTS for roles: %s",
+            ", ".join(roles_to_generate),
+        )
+        qwen = Qwen3TTS(
+            model_id=args.model,
+            device=args.device,
+            dtype_str=args.dtype,
+            attn_impl=args.attn_impl,
+            speaker_user=args.speaker_user,
+            speaker_moshi=args.speaker_moshi,
+            language=args.language,
+            instruct_user=None,
+            instruct_moshi=None,
+        )
+        try:
+            for role in roles_to_generate:
+                speaker = MossTTSD.DEFAULT_REF_SPEAKERS[role]
+                pcm = qwen.synthesize(
+                    MossTTSD.DEFAULT_REF_TEXT,
+                    speaker_role="moshi" if role == "moshi" else "user",
+                    speaker_override=speaker,
+                )
+                path = refs_dir / f"{role}_{speaker}.wav"
+                write_wav(path, pcm[np.newaxis, :], qwen.sample_rate)
+                logger.info("Cached default MOSS-TTSD reference: %s", path)
+        finally:
+            del qwen
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except ImportError:
+                pass
+
+    for role in missing_roles:
+        speaker = MossTTSD.DEFAULT_REF_SPEAKERS[role]
+        ref_audio_paths[role] = refs_dir / f"{role}_{speaker}.wav"
+        ref_texts[role] = MossTTSD.DEFAULT_REF_TEXT
+        logger.info(
+            "Using default MOSS-TTSD reference role=%s speaker=%s path=%s",
+            role, speaker, ref_audio_paths[role],
+        )
+
+    return ref_audio_paths, ref_texts
+
+
 def _resample(pcm: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
     if orig_sr == target_sr:
         return pcm
@@ -443,7 +703,7 @@ def truncate_alignment_text(text: str, kept_samples: int, total_samples: int) ->
 
 def build_segments(
     dialogue: Dialogue,
-    tts: Qwen3TTS,
+    tts: Qwen3TTS | MossTTSD,
     lead_in_sec: float,
     gap_sec: float,
     user_speaker_override: str | None = None,
@@ -759,14 +1019,42 @@ def safe_stem(text: str, fallback: str) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Qwen3-TTS で日本語対話音声データを生成し Moshi fine-tune フォーマットで保存する"
+        description="日本語対話音声データを生成し Moshi fine-tune フォーマットで保存する"
     )
     parser.add_argument("--out-dir", required=True, type=Path, help="出力ディレクトリ")
+    parser.add_argument(
+        "--tts-backend",
+        default="qwen3",
+        choices=["qwen3", "moss-ttsd"],
+        help="TTS backend. Default: qwen3.",
+    )
     parser.add_argument(
         "--model",
         default="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
         help="Qwen3-TTS の HuggingFace モデル ID（CustomVoice 系を推奨）",
     )
+    parser.add_argument(
+        "--moss-model",
+        default="OpenMOSS-Team/MOSS-TTSD-v1.0",
+        help="MOSS-TTSD Hugging Face model ID.",
+    )
+    parser.add_argument(
+        "--moss-codec-model",
+        default="OpenMOSS-Team/MOSS-Audio-Tokenizer",
+        help="MOSS audio-tokenizer model ID.",
+    )
+    for role in MossTTSD.ROLES:
+        parser.add_argument(
+            f"--moss-ref-{role}",
+            type=Path,
+            default=None,
+            help=f"MOSS-TTSD reference WAV for the {role} role.",
+        )
+        parser.add_argument(
+            f"--moss-ref-text-{role}",
+            default=None,
+            help=f"Exact transcript of --moss-ref-{role}.",
+        )
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--dtype", default="bfloat16",
                         choices=["float16", "bfloat16", "float32"])
@@ -830,19 +1118,20 @@ def parse_args() -> argparse.Namespace:
     )
     args = parser.parse_args()
 
-    for role, name in [
-        ("--speaker-user", args.speaker_user),
-        ("--speaker-moshi", args.speaker_moshi),
-        ("--speaker-other", args.speaker_other),
-        ("--speaker-background", args.speaker_background),
-    ]:
-        if name not in VALID_SPEAKERS:
-            parser.error(
-                f"{role}={name!r} は無効です。候補: {sorted(VALID_SPEAKERS)}"
-            )
+    if args.tts_backend == "qwen3":
+        for role, name in [
+            ("--speaker-user", args.speaker_user),
+            ("--speaker-moshi", args.speaker_moshi),
+            ("--speaker-other", args.speaker_other),
+            ("--speaker-background", args.speaker_background),
+        ]:
+            if name not in VALID_SPEAKERS:
+                parser.error(
+                    f"{role}={name!r} は無効です。候補: {sorted(VALID_SPEAKERS)}"
+                )
 
     pool_raw = args.user_speaker_pool.strip()
-    if pool_raw:
+    if pool_raw and args.tts_backend == "qwen3":
         pool = [s.strip() for s in pool_raw.split(",") if s.strip()]
         invalid = [s for s in pool if s not in VALID_SPEAKERS]
         if invalid:
@@ -852,6 +1141,22 @@ def parse_args() -> argparse.Namespace:
         args.user_speaker_pool_list = pool
     else:
         args.user_speaker_pool_list = [args.speaker_user]
+
+    if args.tts_backend == "moss-ttsd":
+        for role in MossTTSD.ROLES:
+            path = getattr(args, f"moss_ref_{role}")
+            text = getattr(args, f"moss_ref_text_{role}")
+            if path is not None and not path.is_file():
+                parser.error(f"--moss-ref-{role} does not exist or is not a file: {path}")
+            if path is not None and (not text or not text.strip()):
+                parser.error(
+                    f"--moss-ref-text-{role} is required when --moss-ref-{role} is set"
+                )
+            if path is None and text:
+                parser.error(
+                    f"--moss-ref-text-{role} requires --moss-ref-{role}; "
+                    "omit both to use the generated default"
+                )
     return args
 
 
@@ -892,17 +1197,28 @@ def main() -> None:
                 "Invalid full-duplex dialogue schema. Regenerate or fix dialogues.jsonl:\n"
                 + details
             )
-    tts = Qwen3TTS(
-        model_id=args.model,
-        device=args.device,
-        dtype_str=args.dtype,
-        attn_impl=args.attn_impl,
-        speaker_user=args.speaker_user,
-        speaker_moshi=args.speaker_moshi,
-        language=args.language,
-        instruct_user=args.instruct_user,
-        instruct_moshi=args.instruct_moshi,
-    )
+    if args.tts_backend == "moss-ttsd":
+        ref_audio_paths, ref_texts = resolve_moss_references(args)
+        tts: Qwen3TTS | MossTTSD = MossTTSD(
+            model_name=args.moss_model,
+            codec_model_name=args.moss_codec_model,
+            ref_audio_paths=ref_audio_paths,
+            ref_texts=ref_texts,
+            device=args.device,
+            dtype=args.dtype,
+        )
+    else:
+        tts = Qwen3TTS(
+            model_id=args.model,
+            device=args.device,
+            dtype_str=args.dtype,
+            attn_impl=args.attn_impl,
+            speaker_user=args.speaker_user,
+            speaker_moshi=args.speaker_moshi,
+            language=args.language,
+            instruct_user=args.instruct_user,
+            instruct_moshi=args.instruct_moshi,
+        )
     tts.load()
     for idx, tmpl in enumerate(templates, start=1):
         turns: list[DialogueTurn] = []
@@ -944,6 +1260,12 @@ def main() -> None:
         )
 
         user_voice = args.user_speaker_pool_list[(idx - 1) % len(args.user_speaker_pool_list)]
+        user_override = "user" if args.tts_backend == "moss-ttsd" else user_voice
+        other_override = "other" if args.tts_backend == "moss-ttsd" else args.speaker_other
+        background_override = (
+            "background" if args.tts_backend == "moss-ttsd"
+            else args.speaker_background
+        )
         logger.info(
             "[%d/%d] 対話 %s を合成中 (moshi=%s, user=%s) ...",
             idx, len(templates), dialogue.id, args.speaker_moshi, user_voice,
@@ -951,9 +1273,9 @@ def main() -> None:
         t0 = time.time()
         segments, silences = build_segments(
             dialogue, tts, args.lead_in_sec, args.gap_sec,
-            user_speaker_override=user_voice,
-            other_speaker_override=args.speaker_other,
-            background_speaker_override=args.speaker_background,
+            user_speaker_override=user_override,
+            other_speaker_override=other_override,
+            background_speaker_override=background_override,
         )
         if not segments or tts.sample_rate == 0:
             # 音声ターンが 0 件（沈黙のみ等）の対話。sample_rate が未確定で
@@ -980,10 +1302,23 @@ def main() -> None:
         write_json(json_path, {
             "alignments": alignments,
             "metadata": {
-                "mode": "qwen3-tts-scripted",
+                "mode": (
+                    "moss-ttsd-scripted"
+                    if args.tts_backend == "moss-ttsd"
+                    else "qwen3-tts-scripted"
+                ),
                 "sample_rate": tts.sample_rate,
                 "duration_sec": round(duration, 4),
-                "tts_model": args.model,
+                "tts_backend": args.tts_backend,
+                "tts_model": (
+                    args.moss_model if args.tts_backend == "moss-ttsd"
+                    else args.model
+                ),
+                "tts_codec_model": (
+                    args.moss_codec_model
+                    if args.tts_backend == "moss-ttsd"
+                    else None
+                ),
                 "language": args.language,
                 "speaker_user": user_voice,
                 "speaker_user_pool": args.user_speaker_pool_list,

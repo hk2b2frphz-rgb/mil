@@ -372,3 +372,41 @@ For full fine-tuning, MLflow receives machine-readable stdout metrics from the
 nu-dialogue runner. The important curves are `train.loss`, `train.loss.text`,
 `train.loss.audio`, `eval.loss`, `eval.loss.text`, `eval.loss.audio`,
 `train.accuracy.*`, `eval.accuracy.*`, and `learning_rate.*`.
+
+## MOSS-TTSD training-data backend
+
+`scripts/generate_qwen3_tts_data.py` also supports
+`--tts-backend moss-ttsd`. It uses MOSS-TTSD once per utterance with a single
+`[S1]` speaker and a role-specific voice-cloning reference. Stereo assembly is
+unchanged: left is `moshi` (相談員), right is `user` (相談者).
+
+When a role has no `MOSS_REF_*` override, a reference is generated with Qwen3-TTS
+and cached under `training_set/moss_default_refs`: Serena for `moshi`, Ono_Anna
+for `user`, Dylan for `other`, and Ryan for `background`. The shared transcript
+is `こんにちは、今日はよろしくお願いします。ゆっくりお話しできればと思います。`.
+
+The audio-only three-dialogue quick test requires no manual reference audio:
+
+```bash
+qsub -V scripts/run_moss_ttsd_quicktest.pbs
+```
+
+The 50-dialogue Gemma pilot also uses these defaults and runs on one V100 in
+float16:
+
+```bash
+qsub -V scripts/run_moss_ttsd_pilot.pbs
+```
+
+Custom clean, single-speaker WAVs can still be supplied per role with matching
+`MOSS_REF_<ROLE>` and `MOSS_REF_TEXT_<ROLE>` environment variables.
+
+Output is written to
+`data/runs/moss_ttsd_pilot/training_set/{data_stereo,synthetic_moshi_train.jsonl}`.
+Override `BATCH_ID` or `NUM_CASES` before submission if needed.
+
+Run `uv sync` for the MOSS runtime dependencies. The cluster must also provide
+FFmpeg for `torchcodec`. FlashAttention 2 is optional and must be installed
+manually against the cluster's CUDA/PyTorch stack; the V100 pilot uses the
+default attention implementation because FlashAttention 2 requires newer GPU
+compute capability.

@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N moss_ttsd_pilot
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# MOSS-TTSD Japanese quality pilot: one V100, one shard, 50 dialogues.
+# Produces stereo WAV files (left=moshi, right=user) and
+# training_set/synthetic_moshi_train.jsonl under data/runs/$BATCH_ID.
+#
+# Missing references are generated from the Qwen3-TTS preset speakers and
+# cached under training_set/moss_default_refs. MOSS_REF_* variables remain
+# optional overrides for custom references.
+#
+# Submit from the repository root:
+#   qsub -V scripts/run_moss_ttsd_pilot.pbs
+#
+# Optional:
+#   BATCH_ID=moss_ttsd_pilot_$(date +%Y%m%d) NUM_CASES=100 \
+#     qsub -V scripts/run_moss_ttsd_pilot.pbs
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+export BATCH_ID="${BATCH_ID:-moss_ttsd_pilot}"
+export RUN_ID="$BATCH_ID"
+export OUT_ROOT="$PWD/data/runs/$BATCH_ID"
+export NUM_CASES="${NUM_CASES:-50}"
+export SEED="${SEED:-0}"
+export FULL_DUPLEX_TASKS="${FULL_DUPLEX_TASKS:-all}"
+export STEPS="${STEPS:-use_cases,dialogues,enrich,audio}"
+export LISTENING_RATIO="${LISTENING_RATIO:-0.7}"
+export GAP_SEC="${GAP_SEC:-0.2}"
+export LEAD_IN_SEC="${LEAD_IN_SEC:-0.3}"
+export CONTENT_SEEDS="${CONTENT_SEEDS:-$PWD/data/content_seeds/seeds.jsonl}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+
+export GEMMA_DTYPE="${GEMMA_DTYPE:-float16}"
+export GEMMA_TIMEOUT_SEC="${GEMMA_TIMEOUT_SEC:-7200}"
+export TTS_BACKEND=moss-ttsd
+export TTS_DTYPE=float16
+export TTS_DEVICE=cuda
+export MOSS_TTS_MODEL="${MOSS_TTS_MODEL:-OpenMOSS-Team/MOSS-TTSD-v1.0}"
+export MOSS_CODEC_MODEL="${MOSS_CODEC_MODEL:-OpenMOSS-Team/MOSS-Audio-Tokenizer}"
+
+mkdir -p experiments/pbs_logs
+JOB_LOG="experiments/pbs_logs/${BATCH_ID}.log"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
+echo "===== MOSS-TTSD pilot ====="
+echo "job_id:      ${PBS_JOBID:-n/a}"
+echo "host:        $(hostname)"
+echo "out_root:    $OUT_ROOT"
+echo "num_cases:   $NUM_CASES"
+echo "tts_model:   $MOSS_TTS_MODEL"
+echo "codec_model: $MOSS_CODEC_MODEL"
+echo "started_at:  $(date -Iseconds)"
+echo "==========================="
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH." >&2
+    exit 1
+}
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+fi
+
+bash scripts/run_full_duplex_training_data.sh
+
+MANIFEST="$OUT_ROOT/training_set/synthetic_moshi_train.jsonl"
+if [[ ! -s "$MANIFEST" ]]; then
+    echo "ERROR: pilot manifest was not created: $MANIFEST" >&2
+    exit 1
+fi
+
+echo "manifest:    $MANIFEST ($(grep -c . "$MANIFEST") samples)"
+echo "stereo_wav:  $OUT_ROOT/training_set/data_stereo"
+echo "finished_at: $(date -Iseconds)"
