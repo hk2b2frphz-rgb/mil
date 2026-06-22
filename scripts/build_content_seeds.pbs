@@ -7,7 +7,7 @@
 #PBS -j oe
 #PBS -V
 
-# Build the concrete talking-point seed bank ONCE, before the 1000h array job.
+# Build the concrete talking-point seed bank ONCE, before the 100h array job.
 # All data-generation shards read this file read-only to diversify spoken
 # content. Run this first:
 #

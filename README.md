@@ -137,9 +137,9 @@ qsub scripts/run_full_duplex_training_data.pbs
 
 詳細は [docs/full_duplex_training_data.md](docs/full_duplex_training_data.md) 参照。
 
-#### 大規模 (~1000h) 生成 (8x V100, ~2日)
+#### 大規模 (~100h) 生成 (8x V100)
 
-96 シャードの PBS 配列ジョブ。各シャードが use_cases → dialogues → enrich →
+10 シャードの PBS 配列ジョブ。各シャードが use_cases → dialogues → enrich →
 audio を 1 枚の V100 で自己完結して実行する（途中失敗時はそのインデックスだけ
 再投入すればよい）。傾聴70%/タスク30%、自然な相づち・話速・応答間、感情の
 平滑化を含む。詳細は [docs/full_duplex_training_data.md](docs/full_duplex_training_data.md)。
@@ -150,36 +150,37 @@ qsub scripts/build_content_seeds.pbs
 #    -> data/content_seeds/seeds.jsonl
 
 # 1. パイロット 1 シャード（実スループットと平均対話長を必ず先に確認）
-qsub -J 0-0 scripts/run_full_duplex_training_data_1000h.pbs
+qsub -J 0-0 scripts/run_full_duplex_training_data_100h.pbs
 
-# 2. 本実行（96 シャード。8 枚なら 8 並列でスケジューラが順次消化）
-qsub scripts/run_full_duplex_training_data_1000h.pbs
+# 2. 本実行（10 シャード。8 枚なら 8 並列でスケジューラが順次消化）
+qsub scripts/run_full_duplex_training_data_100h.pbs
 #    スケジューラが同時実行数の上限指定に対応していれば:
-#    qsub -J 0-95%8 scripts/run_full_duplex_training_data_1000h.pbs
+#    qsub -J 0-9%8 scripts/run_full_duplex_training_data_100h.pbs
+#    もっと欲しい場合は配列を拡大: -J 0-95 で ~1000h
 
 # 3. 全シャード完了後、1 つの manifest へ統合（CPU のみ・ログインノードで可）
 uv run python scripts/merge_training_shards.py \
-  --batch-dir data/runs/fd_1000h \
-  --out-dir   data/runs/fd_1000h/merged \
-  --expected-shards 96
-#    -> data/runs/fd_1000h/merged/training_set/synthetic_moshi_train.jsonl
+  --batch-dir data/runs/fd_100h \
+  --out-dir   data/runs/fd_100h/merged \
+  --expected-shards 10
+#    -> data/runs/fd_100h/merged/training_set/synthetic_moshi_train.jsonl
 
 # 4. 統合データセットで学習
-qsub -v SRC_RUN_DIR=data/runs/fd_1000h/merged scripts/fullft_sweep.pbs
+qsub -v SRC_RUN_DIR=data/runs/fd_100h/merged scripts/fullft_sweep.pbs
 ```
 
 主な調整用環境変数（`qsub -v KEY=VAL,...` で渡す）:
 
 | 変数 | 既定 | 説明 |
 |---|---|---|
-| `BATCH_ID` | `fd_1000h` | 出力先 `data/runs/<BATCH_ID>/shard_*` |
+| `BATCH_ID` | `fd_100h` | 出力先 `data/runs/<BATCH_ID>/shard_*` |
 | `DIALOGUES_PER_SHARD` | `250` | 1 シャードの対話数（下げると失敗時の損失減・Gemma再ロード増） |
 | `LISTENING_RATIO` | `0.7` | 自由対話（雑談・傾聴）の割合 |
 | `GAP_SEC` | `0.2` | ターン交替の間（応答速度） |
 | `CONTENT_SEEDS` | `data/content_seeds/seeds.jsonl` | 話の種バンク（無ければ自動でスキップ） |
 | `MIN_SHARD_FRACTION_PCT` | `80` | シャード成功とみなす最小生成率 |
 
-総量は配列サイズ × `DIALOGUES_PER_SHARD`。1000h からずらすには `-J 0-N` か
+総量は配列サイズ × `DIALOGUES_PER_SHARD`。100h からずらすには `-J 0-N` か
 `DIALOGUES_PER_SHARD` を変更する。
 
 ## 実験一覧

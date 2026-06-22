@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Merge per-shard training_set manifests into one dataset manifest.
 
-Each shard produced by run_full_duplex_training_data_1000h.pbs writes its own
+Each shard produced by run_full_duplex_training_data_100h.pbs writes its own
   <batch>/shard_<i>/training_set/synthetic_moshi_train.jsonl
 plus data_stereo/*.wav and *.json sidecars next to the wavs.
 
@@ -14,9 +14,9 @@ live anywhere.
 
 Usage:
   uv run python scripts/merge_training_shards.py \
-      --batch-dir data/runs/fd_1000h \
-      --out-dir   data/runs/fd_1000h/merged
-The fine-tuning launchers then take SRC_RUN_DIR=data/runs/fd_1000h/merged.
+      --batch-dir data/runs/fd_100h \
+      --out-dir   data/runs/fd_100h/merged
+The fine-tuning launchers then take SRC_RUN_DIR=data/runs/fd_100h/merged.
 """
 from __future__ import annotations
 

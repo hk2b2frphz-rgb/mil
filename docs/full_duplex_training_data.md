@@ -39,37 +39,35 @@ existing pipeline:
 6. The usual Moshi fine-tuning launchers consume
    `training_set/synthetic_moshi_train.jsonl`.
 
-## Large-scale (~1000h) generation
+## Large-scale (~100h) generation
 
-`run_full_duplex_training_data_1000h.pbs` is a PBS job array. Each sub-job is a
+`run_full_duplex_training_data_100h.pbs` is a PBS job array. Each sub-job is a
 self-contained shard (use_cases -> dialogues -> enrich -> audio) on one V100,
 writing to its own directory. With eight V100s the scheduler runs eight shards
 at a time and queues the rest, so no special throttling is needed. Self-
 contained shards are resumable: just re-submit failed indices.
 
-Minimal config to reach ~1000h within ~2 days on 8x V100:
+Minimal config to reach ~100h on 8x V100:
 
-- 96 shards x 250 dialogues = 24,000 dialogues (~1000h at ~150s average).
-- Required aggregate throughput is ~2.6x real time (Gemma + Qwen3-TTS). Eight
-  V100s fully used is the minimum that meets the deadline; fewer cards will not.
-  If real RTF is slower, extend `walltime`, lower `DIALOGUES_PER_SHARD`, or
-  accept ~600-700h.
+- 10 shards x 250 dialogues = 2,500 dialogues (~100h at ~150s average).
+- If real RTF is slower, extend `walltime` or lower `DIALOGUES_PER_SHARD`.
+- Want more? Scale the array up (e.g. `-J 0-95` for ~1000h).
 
 ```bash
 # Always run one pilot shard first to measure real throughput and the actual
-# average dialogue length before committing all 96 shards.
-qsub -J 0-0 scripts/run_full_duplex_training_data_1000h.pbs
+# average dialogue length before committing all shards.
+qsub -J 0-0 scripts/run_full_duplex_training_data_100h.pbs
 
 # Full run.
-qsub scripts/run_full_duplex_training_data_1000h.pbs
+qsub scripts/run_full_duplex_training_data_100h.pbs
 
 # After all shards finish, merge into one manifest (CPU only, login node):
 uv run python scripts/merge_training_shards.py \
-  --batch-dir data/runs/fd_1000h \
-  --out-dir   data/runs/fd_1000h/merged
+  --batch-dir data/runs/fd_100h \
+  --out-dir   data/runs/fd_100h/merged
 
 # Fine-tune with the merged dataset:
-SRC_RUN_DIR=data/runs/fd_1000h/merged qsub scripts/fullft_sweep.pbs
+SRC_RUN_DIR=data/runs/fd_100h/merged qsub scripts/fullft_sweep.pbs
 ```
 
 The merge writes absolute wav paths, so no audio is copied. Useful overrides:
