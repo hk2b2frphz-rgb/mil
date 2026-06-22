@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N tts_compare
+#PBS -q xan_s
+#PBS -l select=1:res=middle
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# TTS selection phase: one self-contained job, two A100s, no manual audio.
+#
+# CLUSTER TODO: confirm that `select=1:res=middle` is the local two-A100
+# allocation string. It is the value used by this repository's existing
+# two-GPU xan_s jobs. If the site requires an explicit GPU count, replace the
+# directive above (for example with the site's equivalent of
+# `select=1:res=middle:ngpus=2`) before submitting.
+#
+# Submit:
+#   qsub -V scripts/run_tts_comparison.pbs
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+export BATCH_ID="${BATCH_ID:-tts_comparison}"
+export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/$BATCH_ID}"
+export COMPARE_OUT="${COMPARE_OUT:-$OUT_ROOT/listening}"
+export REFS_DIR="${REFS_DIR:-$OUT_ROOT/shared_refs}"
+export REFS_JSON="$REFS_DIR/refs.json"
+export VENDOR_DIR="${VENDOR_DIR:-$OUT_ROOT/vendor}"
+export COSYVOICE_REPO="${COSYVOICE_REPO:-$VENDOR_DIR/CosyVoice}"
+export COSYVOICE_GIT_REF="${COSYVOICE_GIT_REF:-main}"
+export TTS_DEVICE="${TTS_DEVICE:-cuda}"
+export TTS_DTYPE="${TTS_DTYPE:-float16}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+
+mkdir -p "$COMPARE_OUT" "$REFS_DIR" "$VENDOR_DIR" experiments/pbs_logs
+exec > >(tee -a "experiments/pbs_logs/${BATCH_ID}.log") 2>&1
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH." >&2
+    exit 1
+}
+
+echo "===== TTS comparison ====="
+echo "job_id:       ${PBS_JOBID:-n/a}"
+echo "host:         $(hostname)"
+echo "out_root:     $OUT_ROOT"
+echo "comparison:   $COMPARE_OUT"
+echo "references:   $REFS_JSON"
+echo "cuda_visible: $CUDA_VISIBLE_DEVICES"
+echo "started_at:   $(date -Iseconds)"
+echo "=========================="
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+fi
+
+echo "===== step 1/6: shared Qwen3 reference voices ====="
+CUDA_VISIBLE_DEVICES=0 uv run python scripts/build_moss_reference_voices.py \
+    --out-dir "$REFS_DIR" \
+    --model "${QWEN_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}" \
+    --device "$TTS_DEVICE" \
+    --dtype "$TTS_DTYPE"
+
+TORCH_VERSION="$(uv run python -c 'import torch; print(torch.__version__)')"
+TORCHAUDIO_VERSION="$(uv run python -c 'import torchaudio; print(torchaudio.__version__)')"
+COMMON_ARGS=(
+    --dialogues-jsonl
+    "$PWD/tests/fixtures/listening_dialogues.jsonl"
+    "$PWD/tests/fixtures/aizuchi_dialogues.jsonl"
+    --emotion-conditions on,off,mild
+    --refs-json "$REFS_JSON"
+    --out-dir "$COMPARE_OUT"
+    --device "$TTS_DEVICE"
+    --dtype "$TTS_DTYPE"
+)
+
+QWEN_UV=(
+    uv run --isolated --no-project
+    --index "pytorch-cu121=https://download.pytorch.org/whl/cu121"
+    --with qwen-tts
+    --with numpy
+    --with scipy
+    --with soundfile
+    --with sphn
+    --with "torch==$TORCH_VERSION"
+    --with "torchaudio==$TORCHAUDIO_VERSION"
+)
+
+MOSS_UV=(
+    uv run --isolated --no-project
+    --index "pytorch-cu121=https://download.pytorch.org/whl/cu121"
+    --with "transformers==5.0.0"
+    --with safetensors
+    --with tiktoken
+    --with einops
+    --with soundfile
+    --with numpy
+    --with sphn
+    --with tqdm
+    --with "torch==$TORCH_VERSION"
+    --with "torchaudio==$TORCHAUDIO_VERSION"
+)
+
+# NOTE/FIXME(cluster verification): CosyVoice has no stable official wheel.
+# This job uses an official recursive checkout plus the inference subset of its
+# pinned requirements. Confirm this set against COSYVOICE_GIT_REF on the cluster.
+COSYVOICE_UV=(
+    uv run --isolated --no-project
+    --index "pytorch-cu121=https://download.pytorch.org/whl/cu121"
+    --with "transformers==4.51.3"
+    --with "numpy==1.26.4"
+    --with "conformer==0.3.2"
+    --with "diffusers==0.29.0"
+    --with "gdown==5.1.0"
+    --with "hydra-core==1.3.2"
+    --with "HyperPyYAML==1.2.3"
+    --with "inflect==7.3.1"
+    --with "librosa==0.10.2"
+    --with "modelscope==1.20.0"
+    --with "omegaconf==2.3.0"
+    --with "onnxruntime-gpu==1.18.0"
+    --with "openai-whisper==20231117"
+    --with "protobuf==4.25"
+    --with "pyworld==0.3.4"
+    --with "soundfile==0.12.1"
+    --with "x-transformers==2.11.24"
+    --with "wetext==0.0.4"
+    --with wget
+    --with huggingface-hub
+    --with sphn
+    --with "torch==$TORCH_VERSION"
+    --with "torchaudio==$TORCHAUDIO_VERSION"
+)
+
+KOKORO_UV=(
+    uv run --isolated --no-project
+    --index "pytorch-cu121=https://download.pytorch.org/whl/cu121"
+    --with "kokoro>=0.9.4"
+    --with "misaki[ja]"
+    --with pyopenjtalk
+    --with soundfile
+    --with numpy
+    --with sphn
+    --with "torch==$TORCH_VERSION"
+)
+
+echo "===== step 2/6: qwen3 baseline ====="
+CUDA_VISIBLE_DEVICES=0 "${QWEN_UV[@]}" python scripts/run_tts_comparison.py \
+    "${COMMON_ARGS[@]}" \
+    --backends qwen3
+
+echo "===== step 3/6: MOSS-TTSD reference backend ====="
+CUDA_VISIBLE_DEVICES=0 "${MOSS_UV[@]}" python scripts/run_tts_comparison.py \
+    "${COMMON_ARGS[@]}" \
+    --backends moss-ttsd
+
+echo "===== step 4/6: prepare official CosyVoice checkout ====="
+if [[ ! -d "$COSYVOICE_REPO/.git" ]]; then
+    git clone --recursive https://github.com/FunAudioLLM/CosyVoice.git "$COSYVOICE_REPO"
+fi
+git -C "$COSYVOICE_REPO" checkout "$COSYVOICE_GIT_REF"
+git -C "$COSYVOICE_REPO" submodule update --init --recursive
+
+echo "===== step 5/6: CosyVoice2 ====="
+CUDA_VISIBLE_DEVICES=1 COSYVOICE_REPO="$COSYVOICE_REPO" \
+    "${COSYVOICE_UV[@]}" python scripts/run_tts_comparison.py \
+    "${COMMON_ARGS[@]}" \
+    --backends cosyvoice2
+
+echo "===== step 6/6: Kokoro ====="
+CUDA_VISIBLE_DEVICES=1 "${KOKORO_UV[@]}" python scripts/run_tts_comparison.py \
+    "${COMMON_ARGS[@]}" \
+    --backends kokoro
+
+echo "===== completed ====="
+echo "Listening index: $COMPARE_OUT/INDEX.html"
+echo "Markdown index:  $COMPARE_OUT/INDEX.md"
+echo "Output tree:"
+find "$COMPARE_OUT" -maxdepth 2 -type f -print | sort
+echo "finished_at: $(date -Iseconds)"
