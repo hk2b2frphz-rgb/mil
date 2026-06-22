@@ -10,6 +10,12 @@
 # TODO(cluster): verify that `select=1:res=middle` is the exact local select
 # string that allocates two A100 GPUs; replace it if explicit ngpus are needed.
 #
+# Scale: NUM_CASES defaults to 2500 dialogues (~100h of stereo audio at an
+# estimated ~150s average length). The 120B model is loaded once per job, so
+# generate the whole batch in a single run rather than many small array jobs.
+# For a quick smoke run first: NUM_CASES=20 qsub -V scripts/run_dialogues_gptoss_2a100.pbs
+# For ~1000h: NUM_CASES=25000 qsub -V scripts/run_dialogues_gptoss_2a100.pbs
+#
 # Submit:
 #   qsub -V scripts/run_dialogues_gptoss_2a100.pbs
 
@@ -38,7 +44,7 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 SHARD_INDEX="${PBS_ARRAY_INDEX:-0}"
 SHARD_TAG="$(printf 'shard_%03d' "$SHARD_INDEX")"
 export BATCH_ID="${BATCH_ID:-gptoss_dialogues}"
-export NUM_CASES="${NUM_CASES:-250}"
+export NUM_CASES="${NUM_CASES:-2500}"
 export BASE_SEED="${BASE_SEED:-0}"
 export SEED="${SEED:-$((BASE_SEED + SHARD_INDEX))}"
 export RUN_ID="${BATCH_ID}/${SHARD_TAG}"
