@@ -138,6 +138,8 @@ def main() -> int:
             gemma_device_map=args.gemma_device_map,
             gemma_dtype=args.gemma_dtype,
             gemma_temperature=args.gemma_temperature,
+            gemma_frequency_penalty=0.3,
+            gemma_presence_penalty=0.1,
             gemma_max_new_tokens=args.gemma_max_new_tokens,
             gemma_timeout_sec=args.gemma_timeout_sec,
             trust_remote_code=args.trust_remote_code,

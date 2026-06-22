@@ -70,9 +70,18 @@ if has_step dialogues; then
         --gemma-backend "${GEMMA_BACKEND:-transformers-subprocess}"
         --gemma-model "${GEMMA_MODEL:-google/gemma-4-E2B-it}"
         --gemma-dtype "${GEMMA_DTYPE:-bfloat16}"
+        --gemma-temperature "${GEMMA_TEMPERATURE:-0.8}"
         --gemma-max-new-tokens "${GEMMA_MAX_NEW_TOKENS:-1100}"
         --gemma-timeout-sec "${GEMMA_TIMEOUT_SEC:-7200}"
     )
+    if [[ "${GEMMA_BACKEND:-transformers-subprocess}" == "openai-compatible" ]]; then
+        gemma_args+=(
+            --gemma-api-base "${GEMMA_API_BASE:-http://127.0.0.1:8080/v1}"
+            --gemma-api-key "${GEMMA_API_KEY:-}"
+            --gemma-frequency-penalty "${GEMMA_FREQUENCY_PENALTY:-0.3}"
+            --gemma-presence-penalty "${GEMMA_PRESENCE_PENALTY:-0.1}"
+        )
+    fi
     if [[ "${ALLOW_TEMPLATE_FALLBACK:-0}" == "1" ]]; then
         gemma_args+=(--allow-template-fallback)
     fi

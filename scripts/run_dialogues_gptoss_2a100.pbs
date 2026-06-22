@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N fd_gptoss
+#PBS -q xan_s
+#PBS -l select=1:res=middle
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# TODO(cluster): verify that `select=1:res=middle` is the exact local select
+# string that allocates two A100 GPUs; replace it if explicit ngpus are needed.
+#
+# Submit:
+#   qsub -V scripts/run_dialogues_gptoss_2a100.pbs
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+if [[ -f "$PWD/scripts/setup_proxy.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$PWD/scripts/setup_proxy.sh"
+fi
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH." >&2
+    exit 1
+}
+command -v curl >/dev/null 2>&1 || {
+    echo "ERROR: curl is not available on PATH." >&2
+    exit 1
+}
+
+export PORT="${PORT:-8000}"
+export MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
+export VLLM_MODEL="${VLLM_MODEL:-openai/gpt-oss-120b}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+
+SHARD_INDEX="${PBS_ARRAY_INDEX:-0}"
+SHARD_TAG="$(printf 'shard_%03d' "$SHARD_INDEX")"
+export BATCH_ID="${BATCH_ID:-gptoss_dialogues}"
+export NUM_CASES="${NUM_CASES:-250}"
+export BASE_SEED="${BASE_SEED:-0}"
+export SEED="${SEED:-$((BASE_SEED + SHARD_INDEX))}"
+export RUN_ID="${BATCH_ID}/${SHARD_TAG}"
+export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/${BATCH_ID}/${SHARD_TAG}}"
+
+if ! [[ "$BATCH_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "ERROR: BATCH_ID may contain only letters, digits, dot, underscore, hyphen." >&2
+    exit 1
+fi
+if ! [[ "$NUM_CASES" =~ ^[0-9]+$ ]] || [[ "$NUM_CASES" -lt 1 ]]; then
+    echo "ERROR: NUM_CASES must be a positive integer: $NUM_CASES" >&2
+    exit 1
+fi
+
+mkdir -p "$OUT_ROOT" experiments/pbs_logs
+exec > >(tee -a "experiments/pbs_logs/${BATCH_ID}_${SHARD_TAG}.log") 2>&1
+
+uv run --isolated --with vllm vllm serve "$VLLM_MODEL" \
+    --tensor-parallel-size 2 \
+    --host 127.0.0.1 \
+    --port "$PORT" \
+    --max-model-len "$MAX_MODEL_LEN" &
+VLLM_PID=$!
+
+cleanup() {
+    if kill -0 "$VLLM_PID" 2>/dev/null; then
+        kill "$VLLM_PID"
+        wait "$VLLM_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+VLLM_READY=0
+for _ in $(seq 1 120); do
+    if curl --fail --silent --show-error \
+        "http://127.0.0.1:${PORT}/v1/models" >/dev/null; then
+        VLLM_READY=1
+        break
+    fi
+    if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+        echo "ERROR: vLLM exited before becoming healthy." >&2
+        exit 1
+    fi
+    sleep 5
+done
+if [[ "$VLLM_READY" != "1" ]]; then
+    echo "ERROR: vLLM health check timed out after 10 minutes." >&2
+    exit 1
+fi
+
+export STEPS="use_cases,dialogues,enrich"
+export GEMMA_BACKEND="openai-compatible"
+export GEMMA_API_BASE="http://127.0.0.1:${PORT}/v1"
+export GEMMA_API_KEY="${GEMMA_API_KEY:-}"
+export GEMMA_MODEL="$VLLM_MODEL"
+export GEMMA_FREQUENCY_PENALTY="${GEMMA_FREQUENCY_PENALTY:-0.3}"
+export GEMMA_PRESENCE_PENALTY="${GEMMA_PRESENCE_PENALTY:-0.1}"
+
+bash scripts/run_full_duplex_training_data.sh
+
+test -s "$OUT_ROOT/gemma_dialogues/dialogues.jsonl"
+test -s "$OUT_ROOT/gemma_dialogues/dialogues_enriched.jsonl"
+echo "dialogues: $OUT_ROOT/gemma_dialogues/dialogues.jsonl"
+echo "enriched:  $OUT_ROOT/gemma_dialogues/dialogues_enriched.jsonl"
+
+# Audio is produced separately via the existing TTS PBS / TTS comparison harness.

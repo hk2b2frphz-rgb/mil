@@ -61,6 +61,55 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+LISTENING_DIALOGUES_PATH = REPO_ROOT / "tests" / "fixtures" / "listening_dialogues.jsonl"
+
+
+def load_listening_dialogue_exemplars(
+    path: Path = LISTENING_DIALOGUES_PATH,
+) -> list[dict[str, Any]]:
+    """Load the curated active-listening examples used by every prompt."""
+    exemplars: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"Listening-dialogue few-shot fixture not found: {path}"
+        ) from exc
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Invalid JSON in {path} at line {line_number}: {exc}"
+            ) from exc
+        if not isinstance(row, dict) or not isinstance(row.get("turns"), list):
+            raise ValueError(
+                f"Listening exemplar at {path}:{line_number} must be a dialogue object."
+            )
+        exemplars.append(row)
+    if len(exemplars) != 5:
+        raise ValueError(
+            f"Expected exactly 5 listening-dialogue exemplars in {path}, "
+            f"found {len(exemplars)}."
+        )
+    return exemplars
+
+
+LISTENING_DIALOGUE_EXEMPLARS = load_listening_dialogue_exemplars()
+
+DIALOGUE_SYSTEM_INSTRUCTIONS = """
+あなたは日本語の合成学習データを作る対話ライターです。
+目的は「孤独・孤立相談窓口」で使う、自然な雑談から慎重な相談まで幅広く扱える会話を作ることです。
+- ACTIVE LISTENING: 相手の言葉を正確に受け止め、すぐ助言せず、言い換え・要約・感情の承認を会話の流れに合わせて行う。
+- EMOTION MIRRORING: user の悲しさ、不安、孤独、ためらい、苛立ち、喜びなどを読み取り、その感情の強さと語調に合う言葉で自然に映し返す。
+- BACKCHANNEL DIVERSITY: 「うんうん / そうなんですね / なるほど / へえ / それは… / うん、うん / そっか / ええ / ふむ / そうですか」など幅広い相槌を使い、同じ対話内で同じ相槌を繰り返さない。
+- GENTLE PROBING: 相手が話したい範囲を尊重し、「よかったら」「差し支えなければ」などを使った開かれた問いで穏やかに掘り下げ、尋問や連続質問にしない。
+- 各 moshi 発話は、相槌・反映・要約・承認・問いかけを毎回同じ順序で並べず、必要な要素だけを組み合わせる。同じ文型、語尾、歓迎表現を反復しない。
+- 相談だけに限定せず、日常の雑談、嬉しい出来事、仕事、家族、学校、健康、趣味、地域、喪失、孤独など、use_case と talking_points に即した具体的な話題を扱う。
+""".strip()
+
 
 DEFAULT_USE_CASES: list[dict[str, Any]] = [
     {
@@ -280,6 +329,18 @@ def parse_args() -> argparse.Namespace:
         default="auto",
     )
     parser.add_argument("--gemma-temperature", type=float, default=0.8)
+    parser.add_argument(
+        "--gemma-frequency-penalty",
+        type=float,
+        default=0.3,
+        help="OpenAI-compatible frequency penalty. Default: 0.3.",
+    )
+    parser.add_argument(
+        "--gemma-presence-penalty",
+        type=float,
+        default=0.1,
+        help="OpenAI-compatible presence penalty. Default: 0.1.",
+    )
     parser.add_argument("--gemma-max-new-tokens", type=int, default=1400)
     parser.add_argument(
         "--trust-remote-code",
@@ -623,8 +684,13 @@ class GemmaDialogueGenerator:
         url = chat_completions_url(self.args.gemma_api_base)
         payload = {
             "model": self.args.gemma_model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [
+                {"role": "system", "content": DIALOGUE_SYSTEM_INSTRUCTIONS},
+                {"role": "user", "content": prompt},
+            ],
             "temperature": self.args.gemma_temperature,
+            "frequency_penalty": self.args.gemma_frequency_penalty,
+            "presence_penalty": self.args.gemma_presence_penalty,
             "max_tokens": self.args.gemma_max_new_tokens,
         }
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -749,7 +815,7 @@ def openai_chat_response_to_text(data: dict[str, Any]) -> str:
     message = choice.get("message") if isinstance(choice, dict) else None
     if isinstance(message, dict):
         content = message.get("content")
-        if isinstance(content, str):
+        if isinstance(content, str) and content:
             return content
         if isinstance(content, list):
             parts = []
@@ -758,7 +824,12 @@ def openai_chat_response_to_text(data: dict[str, Any]) -> str:
                     parts.append(str(item.get("text", "")))
                 else:
                     parts.append(str(item))
-            return "".join(parts)
+            joined = "".join(parts)
+            if joined:
+                return joined
+        reasoning_content = message.get("reasoning_content")
+        if isinstance(reasoning_content, str) and reasoning_content:
+            return reasoning_content
     text = choice.get("text") if isinstance(choice, dict) else None
     if isinstance(text, str):
         return text
@@ -853,6 +924,10 @@ def build_gemma_prompt(use_case: dict[str, Any], rng: random.Random) -> str:
             "短い文が多い",
             "最初は雑談っぽい",
             "気持ちをうまく言葉にできない",
+            "具体的な出来事から話し始め、あとから気持ちが見えてくる",
+            "明るく振る舞うが、ところどころ本音がにじむ",
+            "話題が少し前後し、相談員が要点を拾う必要がある",
+            "結論を急がず、日常の細部をぽつぽつ話す",
         ]
     )
     counselor_style = rng.choice(
@@ -861,6 +936,28 @@ def build_gemma_prompt(use_case: dict[str, Any], rng: random.Random) -> str:
             "相づちを自然に入れる",
             "解決策を急がず、気持ちを整理する",
             "一問一答になりすぎず会話を続ける",
+            "短い受け止め、言い換え、問いかけの順序を毎回変える",
+            "相手の語彙を一部受け取り、感情を丁寧に言葉にする",
+            "雑談では一緒に喜び、重い話では声量を落とすような語調にする",
+        ]
+    )
+    opening_style = rng.choice(
+        [
+            "userが出来事を直接話し始める",
+            "userが話してよいか確かめてから本題に入る",
+            "何気ない近況や季節の話から本音へ移る",
+            "userが感情ではなく身体感覚や生活の変化から話す",
+            "userが嬉しかった小さな出来事を共有する",
+            "userが言葉を探しながら断片的に話す",
+        ]
+    )
+    response_structure = rng.choice(
+        [
+            "相槌→感情の言語化→短い開かれた問い",
+            "言い換え→受容→余白を残す一言",
+            "具体的内容の要約→感情への共感→必要なら確認",
+            "短い共感→相手の言葉の反映→話したい方向を尋ねる",
+            "驚きや喜びの共有→具体点への関心→自然な雑談の継続",
         ]
     )
 
@@ -959,10 +1056,15 @@ def build_gemma_prompt(use_case: dict[str, Any], rng: random.Random) -> str:
     {"speaker": "silence", "duration_sec": 3.0, "note": "なぜ沈黙か簡単に"}
 """.strip(),
     )
+    few_shot_examples = json.dumps(
+        LISTENING_DIALOGUE_EXEMPLARS,
+        ensure_ascii=False,
+        indent=2,
+    )
 
     return f"""
-あなたは日本語の合成学習データを作る対話ライターです。
-目的は「孤独・孤立相談窓口」で使う、自然な雑談寄りの相談会話を作ることです。
+【システムレベルの最優先指示】
+{DIALOGUE_SYSTEM_INSTRUCTIONS}
 
 次のユースケースに基づいて、相談者 user と相談員 moshi の会話を作ってください。
 
@@ -976,6 +1078,8 @@ use_case:
 - 通常ターン（user/moshi）は {turn_count} 件前後。沈黙は別カウント。
 - user の話し方: {user_style}。
 - moshi の話し方: {counselor_style}。
+- 会話の入り方: {opening_style}。use_case に opening があっても丸写しせず、意味を保って自然に変える。
+- 今回の応答構成の基調: {response_structure}。ただし全 moshi ターンを同じ型にはしない。
 - user の性格: {personality}（{personality_guidance}）。この性格が話し方や語彙に一貫して出るようにする。
 - user の今日の状態: {emotional_state}。{emotional_state_hint}
 - 感情はターンごとに激しく変えない。今日の状態を基調に、変化はゆっくり・段階的にする。
@@ -992,6 +1096,11 @@ use_case:
   user の emotion は上記「今日の状態」に沿って選ぶ（例: 涙ぐんでいる→tearful/sobbing、ハイテンション→high_tension/laughing）。
 {silence_directive}
 {duplex_section}
+
+以下の5件は品質基準を示す few-shot 例である。内容や固有表現をコピーせず、
+相槌の変化、感情のミラーリング、言い換え・要約、穏やかな深掘り、安全確認の方法を学ぶこと。
+few_shot_examples:
+{few_shot_examples}
 
 JSON schema:
 {{

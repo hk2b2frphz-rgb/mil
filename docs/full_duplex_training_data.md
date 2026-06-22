@@ -75,6 +75,34 @@ SRC_RUN_DIR=data/runs/fd_1000h/merged qsub scripts/fullft_sweep.pbs
 The merge writes absolute wav paths, so no audio is copied. Useful overrides:
 `BATCH_ID`, `DIALOGUES_PER_SHARD`, `BASE_SEED`, `LISTENING_RATIO`, `GAP_SEC`.
 
+## gpt-oss-120b dialogue generation on 2x A100
+
+Dialogue scripts can be generated with `openai/gpt-oss-120b` behind a local
+vLLM OpenAI-compatible server. This path is opt-in through
+`GEMMA_BACKEND=openai-compatible`; the existing Gemma
+`transformers-subprocess` backend remains the default fallback path.
+
+The redesigned prompt embeds all five curated examples from
+`tests/fixtures/listening_dialogues.jsonl` and explicitly trains for active
+listening, emotion mirroring, varied Japanese backchannels, reflective
+paraphrase/summary, and gentle open-ended probing. It also varies openings and
+response structure while prioritizing concrete `content_seeds`.
+
+Submit the two-A100 dialogue-only job:
+
+```bash
+qsub -V scripts/run_dialogues_gptoss_2a100.pbs
+```
+
+The PBS script starts vLLM with tensor parallelism 2 in an isolated uv
+environment, waits up to 10 minutes for `/v1/models`, then runs
+`use_cases,dialogues,enrich` without audio. Output is written under
+`data/runs/<BATCH_ID>/shard_<index>/`.
+
+Before submission, verify that `#PBS -l select=1:res=middle` allocates exactly
+two A100 GPUs on the target cluster. `PORT`, `MAX_MODEL_LEN`, `VLLM_MODEL`,
+`NUM_CASES`, `BASE_SEED`, `BATCH_ID`, and `OUT_ROOT` are configurable.
+
 ## Generate a dataset
 
 On the GPU server:
