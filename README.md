@@ -415,3 +415,19 @@ FFmpeg for `torchcodec`. FlashAttention 2 is optional and must be installed
 manually against the cluster's CUDA/PyTorch stack; the V100 pilot uses the
 default attention implementation because FlashAttention 2 requires newer GPU
 compute capability.
+
+## MOSS-TTSD NATURALNESS AUDITION mode
+
+The dialogue pilot sends each complete script to MOSS-TTSD as one native
+multi-speaker request. MOSS decides turn-taking, overlap, and backchannel
+timing, and writes one mono mixed WAV plus a JSON sidecar per dialogue:
+
+```bash
+qsub -V scripts/run_moss_ttsd_dialogue_pilot.pbs
+```
+
+Outputs are written under
+`data/runs/moss_ttsd_dialogue_pilot/dialogue_audio/`. This mode is for
+listening-only naturalness auditions. Its mono mixes and model-selected timing
+are not training data and do not replace the existing per-utterance stereo
+pipeline.
