@@ -29,7 +29,6 @@ Qwen3-TTS のプリセット話者 (CustomVoice モデル):
 """
 
 import argparse
-import gc
 import json
 import logging
 import math
@@ -593,79 +592,48 @@ class MossTTSD:
         return audio.astype(np.float32, copy=False)
 
 
-def resolve_moss_references(
+def load_moss_references(
     args: argparse.Namespace,
 ) -> tuple[dict[str, Path], dict[str, str]]:
-    """Resolve explicit MOSS references and generate any missing defaults."""
+    """Load MOSS references from refs.json or explicit CLI arguments."""
     ref_audio_paths: dict[str, Path] = {}
     ref_texts: dict[str, str] = {}
-    missing_roles: list[str] = []
+
+    if args.moss_refs_json is not None:
+        with args.moss_refs_json.open(encoding="utf-8") as f:
+            refs_data = json.load(f)
+        refs = refs_data.get("roles", refs_data)
+        for role in MossTTSD.ROLES:
+            entry = refs.get(role)
+            if not isinstance(entry, dict):
+                raise ValueError(f"Missing role {role!r} in {args.moss_refs_json}")
+            path = Path(str(entry.get("path", "")))
+            if not path.is_absolute():
+                path = args.moss_refs_json.parent / path
+            text = str(entry.get("transcript", "")).strip()
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"MOSS reference WAV for {role!r} does not exist: {path}"
+                )
+            if not text:
+                raise ValueError(
+                    f"MOSS reference transcript for {role!r} is empty in "
+                    f"{args.moss_refs_json}"
+                )
+            ref_audio_paths[role] = path
+            ref_texts[role] = text
+        return ref_audio_paths, ref_texts
 
     for role in MossTTSD.ROLES:
         path = getattr(args, f"moss_ref_{role}")
         text = getattr(args, f"moss_ref_text_{role}")
-        if path is not None:
-            ref_audio_paths[role] = path
-            ref_texts[role] = text.strip()
-        else:
-            missing_roles.append(role)
-
-    if not missing_roles:
-        return ref_audio_paths, ref_texts
-
-    refs_dir = args.out_dir / "moss_default_refs"
-    refs_dir.mkdir(parents=True, exist_ok=True)
-    roles_to_generate = [
-        role
-        for role in missing_roles
-        if not (refs_dir / f"{role}_{MossTTSD.DEFAULT_REF_SPEAKERS[role]}.wav").is_file()
-    ]
-
-    if roles_to_generate:
-        logger.info(
-            "Generating default MOSS-TTSD references with Qwen3-TTS for roles: %s",
-            ", ".join(roles_to_generate),
-        )
-        qwen = Qwen3TTS(
-            model_id=args.model,
-            device=args.device,
-            dtype_str=args.dtype,
-            attn_impl=args.attn_impl,
-            speaker_user=args.speaker_user,
-            speaker_moshi=args.speaker_moshi,
-            language=args.language,
-            instruct_user=None,
-            instruct_moshi=None,
-        )
-        try:
-            for role in roles_to_generate:
-                speaker = MossTTSD.DEFAULT_REF_SPEAKERS[role]
-                pcm = qwen.synthesize(
-                    MossTTSD.DEFAULT_REF_TEXT,
-                    speaker_role="moshi" if role == "moshi" else "user",
-                    speaker_override=speaker,
-                )
-                path = refs_dir / f"{role}_{speaker}.wav"
-                write_wav(path, pcm[np.newaxis, :], qwen.sample_rate)
-                logger.info("Cached default MOSS-TTSD reference: %s", path)
-        finally:
-            del qwen
-            gc.collect()
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except ImportError:
-                pass
-
-    for role in missing_roles:
-        speaker = MossTTSD.DEFAULT_REF_SPEAKERS[role]
-        ref_audio_paths[role] = refs_dir / f"{role}_{speaker}.wav"
-        ref_texts[role] = MossTTSD.DEFAULT_REF_TEXT
-        logger.info(
-            "Using default MOSS-TTSD reference role=%s speaker=%s path=%s",
-            role, speaker, ref_audio_paths[role],
-        )
+        if path is None or not text:
+            raise ValueError(
+                "MOSS-TTSD requires --moss-refs-json or a WAV and transcript "
+                f"for every role; missing {role!r}"
+            )
+        ref_audio_paths[role] = path
+        ref_texts[role] = text.strip()
 
     return ref_audio_paths, ref_texts
 
@@ -1043,6 +1011,12 @@ def parse_args() -> argparse.Namespace:
         default="OpenMOSS-Team/MOSS-Audio-Tokenizer",
         help="MOSS audio-tokenizer model ID.",
     )
+    parser.add_argument(
+        "--moss-refs-json",
+        type=Path,
+        default=None,
+        help="Reference manifest produced by build_moss_reference_voices.py.",
+    )
     for role in MossTTSD.ROLES:
         parser.add_argument(
             f"--moss-ref-{role}",
@@ -1143,19 +1117,26 @@ def parse_args() -> argparse.Namespace:
         args.user_speaker_pool_list = [args.speaker_user]
 
     if args.tts_backend == "moss-ttsd":
+        if args.moss_refs_json is not None and not args.moss_refs_json.is_file():
+            parser.error(
+                f"--moss-refs-json does not exist or is not a file: "
+                f"{args.moss_refs_json}"
+            )
+        if args.moss_refs_json is not None:
+            return args
         for role in MossTTSD.ROLES:
             path = getattr(args, f"moss_ref_{role}")
             text = getattr(args, f"moss_ref_text_{role}")
-            if path is not None and not path.is_file():
+            if path is None:
+                parser.error(
+                    "--moss-refs-json or all four --moss-ref-* paths are "
+                    "required with --tts-backend moss-ttsd"
+                )
+            if not path.is_file():
                 parser.error(f"--moss-ref-{role} does not exist or is not a file: {path}")
-            if path is not None and (not text or not text.strip()):
+            if not text or not text.strip():
                 parser.error(
                     f"--moss-ref-text-{role} is required when --moss-ref-{role} is set"
-                )
-            if path is None and text:
-                parser.error(
-                    f"--moss-ref-text-{role} requires --moss-ref-{role}; "
-                    "omit both to use the generated default"
                 )
     return args
 
@@ -1198,7 +1179,7 @@ def main() -> None:
                 + details
             )
     if args.tts_backend == "moss-ttsd":
-        ref_audio_paths, ref_texts = resolve_moss_references(args)
+        ref_audio_paths, ref_texts = load_moss_references(args)
         tts: Qwen3TTS | MossTTSD = MossTTSD(
             model_name=args.moss_model,
             codec_model_name=args.moss_codec_model,

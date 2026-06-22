@@ -19,10 +19,9 @@ source scripts/setup_proxy.sh
 export BATCH_ID="${BATCH_ID:-moss_ttsd_quicktest}"
 export RUN_ID="$BATCH_ID"
 export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/$BATCH_ID}"
-export STEPS=audio
 export DIALOGUES_JSONL="$PWD/tests/fixtures/aizuchi_dialogues.jsonl"
+export MOSS_REFS_DIR="$OUT_ROOT/moss_refs"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-export TTS_BACKEND=moss-ttsd
 export TTS_DTYPE=float16
 export TTS_DEVICE=cuda
 export MOSS_TTS_MODEL="${MOSS_TTS_MODEL:-OpenMOSS-Team/MOSS-TTSD-v1.0}"
@@ -51,7 +50,44 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi
 fi
 
-bash scripts/run_full_duplex_training_data.sh
+echo "===== step 1/2: Qwen3 reference generation (shared env) ====="
+uv run python -c \
+    'import transformers; print("shared transformers:", transformers.__version__)'
+uv run python scripts/build_moss_reference_voices.py \
+    --out-dir "$MOSS_REFS_DIR" \
+    --model "${QWEN_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}" \
+    --device "$TTS_DEVICE" \
+    --dtype "$TTS_DTYPE"
+
+TORCH_VERSION="$(uv run python -c 'import torch; print(torch.__version__)')"
+TORCHAUDIO_VERSION="$(uv run python -c 'import torchaudio; print(torchaudio.__version__)')"
+MOSS_UV=(
+    uv run --isolated --no-project
+    --index "pytorch-cu121=https://download.pytorch.org/whl/cu121"
+    --with "transformers==5.0.0"
+    --with safetensors
+    --with tiktoken
+    --with einops
+    --with soundfile
+    --with numpy
+    --with sphn
+    --with tqdm
+    --with "torch==$TORCH_VERSION"
+    --with "torchaudio==$TORCHAUDIO_VERSION"
+)
+
+echo "===== step 2/2: MOSS-TTSD audio (isolated env) ====="
+"${MOSS_UV[@]}" python -c \
+    'import torch, transformers; print("isolated transformers:", transformers.__version__); print("isolated torch:", torch.__version__)'
+"${MOSS_UV[@]}" python scripts/generate_qwen3_tts_data.py \
+    --out-dir "$OUT_ROOT/training_set" \
+    --dialogues-jsonl "$DIALOGUES_JSONL" \
+    --tts-backend moss-ttsd \
+    --moss-model "$MOSS_TTS_MODEL" \
+    --moss-codec-model "$MOSS_CODEC_MODEL" \
+    --moss-refs-json "$MOSS_REFS_DIR/refs.json" \
+    --device "$TTS_DEVICE" \
+    --dtype "$TTS_DTYPE"
 
 MANIFEST="$OUT_ROOT/training_set/synthetic_moshi_train.jsonl"
 if [[ ! -s "$MANIFEST" ]]; then

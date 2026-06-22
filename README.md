@@ -380,10 +380,18 @@ nu-dialogue runner. The important curves are `train.loss`, `train.loss.text`,
 `[S1]` speaker and a role-specific voice-cloning reference. Stereo assembly is
 unchanged: left is `moshi` (相談員), right is `user` (相談者).
 
-When a role has no `MOSS_REF_*` override, a reference is generated with Qwen3-TTS
-and cached under `training_set/moss_default_refs`: Serena for `moshi`, Ono_Anna
-for `user`, Dylan for `other`, and Ryan for `background`. The shared transcript
-is `こんにちは、今日はよろしくお願いします。ゆっくりお話しできればと思います。`.
+MOSS jobs use two environments because `qwen-tts`/Moshi require Transformers 4
+while MOSS-TTSD-v1.0 requires Transformers 5. First, the shared project
+environment generates Qwen3-TTS references under `$OUT_ROOT/moss_refs/`
+(`refs.json` plus four WAVs): Serena for `moshi`, Ono_Anna for `user`, Dylan for
+`other`, and Ryan for `background`. The shared transcript is
+`こんにちは、今日はよろしくお願いします。ゆっくりお話しできればと思います。`.
+Existing WAVs are reused.
+
+The audio stage then runs `generate_qwen3_tts_data.py` with
+`uv run --isolated --no-project`, Transformers 5.0.0, and the cluster's exact
+cu121 torch/torchaudio versions. It consumes only the dialogue JSONL and
+`moss_refs/refs.json`; `qwen-tts` is not installed or imported in that step.
 
 The audio-only three-dialogue quick test requires no manual reference audio:
 
@@ -397,9 +405,6 @@ float16:
 ```bash
 qsub -V scripts/run_moss_ttsd_pilot.pbs
 ```
-
-Custom clean, single-speaker WAVs can still be supplied per role with matching
-`MOSS_REF_<ROLE>` and `MOSS_REF_TEXT_<ROLE>` environment variables.
 
 Output is written to
 `data/runs/moss_ttsd_pilot/training_set/{data_stereo,synthetic_moshi_train.jsonl}`.
