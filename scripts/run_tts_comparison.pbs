@@ -57,6 +57,13 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi
 fi
 
+# Preflight: run the (fast, GPU-free) test suite in the project env before any
+# heavy model loading. This surfaces import/dependency breakage (e.g. a missing
+# lightning) immediately, so a broken env fails in seconds instead of after the
+# reference-voice and per-backend stages. set -e aborts the job on failure.
+echo "===== step 0/6: preflight tests (fail fast before heavy GPU work) ====="
+uv run --with pytest python -m pytest tests/ -q
+
 echo "===== step 1/6: shared Qwen3 reference voices ====="
 CUDA_VISIBLE_DEVICES=0 uv run python scripts/build_moss_reference_voices.py \
     --out-dir "$REFS_DIR" \
