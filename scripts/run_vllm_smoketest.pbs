@@ -44,22 +44,14 @@ export MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 export UV_TORCH_BACKEND="${UV_TORCH_BACKEND:-cu128}"
 export VLLM_VERSION="${VLLM_VERSION:-0.23.0}"
 export VLLM_CUDA_VERSION="${VLLM_CUDA_VERSION:-128}"
-export VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
-export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
-export VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-1024}"
-export VLLM_QWEN_REASONING_PARSER="${VLLM_QWEN_REASONING_PARSER:-qwen3}"
-export VLLM_QWEN_CHAT_TEMPLATE_KWARGS="${VLLM_QWEN_CHAT_TEMPLATE_KWARGS:-}"
-export VLLM_PREPARE_GPTOSS_TIKTOKEN="${VLLM_PREPARE_GPTOSS_TIKTOKEN:-1}"
-export TIKTOKEN_ENCODINGS_DIR="${TIKTOKEN_ENCODINGS_DIR:-$PWD/.cache/tiktoken_encodings}"
 
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
     echo "ERROR: PORT must be an integer from 1 to 65535; got '$PORT'." >&2
     exit 1
 fi
 
-VLLM_INSTALL_SPEC="${VLLM_INSTALL_SPEC:-vllm==${VLLM_VERSION}}"
-VLLM_WHEEL_URL="${VLLM_WHEEL_URL:-}"
-VLLM_WITH_SPEC="${VLLM_WHEEL_URL:-$VLLM_INSTALL_SPEC}"
+CPU_ARCH="$(uname -m)"
+VLLM_WHEEL_URL="${VLLM_WHEEL_URL:-https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${VLLM_CUDA_VERSION}-cp38-abi3-manylinux_2_35_${CPU_ARCH}.whl}"
 PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu${VLLM_CUDA_VERSION}}"
 
 SANITIZED_MODEL="${VLLM_MODEL//\//_}"
@@ -77,10 +69,7 @@ echo "max_model_len: $MAX_MODEL_LEN"
 echo "torch_backend: $UV_TORCH_BACKEND"
 echo "vllm_version:  $VLLM_VERSION"
 echo "vllm_cuda:     cu$VLLM_CUDA_VERSION"
-echo "vllm_install:  $VLLM_WITH_SPEC"
-echo "tp_size:       $VLLM_TENSOR_PARALLEL_SIZE"
-echo "gpu_mem_util:  $VLLM_GPU_MEMORY_UTILIZATION"
-echo "max_batched:   $VLLM_MAX_NUM_BATCHED_TOKENS"
+echo "vllm_wheel:    $VLLM_WHEEL_URL"
 echo "started_at:    $(date -Iseconds)"
 echo "==========================="
 
@@ -88,53 +77,14 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi
 fi
 
-prepare_gptoss_tiktoken() {
-    if [[ "$VLLM_PREPARE_GPTOSS_TIKTOKEN" != "1" ]]; then
-        return 0
-    fi
-    if [[ "$VLLM_MODEL" != openai/gpt-oss-* ]]; then
-        return 0
-    fi
-
-    mkdir -p "$TIKTOKEN_ENCODINGS_DIR"
-    export TIKTOKEN_ENCODINGS_BASE="$TIKTOKEN_ENCODINGS_DIR"
-    if [[ ! -s "$TIKTOKEN_ENCODINGS_DIR/o200k_base.tiktoken" ]]; then
-        curl --fail --location --silent --show-error \
-            --output "$TIKTOKEN_ENCODINGS_DIR/o200k_base.tiktoken" \
-            "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
-    fi
-    if [[ ! -s "$TIKTOKEN_ENCODINGS_DIR/cl100k_base.tiktoken" ]]; then
-        curl --fail --location --silent --show-error \
-            --output "$TIKTOKEN_ENCODINGS_DIR/cl100k_base.tiktoken" \
-            "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
-    fi
-    echo "tiktoken_encodings_base: $TIKTOKEN_ENCODINGS_BASE"
-}
-
-prepare_gptoss_tiktoken
-
-serve_args=(
-    vllm serve "$VLLM_MODEL"
-    --tensor-parallel-size "$VLLM_TENSOR_PARALLEL_SIZE"
-    --host 127.0.0.1
-    --port "$PORT"
-    --max-model-len "$MAX_MODEL_LEN"
-    --gpu-memory-utilization "$VLLM_GPU_MEMORY_UTILIZATION"
-)
-if [[ -n "$VLLM_MAX_NUM_BATCHED_TOKENS" ]]; then
-    serve_args+=(--max-num-batched-tokens "$VLLM_MAX_NUM_BATCHED_TOKENS")
-fi
-if [[ "$VLLM_MODEL" == Qwen/Qwen3* || "$VLLM_MODEL" == Qwen/Qwen3.* ]]; then
-    serve_args+=(--reasoning-parser "$VLLM_QWEN_REASONING_PARSER")
-    if [[ -n "$VLLM_QWEN_CHAT_TEMPLATE_KWARGS" ]]; then
-        serve_args+=(--default-chat-template-kwargs "$VLLM_QWEN_CHAT_TEMPLATE_KWARGS")
-    fi
-fi
-
 uv run --isolated \
     --extra-index-url "$PYTORCH_INDEX_URL" \
-    --with "$VLLM_WITH_SPEC" \
-    "${serve_args[@]}" &
+    --with "$VLLM_WHEEL_URL" \
+    vllm serve "$VLLM_MODEL" \
+    --tensor-parallel-size 1 \
+    --host 127.0.0.1 \
+    --port "$PORT" \
+    --max-model-len "$MAX_MODEL_LEN" &
 VLLM_PID=$!
 
 cleanup() {

@@ -49,8 +49,12 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PORT="${PORT:-8000}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 export UV_TORCH_BACKEND="${UV_TORCH_BACKEND:-cu128}"
-export TORCH_VERSION="${TORCH_VERSION:-2.8.0}"
+export TORCH_VERSION="${TORCH_VERSION:-2.11.0}"
+export TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-$TORCH_VERSION}"
+export TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.26.0}"
 export VLLM_VERSION="${VLLM_VERSION:-0.23.0}"
+export VLLM_CUDA_VERSION="${VLLM_CUDA_VERSION:-129}"
+export VLLM_CUDA_MODULE="${VLLM_CUDA_MODULE:-cuda12.9_cudnn9.7.1_nccl2.26.5}"
 export VLLM_ENV_DIR="${VLLM_ENV_DIR:-.venv_vllm_smoke_seq}"
 export VLLM_RECREATE_ENV="${VLLM_RECREATE_ENV:-1}"
 export VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
@@ -73,7 +77,11 @@ fi
 PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
 PYPI_INDEX_URL="${PYPI_INDEX_URL:-https://pypi.org/simple}"
 TORCH_SPEC="${TORCH_SPEC:-torch==${TORCH_VERSION}+${UV_TORCH_BACKEND}}"
-VLLM_INSTALL_SPEC="${VLLM_INSTALL_SPEC:-vllm==${VLLM_VERSION}}"
+TORCHAUDIO_SPEC="${TORCHAUDIO_SPEC:-torchaudio==${TORCHAUDIO_VERSION}+${UV_TORCH_BACKEND}}"
+TORCHVISION_SPEC="${TORCHVISION_SPEC:-torchvision==${TORCHVISION_VERSION}+${UV_TORCH_BACKEND}}"
+CPU_ARCH="$(uname -m)"
+VLLM_WHEEL_URL="${VLLM_WHEEL_URL:-https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${VLLM_CUDA_VERSION}-cp38-abi3-manylinux_2_28_${CPU_ARCH}.whl}"
+VLLM_INSTALL_SPEC="${VLLM_INSTALL_SPEC:-$VLLM_WHEEL_URL}"
 VLLM_PYTHON="$VLLM_ENV_DIR/bin/python"
 VLLM_BIN="$VLLM_ENV_DIR/bin/vllm"
 
@@ -90,7 +98,11 @@ echo "port:          $PORT"
 echo "max_model_len: $MAX_MODEL_LEN"
 echo "torch_backend: $UV_TORCH_BACKEND"
 echo "torch_spec:    $TORCH_SPEC"
+echo "torchaudio:    $TORCHAUDIO_SPEC"
+echo "torchvision:   $TORCHVISION_SPEC"
 echo "vllm_version:  $VLLM_VERSION"
+echo "vllm_cuda:     cu$VLLM_CUDA_VERSION"
+echo "cuda_module:   ${VLLM_CUDA_MODULE:-n/a}"
 echo "vllm_install:  $VLLM_INSTALL_SPEC"
 echo "tp_size:       $VLLM_TENSOR_PARALLEL_SIZE"
 echo "gpu_mem_util:  $VLLM_GPU_MEMORY_UTILIZATION"
@@ -105,18 +117,41 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi
 fi
 
+if [[ -n "$VLLM_CUDA_MODULE" ]]; then
+    if ! command -v module >/dev/null 2>&1; then
+        for module_init in /etc/profile.d/modules.sh /usr/share/Modules/init/bash; do
+            if [[ -f "$module_init" ]]; then
+                # shellcheck source=/dev/null
+                source "$module_init"
+                break
+            fi
+        done
+    fi
+    command -v module >/dev/null 2>&1 || {
+        echo "ERROR: environment modules are not available; cannot load $VLLM_CUDA_MODULE." >&2
+        exit 1
+    }
+    module load "$VLLM_CUDA_MODULE"
+fi
+
 if [[ "$VLLM_RECREATE_ENV" == "1" ]]; then
     rm -rf "$VLLM_ENV_DIR"
 fi
 uv venv "$VLLM_ENV_DIR"
-uv pip install --python "$VLLM_PYTHON" --index-url "$PYTORCH_INDEX_URL" "$TORCH_SPEC"
+uv pip install --python "$VLLM_PYTHON" --index-url "$PYTORCH_INDEX_URL" \
+    "$TORCH_SPEC" "$TORCHAUDIO_SPEC" "$TORCHVISION_SPEC"
 uv pip install --python "$VLLM_PYTHON" --index-url "$PYPI_INDEX_URL" "$VLLM_INSTALL_SPEC"
 if [[ -n "${VLLM_EXTRA_DEPS:-}" ]]; then
     uv pip install --python "$VLLM_PYTHON" $VLLM_EXTRA_DEPS
 fi
 "$VLLM_PYTHON" - <<'PY'
+import ctypes
 import torch
+import vllm
 print("torch:", torch.__version__, "cuda:", torch.version.cuda)
+print("vllm:", vllm.__version__)
+ctypes.CDLL("libcudart.so.12")
+print("libcudart.so.12: OK")
 PY
 
 prepare_gptoss_tiktoken() {
