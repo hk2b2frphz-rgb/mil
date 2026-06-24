@@ -93,43 +93,24 @@ QWEN_UV=(
     --with "torchaudio==$TORCHAUDIO_VERSION"
 )
 
-# NOTE/FIXME(cluster verification): CosyVoice has no stable official wheel.
-# This job uses an official recursive checkout plus the inference subset of its
-# pinned requirements. Confirm this set against COSYVOICE_GIT_REF on the cluster.
+# CosyVoice has no stable official wheel. Rather than hand-maintaining a subset
+# of its requirements (which keeps missing transitive imports like rich /
+# matplotlib / pyarrow), we install directly from the repo's requirements.txt
+# after checkout (see step 3) and only override the few things we must not take
+# verbatim. This base array holds those overrides; the filtered requirements are
+# appended via --with-requirements at step 4.
 COSYVOICE_UV=(
     uv run --isolated --no-project
     --index "pytorch-cu121=https://download.pytorch.org/whl/cu121"
-    --with "transformers==4.51.3"
-    --with "numpy==1.26.4"
-    --with "conformer==0.3.2"
-    --with "diffusers==0.29.0"
-    --with "gdown==5.1.0"
-    --with "hydra-core==1.3.2"
-    --with "HyperPyYAML==1.2.3"
-    --with "inflect==7.3.1"
-    --with "librosa==0.10.2"
-    --with "lightning==2.2.4"
-    --with "matplotlib==3.7.5"
-    --with "modelscope==1.20.0"
-    --with "omegaconf==2.3.0"
-    --with "onnxruntime-gpu==1.18.0"
-    # openai-whisper is pulled in via CosyVoice's requirements but is not used by
-    # CosyVoice3 zero-shot / inference_instruct2. The old 20231117 pin requires
-    # triton==2.0.0, which conflicts with the cluster torch (cu121) that needs
-    # triton 3.x. Drop the pin so a recent whisper (triton>=2, no upper bound) is
-    # selected and the env resolves.
-    --with "openai-whisper>=20240930"
-    --with "protobuf==4.25"
-    --with "pyworld==0.3.4"
-    --with "rich==13.7.1"
-    --with "soundfile==0.12.1"
-    --with "x-transformers==2.11.24"
-    --with "wetext==0.0.4"
-    --with wget
-    --with huggingface-hub
-    --with sphn
+    # Use the cluster's cu121 torch build instead of CosyVoice's pinned 2.3.1.
     --with "torch==$TORCH_VERSION"
     --with "torchaudio==$TORCHAUDIO_VERSION"
+    # CosyVoice pins openai-whisper==20231117 which requires triton==2.0.0 and
+    # conflicts with the cu121 torch (triton 3.x). whisper is unused by
+    # CosyVoice3 zero-shot / inference_instruct2, so take a recent unpinned one.
+    --with "openai-whisper>=20240930"
+    --with huggingface-hub
+    --with sphn
 )
 
 KOKORO_UV=(
@@ -156,9 +137,30 @@ fi
 git -C "$COSYVOICE_REPO" checkout "$COSYVOICE_GIT_REF"
 git -C "$COSYVOICE_REPO" submodule update --init --recursive
 
+# Derive the inference dependency set from CosyVoice's own requirements.txt so we
+# never miss a transitive import again. Strip only what must not be installed in
+# this isolated env:
+#   --extra-index-url lines  -> handled by --index
+#   torch / torchaudio       -> cluster cu121 build (added in COSYVOICE_UV)
+#   openai-whisper           -> old triton==2.0.0 pin; re-added unpinned above
+#   onnxruntime== (CPU)      -> keep onnxruntime-gpu only
+#   web/server/training-only -> deepspeed fastapi* gradio grpcio* tensorboard
+#                               tensorrt* uvicorn (unneeded, heavy/conflicting)
+COSYVOICE_REQ_SRC="$COSYVOICE_REPO/requirements.txt"
+COSYVOICE_REQ="$OUT_ROOT/cosyvoice_requirements.inference.txt"
+if [[ ! -f "$COSYVOICE_REQ_SRC" ]]; then
+    echo "ERROR: $COSYVOICE_REQ_SRC not found; cannot derive CosyVoice deps." >&2
+    exit 1
+fi
+grep -viE '^[[:space:]]*(--|torch==|torchaudio==|openai-whisper|onnxruntime==|deepspeed|fastapi|gradio|grpcio|tensorboard|tensorrt|uvicorn)' \
+    "$COSYVOICE_REQ_SRC" > "$COSYVOICE_REQ"
+echo "[cosyvoice] inference requirements derived at $COSYVOICE_REQ:"
+cat "$COSYVOICE_REQ"
+
 echo "===== step 4/5: CosyVoice3 ====="
 CUDA_VISIBLE_DEVICES=1 COSYVOICE_REPO="$COSYVOICE_REPO" \
-    "${COSYVOICE_UV[@]}" python scripts/run_tts_comparison.py \
+    "${COSYVOICE_UV[@]}" --with-requirements "$COSYVOICE_REQ" \
+    python scripts/run_tts_comparison.py \
     "${COMMON_ARGS[@]}" \
     --backends cosyvoice3
 
