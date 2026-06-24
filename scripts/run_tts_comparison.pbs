@@ -108,6 +108,7 @@ COSYVOICE_UV=(
     --with "HyperPyYAML==1.2.3"
     --with "inflect==7.3.1"
     --with "librosa==0.10.2"
+    --with "lightning==2.2.4"
     --with "modelscope==1.20.0"
     --with "omegaconf==2.3.0"
     --with "onnxruntime-gpu==1.18.0"
