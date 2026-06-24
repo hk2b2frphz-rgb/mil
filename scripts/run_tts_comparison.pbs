@@ -120,6 +120,7 @@ COSYVOICE_UV=(
     --with "openai-whisper>=20240930"
     --with "protobuf==4.25"
     --with "pyworld==0.3.4"
+    --with "rich==13.7.1"
     --with "soundfile==0.12.1"
     --with "x-transformers==2.11.24"
     --with "wetext==0.0.4"
