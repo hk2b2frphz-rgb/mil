@@ -64,6 +64,7 @@ if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
 fi
 
 PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
+PYPI_INDEX_URL="${PYPI_INDEX_URL:-https://pypi.org/simple}"
 TORCH_SPEC="${TORCH_SPEC:-torch==${TORCH_VERSION}+${UV_TORCH_BACKEND}}"
 VLLM_INSTALL_SPEC="${VLLM_INSTALL_SPEC:-vllm==${VLLM_VERSION}}"
 VLLM_PYTHON="$VLLM_ENV_DIR/bin/python"
@@ -86,6 +87,7 @@ echo "vllm_version:  $VLLM_VERSION"
 echo "vllm_install:  $VLLM_INSTALL_SPEC"
 echo "venv:          $VLLM_ENV_DIR"
 echo "torch_index:   $PYTORCH_INDEX_URL"
+echo "pypi_index:    $PYPI_INDEX_URL"
 echo "started_at:    $(date -Iseconds)"
 echo "======================================"
 
@@ -98,7 +100,7 @@ if [[ "$VLLM_RECREATE_ENV" == "1" ]]; then
 fi
 uv venv "$VLLM_ENV_DIR"
 uv pip install --python "$VLLM_PYTHON" --index-url "$PYTORCH_INDEX_URL" "$TORCH_SPEC"
-uv pip install --python "$VLLM_PYTHON" --extra-index-url "$PYTORCH_INDEX_URL" "$VLLM_INSTALL_SPEC"
+uv pip install --python "$VLLM_PYTHON" --index-url "$PYPI_INDEX_URL" "$VLLM_INSTALL_SPEC"
 if [[ -n "${VLLM_EXTRA_DEPS:-}" ]]; then
     uv pip install --python "$VLLM_PYTHON" $VLLM_EXTRA_DEPS
 fi
