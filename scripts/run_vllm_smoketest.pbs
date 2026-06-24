@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+#PBS -N vllm_smoke
+#PBS -q xan_s
+# TODO(cluster): verify that `select=1:res=small` guarantees one A100 GPU.
+#PBS -l select=1:res=small
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -V
+#PBS -S /bin/bash
+
+# vLLM smoke test for loading a single model on one A100 80GB GPU.
+# This only verifies that the model loads and returns inference; it is not a
+# production generation configuration.
+#
+# Usage:
+#   gpt-oss:  qsub -V scripts/run_vllm_smoketest.pbs
+#   qwen:     VLLM_MODEL=Qwen/Qwen3-30B-A3B qsub -V scripts/run_vllm_smoketest.pbs
+# Note: Qwen3-30B-A3B HF repo ID may need verification -- check HuggingFace if model fails to load
+# TODO: verify exact HF repo ID.
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+if [[ -f "$PWD/scripts/setup_proxy.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$PWD/scripts/setup_proxy.sh"
+fi
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH." >&2
+    exit 1
+}
+command -v curl >/dev/null 2>&1 || {
+    echo "ERROR: curl is not available on PATH." >&2
+    exit 1
+}
+
+export VLLM_MODEL="${VLLM_MODEL:-openai/gpt-oss-120b}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export PORT="${PORT:-8000}"
+export MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+
+SANITIZED_MODEL="${VLLM_MODEL//\//_}"
+mkdir -p experiments/pbs_logs
+JOB_LOG="experiments/pbs_logs/vllm_smoke_${SANITIZED_MODEL}.log"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
+echo "===== vLLM smoke test ====="
+echo "job_id:        ${PBS_JOBID:-n/a}"
+echo "host:          $(hostname)"
+echo "model:         $VLLM_MODEL"
+echo "cuda_devices:  $CUDA_VISIBLE_DEVICES"
+echo "port:          $PORT"
+echo "max_model_len: $MAX_MODEL_LEN"
+echo "started_at:    $(date -Iseconds)"
+echo "==========================="
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+fi
+
+uv run --isolated --with vllm vllm serve "$VLLM_MODEL" \
+    --tensor-parallel-size 1 \
+    --host 127.0.0.1 \
+    --port "$PORT" \
+    --max-model-len "$MAX_MODEL_LEN" &
+VLLM_PID=$!
+
+cleanup() {
+    if kill -0 "$VLLM_PID" 2>/dev/null; then
+        kill "$VLLM_PID"
+        wait "$VLLM_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+VLLM_READY=0
+for _ in $(seq 1 120); do
+    if curl --fail --silent --show-error \
+        "http://127.0.0.1:${PORT}/v1/models" >/dev/null; then
+        VLLM_READY=1
+        break
+    fi
+    if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+        echo "ERROR: vLLM exited before becoming healthy." >&2
+        exit 1
+    fi
+    sleep 5
+done
+if [[ "$VLLM_READY" != "1" ]]; then
+    echo "ERROR: vLLM health check timed out after 10 minutes." >&2
+    exit 1
+fi
+
+CHAT_RESPONSE="$(
+    curl --silent --show-error \
+        --write-out '\n%{http_code}' \
+        --header "Content-Type: application/json" \
+        --data '{"model":"'"$VLLM_MODEL"'","messages":[{"role":"user","content":"こんにちは、自己紹介して"}],"max_tokens":64}' \
+        "http://127.0.0.1:${PORT}/v1/chat/completions"
+)"
+HTTP_STATUS="${CHAT_RESPONSE##*$'\n'}"
+RESPONSE_BODY="${CHAT_RESPONSE%$'\n'*}"
+
+echo "$RESPONSE_BODY"
+
+if [[ "$HTTP_STATUS" != "200" ]]; then
+    echo "ERROR: chat completion returned HTTP status $HTTP_STATUS." >&2
+    exit 1
+fi
+if ! printf '%s\n' "$RESPONSE_BODY" | grep -q '"choices"'; then
+    echo "ERROR: chat completion response did not contain choices." >&2
+    exit 1
+fi
+
+echo "SMOKE TEST PASSED: $VLLM_MODEL"
+echo "finished_at: $(date -Iseconds)"
