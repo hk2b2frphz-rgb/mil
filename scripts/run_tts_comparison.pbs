@@ -122,7 +122,12 @@ COSYVOICE_UV=(
     --with "modelscope==1.20.0"
     --with "omegaconf==2.3.0"
     --with "onnxruntime-gpu==1.18.0"
-    --with "openai-whisper==20231117"
+    # openai-whisper is pulled in via CosyVoice's requirements but is not used by
+    # CosyVoice2 zero-shot / inference_instruct2. The old 20231117 pin requires
+    # triton==2.0.0, which conflicts with the cluster torch (cu121) that needs
+    # triton 3.x. Drop the pin so a recent whisper (triton>=2, no upper bound) is
+    # selected and the env resolves.
+    --with "openai-whisper>=20240930"
     --with "protobuf==4.25"
     --with "pyworld==0.3.4"
     --with "soundfile==0.12.1"

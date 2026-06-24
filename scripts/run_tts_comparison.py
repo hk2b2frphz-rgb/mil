@@ -385,6 +385,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kokoro-voice-user", default="jm_kumo")
     parser.add_argument("--lead-in-sec", type=float, default=0.3)
     parser.add_argument("--gap-sec", type=float, default=0.4)
+    parser.add_argument(
+        "--max-dialogues",
+        type=int,
+        default=3,
+        help="Truncate loaded dialogues to at most N (across all input files).",
+    )
     return parser.parse_args()
 
 
@@ -396,6 +402,8 @@ def main() -> None:
         args.emotion_conditions, SUPPORTED_CONDITIONS, "--emotion-conditions"
     )
     dialogues = load_and_validate_dialogues(args.dialogues_jsonl)
+    if args.max_dialogues is not None:
+        dialogues = dialogues[: args.max_dialogues]
     mild_map = load_mild_map(args.mild_emotion_map)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
