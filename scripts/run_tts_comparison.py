@@ -235,6 +235,15 @@ def collect_sidecars(out_dir: Path) -> dict[str, list[dict[str, Any]]]:
     for path in sorted(out_dir.glob("*/*.json")):
         with path.open("r", encoding="utf-8") as handle:
             row = json.load(handle)
+        backend = str(row.get("backend", "unknown"))
+        row.setdefault("backend", backend)
+        row.setdefault(
+            "voice_mode",
+            BACKEND_VOICE_MODES.get(
+                backend,
+                f"legacy output ({row.get('emotion_condition', 'unknown condition')})",
+            ),
+        )
         row["_json_path"] = path
         row["_wav_path"] = path.with_suffix(".wav")
         grouped.setdefault(str(row["dialogue_id"]), []).append(row)

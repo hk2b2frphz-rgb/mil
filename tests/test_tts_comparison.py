@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -21,6 +23,28 @@ class TTSComparisonImportTests(unittest.TestCase):
         requested = ["on", "off", "mild"]
         for backend in ("cosyvoice3", "qwen3", "kokoro"):
             self.assertEqual(module.conditions_for_backend(backend, requested), ["taste"])
+
+    def test_index_tolerates_legacy_sidecars_without_voice_mode(self) -> None:
+        module = importlib.import_module("scripts.run_tts_comparison")
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            dialogue_dir = out_dir / "legacy_case"
+            dialogue_dir.mkdir()
+            wav_path = dialogue_dir / "qwen3__on.wav"
+            wav_path.write_bytes(b"")
+            (dialogue_dir / "qwen3__on.json").write_text(
+                json.dumps(
+                    {
+                        "dialogue_id": "legacy_case",
+                        "title": "legacy",
+                        "backend": "qwen3",
+                        "emotion_condition": "on",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            module.write_indexes(out_dir)
+            self.assertIn("fixed preset voices", (out_dir / "INDEX.html").read_text())
 
 
 if __name__ == "__main__":
