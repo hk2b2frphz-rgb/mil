@@ -48,10 +48,22 @@ command -v curl >/dev/null 2>&1 || {
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PORT="${PORT:-8000}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+export UV_TORCH_BACKEND="${UV_TORCH_BACKEND:-cu128}"
+export VLLM_VERSION="${VLLM_VERSION:-0.23.0}"
+export VLLM_CUDA_VERSION="${VLLM_CUDA_VERSION:-128}"
 # Per-model startup budget: HEALTH_RETRIES * 5s (default 240 -> 20 min) to cover
 # first-time weight downloads of the 120B model.
 HEALTH_RETRIES="${HEALTH_RETRIES:-240}"
 VLLM_MODELS="${VLLM_MODELS:-Qwen/Qwen3.6-27B Qwen/Qwen3.6-35B-A3B openai/gpt-oss-120b}"
+
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+    echo "ERROR: PORT must be an integer from 1 to 65535; got '$PORT'." >&2
+    exit 1
+fi
+
+CPU_ARCH="$(uname -m)"
+VLLM_WHEEL_URL="${VLLM_WHEEL_URL:-https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${VLLM_CUDA_VERSION}-cp38-abi3-manylinux_2_35_${CPU_ARCH}.whl}"
+PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu${VLLM_CUDA_VERSION}}"
 
 mkdir -p experiments/pbs_logs
 JOB_LOG="experiments/pbs_logs/vllm_smoke_seq.log"
@@ -64,6 +76,10 @@ echo "models:        $VLLM_MODELS"
 echo "cuda_devices:  $CUDA_VISIBLE_DEVICES"
 echo "port:          $PORT"
 echo "max_model_len: $MAX_MODEL_LEN"
+echo "torch_backend: $UV_TORCH_BACKEND"
+echo "vllm_version:  $VLLM_VERSION"
+echo "vllm_cuda:     cu$VLLM_CUDA_VERSION"
+echo "vllm_wheel:    $VLLM_WHEEL_URL"
 echo "started_at:    $(date -Iseconds)"
 echo "======================================"
 
@@ -90,7 +106,10 @@ run_one() {
         fi
     }
 
-    uv run --isolated --with vllm vllm serve "$model" \
+    uv run --isolated \
+        --extra-index-url "$PYTORCH_INDEX_URL" \
+        --with "$VLLM_WHEEL_URL" \
+        vllm serve "$model" \
         --tensor-parallel-size 1 \
         --host 127.0.0.1 \
         --port "$PORT" \
