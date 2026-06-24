@@ -124,7 +124,7 @@ run_one() {
         curl --silent --show-error \
             --write-out '\n%{http_code}' \
             --header "Content-Type: application/json" \
-            --data '{"model":"'"$model"'","messages":[{"role":"user","content":"こんにちは、自己紹介して"}],"max_tokens":64}' \
+            --data '{"model":"'"$model"'","messages":[{"role":"user","content":"Hello, please introduce yourself briefly."}],"max_tokens":64}' \
             "http://127.0.0.1:${PORT}/v1/chat/completions"
     )" || {
         echo "ERROR: chat completion request failed for $model." >&2

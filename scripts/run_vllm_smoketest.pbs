@@ -98,7 +98,7 @@ CHAT_RESPONSE="$(
     curl --silent --show-error \
         --write-out '\n%{http_code}' \
         --header "Content-Type: application/json" \
-        --data '{"model":"'"$VLLM_MODEL"'","messages":[{"role":"user","content":"こんにちは、自己紹介して"}],"max_tokens":64}' \
+        --data '{"model":"'"$VLLM_MODEL"'","messages":[{"role":"user","content":"Hello, please introduce yourself briefly."}],"max_tokens":64}' \
         "http://127.0.0.1:${PORT}/v1/chat/completions"
 )"
 HTTP_STATUS="${CHAT_RESPONSE##*$'\n'}"
