@@ -8,16 +8,16 @@
 #PBS -V
 #PBS -S /bin/bash
 
-# Sequential vLLM smoke test on a single A100 80GB GPU.
+# Sequential vLLM smoke test on a single GPU allocation.
 # Loads each model one at a time (only one resident at a time, so each fits on
-# one card), verifies it serves inference, then tears it down before the next.
+# the allocation), verifies it serves inference, then tears it down before the next.
 # This only checks that models load and return inference; it is not a
 # production generation configuration.
 #
 # Models (default order):
-#   Qwen/Qwen3.6-27B       (dense, ~54GB bf16)
-#   Qwen/Qwen3.6-35B-A3B   (MoE 35B/3B active, ~70GB bf16 -- tightest)
-#   openai/gpt-oss-120b    (MXFP4, ~63GB)
+#   Qwen/Qwen3.6-27B-FP8       (Qwen recipe: vLLM >= 0.17.0)
+#   Qwen/Qwen3.6-35B-A3B-FP8   (Qwen recipe: vLLM >= 0.17.0)
+#   openai/gpt-oss-120b        (MXFP4, fits one A100 80GB per vLLM recipe)
 #
 # Submit:
 #   qsub -V scripts/run_vllm_smoketest_seq.pbs
@@ -50,13 +50,20 @@ export PORT="${PORT:-8000}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 export UV_TORCH_BACKEND="${UV_TORCH_BACKEND:-cu128}"
 export TORCH_VERSION="${TORCH_VERSION:-2.8.0}"
-export VLLM_VERSION="${VLLM_VERSION:-0.10.2}"
+export VLLM_VERSION="${VLLM_VERSION:-0.23.0}"
 export VLLM_ENV_DIR="${VLLM_ENV_DIR:-.venv_vllm_smoke_seq}"
 export VLLM_RECREATE_ENV="${VLLM_RECREATE_ENV:-1}"
+export VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
+export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
+export VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-1024}"
+export VLLM_QWEN_REASONING_PARSER="${VLLM_QWEN_REASONING_PARSER:-qwen3}"
+export VLLM_QWEN_CHAT_TEMPLATE_KWARGS="${VLLM_QWEN_CHAT_TEMPLATE_KWARGS:-}"
+export VLLM_PREPARE_GPTOSS_TIKTOKEN="${VLLM_PREPARE_GPTOSS_TIKTOKEN:-1}"
+export TIKTOKEN_ENCODINGS_DIR="${TIKTOKEN_ENCODINGS_DIR:-$PWD/.cache/tiktoken_encodings}"
 # Per-model startup budget: HEALTH_RETRIES * 5s (default 240 -> 20 min) to cover
 # first-time weight downloads of the 120B model.
 HEALTH_RETRIES="${HEALTH_RETRIES:-240}"
-VLLM_MODELS="${VLLM_MODELS:-Qwen/Qwen3.6-27B Qwen/Qwen3.6-35B-A3B openai/gpt-oss-120b}"
+VLLM_MODELS="${VLLM_MODELS:-Qwen/Qwen3.6-27B-FP8 Qwen/Qwen3.6-35B-A3B-FP8 openai/gpt-oss-120b}"
 
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
     echo "ERROR: PORT must be an integer from 1 to 65535; got '$PORT'." >&2
@@ -85,6 +92,9 @@ echo "torch_backend: $UV_TORCH_BACKEND"
 echo "torch_spec:    $TORCH_SPEC"
 echo "vllm_version:  $VLLM_VERSION"
 echo "vllm_install:  $VLLM_INSTALL_SPEC"
+echo "tp_size:       $VLLM_TENSOR_PARALLEL_SIZE"
+echo "gpu_mem_util:  $VLLM_GPU_MEMORY_UTILIZATION"
+echo "max_batched:   $VLLM_MAX_NUM_BATCHED_TOKENS"
 echo "venv:          $VLLM_ENV_DIR"
 echo "torch_index:   $PYTORCH_INDEX_URL"
 echo "pypi_index:    $PYPI_INDEX_URL"
@@ -109,6 +119,30 @@ import torch
 print("torch:", torch.__version__, "cuda:", torch.version.cuda)
 PY
 
+prepare_gptoss_tiktoken() {
+    local model="$1"
+    if [[ "$VLLM_PREPARE_GPTOSS_TIKTOKEN" != "1" ]]; then
+        return 0
+    fi
+    if [[ "$model" != openai/gpt-oss-* ]]; then
+        return 0
+    fi
+
+    mkdir -p "$TIKTOKEN_ENCODINGS_DIR"
+    export TIKTOKEN_ENCODINGS_BASE="$TIKTOKEN_ENCODINGS_DIR"
+    if [[ ! -s "$TIKTOKEN_ENCODINGS_DIR/o200k_base.tiktoken" ]]; then
+        curl --fail --location --silent --show-error \
+            --output "$TIKTOKEN_ENCODINGS_DIR/o200k_base.tiktoken" \
+            "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
+    fi
+    if [[ ! -s "$TIKTOKEN_ENCODINGS_DIR/cl100k_base.tiktoken" ]]; then
+        curl --fail --location --silent --show-error \
+            --output "$TIKTOKEN_ENCODINGS_DIR/cl100k_base.tiktoken" \
+            "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
+    fi
+    echo "tiktoken_encodings_base: $TIKTOKEN_ENCODINGS_BASE"
+}
+
 # Smoke-test one model. Returns 0 on PASS, non-zero on FAIL. Designed to be
 # called from an `if` so a single failure never aborts the whole job.
 run_one() {
@@ -120,6 +154,7 @@ run_one() {
     echo ""
     echo "########## MODEL: $model ##########"
     echo "started_at: $(date -Iseconds)"
+    prepare_gptoss_tiktoken "$model"
 
     cleanup_model() {
         if [[ -n "$vllm_pid" ]] && kill -0 "$vllm_pid" 2>/dev/null; then
@@ -128,12 +163,25 @@ run_one() {
         fi
     }
 
-    "$VLLM_BIN" serve "$model" \
-        --tensor-parallel-size 1 \
-        --host 127.0.0.1 \
-        --port "$PORT" \
-        --max-model-len "$MAX_MODEL_LEN" \
-        > >(tee -a "$model_log") 2>&1 &
+    local -a serve_args=(
+        serve "$model"
+        --tensor-parallel-size "$VLLM_TENSOR_PARALLEL_SIZE"
+        --host 127.0.0.1
+        --port "$PORT"
+        --max-model-len "$MAX_MODEL_LEN"
+        --gpu-memory-utilization "$VLLM_GPU_MEMORY_UTILIZATION"
+    )
+    if [[ -n "$VLLM_MAX_NUM_BATCHED_TOKENS" ]]; then
+        serve_args+=(--max-num-batched-tokens "$VLLM_MAX_NUM_BATCHED_TOKENS")
+    fi
+    if [[ "$model" == Qwen/Qwen3* || "$model" == Qwen/Qwen3.* ]]; then
+        serve_args+=(--reasoning-parser "$VLLM_QWEN_REASONING_PARSER")
+        if [[ -n "$VLLM_QWEN_CHAT_TEMPLATE_KWARGS" ]]; then
+            serve_args+=(--default-chat-template-kwargs "$VLLM_QWEN_CHAT_TEMPLATE_KWARGS")
+        fi
+    fi
+
+    "$VLLM_BIN" "${serve_args[@]}" > >(tee -a "$model_log") 2>&1 &
     vllm_pid=$!
 
     local ready=0
