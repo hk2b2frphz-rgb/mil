@@ -3,7 +3,7 @@
 #PBS -q xan_s
 # TODO(cluster): verify that `select=1:res=small` guarantees one A100 GPU.
 #PBS -l select=1:res=small
-#PBS -l walltime=01:00:00
+#PBS -l walltime=03:00:00
 #PBS -j oe
 #PBS -V
 #PBS -S /bin/bash
@@ -149,7 +149,11 @@ prepare_gptoss_tiktoken() {
 
 prepare_gptoss_tiktoken "$VLLM_MODEL"
 
-SMOKE_MODEL="$VLLM_MODEL" "$VLLM_PYTHON" scripts/vllm_smoke_infer.py
+MM_LIMIT="${VLLM_LIMIT_MM_PER_PROMPT:-}"
+if [[ -z "$MM_LIMIT" && "$VLLM_MODEL" == Qwen/* ]]; then
+    MM_LIMIT='{"image": 0, "video": 0}'
+fi
+VLLM_LIMIT_MM_PER_PROMPT="$MM_LIMIT" SMOKE_MODEL="$VLLM_MODEL" "$VLLM_PYTHON" scripts/vllm_smoke_infer.py
 
 echo "SMOKE TEST PASSED: $VLLM_MODEL"
 echo "finished_at: $(date -Iseconds)"

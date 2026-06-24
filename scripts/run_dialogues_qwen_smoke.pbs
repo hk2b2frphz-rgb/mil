@@ -3,7 +3,7 @@
 #PBS -N fd_qwen_smoke
 #PBS -q xan_s
 #PBS -l select=1:res=small
-#PBS -l walltime=02:00:00
+#PBS -l walltime=06:00:00
 #PBS -j oe
 #PBS -V
 
@@ -43,6 +43,12 @@ export VLLM_VERSION="${VLLM_VERSION:-0.21.0}"
 export VLLM_CUDA_MODULE="${VLLM_CUDA_MODULE:-}"
 export VLLM_ENV_DIR="${VLLM_ENV_DIR:-.venv_vllm_qwen_smoke}"
 export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
+if [[ ! -v VLLM_LIMIT_MM_PER_PROMPT ]]; then
+    export VLLM_LIMIT_MM_PER_PROMPT='{"image": 0, "video": 0}'
+else
+    export VLLM_LIMIT_MM_PER_PROMPT
+fi
+HEALTH_RETRIES="${HEALTH_RETRIES:-360}"
 
 VLLM_PYTHON="$VLLM_ENV_DIR/bin/python"
 VLLM_BIN="$VLLM_ENV_DIR/bin/vllm"
@@ -81,6 +87,7 @@ echo "torch_backend: $UV_TORCH_BACKEND"
 echo "vllm_version:  $VLLM_VERSION"
 echo "cuda_module:   ${VLLM_CUDA_MODULE:-n/a}"
 echo "vllm_install:  $VLLM_INSTALL_SPEC"
+echo "mm_limit:      $VLLM_LIMIT_MM_PER_PROMPT"
 echo "venv:          $VLLM_ENV_DIR"
 echo "out_root:      $OUT_ROOT"
 echo "started_at:    $(date -Iseconds)"
@@ -127,6 +134,9 @@ vllm_args=(
 if [[ -n "${VLLM_QWEN_CHAT_TEMPLATE_KWARGS:-}" ]]; then
     vllm_args+=(--default-chat-template-kwargs "$VLLM_QWEN_CHAT_TEMPLATE_KWARGS")
 fi
+if [[ -n "$VLLM_LIMIT_MM_PER_PROMPT" ]]; then
+    vllm_args+=(--limit-mm-per-prompt "$VLLM_LIMIT_MM_PER_PROMPT")
+fi
 
 "${vllm_args[@]}" &
 VLLM_PID=$!
@@ -140,7 +150,7 @@ cleanup() {
 trap cleanup EXIT
 
 VLLM_READY=0
-for _ in $(seq 1 120); do
+for ((i = 0; i < HEALTH_RETRIES; i++)); do
     if curl --fail --silent --show-error \
         "http://127.0.0.1:${PORT}/v1/models" >/dev/null; then
         VLLM_READY=1
@@ -153,7 +163,7 @@ for _ in $(seq 1 120); do
     sleep 5
 done
 if [[ "$VLLM_READY" != "1" ]]; then
-    echo "ERROR: vLLM health check timed out after 10 minutes." >&2
+    echo "ERROR: vLLM health check timed out after $((HEALTH_RETRIES * 5)) seconds." >&2
     exit 1
 fi
 

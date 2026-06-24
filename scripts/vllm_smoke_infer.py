@@ -21,6 +21,15 @@ def main() -> int:
     max_num_batched_tokens = os.environ.get("VLLM_MAX_NUM_BATCHED_TOKENS", "")
     if max_num_batched_tokens:
         kwargs["max_num_batched_tokens"] = int(max_num_batched_tokens)
+    limit_mm_per_prompt = os.environ.get("VLLM_LIMIT_MM_PER_PROMPT", "")
+    if limit_mm_per_prompt:
+        import json
+
+        try:
+            kwargs["limit_mm_per_prompt"] = json.loads(limit_mm_per_prompt)
+        except json.JSONDecodeError as exc:
+            print(f"ERROR: invalid VLLM_LIMIT_MM_PER_PROMPT JSON: {exc}", file=sys.stderr)
+            return 2
 
     llm = LLM(**kwargs)
     outs = llm.chat(
