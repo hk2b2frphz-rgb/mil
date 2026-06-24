@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 #PBS -S /bin/bash
 #PBS -N tts_compare
-#PBS -q xan_s
-#PBS -l select=1:res=middle
+#PBS -q xvn_s
+#PBS -l select=1:res=small
 #PBS -l walltime=12:00:00
 #PBS -j oe
 #PBS -V
 
-# TTS smoke phase: one self-contained job, two A100s, no manual audio.
+# TTS smoke phase: one self-contained small-GPU job, no manual audio.
 #
-# CLUSTER TODO: confirm that `select=1:res=middle` is the local two-A100
-# allocation string. It is the value used by this repository's existing
-# two-GPU xan_s jobs. If the site requires an explicit GPU count, replace the
+# CLUSTER TODO: confirm that `select=1:res=small` is the local small GPU
+# allocation string. If the site requires an explicit GPU count, replace the
 # directive above (for example with the site's equivalent of
-# `select=1:res=middle:ngpus=2`) before submitting.
+# `select=1:res=small:ngpus=1`) before submitting.
 #
 # Submit:
 #   qsub -V scripts/run_tts_comparison.pbs

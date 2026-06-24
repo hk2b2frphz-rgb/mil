@@ -483,7 +483,6 @@ Download `listening/` and open `INDEX.html`, or use `INDEX.md`. Each JSON
 sidecar records the turns, voice mode, sample rate, and duration.
 
 Cluster-specific requirement: `scripts/run_tts_comparison.pbs` defaults to
-`#PBS -q xan_s` and `#PBS -l select=1:res=middle`, matching this repository's
-existing two-GPU A100 jobs. Before submission, confirm that this is still the
-site's two-A100 select string; replace that directive if the scheduler requires
-an explicit GPU count.
+`#PBS -q xvn_s` and `#PBS -l select=1:res=small`. Before submission, confirm
+that this is still the site's small GPU select string; replace that directive if
+the scheduler requires an explicit GPU count.
