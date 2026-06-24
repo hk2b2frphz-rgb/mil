@@ -41,6 +41,7 @@ export VLLM_MODEL="${VLLM_MODEL:-openai/gpt-oss-120b}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PORT="${PORT:-8000}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+export UV_TORCH_BACKEND="${UV_TORCH_BACKEND:-auto}"
 
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
     echo "ERROR: PORT must be an integer from 1 to 65535; got '$PORT'." >&2
@@ -59,6 +60,7 @@ echo "model:         $VLLM_MODEL"
 echo "cuda_devices:  $CUDA_VISIBLE_DEVICES"
 echo "port:          $PORT"
 echo "max_model_len: $MAX_MODEL_LEN"
+echo "torch_backend: $UV_TORCH_BACKEND"
 echo "started_at:    $(date -Iseconds)"
 echo "==========================="
 
