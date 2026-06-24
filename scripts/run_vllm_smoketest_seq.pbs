@@ -98,6 +98,7 @@ if [[ "$VLLM_RECREATE_ENV" == "1" ]]; then
 fi
 uv venv "$VLLM_ENV_DIR"
 uv pip install --python "$VLLM_PYTHON" --index-url "$PYTORCH_INDEX_URL" "$TORCH_SPEC"
+uv pip install --python "$VLLM_PYTHON" "numpy<2"
 uv pip install --python "$VLLM_PYTHON" --no-deps --only-binary :all: "$VLLM_INSTALL_SPEC"
 if [[ -n "${VLLM_EXTRA_DEPS:-}" ]]; then
     uv pip install --python "$VLLM_PYTHON" $VLLM_EXTRA_DEPS
