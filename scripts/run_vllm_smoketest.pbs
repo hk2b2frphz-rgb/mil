@@ -39,7 +39,6 @@ command -v curl >/dev/null 2>&1 || {
 
 export VLLM_MODEL="${VLLM_MODEL:-openai/gpt-oss-120b}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-export PORT="${PORT:-8000}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 export UV_TORCH_BACKEND="${UV_TORCH_BACKEND:-cu129}"
 # Pinned to 0.21.0: vLLM 0.22+ hard-require CUDA 13 (nvidia-cutlass-dsl[cu13]) which the 570.x driver cannot run.
@@ -48,16 +47,16 @@ export VLLM_VERSION="${VLLM_VERSION:-0.21.0}"
 # cuda12.x module only if your cluster requires an explicit CUDA module; do NOT
 # use a cuda13.x module -- the node driver (570.x) does not support CUDA 13.
 export VLLM_CUDA_MODULE="${VLLM_CUDA_MODULE:-}"
+export VLLM_CUDART_SONAME="${VLLM_CUDART_SONAME:-libcudart.so.12}"
 export VENV="${VENV:-.venv_vllm_smoke}"
-
-if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
-    echo "ERROR: PORT must be an integer from 1 to 65535; got '$PORT'." >&2
-    exit 1
-fi
+export VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
+export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
+export VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-1024}"
+export VLLM_PREPARE_GPTOSS_TIKTOKEN="${VLLM_PREPARE_GPTOSS_TIKTOKEN:-1}"
+export TIKTOKEN_ENCODINGS_DIR="${TIKTOKEN_ENCODINGS_DIR:-$PWD/.cache/tiktoken_encodings}"
 
 SANITIZED_MODEL="${VLLM_MODEL//\//_}"
 VLLM_PYTHON="$VENV/bin/python"
-VLLM_BIN="$VENV/bin/vllm"
 CPU_ARCH="$(uname -m)"
 VLLM_WHEEL_URL="${VLLM_WHEEL_URL:-https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu129-cp38-abi3-manylinux_2_34_${CPU_ARCH}.whl}"
 VLLM_INSTALL_SPEC="${VLLM_INSTALL_SPEC:-$VLLM_WHEEL_URL}"
@@ -70,12 +69,15 @@ echo "job_id:        ${PBS_JOBID:-n/a}"
 echo "host:          $(hostname)"
 echo "model:         $VLLM_MODEL"
 echo "cuda_devices:  $CUDA_VISIBLE_DEVICES"
-echo "port:          $PORT"
 echo "max_model_len: $MAX_MODEL_LEN"
 echo "torch_backend: $UV_TORCH_BACKEND"
 echo "vllm_version:  $VLLM_VERSION"
+echo "cudart_soname: $VLLM_CUDART_SONAME"
 echo "cuda_module:   ${VLLM_CUDA_MODULE:-n/a}"
 echo "vllm_install:  $VLLM_INSTALL_SPEC"
+echo "tp_size:       $VLLM_TENSOR_PARALLEL_SIZE"
+echo "gpu_mem_util:  $VLLM_GPU_MEMORY_UTILIZATION"
+echo "max_batched:   $VLLM_MAX_NUM_BATCHED_TOKENS"
 echo "venv:          $VENV"
 echo "started_at:    $(date -Iseconds)"
 echo "==========================="
@@ -104,66 +106,77 @@ fi
 uv venv "$VENV"
 # Put the venv bin on PATH so ninja/cmake/python resolve by name. We invoke vllm
 # by absolute path, which does NOT activate the venv, so without this torch's
-# inductor (shutil.which("ninja")) cannot find ninja at serve time.
+# inductor (shutil.which("ninja")) cannot find ninja at inference time.
 export PATH="$(cd "$VENV" && pwd)/bin:$PATH"
 # Build tools for any source builds at install time and for torch.compile/inductor
-# kernel compilation at serve time (ninja must be on PATH inside the venv).
+# kernel compilation at inference time (ninja must be on PATH inside the venv).
 uv pip install --python "$VLLM_PYTHON" ${VLLM_BUILD_TOOLS:-ninja cmake}
 uv pip install --python "$VLLM_PYTHON" "$VLLM_INSTALL_SPEC" --torch-backend="$UV_TORCH_BACKEND"
+"$VLLM_PYTHON" - <<'PY'
+import ctypes
+import os
+import torch
+import vllm
+print("torch:", torch.__version__, "cuda:", torch.version.cuda)
+print("vllm:", vllm.__version__)
+ctypes.CDLL(os.environ["VLLM_CUDART_SONAME"])
+print(os.environ["VLLM_CUDART_SONAME"], "OK")
+PY
 
-"$VLLM_BIN" serve "$VLLM_MODEL" \
-    --tensor-parallel-size 1 \
-    --host 127.0.0.1 \
-    --port "$PORT" \
-    --max-model-len "$MAX_MODEL_LEN" &
-VLLM_PID=$!
-
-cleanup() {
-    if kill -0 "$VLLM_PID" 2>/dev/null; then
-        kill "$VLLM_PID"
-        wait "$VLLM_PID" 2>/dev/null || true
+prepare_gptoss_tiktoken() {
+    local model="$1"
+    if [[ "$VLLM_PREPARE_GPTOSS_TIKTOKEN" != "1" ]]; then
+        return 0
     fi
+    if [[ "$model" != openai/gpt-oss-* ]]; then
+        return 0
+    fi
+
+    mkdir -p "$TIKTOKEN_ENCODINGS_DIR"
+    export TIKTOKEN_ENCODINGS_BASE="$TIKTOKEN_ENCODINGS_DIR"
+    if [[ ! -s "$TIKTOKEN_ENCODINGS_DIR/o200k_base.tiktoken" ]]; then
+        curl --fail --location --silent --show-error \
+            --output "$TIKTOKEN_ENCODINGS_DIR/o200k_base.tiktoken" \
+            "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
+    fi
+    if [[ ! -s "$TIKTOKEN_ENCODINGS_DIR/cl100k_base.tiktoken" ]]; then
+        curl --fail --location --silent --show-error \
+            --output "$TIKTOKEN_ENCODINGS_DIR/cl100k_base.tiktoken" \
+            "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
+    fi
+    echo "tiktoken_encodings_base: $TIKTOKEN_ENCODINGS_BASE"
 }
-trap cleanup EXIT
 
-VLLM_READY=0
-for _ in $(seq 1 120); do
-    if curl --fail --silent --show-error \
-        "http://127.0.0.1:${PORT}/v1/models" >/dev/null; then
-        VLLM_READY=1
-        break
-    fi
-    if ! kill -0 "$VLLM_PID" 2>/dev/null; then
-        echo "ERROR: vLLM exited before becoming healthy." >&2
-        exit 1
-    fi
-    sleep 5
-done
-if [[ "$VLLM_READY" != "1" ]]; then
-    echo "ERROR: vLLM health check timed out after 10 minutes." >&2
-    exit 1
-fi
+prepare_gptoss_tiktoken "$VLLM_MODEL"
 
-CHAT_RESPONSE="$(
-    curl --silent --show-error \
-        --write-out '\n%{http_code}' \
-        --header "Content-Type: application/json" \
-        --data '{"model":"'"$VLLM_MODEL"'","messages":[{"role":"user","content":"Hello, please introduce yourself briefly."}],"max_tokens":64}' \
-        "http://127.0.0.1:${PORT}/v1/chat/completions"
-)"
-HTTP_STATUS="${CHAT_RESPONSE##*$'\n'}"
-RESPONSE_BODY="${CHAT_RESPONSE%$'\n'*}"
+SMOKE_MODEL="$VLLM_MODEL" "$VLLM_PYTHON" - <<'PY'
+import os
+import sys
 
-echo "$RESPONSE_BODY"
+from vllm import LLM, SamplingParams
 
-if [[ "$HTTP_STATUS" != "200" ]]; then
-    echo "ERROR: chat completion returned HTTP status $HTTP_STATUS." >&2
-    exit 1
-fi
-if ! printf '%s\n' "$RESPONSE_BODY" | grep -q '"choices"'; then
-    echo "ERROR: chat completion response did not contain choices." >&2
-    exit 1
-fi
+model = os.environ["SMOKE_MODEL"]
+kwargs = {
+    "model": model,
+    "tensor_parallel_size": int(os.environ.get("VLLM_TENSOR_PARALLEL_SIZE", "1")),
+    "max_model_len": int(os.environ.get("MAX_MODEL_LEN", "8192")),
+    "gpu_memory_utilization": float(os.environ.get("VLLM_GPU_MEMORY_UTILIZATION", "0.90")),
+}
+max_num_batched_tokens = os.environ.get("VLLM_MAX_NUM_BATCHED_TOKENS", "")
+if max_num_batched_tokens:
+    kwargs["max_num_batched_tokens"] = int(max_num_batched_tokens)
+
+llm = LLM(**kwargs)
+outs = llm.chat(
+    [{"role": "user", "content": "Hello, please introduce yourself briefly."}],
+    SamplingParams(max_tokens=64, temperature=0.0),
+)
+text = outs[0].outputs[0].text
+print(text)
+if not text.strip():
+    print(f"ERROR: empty completion for {model}", file=sys.stderr)
+    sys.exit(1)
+PY
 
 echo "SMOKE TEST PASSED: $VLLM_MODEL"
 echo "finished_at: $(date -Iseconds)"

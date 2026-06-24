@@ -10,7 +10,7 @@
 
 # Sequential vLLM smoke test on a single GPU allocation.
 # Loads each model one at a time (only one resident at a time, so each fits on
-# the allocation), verifies it serves inference, then tears it down before the next.
+# the allocation), verifies offline inference, then tears it down before the next.
 # This only checks that models load and return inference; it is not a
 # production generation configuration.
 #
@@ -65,18 +65,9 @@ export VLLM_QWEN_REASONING_PARSER="${VLLM_QWEN_REASONING_PARSER:-qwen3}"
 export VLLM_QWEN_CHAT_TEMPLATE_KWARGS="${VLLM_QWEN_CHAT_TEMPLATE_KWARGS:-}"
 export VLLM_PREPARE_GPTOSS_TIKTOKEN="${VLLM_PREPARE_GPTOSS_TIKTOKEN:-1}"
 export TIKTOKEN_ENCODINGS_DIR="${TIKTOKEN_ENCODINGS_DIR:-$PWD/.cache/tiktoken_encodings}"
-# Per-model startup budget: HEALTH_RETRIES * 5s (default 240 -> 20 min) to cover
-# first-time weight downloads of the 120B model.
-HEALTH_RETRIES="${HEALTH_RETRIES:-240}"
 VLLM_MODELS="${VLLM_MODELS:-Qwen/Qwen3.6-27B-FP8 Qwen/Qwen3.6-35B-A3B-FP8 openai/gpt-oss-120b}"
 
-if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
-    echo "ERROR: PORT must be an integer from 1 to 65535; got '$PORT'." >&2
-    exit 1
-fi
-
 VLLM_PYTHON="$VLLM_ENV_DIR/bin/python"
-VLLM_BIN="$VLLM_ENV_DIR/bin/vllm"
 CPU_ARCH="$(uname -m)"
 VLLM_WHEEL_URL="${VLLM_WHEEL_URL:-https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu129-cp38-abi3-manylinux_2_34_${CPU_ARCH}.whl}"
 VLLM_INSTALL_SPEC="${VLLM_INSTALL_SPEC:-$VLLM_WHEEL_URL}"
@@ -90,7 +81,6 @@ echo "job_id:        ${PBS_JOBID:-n/a}"
 echo "host:          $(hostname)"
 echo "models:        $VLLM_MODELS"
 echo "cuda_devices:  $CUDA_VISIBLE_DEVICES"
-echo "port:          $PORT"
 echo "max_model_len: $MAX_MODEL_LEN"
 echo "torch_backend: $UV_TORCH_BACKEND"
 echo "vllm_version:  $VLLM_VERSION"
@@ -131,10 +121,10 @@ fi
 uv venv "$VLLM_ENV_DIR"
 # Put the venv bin on PATH so ninja/cmake/python resolve by name. We invoke vllm
 # by absolute path, which does NOT activate the venv, so without this torch's
-# inductor (shutil.which("ninja")) cannot find ninja at serve time.
+# inductor (shutil.which("ninja")) cannot find ninja at inference time.
 export PATH="$(cd "$VLLM_ENV_DIR" && pwd)/bin:$PATH"
 # Build tools for any source builds at install time and for torch.compile/inductor
-# kernel compilation at serve time (ninja must be on PATH inside the venv).
+# kernel compilation at inference time (ninja must be on PATH inside the venv).
 uv pip install --python "$VLLM_PYTHON" ${VLLM_BUILD_TOOLS:-ninja cmake}
 uv pip install --python "$VLLM_PYTHON" "$VLLM_INSTALL_SPEC" --torch-backend="$UV_TORCH_BACKEND"
 if [[ -n "${VLLM_EXTRA_DEPS:-}" ]]; then
@@ -182,90 +172,43 @@ run_one() {
     local model="$1"
     local sanitized="${model//\//_}"
     local model_log="experiments/pbs_logs/vllm_smoke_${sanitized}.log"
-    local vllm_pid=""
 
     echo ""
     echo "########## MODEL: $model ##########"
     echo "started_at: $(date -Iseconds)"
     prepare_gptoss_tiktoken "$model"
 
-    cleanup_model() {
-        if [[ -n "$vllm_pid" ]] && kill -0 "$vllm_pid" 2>/dev/null; then
-            kill "$vllm_pid" 2>/dev/null || true
-            wait "$vllm_pid" 2>/dev/null || true
-        fi
-    }
+    if ! SMOKE_MODEL="$model" "$VLLM_PYTHON" - <<'PY' > >(tee -a "$model_log") 2>&1; then
+import os
+import sys
 
-    local -a serve_args=(
-        serve "$model"
-        --tensor-parallel-size "$VLLM_TENSOR_PARALLEL_SIZE"
-        --host 127.0.0.1
-        --port "$PORT"
-        --max-model-len "$MAX_MODEL_LEN"
-        --gpu-memory-utilization "$VLLM_GPU_MEMORY_UTILIZATION"
-    )
-    if [[ -n "$VLLM_MAX_NUM_BATCHED_TOKENS" ]]; then
-        serve_args+=(--max-num-batched-tokens "$VLLM_MAX_NUM_BATCHED_TOKENS")
-    fi
-    if [[ "$model" == Qwen/Qwen3* || "$model" == Qwen/Qwen3.* ]]; then
-        serve_args+=(--reasoning-parser "$VLLM_QWEN_REASONING_PARSER")
-        if [[ -n "$VLLM_QWEN_CHAT_TEMPLATE_KWARGS" ]]; then
-            serve_args+=(--default-chat-template-kwargs "$VLLM_QWEN_CHAT_TEMPLATE_KWARGS")
-        fi
-    fi
+from vllm import LLM, SamplingParams
 
-    "$VLLM_BIN" "${serve_args[@]}" > >(tee -a "$model_log") 2>&1 &
-    vllm_pid=$!
+model = os.environ["SMOKE_MODEL"]
+kwargs = {
+    "model": model,
+    "tensor_parallel_size": int(os.environ.get("VLLM_TENSOR_PARALLEL_SIZE", "1")),
+    "max_model_len": int(os.environ.get("MAX_MODEL_LEN", "8192")),
+    "gpu_memory_utilization": float(os.environ.get("VLLM_GPU_MEMORY_UTILIZATION", "0.90")),
+}
+max_num_batched_tokens = os.environ.get("VLLM_MAX_NUM_BATCHED_TOKENS", "")
+if max_num_batched_tokens:
+    kwargs["max_num_batched_tokens"] = int(max_num_batched_tokens)
 
-    local ready=0
-    local i
-    for ((i = 0; i < HEALTH_RETRIES; i++)); do
-        if curl --fail --silent --show-error \
-            "http://127.0.0.1:${PORT}/v1/models" >/dev/null; then
-            ready=1
-            break
-        fi
-        if ! kill -0 "$vllm_pid" 2>/dev/null; then
-            echo "ERROR: vLLM exited before becoming healthy for $model." >&2
-            cleanup_model
-            return 1
-        fi
-        sleep 5
-    done
-    if [[ "$ready" != "1" ]]; then
-        echo "ERROR: vLLM health check timed out for $model." >&2
-        cleanup_model
+llm = LLM(**kwargs)
+outs = llm.chat(
+    [{"role": "user", "content": "Hello, please introduce yourself briefly."}],
+    SamplingParams(max_tokens=64, temperature=0.0),
+)
+text = outs[0].outputs[0].text
+print(text)
+if not text.strip():
+    print(f"ERROR: empty completion for {model}", file=sys.stderr)
+    sys.exit(1)
+PY
         return 1
     fi
 
-    local response http_status body
-    response="$(
-        curl --silent --show-error \
-            --write-out '\n%{http_code}' \
-            --header "Content-Type: application/json" \
-            --data '{"model":"'"$model"'","messages":[{"role":"user","content":"Hello, please introduce yourself briefly."}],"max_tokens":64}' \
-            "http://127.0.0.1:${PORT}/v1/chat/completions"
-    )" || {
-        echo "ERROR: chat completion request failed for $model." >&2
-        cleanup_model
-        return 1
-    }
-    http_status="${response##*$'\n'}"
-    body="${response%$'\n'*}"
-    echo "$body"
-
-    if [[ "$http_status" != "200" ]]; then
-        echo "ERROR: chat completion returned HTTP status $http_status for $model." >&2
-        cleanup_model
-        return 1
-    fi
-    if ! printf '%s\n' "$body" | grep -q '"choices"'; then
-        echo "ERROR: chat completion response did not contain choices for $model." >&2
-        cleanup_model
-        return 1
-    fi
-
-    cleanup_model
     # Give the GPU a moment to release memory before loading the next model.
     sleep 10
     echo "finished_at: $(date -Iseconds)"
