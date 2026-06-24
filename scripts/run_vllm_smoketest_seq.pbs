@@ -63,7 +63,7 @@ fi
 
 PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
 VLLM_INSTALL_SPEC="${VLLM_INSTALL_SPEC:-vllm==${VLLM_VERSION}}"
-VLLM_UV_ARGS=(--isolated --torch-backend "$UV_TORCH_BACKEND" --extra-index-url "$PYTORCH_INDEX_URL")
+VLLM_UV_ARGS=(--isolated --extra-index-url "$PYTORCH_INDEX_URL")
 if [[ "$VLLM_INSTALL_MODE" == "source" ]]; then
     VLLM_UV_ARGS+=(--with "git+https://github.com/vllm-project/vllm.git@v${VLLM_VERSION}")
 else
