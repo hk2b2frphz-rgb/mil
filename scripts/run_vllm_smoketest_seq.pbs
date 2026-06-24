@@ -49,8 +49,10 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PORT="${PORT:-8000}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 export UV_TORCH_BACKEND="${UV_TORCH_BACKEND:-cu121}"
+export TORCH_VERSION="${TORCH_VERSION:-2.5.1}"
 export VLLM_VERSION="${VLLM_VERSION:-0.23.0}"
-export VLLM_INSTALL_MODE="${VLLM_INSTALL_MODE:-wheel}"
+export VLLM_ENV_DIR="${VLLM_ENV_DIR:-.venv_vllm_smoke_seq}"
+export VLLM_RECREATE_ENV="${VLLM_RECREATE_ENV:-1}"
 # Per-model startup budget: HEALTH_RETRIES * 5s (default 240 -> 20 min) to cover
 # first-time weight downloads of the 120B model.
 HEALTH_RETRIES="${HEALTH_RETRIES:-240}"
@@ -62,13 +64,10 @@ if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
 fi
 
 PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu121}"
+TORCH_SPEC="${TORCH_SPEC:-torch==${TORCH_VERSION}+${UV_TORCH_BACKEND}}"
 VLLM_INSTALL_SPEC="${VLLM_INSTALL_SPEC:-vllm==${VLLM_VERSION}}"
-VLLM_UV_ARGS=(--isolated --extra-index-url "$PYTORCH_INDEX_URL")
-if [[ "$VLLM_INSTALL_MODE" == "source" ]]; then
-    VLLM_UV_ARGS+=(--with "git+https://github.com/vllm-project/vllm.git@v${VLLM_VERSION}")
-else
-    VLLM_UV_ARGS+=(--with "$VLLM_INSTALL_SPEC")
-fi
+VLLM_PYTHON="$VLLM_ENV_DIR/bin/python"
+VLLM_BIN="$VLLM_ENV_DIR/bin/vllm"
 
 mkdir -p experiments/pbs_logs
 JOB_LOG="experiments/pbs_logs/vllm_smoke_seq.log"
@@ -82,8 +81,10 @@ echo "cuda_devices:  $CUDA_VISIBLE_DEVICES"
 echo "port:          $PORT"
 echo "max_model_len: $MAX_MODEL_LEN"
 echo "torch_backend: $UV_TORCH_BACKEND"
+echo "torch_spec:    $TORCH_SPEC"
 echo "vllm_version:  $VLLM_VERSION"
-echo "install_mode:  $VLLM_INSTALL_MODE"
+echo "vllm_install:  $VLLM_INSTALL_SPEC --no-deps --only-binary"
+echo "venv:          $VLLM_ENV_DIR"
 echo "torch_index:   $PYTORCH_INDEX_URL"
 echo "started_at:    $(date -Iseconds)"
 echo "======================================"
@@ -91,6 +92,20 @@ echo "======================================"
 if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi
 fi
+
+if [[ "$VLLM_RECREATE_ENV" == "1" ]]; then
+    rm -rf "$VLLM_ENV_DIR"
+fi
+uv venv "$VLLM_ENV_DIR"
+uv pip install --python "$VLLM_PYTHON" --index-url "$PYTORCH_INDEX_URL" "$TORCH_SPEC"
+uv pip install --python "$VLLM_PYTHON" --no-deps --only-binary :all: "$VLLM_INSTALL_SPEC"
+if [[ -n "${VLLM_EXTRA_DEPS:-}" ]]; then
+    uv pip install --python "$VLLM_PYTHON" $VLLM_EXTRA_DEPS
+fi
+"$VLLM_PYTHON" - <<'PY'
+import torch
+print("torch:", torch.__version__, "cuda:", torch.version.cuda)
+PY
 
 # Smoke-test one model. Returns 0 on PASS, non-zero on FAIL. Designed to be
 # called from an `if` so a single failure never aborts the whole job.
@@ -111,8 +126,7 @@ run_one() {
         fi
     }
 
-    uv run "${VLLM_UV_ARGS[@]}" \
-        vllm serve "$model" \
+    "$VLLM_BIN" serve "$model" \
         --tensor-parallel-size 1 \
         --host 127.0.0.1 \
         --port "$PORT" \
