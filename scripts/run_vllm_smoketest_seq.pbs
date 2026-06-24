@@ -48,7 +48,7 @@ command -v curl >/dev/null 2>&1 || {
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PORT="${PORT:-8000}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
-export UV_TORCH_BACKEND="${UV_TORCH_BACKEND:-cu128}"
+export UV_TORCH_BACKEND="${UV_TORCH_BACKEND:-cu121}"
 export VLLM_VERSION="${VLLM_VERSION:-0.23.0}"
 export VLLM_INSTALL_MODE="${VLLM_INSTALL_MODE:-source}"
 # Per-model startup budget: HEALTH_RETRIES * 5s (default 240 -> 20 min) to cover
@@ -61,7 +61,7 @@ if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
     exit 1
 fi
 
-PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
+PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu121}"
 VLLM_INSTALL_SPEC="${VLLM_INSTALL_SPEC:-vllm==${VLLM_VERSION}}"
 VLLM_UV_ARGS=(--isolated --extra-index-url "$PYTORCH_INDEX_URL")
 if [[ "$VLLM_INSTALL_MODE" == "source" ]]; then
