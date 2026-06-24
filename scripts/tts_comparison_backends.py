@@ -47,8 +47,8 @@ def load_reference_manifest(path: Path) -> tuple[dict[str, Path], dict[str, str]
     return audio_paths, transcripts
 
 
-class CosyVoice2TTS:
-    """CosyVoice2 zero-shot voice cloning with optional inference_instruct2."""
+class CosyVoiceTTS:
+    """CosyVoice zero-shot voice cloning for smoke-listening runs."""
 
     supports_instruct = True
 
@@ -80,12 +80,16 @@ class CosyVoice2TTS:
             from cosyvoice.cli.cosyvoice import AutoModel
         except ImportError as exc:
             raise RuntimeError(
-                "CosyVoice2 requires the official FunAudioLLM/CosyVoice checkout "
+                "CosyVoice requires the official FunAudioLLM/CosyVoice checkout "
                 "on COSYVOICE_REPO plus the isolated dependencies in "
                 "scripts/run_tts_comparison.pbs."
             ) from exc
 
-        model_dir = os.environ.get("COSYVOICE2_MODEL_DIR")
+        model_dir = (
+            os.environ.get("COSYVOICE3_MODEL_DIR")
+            or os.environ.get("COSYVOICE_MODEL_DIR")
+            or os.environ.get("COSYVOICE2_MODEL_DIR")
+        )
         if not model_dir:
             from huggingface_hub import snapshot_download
 
@@ -96,7 +100,7 @@ class CosyVoice2TTS:
         # device argument across CosyVoice2 revisions.
         self.model = AutoModel(model_dir=model_dir)
         self.sample_rate = int(self.model.sample_rate)
-        logger.info("CosyVoice2 loaded from %s at %d Hz", model_dir, self.sample_rate)
+        logger.info("CosyVoice loaded from %s at %d Hz", model_dir, self.sample_rate)
 
     @staticmethod
     def _role(speaker_role: str, speaker_override: str | None) -> str:
@@ -124,7 +128,10 @@ class CosyVoice2TTS:
             )
         else:
             iterator = self.model.inference_zero_shot(
-                text, self.ref_texts[role], prompt_wav, stream=False
+                text,
+                f"You are a helpful assistant.<|endofprompt|>{self.ref_texts[role]}",
+                prompt_wav,
+                stream=False,
             )
 
         chunks: list[np.ndarray] = []
@@ -134,8 +141,12 @@ class CosyVoice2TTS:
                 audio = audio.detach().cpu().numpy()
             chunks.append(np.asarray(audio, dtype=np.float32).reshape(-1))
         if not chunks:
-            raise RuntimeError("CosyVoice2 returned no audio chunks")
+            raise RuntimeError("CosyVoice returned no audio chunks")
         return np.concatenate(chunks).astype(np.float32, copy=False)
+
+
+CosyVoice2TTS = CosyVoiceTTS
+CosyVoice3TTS = CosyVoiceTTS
 
 
 class KokoroTTS:

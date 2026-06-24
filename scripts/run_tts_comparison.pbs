@@ -7,7 +7,7 @@
 #PBS -j oe
 #PBS -V
 
-# TTS selection phase: one self-contained job, two A100s, no manual audio.
+# TTS smoke phase: one self-contained job, two A100s, no manual audio.
 #
 # CLUSTER TODO: confirm that `select=1:res=middle` is the local two-A100
 # allocation string. It is the value used by this repository's existing
@@ -43,7 +43,7 @@ command -v uv >/dev/null 2>&1 || {
     exit 1
 }
 
-echo "===== TTS comparison ====="
+echo "===== TTS smoke ====="
 echo "job_id:       ${PBS_JOBID:-n/a}"
 echo "host:         $(hostname)"
 echo "out_root:     $OUT_ROOT"
@@ -61,10 +61,10 @@ fi
 # heavy model loading. This surfaces import/dependency breakage (e.g. a missing
 # lightning) immediately, so a broken env fails in seconds instead of after the
 # reference-voice and per-backend stages. set -e aborts the job on failure.
-echo "===== step 0/6: preflight tests (fail fast before heavy GPU work) ====="
+echo "===== step 0/5: preflight tests (fail fast before heavy GPU work) ====="
 uv run --with pytest python -m pytest tests/ -q
 
-echo "===== step 1/6: shared Qwen3 reference voices ====="
+echo "===== step 1/5: shared Qwen3 reference voices ====="
 CUDA_VISIBLE_DEVICES=0 uv run python scripts/build_moss_reference_voices.py \
     --out-dir "$REFS_DIR" \
     --model "${QWEN_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}" \
@@ -77,7 +77,6 @@ COMMON_ARGS=(
     --dialogues-jsonl
     "$PWD/tests/fixtures/listening_dialogues.jsonl"
     "$PWD/tests/fixtures/aizuchi_dialogues.jsonl"
-    --emotion-conditions on,off,mild
     --refs-json "$REFS_JSON"
     --out-dir "$COMPARE_OUT"
     --device "$TTS_DEVICE"
@@ -92,21 +91,6 @@ QWEN_UV=(
     --with scipy
     --with soundfile
     --with sphn
-    --with "torch==$TORCH_VERSION"
-    --with "torchaudio==$TORCHAUDIO_VERSION"
-)
-
-MOSS_UV=(
-    uv run --isolated --no-project
-    --index "pytorch-cu121=https://download.pytorch.org/whl/cu121"
-    --with "transformers==5.0.0"
-    --with safetensors
-    --with tiktoken
-    --with einops
-    --with soundfile
-    --with numpy
-    --with sphn
-    --with tqdm
     --with "torch==$TORCH_VERSION"
     --with "torchaudio==$TORCHAUDIO_VERSION"
 )
@@ -130,7 +114,7 @@ COSYVOICE_UV=(
     --with "omegaconf==2.3.0"
     --with "onnxruntime-gpu==1.18.0"
     # openai-whisper is pulled in via CosyVoice's requirements but is not used by
-    # CosyVoice2 zero-shot / inference_instruct2. The old 20231117 pin requires
+    # CosyVoice3 zero-shot / inference_instruct2. The old 20231117 pin requires
     # triton==2.0.0, which conflicts with the cluster torch (cu121) that needs
     # triton 3.x. Drop the pin so a recent whisper (triton>=2, no upper bound) is
     # selected and the env resolves.
@@ -159,30 +143,25 @@ KOKORO_UV=(
     --with "torch==$TORCH_VERSION"
 )
 
-echo "===== step 2/6: qwen3 baseline ====="
+echo "===== step 2/5: qwen3 baseline ====="
 CUDA_VISIBLE_DEVICES=0 "${QWEN_UV[@]}" python scripts/run_tts_comparison.py \
     "${COMMON_ARGS[@]}" \
     --backends qwen3
 
-echo "===== step 3/6: MOSS-TTSD reference backend ====="
-CUDA_VISIBLE_DEVICES=0 "${MOSS_UV[@]}" python scripts/run_tts_comparison.py \
-    "${COMMON_ARGS[@]}" \
-    --backends moss-ttsd
-
-echo "===== step 4/6: prepare official CosyVoice checkout ====="
+echo "===== step 3/5: prepare official CosyVoice checkout ====="
 if [[ ! -d "$COSYVOICE_REPO/.git" ]]; then
     git clone --recursive https://github.com/FunAudioLLM/CosyVoice.git "$COSYVOICE_REPO"
 fi
 git -C "$COSYVOICE_REPO" checkout "$COSYVOICE_GIT_REF"
 git -C "$COSYVOICE_REPO" submodule update --init --recursive
 
-echo "===== step 5/6: CosyVoice2 ====="
+echo "===== step 4/5: CosyVoice3 ====="
 CUDA_VISIBLE_DEVICES=1 COSYVOICE_REPO="$COSYVOICE_REPO" \
     "${COSYVOICE_UV[@]}" python scripts/run_tts_comparison.py \
     "${COMMON_ARGS[@]}" \
-    --backends cosyvoice2
+    --backends cosyvoice3
 
-echo "===== step 6/6: Kokoro ====="
+echo "===== step 5/5: Kokoro ====="
 CUDA_VISIBLE_DEVICES=1 "${KOKORO_UV[@]}" python scripts/run_tts_comparison.py \
     "${COMMON_ARGS[@]}" \
     --backends kokoro

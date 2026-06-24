@@ -16,15 +16,11 @@ class TTSComparisonImportTests(unittest.TestCase):
         self.assertTrue(dialogues)
         self.assertTrue(all(isinstance(path, Path) for path in paths))
 
-    def test_non_instruct_backends_collapse_to_na(self) -> None:
+    def test_backends_render_single_taste_condition(self) -> None:
         module = importlib.import_module("scripts.run_tts_comparison")
         requested = ["on", "off", "mild"]
-        self.assertEqual(module.conditions_for_backend("moss-ttsd", requested), ["n/a"])
-        self.assertEqual(module.conditions_for_backend("kokoro", requested), ["n/a"])
-        self.assertEqual(
-            module.conditions_for_backend("qwen3", requested),
-            requested,
-        )
+        for backend in ("cosyvoice3", "qwen3", "kokoro"):
+            self.assertEqual(module.conditions_for_backend(backend, requested), ["taste"])
 
 
 if __name__ == "__main__":

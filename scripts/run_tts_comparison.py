@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render fixed Japanese dialogues across TTS backends for listening selection."""
+"""Render fixed Japanese dialogues across TTS backends for smoke listening."""
 
 from __future__ import annotations
 
@@ -17,41 +17,33 @@ try:
     from scripts.generate_qwen3_tts_data import (
         Dialogue,
         DialogueTurn,
-        EMOTION_PRESETS,
-        MossTTSD,
         Qwen3TTS,
         build_segments,
         load_dialogues_from_jsonl,
         render_stereo,
-        resolve_emotion,
         safe_stem,
         validate_duplex_dialogue,
         write_wav,
     )
     from scripts.tts_comparison_backends import (
-        CosyVoice2TTS,
+        CosyVoice3TTS,
         KokoroTTS,
-        load_reference_manifest,
     )
 except ImportError:
     from generate_qwen3_tts_data import (
         Dialogue,
         DialogueTurn,
-        EMOTION_PRESETS,
-        MossTTSD,
         Qwen3TTS,
         build_segments,
         load_dialogues_from_jsonl,
         render_stereo,
-        resolve_emotion,
         safe_stem,
         validate_duplex_dialogue,
         write_wav,
     )
     from tts_comparison_backends import (
-        CosyVoice2TTS,
+        CosyVoice3TTS,
         KokoroTTS,
-        load_reference_manifest,
     )
 
 logger = logging.getLogger(__name__)
@@ -60,13 +52,11 @@ DEFAULT_DIALOGUES = (
     Path("tests/fixtures/listening_dialogues.jsonl"),
     Path("tests/fixtures/aizuchi_dialogues.jsonl"),
 )
-SUPPORTED_BACKENDS = ("qwen3", "moss-ttsd", "cosyvoice2", "kokoro")
-SUPPORTED_CONDITIONS = ("on", "off", "mild")
-BACKEND_EMOTION_SUPPORT = {
-    "qwen3": True,
-    "moss-ttsd": False,
-    "cosyvoice2": True,
-    "kokoro": False,
+SUPPORTED_BACKENDS = ("cosyvoice3", "qwen3", "kokoro")
+BACKEND_VOICE_MODES = {
+    "cosyvoice3": "zero-shot consultant voices",
+    "qwen3": "fixed preset voices",
+    "kokoro": "fixed Japanese voices",
 }
 
 
@@ -106,16 +96,6 @@ def load_and_validate_dialogues(paths: Sequence[Path]) -> list[dict[str, Any]]:
     return dialogues
 
 
-def load_mild_map(path: Path) -> dict[str, str]:
-    with path.open("r", encoding="utf-8") as handle:
-        mild = json.load(handle)
-    if not isinstance(mild, dict):
-        raise ValueError(f"Mild emotion map must be a JSON object: {path}")
-    result = dict(EMOTION_PRESETS)
-    result.update({str(key): str(value) for key, value in mild.items()})
-    return result
-
-
 def make_backend(args: argparse.Namespace, name: str) -> Any:
     if name == "qwen3":
         return Qwen3TTS(
@@ -129,18 +109,8 @@ def make_backend(args: argparse.Namespace, name: str) -> Any:
             instruct_user=None,
             instruct_moshi=None,
         )
-    if name == "moss-ttsd":
-        ref_paths, ref_texts = load_reference_manifest(args.refs_json)
-        return MossTTSD(
-            model_name=args.moss_model,
-            codec_model_name=args.moss_codec_model,
-            ref_audio_paths=ref_paths,
-            ref_texts=ref_texts,
-            device=args.device,
-            dtype=args.dtype,
-        )
-    if name == "cosyvoice2":
-        return CosyVoice2TTS(
+    if name == "cosyvoice3":
+        return CosyVoice3TTS(
             model_id=args.cosyvoice_model,
             refs_json=args.refs_json,
             device=args.device,
@@ -155,13 +125,13 @@ def make_backend(args: argparse.Namespace, name: str) -> Any:
 
 
 def conditions_for_backend(name: str, requested: Sequence[str]) -> list[str]:
-    return list(requested) if BACKEND_EMOTION_SUPPORT[name] else ["n/a"]
+    if name not in BACKEND_VOICE_MODES:
+        raise ValueError(f"Unsupported backend: {name}")
+    return ["taste"]
 
 
 def to_dialogue(
     raw: dict[str, Any],
-    condition: str,
-    emotion_map: dict[str, str],
 ) -> Dialogue:
     turns: list[DialogueTurn] = []
     for raw_turn in raw["turns"]:
@@ -174,18 +144,12 @@ def to_dialogue(
                 )
             )
             continue
-        emotion = str(raw_turn.get("emotion", "")) or None
-        instruct = (
-            resolve_emotion(emotion, emotion_map)
-            if condition in {"on", "mild"}
-            else None
-        )
         turns.append(
             DialogueTurn(
                 speaker=str(raw_turn["speaker"]),
                 text=str(raw_turn["text"]),
-                emotion=emotion,
-                instruct=instruct,
+                emotion=str(raw_turn.get("emotion", "")) or None,
+                instruct=None,
                 timing=str(raw_turn.get("timing") or "sequential"),
                 start_after_previous_start_sec=raw_turn.get(
                     "start_after_previous_start_sec"
@@ -218,15 +182,13 @@ def write_json(path: Path, data: Any) -> None:
 def render_variant(
     raw: dict[str, Any],
     backend_name: str,
-    condition: str,
     backend: Any,
-    emotion_map: dict[str, str],
     out_dir: Path,
     lead_in_sec: float,
     gap_sec: float,
 ) -> Path:
-    dialogue = to_dialogue(raw, condition, emotion_map)
-    role_override = backend_name in {"moss-ttsd", "cosyvoice2", "kokoro"}
+    dialogue = to_dialogue(raw)
+    role_override = backend_name in {"cosyvoice3", "kokoro"}
     segments, silences = build_segments(
         dialogue,
         backend,
@@ -237,12 +199,11 @@ def render_variant(
         background_speaker_override="background" if role_override else None,
     )
     if not segments or backend.sample_rate <= 0:
-        raise RuntimeError(f"No audio rendered for {dialogue.id}/{backend_name}/{condition}")
+        raise RuntimeError(f"No audio rendered for {dialogue.id}/{backend_name}")
 
     stereo = render_stereo(segments, backend.sample_rate)
     dialogue_dir = out_dir / dialogue.id
-    condition_stem = "na" if condition == "n/a" else condition
-    wav_path = dialogue_dir / f"{backend_name}__{condition_stem}.wav"
+    wav_path = dialogue_dir / f"{backend_name}.wav"
     json_path = wav_path.with_suffix(".json")
     write_wav(wav_path, stereo, backend.sample_rate)
     write_json(
@@ -254,23 +215,15 @@ def render_variant(
             "risk_level": dialogue.risk_level,
             "source_path": raw["_source_path"],
             "backend": backend_name,
-            "emotion_condition": condition,
-            "supports_emotion_instruct": BACKEND_EMOTION_SUPPORT[backend_name],
+            "test_kind": "tts_taste_smoke",
+            "voice_mode": BACKEND_VOICE_MODES[backend_name],
+            "supports_emotion_instruct": False,
             "sample_rate": backend.sample_rate,
             "duration_sec": round(stereo.shape[-1] / backend.sample_rate, 4),
             "left_channel": "moshi",
             "right_channel": "user",
             "turns": [asdict(turn) for turn in dialogue.turns],
-            "instruct_used": [
-                {
-                    "turn_index": index,
-                    "speaker": turn.speaker,
-                    "emotion": turn.emotion,
-                    "instruct": turn.instruct,
-                }
-                for index, turn in enumerate(dialogue.turns)
-                if turn.speaker != "silence"
-            ],
+            "instruct_used": [],
             "silences": silences,
         },
     )
@@ -291,25 +244,24 @@ def collect_sidecars(out_dir: Path) -> dict[str, list[dict[str, Any]]]:
 def write_indexes(out_dir: Path) -> None:
     grouped = collect_sidecars(out_dir)
     markdown = [
-        "# TTS comparison listening index",
+        "# TTS smoke listening index",
         "",
         "Stereo format: left channel = moshi, right channel = user.",
         "",
-        "| Backend | Emotion variants | Voice mode |",
+        "| Backend | Model | Voice mode |",
         "|---|---|---|",
-        "| qwen3 | on, off, mild | fixed Qwen3 presets |",
-        "| moss-ttsd | n/a | shared Qwen3 clone references |",
-        "| cosyvoice2 | on, off, mild | shared Qwen3 clone references |",
-        "| kokoro | n/a | fixed Japanese voices |",
+        "| cosyvoice3 | FunAudioLLM/Fun-CosyVoice3-0.5B-2512 | zero-shot consultant voices |",
+        "| qwen3 | Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice | fixed preset voices |",
+        "| kokoro | hexgrad/Kokoro-82M | fixed Japanese voices |",
         "",
     ]
     html_lines = [
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>",
-        "<title>TTS comparison</title>",
+        "<title>TTS smoke listening</title>",
         "<style>body{font-family:sans-serif;max-width:1100px;margin:2rem auto}"
         "table{border-collapse:collapse}th,td{border:1px solid #ccc;padding:.4rem}"
         "audio{width:520px}</style></head><body>",
-        "<h1>TTS comparison listening index</h1>",
+        "<h1>TTS smoke listening index</h1>",
         "<p>Stereo: left = moshi, right = user.</p>",
     ]
     for dialogue_id, rows in sorted(grouped.items()):
@@ -319,18 +271,18 @@ def write_indexes(out_dir: Path) -> None:
             [
                 f"<h2>{html.escape(dialogue_id)}</h2>",
                 f"<p>{html.escape(str(first['title']))}</p>",
-                "<table><tr><th>Backend</th><th>Emotion</th><th>Audio</th><th>Metadata</th></tr>",
+                "<table><tr><th>Backend</th><th>Voice mode</th><th>Audio</th><th>Metadata</th></tr>",
             ]
         )
-        for row in sorted(rows, key=lambda item: (item["backend"], item["emotion_condition"])):
+        for row in sorted(rows, key=lambda item: item["backend"]):
             wav_rel = Path(row["_wav_path"]).relative_to(out_dir).as_posix()
             json_rel = Path(row["_json_path"]).relative_to(out_dir).as_posix()
-            label = f"{row['backend']} / {row['emotion_condition']}"
+            label = str(row["backend"])
             markdown.append(f"- [{label}]({wav_rel}) ([json]({json_rel}))")
             html_lines.append(
                 "<tr>"
                 f"<td>{html.escape(str(row['backend']))}</td>"
-                f"<td>{html.escape(str(row['emotion_condition']))}</td>"
+                f"<td>{html.escape(str(row['voice_mode']))}</td>"
                 f"<td><audio controls preload='none' src='{html.escape(wav_rel)}'></audio></td>"
                 f"<td><a href='{html.escape(json_rel)}'>json</a></td>"
                 "</tr>"
@@ -351,14 +303,8 @@ def parse_args() -> argparse.Namespace:
         default=list(DEFAULT_DIALOGUES),
     )
     parser.add_argument("--backends", default=",".join(SUPPORTED_BACKENDS))
-    parser.add_argument("--emotion-conditions", default="on,off,mild")
     parser.add_argument("--refs-json", required=True, type=Path)
     parser.add_argument("--out-dir", required=True, type=Path)
-    parser.add_argument(
-        "--mild-emotion-map",
-        type=Path,
-        default=Path("configs/emotion_presets_mild.json"),
-    )
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument(
         "--dtype",
@@ -372,14 +318,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--qwen-speaker-user", default="Ono_Anna")
     parser.add_argument("--qwen-speaker-moshi", default="Serena")
-    parser.add_argument("--moss-model", default="OpenMOSS-Team/MOSS-TTSD-v1.0")
-    parser.add_argument(
-        "--moss-codec-model",
-        default="OpenMOSS-Team/MOSS-Audio-Tokenizer",
-    )
     parser.add_argument(
         "--cosyvoice-model",
-        default="FunAudioLLM/CosyVoice2-0.5B",
+        default="FunAudioLLM/Fun-CosyVoice3-0.5B-2512",
     )
     parser.add_argument("--kokoro-voice-moshi", default="jf_alpha")
     parser.add_argument("--kokoro-voice-user", default="jm_kumo")
@@ -398,36 +339,24 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args()
     backends = csv_choices(args.backends, SUPPORTED_BACKENDS, "--backends")
-    conditions = csv_choices(
-        args.emotion_conditions, SUPPORTED_CONDITIONS, "--emotion-conditions"
-    )
     dialogues = load_and_validate_dialogues(args.dialogues_jsonl)
     if args.max_dialogues is not None:
         dialogues = dialogues[: args.max_dialogues]
-    mild_map = load_mild_map(args.mild_emotion_map)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     for backend_name in backends:
         backend = make_backend(args, backend_name)
         backend.load()
         for raw in dialogues:
-            for condition in conditions_for_backend(backend_name, conditions):
-                logger.info(
-                    "Rendering dialogue=%s backend=%s emotion=%s",
-                    raw["id"],
-                    backend_name,
-                    condition,
-                )
-                render_variant(
-                    raw,
-                    backend_name,
-                    condition,
-                    backend,
-                    mild_map if condition == "mild" else dict(EMOTION_PRESETS),
-                    args.out_dir,
-                    args.lead_in_sec,
-                    args.gap_sec,
-                )
+            logger.info("Rendering dialogue=%s backend=%s", raw["id"], backend_name)
+            render_variant(
+                raw,
+                backend_name,
+                backend,
+                args.out_dir,
+                args.lead_in_sec,
+                args.gap_sec,
+            )
         del backend
     write_indexes(args.out_dir)
     print(args.out_dir / "INDEX.md")

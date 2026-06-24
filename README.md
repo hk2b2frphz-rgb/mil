@@ -433,30 +433,29 @@ listening-only naturalness auditions. Its mono mixes and model-selected timing
 are not training data and do not replace the existing per-utterance stereo
 pipeline.
 
-## TTS selection phase
+## TTS smoke listening phase
 
-Before large-scale data generation, submit one two-A100 listening job:
+Before large-scale data generation, submit one two-A100 taste-listening job:
 
 ```bash
 qsub -V scripts/run_tts_comparison.pbs
 ```
 
-The job generates shared Qwen3 reference clips once, then compares:
+The job generates shared Qwen3 reference clips once, then renders one smoke WAV
+per backend:
 
-- `qwen3`: Apache-2.0 model, existing Qwen3-TTS baseline, fixed preset voices,
-  and per-turn emotion instructions.
-- `moss-ttsd`: Apache-2.0 model, shared-reference voice cloning, and no emotion
-  instruction. It remains a reference despite weaker Japanese kanji readings.
-- `cosyvoice2`: Apache-2.0 repository code and checkpoint, shared-reference
-  voice cloning, and `inference_instruct2` style control.
+- `cosyvoice3`: Apache-2.0 repository code and
+  `FunAudioLLM/Fun-CosyVoice3-0.5B-2512`, shared-reference zero-shot voices for
+  consultant/user taste checks.
+- `qwen3`: Apache-2.0 `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`, fixed preset
+  voices for agent/user taste checks.
 - `kokoro`: Apache-2.0 library/model, fixed Japanese voices through
-  `misaki[ja]`/`pyopenjtalk`, no cloning or emotion instruction. Some Japanese
-  voices include attribution metadata; review `VOICES.md` for deployment.
+  `misaki[ja]`/`pyopenjtalk`. Some Japanese voices include attribution
+  metadata; review `VOICES.md` for deployment.
 
-Qwen3 and CosyVoice2 render `on` (the existing emotion map), `off` (no
-instruction), and `mild` (`configs/emotion_presets_mild.json`). MOSS-TTSD and
-Kokoro each render one `n/a` condition. Every WAV remains training-compatible
-stereo: left is `moshi`, right is `user`.
+This is intentionally not an emotion-text A/B test. Every backend renders the
+same dialogue once, with no per-turn emotion instruction. Every WAV remains
+training-compatible stereo: left is `moshi`, right is `user`.
 
 Default output:
 
@@ -472,26 +471,16 @@ data/runs/tts_comparison/
     INDEX.html
     INDEX.md
     <dialogue_id>/
-      qwen3__on.wav
-      qwen3__on.json
-      qwen3__off.wav
-      qwen3__off.json
-      qwen3__mild.wav
-      qwen3__mild.json
-      moss-ttsd__na.wav
-      moss-ttsd__na.json
-      cosyvoice2__on.wav
-      cosyvoice2__on.json
-      cosyvoice2__off.wav
-      cosyvoice2__off.json
-      cosyvoice2__mild.wav
-      cosyvoice2__mild.json
-      kokoro__na.wav
-      kokoro__na.json
+      cosyvoice3.wav
+      cosyvoice3.json
+      qwen3.wav
+      qwen3.json
+      kokoro.wav
+      kokoro.json
 ```
 
 Download `listening/` and open `INDEX.html`, or use `INDEX.md`. Each JSON
-sidecar records the turns and actual per-turn instruction.
+sidecar records the turns, voice mode, sample rate, and duration.
 
 Cluster-specific requirement: `scripts/run_tts_comparison.pbs` defaults to
 `#PBS -q xan_s` and `#PBS -l select=1:res=middle`, matching this repository's
