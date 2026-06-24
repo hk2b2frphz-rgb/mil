@@ -50,7 +50,7 @@ export PORT="${PORT:-8000}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 export UV_TORCH_BACKEND="${UV_TORCH_BACKEND:-cu121}"
 export VLLM_VERSION="${VLLM_VERSION:-0.23.0}"
-export VLLM_INSTALL_MODE="${VLLM_INSTALL_MODE:-source}"
+export VLLM_INSTALL_MODE="${VLLM_INSTALL_MODE:-wheel}"
 # Per-model startup budget: HEALTH_RETRIES * 5s (default 240 -> 20 min) to cover
 # first-time weight downloads of the 120B model.
 HEALTH_RETRIES="${HEALTH_RETRIES:-240}"
