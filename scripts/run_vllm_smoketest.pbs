@@ -102,6 +102,9 @@ if [[ -n "$VLLM_CUDA_MODULE" ]]; then
 fi
 
 uv venv "$VENV"
+# Build tools for any source builds at install time and for torch.compile/inductor
+# kernel compilation at serve time (ninja must be on PATH inside the venv).
+uv pip install --python "$VLLM_PYTHON" ${VLLM_BUILD_TOOLS:-ninja cmake}
 uv pip install --python "$VLLM_PYTHON" "$VLLM_INSTALL_SPEC" --torch-backend="$UV_TORCH_BACKEND"
 
 "$VLLM_BIN" serve "$VLLM_MODEL" \

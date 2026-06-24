@@ -129,6 +129,9 @@ if [[ "$VLLM_RECREATE_ENV" == "1" ]]; then
     rm -rf "$VLLM_ENV_DIR"
 fi
 uv venv "$VLLM_ENV_DIR"
+# Build tools for any source builds at install time and for torch.compile/inductor
+# kernel compilation at serve time (ninja must be on PATH inside the venv).
+uv pip install --python "$VLLM_PYTHON" ${VLLM_BUILD_TOOLS:-ninja cmake}
 uv pip install --python "$VLLM_PYTHON" "$VLLM_INSTALL_SPEC" --torch-backend="$UV_TORCH_BACKEND"
 if [[ -n "${VLLM_EXTRA_DEPS:-}" ]]; then
     read -r -a vllm_extra_deps <<< "$VLLM_EXTRA_DEPS"
