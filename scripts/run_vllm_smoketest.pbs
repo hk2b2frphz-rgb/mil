@@ -42,6 +42,11 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PORT="${PORT:-8000}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+    echo "ERROR: PORT must be an integer from 1 to 65535; got '$PORT'." >&2
+    exit 1
+fi
+
 SANITIZED_MODEL="${VLLM_MODEL//\//_}"
 mkdir -p experiments/pbs_logs
 JOB_LOG="experiments/pbs_logs/vllm_smoke_${SANITIZED_MODEL}.log"
