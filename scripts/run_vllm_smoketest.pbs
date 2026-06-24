@@ -13,10 +13,12 @@
 # production generation configuration.
 #
 # Usage:
-#   gpt-oss:  qsub -V scripts/run_vllm_smoketest.pbs
-#   qwen:     VLLM_MODEL=Qwen/Qwen3-30B-A3B qsub -V scripts/run_vllm_smoketest.pbs
-# Note: Qwen3-30B-A3B HF repo ID may need verification -- check HuggingFace if model fails to load
-# TODO: verify exact HF repo ID.
+#   gpt-oss:       qsub -V scripts/run_vllm_smoketest.pbs
+#   qwen 27B:      VLLM_MODEL=Qwen/Qwen3.6-27B     qsub -V scripts/run_vllm_smoketest.pbs
+#   qwen 35B-A3B:  VLLM_MODEL=Qwen/Qwen3.6-35B-A3B qsub -V scripts/run_vllm_smoketest.pbs
+# Note: all of the above are expected to fit on one A100 80GB. Qwen3.6-35B-A3B
+# (MoE ~70GB in bf16) is the tightest -- keep MAX_MODEL_LEN modest. If an HF repo
+# ID 404s, double-check the exact name on HuggingFace.
 
 set -euo pipefail
 
