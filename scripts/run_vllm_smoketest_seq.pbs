@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+#PBS -N vllm_smoke_seq
+#PBS -q xan_s
+# TODO(cluster): verify that `select=1:res=small` guarantees one A100 GPU.
+#PBS -l select=1:res=small
+#PBS -l walltime=03:00:00
+#PBS -j oe
+#PBS -V
+#PBS -S /bin/bash
+
+# Sequential vLLM smoke test on a single A100 80GB GPU.
+# Loads each model one at a time (only one resident at a time, so each fits on
+# one card), verifies it serves inference, then tears it down before the next.
+# This only checks that models load and return inference; it is not a
+# production generation configuration.
+#
+# Models (default order):
+#   Qwen/Qwen3.6-27B       (dense, ~54GB bf16)
+#   Qwen/Qwen3.6-35B-A3B   (MoE 35B/3B active, ~70GB bf16 -- tightest)
+#   openai/gpt-oss-120b    (MXFP4, ~63GB)
+#
+# Submit:
+#   qsub -V scripts/run_vllm_smoketest_seq.pbs
+# Override the model list (space-separated):
+#   VLLM_MODELS="openai/gpt-oss-120b Qwen/Qwen3.6-27B" qsub -V scripts/run_vllm_smoketest_seq.pbs
+#
+# Note: a single failing model does NOT abort the run; every model is attempted
+# and a PASS/FAIL summary is printed at the end. The job exits non-zero if any
+# model failed. If an HF repo ID 404s, double-check the exact name on HuggingFace.
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+if [[ -f "$PWD/scripts/setup_proxy.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$PWD/scripts/setup_proxy.sh"
+fi
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH." >&2
+    exit 1
+}
+command -v curl >/dev/null 2>&1 || {
+    echo "ERROR: curl is not available on PATH." >&2
+    exit 1
+}
+
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export PORT="${PORT:-8000}"
+export MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+# Per-model startup budget: HEALTH_RETRIES * 5s (default 240 -> 20 min) to cover
+# first-time weight downloads of the 120B model.
+HEALTH_RETRIES="${HEALTH_RETRIES:-240}"
+VLLM_MODELS="${VLLM_MODELS:-Qwen/Qwen3.6-27B Qwen/Qwen3.6-35B-A3B openai/gpt-oss-120b}"
+
+mkdir -p experiments/pbs_logs
+JOB_LOG="experiments/pbs_logs/vllm_smoke_seq.log"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
+echo "===== sequential vLLM smoke test ====="
+echo "job_id:        ${PBS_JOBID:-n/a}"
+echo "host:          $(hostname)"
+echo "models:        $VLLM_MODELS"
+echo "cuda_devices:  $CUDA_VISIBLE_DEVICES"
+echo "port:          $PORT"
+echo "max_model_len: $MAX_MODEL_LEN"
+echo "started_at:    $(date -Iseconds)"
+echo "======================================"
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+fi
+
+# Smoke-test one model. Returns 0 on PASS, non-zero on FAIL. Designed to be
+# called from an `if` so a single failure never aborts the whole job.
+run_one() {
+    local model="$1"
+    local sanitized="${model//\//_}"
+    local model_log="experiments/pbs_logs/vllm_smoke_${sanitized}.log"
+    local vllm_pid=""
+
+    echo ""
+    echo "########## MODEL: $model ##########"
+    echo "started_at: $(date -Iseconds)"
+
+    cleanup_model() {
+        if [[ -n "$vllm_pid" ]] && kill -0 "$vllm_pid" 2>/dev/null; then
+            kill "$vllm_pid" 2>/dev/null || true
+            wait "$vllm_pid" 2>/dev/null || true
+        fi
+    }
+
+    uv run --isolated --with vllm vllm serve "$model" \
+        --tensor-parallel-size 1 \
+        --host 127.0.0.1 \
+        --port "$PORT" \
+        --max-model-len "$MAX_MODEL_LEN" \
+        > >(tee -a "$model_log") 2>&1 &
+    vllm_pid=$!
+
+    local ready=0
+    local i
+    for ((i = 0; i < HEALTH_RETRIES; i++)); do
+        if curl --fail --silent --show-error \
+            "http://127.0.0.1:${PORT}/v1/models" >/dev/null; then
+            ready=1
+            break
+        fi
+        if ! kill -0 "$vllm_pid" 2>/dev/null; then
+            echo "ERROR: vLLM exited before becoming healthy for $model." >&2
+            cleanup_model
+            return 1
+        fi
+        sleep 5
+    done
+    if [[ "$ready" != "1" ]]; then
+        echo "ERROR: vLLM health check timed out for $model." >&2
+        cleanup_model
+        return 1
+    fi
+
+    local response http_status body
+    response="$(
+        curl --silent --show-error \
+            --write-out '\n%{http_code}' \
+            --header "Content-Type: application/json" \
+            --data '{"model":"'"$model"'","messages":[{"role":"user","content":"こんにちは、自己紹介して"}],"max_tokens":64}' \
+            "http://127.0.0.1:${PORT}/v1/chat/completions"
+    )" || {
+        echo "ERROR: chat completion request failed for $model." >&2
+        cleanup_model
+        return 1
+    }
+    http_status="${response##*$'\n'}"
+    body="${response%$'\n'*}"
+    echo "$body"
+
+    if [[ "$http_status" != "200" ]]; then
+        echo "ERROR: chat completion returned HTTP status $http_status for $model." >&2
+        cleanup_model
+        return 1
+    fi
+    if ! printf '%s\n' "$body" | grep -q '"choices"'; then
+        echo "ERROR: chat completion response did not contain choices for $model." >&2
+        cleanup_model
+        return 1
+    fi
+
+    cleanup_model
+    # Give the GPU a moment to release memory before loading the next model.
+    sleep 10
+    echo "finished_at: $(date -Iseconds)"
+    return 0
+}
+
+declare -a SUMMARY=()
+OVERALL_RC=0
+for model in $VLLM_MODELS; do
+    if run_one "$model"; then
+        SUMMARY+=("PASS  $model")
+        echo "SMOKE TEST PASSED: $model"
+    else
+        SUMMARY+=("FAIL  $model")
+        OVERALL_RC=1
+        echo "SMOKE TEST FAILED: $model"
+    fi
+done
+
+echo ""
+echo "===== smoke test summary ====="
+for line in "${SUMMARY[@]}"; do
+    echo "$line"
+done
+echo "finished_at: $(date -Iseconds)"
+echo "=============================="
+
+exit "$OVERALL_RC"
