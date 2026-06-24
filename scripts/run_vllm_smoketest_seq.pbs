@@ -53,6 +53,7 @@ export TORCH_VERSION="${TORCH_VERSION:-2.5.1}"
 export VLLM_VERSION="${VLLM_VERSION:-0.23.0}"
 export VLLM_ENV_DIR="${VLLM_ENV_DIR:-.venv_vllm_smoke_seq}"
 export VLLM_RECREATE_ENV="${VLLM_RECREATE_ENV:-1}"
+VLLM_RUNTIME_DEPS="${VLLM_RUNTIME_DEPS:-numpy<2 packaging fastapi uvicorn[standard] pydantic pydantic-settings starlette aiohttp requests tqdm pyyaml regex tokenizers transformers safetensors sentencepiece protobuf psutil py-cpuinfo prometheus-client prometheus-fastapi-instrumentator pyzmq cloudpickle cachetools pillow scipy typing-extensions}"
 # Per-model startup budget: HEALTH_RETRIES * 5s (default 240 -> 20 min) to cover
 # first-time weight downloads of the 120B model.
 HEALTH_RETRIES="${HEALTH_RETRIES:-240}"
@@ -86,6 +87,7 @@ echo "vllm_version:  $VLLM_VERSION"
 echo "vllm_install:  $VLLM_INSTALL_SPEC --no-deps --only-binary"
 echo "venv:          $VLLM_ENV_DIR"
 echo "torch_index:   $PYTORCH_INDEX_URL"
+echo "runtime_deps:  $VLLM_RUNTIME_DEPS"
 echo "started_at:    $(date -Iseconds)"
 echo "======================================"
 
@@ -98,7 +100,7 @@ if [[ "$VLLM_RECREATE_ENV" == "1" ]]; then
 fi
 uv venv "$VLLM_ENV_DIR"
 uv pip install --python "$VLLM_PYTHON" --index-url "$PYTORCH_INDEX_URL" "$TORCH_SPEC"
-uv pip install --python "$VLLM_PYTHON" "numpy<2" packaging
+uv pip install --python "$VLLM_PYTHON" $VLLM_RUNTIME_DEPS
 uv pip install --python "$VLLM_PYTHON" --no-deps --only-binary :all: "$VLLM_INSTALL_SPEC"
 if [[ -n "${VLLM_EXTRA_DEPS:-}" ]]; then
     uv pip install --python "$VLLM_PYTHON" $VLLM_EXTRA_DEPS
