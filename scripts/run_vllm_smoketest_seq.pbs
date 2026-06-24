@@ -48,12 +48,11 @@ command -v curl >/dev/null 2>&1 || {
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PORT="${PORT:-8000}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
-export UV_TORCH_BACKEND="${UV_TORCH_BACKEND:-cu121}"
-export TORCH_VERSION="${TORCH_VERSION:-2.5.1}"
-export VLLM_VERSION="${VLLM_VERSION:-0.7.3}"
+export UV_TORCH_BACKEND="${UV_TORCH_BACKEND:-cu128}"
+export TORCH_VERSION="${TORCH_VERSION:-2.8.0}"
+export VLLM_VERSION="${VLLM_VERSION:-0.10.2}"
 export VLLM_ENV_DIR="${VLLM_ENV_DIR:-.venv_vllm_smoke_seq}"
 export VLLM_RECREATE_ENV="${VLLM_RECREATE_ENV:-1}"
-VLLM_RUNTIME_DEPS="${VLLM_RUNTIME_DEPS:-numpy<2 packaging fastapi uvicorn[standard] pydantic pydantic-settings starlette aiohttp requests tqdm pyyaml regex tokenizers transformers safetensors sentencepiece protobuf psutil py-cpuinfo prometheus-client prometheus-fastapi-instrumentator pyzmq cloudpickle cachetools pillow scipy typing-extensions}"
 # Per-model startup budget: HEALTH_RETRIES * 5s (default 240 -> 20 min) to cover
 # first-time weight downloads of the 120B model.
 HEALTH_RETRIES="${HEALTH_RETRIES:-240}"
@@ -64,7 +63,7 @@ if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
     exit 1
 fi
 
-PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu121}"
+PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
 TORCH_SPEC="${TORCH_SPEC:-torch==${TORCH_VERSION}+${UV_TORCH_BACKEND}}"
 VLLM_INSTALL_SPEC="${VLLM_INSTALL_SPEC:-vllm==${VLLM_VERSION}}"
 VLLM_PYTHON="$VLLM_ENV_DIR/bin/python"
@@ -84,10 +83,9 @@ echo "max_model_len: $MAX_MODEL_LEN"
 echo "torch_backend: $UV_TORCH_BACKEND"
 echo "torch_spec:    $TORCH_SPEC"
 echo "vllm_version:  $VLLM_VERSION"
-echo "vllm_install:  $VLLM_INSTALL_SPEC --no-deps --only-binary"
+echo "vllm_install:  $VLLM_INSTALL_SPEC"
 echo "venv:          $VLLM_ENV_DIR"
 echo "torch_index:   $PYTORCH_INDEX_URL"
-echo "runtime_deps:  $VLLM_RUNTIME_DEPS"
 echo "started_at:    $(date -Iseconds)"
 echo "======================================"
 
@@ -100,8 +98,7 @@ if [[ "$VLLM_RECREATE_ENV" == "1" ]]; then
 fi
 uv venv "$VLLM_ENV_DIR"
 uv pip install --python "$VLLM_PYTHON" --index-url "$PYTORCH_INDEX_URL" "$TORCH_SPEC"
-uv pip install --python "$VLLM_PYTHON" $VLLM_RUNTIME_DEPS
-uv pip install --python "$VLLM_PYTHON" --no-deps --only-binary :all: "$VLLM_INSTALL_SPEC"
+uv pip install --python "$VLLM_PYTHON" --extra-index-url "$PYTORCH_INDEX_URL" "$VLLM_INSTALL_SPEC"
 if [[ -n "${VLLM_EXTRA_DEPS:-}" ]]; then
     uv pip install --python "$VLLM_PYTHON" $VLLM_EXTRA_DEPS
 fi
