@@ -890,8 +890,17 @@ def validate_duplex_dialogue(dialogue: dict[str, Any]) -> list[str]:
                 "pause_handling requires user -> silence>=2s -> user continuation"
             )
     elif task == "smooth_turn_taking":
-        if overlaps:
-            errors.append("smooth_turn_taking must not contain overlap_previous")
+        # Injected listening backchannels (event=model_backchannel) are allowed;
+        # they do not interrupt or truncate. Only non-backchannel overlaps would
+        # violate the "no interruption" intent of smooth_turn_taking.
+        non_backchannel = [
+            turn for turn in overlaps
+            if str(turn.get("event") or "") != "model_backchannel"
+        ]
+        if non_backchannel:
+            errors.append(
+                "smooth_turn_taking must not contain non-backchannel overlap_previous"
+            )
     elif task == "backchannel":
         turn = events.get("model_backchannel")
         if not turn or turn.get("speaker") != "moshi" or turn not in overlaps:

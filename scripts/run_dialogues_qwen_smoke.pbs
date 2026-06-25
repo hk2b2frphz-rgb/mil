@@ -178,7 +178,10 @@ if [[ "$VLLM_READY" != "1" ]]; then
     exit 1
 fi
 
+# Backchannels are produced by the LLM (few-shot exemplars + prompt); no mechanical
+# enrich injection. Show two exemplars for density variety. Mirrors the 1000 job.
 export STEPS="use_cases,dialogues"
+export LLM_NUM_FEWSHOT="${LLM_NUM_FEWSHOT:-2}"
 export LLM_BACKEND="openai-compatible"
 export LLM_API_BASE="http://127.0.0.1:${PORT}/v1"
 export LLM_API_KEY="${LLM_API_KEY:-}"
@@ -194,12 +197,13 @@ export OUT_ROOT
 
 bash scripts/run_full_duplex_training_data.sh
 
-test -s "$OUT_ROOT/llm_dialogues/dialogues.jsonl"
+DIALOGUES_FINAL="$OUT_ROOT/llm_dialogues/dialogues.jsonl"
+test -s "$DIALOGUES_FINAL"
 
 uv run python scripts/report_dialogue_diversity.py \
-    --in "$OUT_ROOT/llm_dialogues/dialogues.jsonl" \
+    --in "$DIALOGUES_FINAL" \
     --out "$OUT_ROOT/diversity_report.txt" \
     --samples 5
 
-echo "dialogues: $OUT_ROOT/llm_dialogues/dialogues.jsonl"
+echo "dialogues: $DIALOGUES_FINAL"
 echo "report:    $OUT_ROOT/diversity_report.txt"

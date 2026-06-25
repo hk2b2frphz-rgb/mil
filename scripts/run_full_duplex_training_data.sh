@@ -101,10 +101,22 @@ if has_step dialogues; then
 fi
 
 if has_step enrich; then
-    uv run python scripts/enrich_dialogue_timing.py \
-        --in "$DIALOGUES_RAW" \
-        --out "$DIALOGUES_ENRICHED" \
+    enrich_args=(
+        uv run python scripts/enrich_dialogue_timing.py
+        --in "$DIALOGUES_RAW"
+        --out "$DIALOGUES_ENRICHED"
         --seed "$SEED"
+    )
+    # Backchannel density knobs (defaults match the script). Lower SEC_PER_AIZUCHI
+    # = more frequent あいづち; higher AIZUCHI_PROB = more user turns get them.
+    [[ -n "${SEC_PER_AIZUCHI:-}" ]] && enrich_args+=(--sec-per-aizuchi "$SEC_PER_AIZUCHI")
+    [[ -n "${AIZUCHI_PROB:-}" ]] && enrich_args+=(--aizuchi-prob "$AIZUCHI_PROB")
+    [[ -n "${MAX_AIZUCHI_PER_TURN:-}" ]] && enrich_args+=(--max-aizuchi-per-turn "$MAX_AIZUCHI_PER_TURN")
+    # Apply backchannels to labeled-task dialogues too (not just free-form chat).
+    if [[ "${ENRICH_LABELED_TASKS:-0}" == "1" ]]; then
+        enrich_args+=(--enrich-labeled-tasks)
+    fi
+    "${enrich_args[@]}"
 fi
 
 # Use the enriched dialogues only if they exist and are at least as new as the

@@ -171,6 +171,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable the per-turn emotion smoothing pass.",
     )
+    parser.add_argument(
+        "--enrich-labeled-tasks",
+        action="store_true",
+        help=(
+            "Also inject backchannels into labeled-task dialogues "
+            "(duplex_task != null). Only plain sequential user turns are split; "
+            "the task's explicit overlap/truncate event turns are left "
+            "untouched (they are not timing==sequential), so the labeled "
+            "phenomenon is preserved while the surrounding talk gains the same "
+            "frequent あいづち as free-form chat."
+        ),
+    )
     args = parser.parse_args()
     if args.chars_per_sec <= 0:
         parser.error("--chars-per-sec must be > 0")
@@ -203,40 +215,21 @@ def est_sec(text: str, chars_per_sec: float) -> float:
 
 
 def split_into_chunks(text: str, k: int) -> list[str]:
-    """text を最大 k 個の細かい断片へ分割する。
+    """text を最大 k 個の断片へ、句切れ(、。！？)境界だけで分割する。
 
-    句切れ(、。！？)を優先しつつ、節が長い場合は文字数でさらに細かく割る。これに
-    より「私、/ 昨日お昼ご飯を / 食べに行って、」のような細かい相づち単位になる。"""
+    相づちは各断片の終盤に重ねるので、断片の境界は user 発話を音声化する際の
+    再合成・gap の境界にもなる。単語の途中で割ると音声がそこで途切れて不自然に
+    なるため、分割は必ず句読点境界に限定し、文字数による強制分割はしない。
+    節が少なければ相づちも自然に少なくなる(日本語の節ごとの相づちレート)。"""
     if k <= 1:
         return [text]
-    n = len(text)
-    # 目標断片サイズ(文字)。k 個に均等割りした長さを目安にする。
-    target = max(2, (n + k - 1) // k)
     clauses = [c for c in CLAUSE_SPLIT_RE.split(text) if c.strip()] or [text]
-
-    # 節が target より長ければ文字数でさらに分割し、細かい atom 列にする。
-    atoms: list[str] = []
-    for clause in clauses:
-        if len(clause) > target:
-            pieces = max(1, (len(clause) + target - 1) // target)
-            size = max(1, (len(clause) + pieces - 1) // pieces)
-            atoms.extend(clause[i : i + size] for i in range(0, len(clause), size))
-        else:
-            atoms.append(clause)
-
-    # atom が k より多ければ、隣接 atom を target 程度にまとめて k 個以内に収める。
-    if len(atoms) <= k:
-        return atoms
-    chunks: list[str] = []
-    acc = ""
-    for atom in atoms:
-        if acc and len(acc) + len(atom) > target and len(chunks) < k - 1:
-            chunks.append(acc)
-            acc = atom
-        else:
-            acc += atom
-    if acc:
-        chunks.append(acc)
+    # 節が k 以下ならそのまま(各節の終わりに相づち)。
+    if len(clauses) <= k:
+        return clauses
+    # 節が k より多い場合のみ、隣接する節をまとめて k 個以内に収める(節境界は保つ)。
+    per = (len(clauses) + k - 1) // k
+    chunks = ["".join(clauses[i : i + per]) for i in range(0, len(clauses), per)]
     return [c for c in chunks if c] or [text]
 
 
@@ -260,8 +253,12 @@ def enrich_user_turn(
     turn: dict[str, Any],
     rng: random.Random,
     args: argparse.Namespace,
+    allow_trailing: bool = True,
 ) -> list[dict[str, Any]]:
-    """1 つの user 発話を (分割 user 句 + 相づち) の列へ展開する。"""
+    """1 つの user 発話を (分割 user 句 + 相づち) の列へ展開する。
+
+    allow_trailing=False のときは最後の句のあとに相づちを置かない。直後が silence の
+    user 発話に使い、「user -> silence -> user」(pause_handling)の隣接関係を保つ。"""
     text = str(turn.get("text", "")).strip()
     if not text:
         return [turn]
@@ -273,7 +270,9 @@ def enrich_user_turn(
     n_aizuchi = max(1, min(args.max_aizuchi_per_turn, int(dur / args.sec_per_aizuchi)))
     chunks = split_into_chunks(text, n_aizuchi)
     if len(chunks) == 1:
-        # 分割できない短文。終盤に 1 回だけ相づちを重ねる。
+        # 分割できない短文。終盤に 1 回だけ相づちを重ねる(直後が silence なら置かない)。
+        if not allow_trailing:
+            return [dict(turn, text=chunks[0])]
         out = [dict(turn, text=chunks[0])]
         offset = est_sec(chunks[0], args.chars_per_sec) * rng.uniform(0.6, 0.85)
         out.append(make_aizuchi(rng, offset))
@@ -294,8 +293,12 @@ def enrich_user_turn(
                 if key in turn and turn[key] not in (None, ""):
                     user_chunk[key] = turn[key]
         out.append(user_chunk)
-        # 句の終盤に相づちを重ねる(最後の句の後は本応答が続くので確率低め)
-        place = ci < len(chunks) - 1 or rng.random() < 0.4
+        # 句の終盤に相づちを重ねる(最後の句の後は本応答が続くので確率低め)。
+        # 直後が silence の場合は最後の句に相づちを置かない(隣接関係を保つ)。
+        if ci == len(chunks) - 1:
+            place = allow_trailing and rng.random() < 0.4
+        else:
+            place = True
         if place:
             chunk_sec = est_sec(chunk, args.chars_per_sec)
             offset = chunk_sec * rng.uniform(0.55, 0.85)
@@ -313,20 +316,30 @@ def enrich_dialogue(dialogue: dict[str, Any], rng: random.Random, args: argparse
     if not args.no_emotion_smoothing:
         smooth_user_emotions(turns, rng, args.emotion_inertia)
 
-    # 2) 相づち挿入(ターン分割を伴う)は自由対話だけに適用する。
-    #    ラベル付きタスクは厳密な検証規則を壊さないため構造を触らない。
-    if dialogue.get("duplex_task"):
+    # 2) 相づち挿入(ターン分割を伴う)。既定では自由対話だけに適用する。
+    #    --enrich-labeled-tasks 指定時はラベル付きタスクにも適用するが、分割対象は
+    #    timing=="sequential" の素の user 発話のみ(下のループでガード)なので、
+    #    タスク固有の overlap/truncate イベント行は保持され、検証規則は壊れない。
+    if dialogue.get("duplex_task") and not args.enrich_labeled_tasks:
         out = dict(dialogue)
         out["turns"] = turns
         return out
 
     new_turns: list[dict[str, Any]] = []
-    for turn in turns:
+    for idx, turn in enumerate(turns):
         if not isinstance(turn, dict):
             continue
         speaker = str(turn.get("speaker", "")).strip().lower()
         if speaker == "user" and str(turn.get("timing") or "sequential") == "sequential":
-            new_turns.extend(enrich_user_turn(turn, rng, args))
+            # 直後が silence なら末尾相づちを抑制し user->silence->user を保つ。
+            next_turn = turns[idx + 1] if idx + 1 < len(turns) else None
+            next_is_silence = (
+                isinstance(next_turn, dict)
+                and str(next_turn.get("speaker", "")).strip().lower() == "silence"
+            )
+            new_turns.extend(
+                enrich_user_turn(turn, rng, args, allow_trailing=not next_is_silence)
+            )
         else:
             new_turns.append(turn)
 
