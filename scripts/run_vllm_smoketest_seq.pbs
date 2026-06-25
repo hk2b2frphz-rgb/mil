@@ -15,9 +15,9 @@
 # production generation configuration.
 #
 # Models (default order):
-#   Qwen/Qwen3.6-27B-FP8       (Qwen recipe: vLLM >= 0.17.0)
-#   Qwen/Qwen3.6-35B-A3B-FP8   (Qwen recipe: vLLM >= 0.17.0)
-#   openai/gpt-oss-120b        (MXFP4, fits one A100 80GB per vLLM recipe)
+#   Qwen/Qwen3.6-27B            (bf16; fits one A100 80GB)
+#   Qwen/Qwen3.6-35B-A3B        (MoE ~70GB bf16; fits one A100 80GB)
+#   openai/gpt-oss-120b         (MXFP4, fits one A100 80GB per vLLM recipe)
 #
 # Submit:
 #   qsub -V scripts/run_vllm_smoketest_seq.pbs
@@ -65,7 +65,7 @@ export VLLM_QWEN_REASONING_PARSER="${VLLM_QWEN_REASONING_PARSER:-qwen3}"
 export VLLM_QWEN_CHAT_TEMPLATE_KWARGS="${VLLM_QWEN_CHAT_TEMPLATE_KWARGS:-}"
 export VLLM_PREPARE_GPTOSS_TIKTOKEN="${VLLM_PREPARE_GPTOSS_TIKTOKEN:-1}"
 export TIKTOKEN_ENCODINGS_DIR="${TIKTOKEN_ENCODINGS_DIR:-$PWD/.cache/tiktoken_encodings}"
-VLLM_MODELS="${VLLM_MODELS:-Qwen/Qwen3.6-27B-FP8 Qwen/Qwen3.6-35B-A3B-FP8 openai/gpt-oss-120b}"
+VLLM_MODELS="${VLLM_MODELS:-Qwen/Qwen3.6-27B Qwen/Qwen3.6-35B-A3B openai/gpt-oss-120b}"
 
 VLLM_PYTHON="$VLLM_ENV_DIR/bin/python"
 CPU_ARCH="$(uname -m)"
