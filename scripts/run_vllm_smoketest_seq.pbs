@@ -118,7 +118,7 @@ fi
 if [[ "$VLLM_RECREATE_ENV" == "1" ]]; then
     rm -rf "$VLLM_ENV_DIR"
 fi
-uv venv "$VLLM_ENV_DIR"
+[[ -d "$VLLM_ENV_DIR" ]] || uv venv "$VLLM_ENV_DIR"
 # Put the venv bin on PATH so ninja/cmake/python resolve by name. We invoke vllm
 # by absolute path, which does NOT activate the venv, so without this torch's
 # inductor (shutil.which("ninja")) cannot find ninja at inference time.
