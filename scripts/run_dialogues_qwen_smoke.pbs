@@ -133,6 +133,13 @@ vllm_args=(
     --enforce-eager
     --reasoning-parser qwen3
 )
+# Qwen3 thinking runs away on this JSON-generation task: it over-reasons, fails
+# to summarize, and emits broken/unterminated JSON. Disable thinking by default
+# so the model goes straight to the (json_object-constrained) answer. Override by
+# exporting VLLM_QWEN_CHAT_TEMPLATE_KWARGS yourself (e.g. to re-enable thinking).
+if [[ -z "${VLLM_QWEN_CHAT_TEMPLATE_KWARGS:-}" ]]; then
+    VLLM_QWEN_CHAT_TEMPLATE_KWARGS='{"enable_thinking": false}'
+fi
 if [[ -n "${VLLM_QWEN_CHAT_TEMPLATE_KWARGS:-}" ]]; then
     vllm_args+=(--default-chat-template-kwargs "$VLLM_QWEN_CHAT_TEMPLATE_KWARGS")
 fi
