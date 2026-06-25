@@ -14,6 +14,8 @@ from scripts.generate_synthetic_moshi_training_data import (
     build_moshi_agent_prompt,
     build_user_agent_profile,
     build_user_agent_prompt,
+    clean_agent_utterance,
+    fallback_moshi_utterance,
     messages_to_completion_prompt,
     openai_generation_url,
     openai_models_url,
@@ -88,6 +90,7 @@ class PromptRedesignTests(unittest.TestCase):
         moshi_prompt = build_moshi_agent_prompt(use_case, turns)
         self.assertIn("孤独・孤立相談窓口の相談員 moshi", moshi_prompt.system)
         self.assertIn("「うん」「うんうん」は使いません", moshi_prompt.user)
+        self.assertNotIn("model_backchannel", moshi_prompt.user)
         self.assertNotIn("今回の userAI のランダム設定", moshi_prompt.user)
 
         judge_prompt = build_judge_agent_prompt(
@@ -95,8 +98,15 @@ class PromptRedesignTests(unittest.TestCase):
         )
         self.assertIn('{"complete": true/false', judge_prompt.system)
 
-        aizuchi_prompt = build_aizuchi_agent_prompt(use_case, [], turns[0].text, 1)
+        aizuchi_prompt = build_aizuchi_agent_prompt(
+            use_case,
+            [],
+            turns[0].text,
+            "夕方がつらいんですね。",
+            1,
+        )
         self.assertIn('"insertions"', aizuchi_prompt.system)
+        self.assertIn("今回の moshi 本応答", aizuchi_prompt.user)
 
     def test_aizuchi_insertions_split_user_turns_into_current_format(self) -> None:
         text = "休日になると、誰とも話さないまま夕方になって、急に寂しくなります。"
@@ -110,8 +120,8 @@ class PromptRedesignTests(unittest.TestCase):
 
         self.assertEqual([turn.speaker for turn in turns], ["user", "moshi", "user"])
         self.assertEqual(turns[1].text, "はい。")
-        self.assertEqual(turns[1].timing, "overlap_previous")
-        self.assertEqual(turns[1].event, "model_backchannel")
+        self.assertEqual(turns[1].timing, "sequential")
+        self.assertIsNone(turns[1].event)
 
     def test_openai_endpoint_urls_support_chat_and_completions(self) -> None:
         self.assertEqual(
@@ -138,6 +148,21 @@ class PromptRedesignTests(unittest.TestCase):
         self.assertIn("<|im_start|>system\nsys<|im_end|>", prompt)
         self.assertIn("<|im_start|>user\nhello<|im_end|>", prompt)
         self.assertTrue(prompt.endswith("<|im_start|>assistant\n"))
+
+    def test_clean_agent_utterance_removes_completion_special_tokens(self) -> None:
+        self.assertEqual(clean_agent_utterance("<|im_end|>", "moshi"), "")
+        self.assertEqual(
+            clean_agent_utterance("<|im_start|>assistant\nmoshi|はい。<|im_end|>", "moshi"),
+            "はい。",
+        )
+
+    def test_fallback_moshi_utterance_is_nonempty_and_polite(self) -> None:
+        text = fallback_moshi_utterance(
+            [DialogueTurn("user", "夕方になると、急にひとりだなって感じます。")]
+        )
+
+        self.assertIn("話してくださってありがとうございます", text)
+        self.assertNotIn("うん", text)
 
 
 if __name__ == "__main__":

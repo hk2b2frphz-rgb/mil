@@ -460,6 +460,26 @@ def parse_args() -> argparse.Namespace:
         help="Maximum moshi backchannels inserted inside one user utterance.",
     )
     parser.add_argument(
+        "--multi-agent-empty-policy",
+        choices=["fail", "fallback"],
+        default=os.environ.get("MULTI_AGENT_EMPTY_POLICY") or "fail",
+        help=(
+            "What to do when userAI/systemAI returns an empty utterance after "
+            "retry. fail stops the job with trace context; fallback inserts a "
+            "deterministic utterance. Default: fail."
+        ),
+    )
+    parser.add_argument(
+        "--multi-agent-aizuchi-mode",
+        choices=["separate", "inline"],
+        default=os.environ.get("MULTI_AGENT_AIZUCHI_MODE") or "separate",
+        help=(
+            "separate: add aizuchi to surface output only; userAI/systemAI/judgeAI "
+            "see core turns without aizuchi. inline: add aizuchi to the running "
+            "turn history too, so later agents see it. Default: separate."
+        ),
+    )
+    parser.add_argument(
         "--no-multi-agent-aizuchi",
         action="store_true",
         help="Disable the separate aizuchi agent in multi-agent mode.",
@@ -910,6 +930,23 @@ class LLMDialogueGenerator:
         self.args = args
         self.pipe = None
         self.active_task = args.llm_task
+        self.trace_path: Path | None = None
+        if getattr(args, "dialogue_generation_mode", "") == "multi-agent":
+            self.trace_path = args.out_dir / "multi_agent_trace.jsonl"
+            try:
+                if self.trace_path.exists():
+                    self.trace_path.unlink()
+            except OSError:
+                logger.warning("Could not reset trace file: %s", self.trace_path)
+
+    def trace_event(self, event: dict[str, Any]) -> None:
+        if self.trace_path is None:
+            return
+        payload = {
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            **event,
+        }
+        append_jsonl(self.trace_path, payload)
 
     def _torch_dtype(self):
         if self.args.llm_dtype == "auto":
@@ -1185,6 +1222,85 @@ class LLMDialogueGenerator:
             role_name=role_name,
         )
 
+    def call_agent_utterance(
+        self,
+        prompt: AgentPrompt,
+        *,
+        speaker: str,
+        temperature: float,
+        max_tokens: int,
+        role_name: str,
+        fallback_text: str,
+        context: dict[str, Any],
+    ) -> str:
+        current = prompt
+        last_raw = ""
+        for attempt in range(2):
+            raw = self.call_agent(
+                current,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                role_name=role_name if attempt == 0 else f"{role_name}-retry",
+            )
+            last_raw = raw
+            text = clean_agent_utterance(raw, speaker)
+            self.trace_event(
+                {
+                    "event": "agent_utterance",
+                    "role": role_name,
+                    "speaker": speaker,
+                    "attempt": attempt + 1,
+                    "empty": not bool(text),
+                    "prompt_system": current.system,
+                    "prompt_user": current.user,
+                    "raw_text": raw[:1000],
+                    "cleaned_text": text,
+                    **context,
+                }
+            )
+            if text:
+                return text
+            logger.warning(
+                "%s produced an empty utterance on attempt %d; raw=%r",
+                role_name,
+                attempt + 1,
+                raw[:500],
+            )
+            current = AgentPrompt(
+                system=prompt.system,
+                user=(
+                    prompt.user
+                    + "\n\n前回の出力が空でした。必ず1文以上の発話本文だけを返してください。"
+                ),
+            )
+        if self.args.multi_agent_empty_policy == "fallback":
+            logger.warning("%s fallback utterance used: %s", role_name, fallback_text)
+            self.trace_event(
+                {
+                    "event": "agent_fallback",
+                    "role": role_name,
+                    "speaker": speaker,
+                    "fallback_text": fallback_text,
+                    "last_raw_text": last_raw[:1000],
+                    **context,
+                }
+            )
+            return fallback_text
+        self.trace_event(
+            {
+                "event": "agent_empty_failure",
+                "role": role_name,
+                "speaker": speaker,
+                "last_raw_text": last_raw[:1000],
+                **context,
+            }
+        )
+        raise ValueError(
+            f"{role_name} produced an empty utterance after retry "
+            f"(case={context.get('case_id')} pair={context.get('pair_index')}). "
+            f"See {self.trace_path} for raw output."
+        )
+
     def generate_multi_agent(
         self,
         use_case: dict[str, Any],
@@ -1201,64 +1317,88 @@ class LLMDialogueGenerator:
         profile = build_user_agent_profile(use_case, rng)
         max_pairs = max(1, int(self.args.multi_agent_max_pairs))
         min_pairs = max(1, min(int(self.args.multi_agent_min_pairs), max_pairs))
-        turns: list[DialogueTurn] = []
+        core_turns: list[DialogueTurn] = []
+        surface_turns: list[DialogueTurn] = []
+        case_id = str(use_case.get("id") or "multi_agent_dialogue")
+        self.trace_event(
+            {
+                "event": "dialogue_start",
+                "case_id": case_id,
+                "profile": profile,
+                "min_pairs": min_pairs,
+                "max_pairs": max_pairs,
+                "empty_policy": self.args.multi_agent_empty_policy,
+                "aizuchi_mode": self.args.multi_agent_aizuchi_mode,
+            }
+        )
 
         for pair_index in range(max_pairs):
+            context = {"case_id": case_id, "pair_index": pair_index + 1}
             user_prompt = build_user_agent_prompt(
-                use_case, profile, turns, pair_index, max_pairs
+                use_case, profile, core_turns, pair_index, max_pairs
             )
-            user_raw = self.call_agent(
+            user_text = self.call_agent_utterance(
                 user_prompt,
+                speaker="user",
                 temperature=self.args.multi_agent_user_temperature,
                 max_tokens=240,
                 role_name="userAI",
+                fallback_text=fallback_user_utterance(use_case, core_turns),
+                context=context,
             )
-            user_text = clean_agent_utterance(user_raw, "user")
-            if not user_text:
-                raise ValueError("userAI produced an empty utterance.")
+            logger.info(
+                "multi-agent case=%s pair=%d user=%s",
+                case_id,
+                pair_index + 1,
+                user_text,
+            )
+            user_turn = DialogueTurn("user", user_text)
+            core_turns.append(user_turn)
 
-            insertions: list[dict[str, Any]] = []
-            clauses = split_text_into_clauses(user_text)
-            if (
-                not self.args.no_multi_agent_aizuchi
-                and len(user_text) >= self.args.multi_agent_aizuchi_min_chars
-                and len(clauses) >= 2
-                and self.args.multi_agent_max_aizuchi_per_user > 0
-            ):
-                aizuchi_prompt = build_aizuchi_agent_prompt(
-                    use_case,
-                    turns,
-                    user_text,
-                    self.args.multi_agent_max_aizuchi_per_user,
-                )
-                aizuchi_raw = self.call_agent(
-                    aizuchi_prompt,
-                    temperature=self.args.multi_agent_aizuchi_temperature,
-                    max_tokens=120,
-                    role_name="aizuchiAI",
-                )
-                insertions = parse_aizuchi_insertions(
-                    aizuchi_raw,
-                    clauses,
-                    self.args.multi_agent_max_aizuchi_per_user,
-                )
-            turns.extend(user_turns_with_aizuchi(user_text, insertions))
-
-            moshi_prompt = build_moshi_agent_prompt(use_case, turns)
-            moshi_raw = self.call_agent(
+            moshi_prompt = build_moshi_agent_prompt(use_case, core_turns)
+            moshi_text = self.call_agent_utterance(
                 moshi_prompt,
+                speaker="moshi",
                 temperature=self.args.multi_agent_system_temperature,
                 max_tokens=280,
                 role_name="systemAI",
+                fallback_text=fallback_moshi_utterance(core_turns),
+                context=context,
             )
-            moshi_text = clean_agent_utterance(moshi_raw, "moshi")
-            if not moshi_text:
-                raise ValueError("systemAI produced an empty utterance.")
-            turns.append(DialogueTurn("moshi", moshi_text))
+            moshi_turn = DialogueTurn("moshi", moshi_text)
+            core_turns.append(moshi_turn)
+            surface_pair_turns = self.add_aizuchi_for_user_turn(
+                use_case=use_case,
+                visible_turns=surface_turns,
+                user_turn=user_turn,
+                moshi_turn=moshi_turn,
+                case_id=case_id,
+                pair_index=pair_index + 1,
+            )
+            surface_pair_turns.append(moshi_turn)
+            surface_turns.extend(surface_pair_turns)
+            if self.args.multi_agent_aizuchi_mode == "inline":
+                core_turns = list(surface_turns)
+            logger.info(
+                "multi-agent case=%s pair=%d moshi=%s",
+                case_id,
+                pair_index + 1,
+                moshi_text,
+            )
+            self.trace_event(
+                {
+                    "event": "pair_complete",
+                    "core_turn_count": len(core_turns),
+                    "surface_turn_count": len(surface_turns),
+                    "core_transcript": dialogue_turns_to_transcript(core_turns),
+                    "surface_transcript": dialogue_turns_to_transcript(surface_turns),
+                    **context,
+                }
+            )
 
             if pair_index + 1 >= min_pairs:
                 judge_prompt = build_judge_agent_prompt(
-                    use_case, turns, pair_index, min_pairs, max_pairs
+                    use_case, core_turns, pair_index, min_pairs, max_pairs
                 )
                 judge_raw = self.call_agent(
                     judge_prompt,
@@ -1266,23 +1406,95 @@ class LLMDialogueGenerator:
                     max_tokens=120,
                     role_name="judgeAI",
                 )
-                if parse_completion_decision(judge_raw):
+                complete = parse_completion_decision(judge_raw)
+                self.trace_event(
+                    {
+                        "event": "judge_decision",
+                        "prompt_system": judge_prompt.system,
+                        "prompt_user": judge_prompt.user,
+                        "raw_text": judge_raw[:1000],
+                        "complete": complete,
+                        **context,
+                    }
+                )
+                if complete:
                     break
 
-        dialogue_id = str(use_case.get("id") or "multi_agent_dialogue")
+        dialogue_id = case_id
+        self.trace_event(
+            {
+                "event": "dialogue_complete",
+                "case_id": case_id,
+                "core_turn_count": len(core_turns),
+                "surface_turn_count": len(surface_turns),
+                "core_transcript": dialogue_turns_to_transcript(core_turns),
+                "surface_transcript": dialogue_turns_to_transcript(surface_turns),
+            }
+        )
         return Dialogue(
             id=safe_stem(dialogue_id, "multi_agent_dialogue"),
             category=str(use_case.get("category", "unknown")),
             risk_level=str(use_case.get("risk_level", "low")),
             title=str(use_case.get("situation") or dialogue_id),
             source_use_case=str(use_case.get("id") or dialogue_id),
-            turns=turns,
+            turns=surface_turns,
             generator_notes=(
                 "multi_agent profile="
                 + json.dumps(profile, ensure_ascii=False, sort_keys=True)
             ),
             duplex_task=str(use_case.get("duplex_task") or "") or None,
         )
+
+    def add_aizuchi_for_user_turn(
+        self,
+        *,
+        use_case: dict[str, Any],
+        visible_turns: list[DialogueTurn],
+        user_turn: DialogueTurn,
+        moshi_turn: DialogueTurn,
+        case_id: str,
+        pair_index: int,
+    ) -> list[DialogueTurn]:
+        if (
+            self.args.no_multi_agent_aizuchi
+            or len(user_turn.text) < self.args.multi_agent_aizuchi_min_chars
+            or self.args.multi_agent_max_aizuchi_per_user <= 0
+        ):
+            return [user_turn]
+        clauses = split_text_into_clauses(user_turn.text)
+        if len(clauses) < 2:
+            return [user_turn]
+        prompt = build_aizuchi_agent_prompt(
+            use_case,
+            visible_turns,
+            user_turn.text,
+            moshi_turn.text,
+            self.args.multi_agent_max_aizuchi_per_user,
+        )
+        raw = self.call_agent(
+            prompt,
+            temperature=self.args.multi_agent_aizuchi_temperature,
+            max_tokens=120,
+            role_name="aizuchiAI",
+        )
+        insertions = parse_aizuchi_insertions(
+            raw,
+            clauses,
+            self.args.multi_agent_max_aizuchi_per_user,
+        )
+        self.trace_event(
+            {
+                "event": "aizuchi_decision",
+                "case_id": case_id,
+                "pair_index": pair_index,
+                "aizuchi_mode": self.args.multi_agent_aizuchi_mode,
+                "prompt_system": prompt.system,
+                "prompt_user": prompt.user,
+                "raw_text": raw[:1000],
+                "insertions": insertions,
+            }
+        )
+        return user_turns_with_aizuchi(user_turn.text, insertions)
 
     def generate_transformers_subprocess(self, prompt: str) -> str:
         return self.generate_transformers_subprocess_batch([prompt])[0]
@@ -1648,6 +1860,7 @@ def build_aizuchi_agent_prompt(
     use_case: dict[str, Any],
     turns: list[DialogueTurn],
     user_text: str,
+    moshi_text: str,
     max_insertions: int,
 ) -> AgentPrompt:
     transcript = dialogue_turns_to_transcript(turns) or "(まだ会話は始まっていません)"
@@ -1663,23 +1876,60 @@ def build_aizuchi_agent_prompt(
 今回の user 発話を句ごとに分けたもの:
 {numbered}
 
+今回の moshi 本応答:
+{moshi_text}
+
 最大挿入数: {max_insertions}
 判断:
 - user発話の途中に moshi の短い相づちを入れるなら after_clause に句番号を指定します。
 - 最後の句の後には挿入しません。
 - 重い告白や短い発話では insertions を [] にします。
+- moshi 本応答の直前に同じ語が重ならないようにします。
 - text は必ず「はい。」「ええ。」「そうなんですね。」「なるほど。」のどれか。
 JSONだけを返してください。
 """.strip()
     return AgentPrompt(system=AIZUCHI_AGENT_SYSTEM_PROMPT, user=prompt)
 
 
+def latest_turn_text(turns: list[DialogueTurn], speaker: str) -> str:
+    for turn in reversed(turns):
+        if turn.speaker == speaker and turn.text.strip():
+            return turn.text.strip()
+    return ""
+
+
+def fallback_user_utterance(
+    use_case: dict[str, Any], turns: list[DialogueTurn]
+) -> str:
+    if not any(turn.speaker == "user" for turn in turns):
+        return str(use_case.get("opening") or "少し話してもいいですか。")
+    return "はい。少しずつですが、もう少し話してみます。"
+
+
+def fallback_moshi_utterance(turns: list[DialogueTurn]) -> str:
+    last_user = latest_turn_text(turns, "user")
+    if not last_user:
+        return "来てくださってありがとうございます。少しずつで大丈夫です。"
+    short = last_user
+    if len(short) > 38:
+        short = short[:38].rstrip("、。…") + "…"
+    return (
+        "話してくださってありがとうございます。"
+        f"{short}ということなんですね。"
+        "よければ、もう少し聞かせてください。"
+    )
+
+
 def clean_agent_utterance(text: str, speaker: str) -> str:
     text = strip_thinking(text).strip()
+    text = re.sub(r"<\|im_start\|>\s*assistant\s*", "", text)
+    text = text.replace("<|im_end|>", "").strip()
     lines = [
         line.strip().strip('"').strip("'")
         for line in text.splitlines()
-        if line.strip() and not line.strip().startswith("```")
+        if line.strip()
+        and not line.strip().startswith("```")
+        and line.strip() not in {"<|im_start|>assistant", "<|im_end|>"}
     ]
     if not lines:
         return ""
@@ -1767,15 +2017,7 @@ def user_turns_with_aizuchi(
         chunk = "".join(clauses[start:after_clause]).strip()
         if chunk:
             turns.append(DialogueTurn("user", chunk))
-        turns.append(
-            DialogueTurn(
-                "moshi",
-                str(insertion["text"]),
-                timing="overlap_previous",
-                start_after_previous_start_sec=1.2,
-                event="model_backchannel",
-            )
-        )
+        turns.append(DialogueTurn("moshi", str(insertion["text"])))
         start = after_clause
     rest = "".join(clauses[start:]).strip()
     if rest:
@@ -1805,6 +2047,7 @@ def multi_agent_prompt_preview(
         use_case,
         [],
         sample_user.text,
+        "話してくださってありがとうございます。",
         args.multi_agent_max_aizuchi_per_user,
     )
     return {
