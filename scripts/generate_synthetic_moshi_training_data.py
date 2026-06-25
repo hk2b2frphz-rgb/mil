@@ -702,17 +702,29 @@ class GemmaDialogueGenerator:
             headers["Authorization"] = f"Bearer {self.args.gemma_api_key}"
         request = urllib.request.Request(url, data=body, headers=headers, method="POST")
         try:
+            t0 = time.time()
             with urllib.request.urlopen(
                 request,
                 timeout=self.args.gemma_timeout_sec,
             ) as response:
                 data = json.loads(response.read().decode("utf-8"))
+            elapsed = time.time() - t0
         except urllib.error.URLError as exc:
             raise RuntimeError(
                 "Could not reach the OpenAI-compatible Gemma endpoint at "
                 f"{url}. Start a Gemma server separately, pass --gemma-api-base, "
                 "or use --dialogues-jsonl / --gemma-backend template."
             ) from exc
+        logger.info("raw_response: %s", json.dumps(data, ensure_ascii=False))
+        usage = data.get("usage") or {}
+        completion_tokens = usage.get("completion_tokens")
+        if completion_tokens and elapsed > 0:
+            logger.info(
+                "throughput: %.1f tokens/sec (%d tokens in %.2fs)",
+                completion_tokens / elapsed,
+                completion_tokens,
+                elapsed,
+            )
         return openai_chat_response_to_text(data)
 
     def generate_transformers_subprocess(self, prompt: str) -> str:

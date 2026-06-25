@@ -71,7 +71,7 @@ if has_step dialogues; then
         --gemma-model "${GEMMA_MODEL:-google/gemma-4-E2B-it}"
         --gemma-dtype "${GEMMA_DTYPE:-bfloat16}"
         --gemma-temperature "${GEMMA_TEMPERATURE:-0.8}"
-        --gemma-max-new-tokens "${GEMMA_MAX_NEW_TOKENS:-1100}"
+        --gemma-max-new-tokens "${GEMMA_MAX_NEW_TOKENS:-3000}"
         --gemma-timeout-sec "${GEMMA_TIMEOUT_SEC:-7200}"
     )
     if [[ "${GEMMA_BACKEND:-transformers-subprocess}" == "openai-compatible" ]]; then
