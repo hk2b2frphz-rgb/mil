@@ -188,8 +188,8 @@ done
 echo "vLLM is ready and serving $VLLM_MODEL; starting dialogue generation."
 
 # Focus of this run: dialogue TEXT with natural, frequent Japanese backchannels
-# (相づち) produced by the LLM itself -- the few-shot exemplars keep moshi polite
-# (はい/ええ/そうなんですね/なるほど) and reflective mid-conversation. We are
+# produced by the LLM itself -- the few-shot exemplars keep moshi polite
+# (short acknowledgements) and reflective mid-conversation. We are
 # NOT encoding any overlap/timing meta in the text here; the full-duplex overlap
 # layer is designed separately later. So: free-form only (LISTENING_RATIO=1.0, no
 # labeled duplex tasks) and two exemplars for backchannel-density variety.
