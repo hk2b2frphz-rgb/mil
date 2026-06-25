@@ -70,7 +70,7 @@ export NUM_CASES="${NUM_CASES:-1000}"
 export SEED="${SEED:-0}"
 export RUN_ID="${BATCH_ID}"
 export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/${BATCH_ID}}"
-export GEMMA_TEMPERATURE="${GEMMA_TEMPERATURE:-0.9}"
+export LLM_TEMPERATURE="${LLM_TEMPERATURE:-0.9}"
 
 if ! [[ "$BATCH_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
     echo "ERROR: BATCH_ID may contain only letters, digits, dot, underscore, hyphen." >&2
@@ -188,13 +188,13 @@ done
 echo "vLLM is ready and serving $VLLM_MODEL; starting dialogue generation."
 
 export STEPS="use_cases,dialogues"
-export GEMMA_BACKEND="openai-compatible"
-export GEMMA_API_BASE="http://127.0.0.1:${PORT}/v1"
-export GEMMA_API_KEY="${GEMMA_API_KEY:-}"
-export GEMMA_MODEL="$VLLM_MODEL"
-export GEMMA_TEMPERATURE
-export GEMMA_FREQUENCY_PENALTY="0.3"
-export GEMMA_PRESENCE_PENALTY="0.1"
+export LLM_BACKEND="openai-compatible"
+export LLM_API_BASE="http://127.0.0.1:${PORT}/v1"
+export LLM_API_KEY="${LLM_API_KEY:-}"
+export LLM_MODEL="$VLLM_MODEL"
+export LLM_TEMPERATURE
+export LLM_FREQUENCY_PENALTY="0.3"
+export LLM_PRESENCE_PENALTY="0.1"
 # Dialogues are generated as a plain pipe-delimited transcript (not JSON), which
 # the model produces far more reliably, so no response_format is forced. Qwen
 # thinking is controlled separately via the chat template kwargs.
@@ -203,14 +203,14 @@ export OUT_ROOT
 
 bash scripts/run_full_duplex_training_data.sh
 
-test -s "$OUT_ROOT/gemma_dialogues/dialogues.jsonl"
+test -s "$OUT_ROOT/llm_dialogues/dialogues.jsonl"
 
 # Diversity report is best-effort; do not fail the data job if it errors.
 uv run python scripts/report_dialogue_diversity.py \
-    --in "$OUT_ROOT/gemma_dialogues/dialogues.jsonl" \
+    --in "$OUT_ROOT/llm_dialogues/dialogues.jsonl" \
     --out "$OUT_ROOT/diversity_report.txt" \
     --samples 8 || echo "WARNING: diversity report failed (dialogues are still saved)." >&2
 
-echo "dialogues: $OUT_ROOT/gemma_dialogues/dialogues.jsonl"
+echo "dialogues: $OUT_ROOT/llm_dialogues/dialogues.jsonl"
 echo "report:    $OUT_ROOT/diversity_report.txt"
 echo "finished_at: $(date -Iseconds)"

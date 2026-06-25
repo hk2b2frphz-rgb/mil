@@ -20,7 +20,7 @@ GAP_SEC="${GAP_SEC:-0.2}"
 LEAD_IN_SEC="${LEAD_IN_SEC:-0.3}"
 
 USE_CASES_PATH="$OUT_ROOT/use_cases.jsonl"
-DIALOGUES_DIR="$OUT_ROOT/gemma_dialogues"
+DIALOGUES_DIR="$OUT_ROOT/llm_dialogues"
 DIALOGUES_RAW="$DIALOGUES_DIR/dialogues.jsonl"
 DIALOGUES_ENRICHED="$DIALOGUES_DIR/dialogues_enriched.jsonl"
 TRAINING_DIR="$OUT_ROOT/training_set"
@@ -60,41 +60,41 @@ if has_step use_cases; then
 fi
 
 if has_step dialogues; then
-    gemma_args=(
+    llm_args=(
         uv run python scripts/generate_synthetic_moshi_training_data.py
         --out-dir "$DIALOGUES_DIR"
         --use-cases-jsonl "$USE_CASES_PATH"
         --num-dialogues "$NUM_CASES"
         --seed "$SEED"
         --mode dialogues-only
-        --gemma-backend "${GEMMA_BACKEND:-transformers-subprocess}"
-        --gemma-model "${GEMMA_MODEL:-google/gemma-2-2b-it}"
-        --gemma-dtype "${GEMMA_DTYPE:-bfloat16}"
-        --gemma-temperature "${GEMMA_TEMPERATURE:-0.8}"
-        --gemma-max-new-tokens "${GEMMA_MAX_NEW_TOKENS:-4096}"
-        --gemma-timeout-sec "${GEMMA_TIMEOUT_SEC:-7200}"
+        --llm-backend "${LLM_BACKEND:-transformers-subprocess}"
+        --llm-model "${LLM_MODEL:-google/gemma-2-2b-it}"
+        --llm-dtype "${LLM_DTYPE:-bfloat16}"
+        --llm-temperature "${LLM_TEMPERATURE:-0.8}"
+        --llm-max-new-tokens "${LLM_MAX_NEW_TOKENS:-4096}"
+        --llm-timeout-sec "${LLM_TIMEOUT_SEC:-7200}"
     )
-    if [[ "${GEMMA_BACKEND:-transformers-subprocess}" == "openai-compatible" ]]; then
-        gemma_args+=(
-            --gemma-api-base "${GEMMA_API_BASE:-http://127.0.0.1:8080/v1}"
-            --gemma-api-key "${GEMMA_API_KEY:-}"
-            --gemma-frequency-penalty "${GEMMA_FREQUENCY_PENALTY:-0.3}"
-            --gemma-presence-penalty "${GEMMA_PRESENCE_PENALTY:-0.1}"
-            --gemma-repetition-penalty "${GEMMA_REPETITION_PENALTY:-1.1}"
+    if [[ "${LLM_BACKEND:-transformers-subprocess}" == "openai-compatible" ]]; then
+        llm_args+=(
+            --llm-api-base "${LLM_API_BASE:-http://127.0.0.1:8080/v1}"
+            --llm-api-key "${LLM_API_KEY:-}"
+            --llm-frequency-penalty "${LLM_FREQUENCY_PENALTY:-0.3}"
+            --llm-presence-penalty "${LLM_PRESENCE_PENALTY:-0.1}"
+            --llm-repetition-penalty "${LLM_REPETITION_PENALTY:-1.1}"
         )
         # Reasoning models (gpt-oss): keep effort low so the JSON channel is
         # emitted, and force JSON output. Both are no-ops if left empty.
-        if [[ -n "${GEMMA_REASONING_EFFORT:-}" ]]; then
-            gemma_args+=(--gemma-reasoning-effort "$GEMMA_REASONING_EFFORT")
+        if [[ -n "${LLM_REASONING_EFFORT:-}" ]]; then
+            llm_args+=(--llm-reasoning-effort "$LLM_REASONING_EFFORT")
         fi
-        if [[ -n "${GEMMA_RESPONSE_FORMAT:-}" ]]; then
-            gemma_args+=(--gemma-response-format "$GEMMA_RESPONSE_FORMAT")
+        if [[ -n "${LLM_RESPONSE_FORMAT:-}" ]]; then
+            llm_args+=(--llm-response-format "$LLM_RESPONSE_FORMAT")
         fi
     fi
     if [[ "${ALLOW_TEMPLATE_FALLBACK:-0}" == "1" ]]; then
-        gemma_args+=(--allow-template-fallback)
+        llm_args+=(--allow-template-fallback)
     fi
-    "${gemma_args[@]}"
+    "${llm_args[@]}"
     # Drop any stale enriched file so a regenerated dialogues.jsonl is never
     # rendered from previous-run enrichment.
     rm -f "$DIALOGUES_ENRICHED"

@@ -800,7 +800,7 @@ def optional_float(value: Any, default: float | None = None) -> float | None:
 
 
 def load_dialogues_from_jsonl(path: Path) -> list[dict[str, Any]]:
-    """外部 (Gemma) の dialogues.jsonl を読む。TEMPLATE_DIALOGUES と同じ形に整える。"""
+    """外部 (LLM) の dialogues.jsonl を読む。TEMPLATE_DIALOGUES と同じ形に整える。"""
     out: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as f:
         for i, line in enumerate(f, start=1):
@@ -1075,7 +1075,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "外部対話 JSONL（Gemma が出した dialogues.jsonl など）を読む。"
+            "外部対話 JSONL（LLM が出した dialogues.jsonl など）を読む。"
             "未指定なら内蔵 TEMPLATE_DIALOGUES を使う。"
         ),
     )

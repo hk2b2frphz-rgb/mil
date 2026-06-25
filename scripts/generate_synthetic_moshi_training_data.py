@@ -4,13 +4,13 @@ from __future__ import annotations
 Generate a small synthetic Moshi fine-tuning dataset.
 
 Pipeline:
-1. Gemma 4 generates Japanese dialogue scripts for loneliness/isolation
+1. LLM 4 generates Japanese dialogue scripts for loneliness/isolation
    support-window use cases.
 2. In the default "scripted-moshi-tts" mode, each script turn is rendered
    with Kyutai/Moshi TTS and placed into a stereo dialogue file.
 3. In "moshi-selfplay" mode, user turns are rendered as audio and
    llm-jp-moshi-v1 generates the counselor stream from that user audio context.
-4. In "scripted-local-tts" mode, both speakers are rendered from the Gemma
+4. In "scripted-local-tts" mode, both speakers are rendered from the LLM
    script with local pyopenjtalk/pyttsx3 TTS for quick format checks.
 
 Outputs follow the moshi-finetune dataset shape:
@@ -182,7 +182,7 @@ class AudioSegment:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate a small Gemma 4 + Moshi TTS synthetic stereo dataset "
+            "Generate a small LLM 4 + Moshi TTS synthetic stereo dataset "
             "for Moshi fine-tuning experiments. llm-jp-moshi can also be "
             "sampled with --mode moshi-selfplay."
         )
@@ -215,7 +215,7 @@ def parse_args() -> argparse.Namespace:
             "TTS into stereo WAVs. moshi-selfplay: local TTS creates the user "
             "stream and llm-jp-moshi generates the counselor stream. "
             "scripted-local-tts/scripted-stereo: local TTS renders both speakers. "
-            "dialogues-only: Gemma で対話 JSONL を生成して終了（音声合成は行わない）。"
+            "dialogues-only: LLM で対話 JSONL を生成して終了（音声合成は行わない）。"
         ),
     )
     parser.add_argument(
@@ -229,7 +229,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Optional pre-generated dialogue JSONL. If set, Gemma is not loaded "
+            "Optional pre-generated dialogue JSONL. If set, LLM is not loaded "
             "and these dialogues are rendered instead."
         ),
     )
@@ -241,12 +241,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--allow-template-fallback",
         action="store_true",
-        help="Use deterministic templates if Gemma generation fails.",
+        help="Use deterministic templates if LLM generation fails.",
     )
 
-    # Gemma generation
+    # LLM generation
     parser.add_argument(
-        "--gemma-backend",
+        "--llm-backend",
         choices=[
             "transformers-subprocess",
             "transformers",
@@ -255,91 +255,91 @@ def parse_args() -> argparse.Namespace:
         ],
         default="transformers-subprocess",
         help=(
-            "Dialogue generation backend. transformers-subprocess runs Gemma "
+            "Dialogue generation backend. transformers-subprocess runs LLM "
             "from this script via a separate Python environment, avoiding "
             "dependency conflicts with Moshi. Default: transformers-subprocess."
         ),
     )
     parser.add_argument(
-        "--gemma-python",
-        default=os.environ.get("GEMMA_PYTHON"),
+        "--llm-python",
+        default=os.environ.get("LLM_PYTHON"),
         help=(
-            "Python executable for --gemma-backend transformers-subprocess. "
+            "Python executable for --llm-backend transformers-subprocess. "
             "Defaults to gemma_runtime/.venv/bin/python if present, otherwise "
             "the current Python."
         ),
     )
     parser.add_argument(
-        "--gemma-worker",
+        "--llm-worker",
         type=Path,
         default=Path(__file__).with_name("gemma_dialogue_worker.py"),
-        help="Worker script used by --gemma-backend transformers-subprocess.",
+        help="Worker script used by --llm-backend transformers-subprocess.",
     )
     parser.add_argument(
-        "--gemma-api-base",
-        default=os.environ.get("GEMMA_API_BASE")
+        "--llm-api-base",
+        default=os.environ.get("LLM_API_BASE")
         or os.environ.get("OPENAI_BASE_URL")
         or "http://127.0.0.1:8080/v1",
         help=(
-            "OpenAI-compatible API base URL for Gemma, e.g. "
-            "http://127.0.0.1:8080/v1. Used with --gemma-backend "
+            "OpenAI-compatible API base URL for LLM, e.g. "
+            "http://127.0.0.1:8080/v1. Used with --llm-backend "
             "openai-compatible."
         ),
     )
     parser.add_argument(
-        "--gemma-api-key",
-        default=os.environ.get("GEMMA_API_KEY") or os.environ.get("OPENAI_API_KEY"),
-        help="Optional API key for the OpenAI-compatible Gemma endpoint.",
+        "--llm-api-key",
+        default=os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY"),
+        help="Optional API key for the OpenAI-compatible LLM endpoint.",
     )
     parser.add_argument(
-        "--gemma-timeout-sec",
+        "--llm-timeout-sec",
         type=float,
         default=300.0,
-        help="Timeout for Gemma generation requests/subprocess calls.",
+        help="Timeout for LLM generation requests/subprocess calls.",
     )
     parser.add_argument(
-        "--gemma-model",
+        "--llm-model",
         default="google/gemma-2-2b-it",
         help=(
-            "Gemma model id/name. For OpenAI-compatible servers this is sent "
+            "LLM model id/name. For OpenAI-compatible servers this is sent "
             "as the request model field."
         ),
     )
     parser.add_argument(
-        "--gemma-task",
+        "--llm-task",
         default="any-to-any",
         help=(
-            "Transformers pipeline task, used with --gemma-backend "
+            "Transformers pipeline task, used with --llm-backend "
             "transformers or transformers-subprocess."
         ),
     )
     parser.add_argument(
-        "--gemma-device-map",
+        "--llm-device-map",
         default="auto",
         help='Device map passed to transformers.pipeline. Default: "auto".',
     )
     parser.add_argument(
-        "--gemma-dtype",
+        "--llm-dtype",
         choices=["auto", "bfloat16", "float16", "float32"],
         default="auto",
     )
-    parser.add_argument("--gemma-temperature", type=float, default=0.8)
+    parser.add_argument("--llm-temperature", type=float, default=0.8)
     parser.add_argument(
-        "--gemma-frequency-penalty",
+        "--llm-frequency-penalty",
         type=float,
         default=0.3,
         help="OpenAI-compatible frequency penalty. Default: 0.3.",
     )
     parser.add_argument(
-        "--gemma-presence-penalty",
+        "--llm-presence-penalty",
         type=float,
         default=0.1,
         help="OpenAI-compatible presence penalty. Default: 0.1.",
     )
     parser.add_argument(
-        "--gemma-repetition-penalty",
+        "--llm-repetition-penalty",
         type=float,
-        default=float(os.environ.get("GEMMA_REPETITION_PENALTY") or 1.0),
+        default=float(os.environ.get("LLM_REPETITION_PENALTY") or 1.0),
         help=(
             "vLLM repetition_penalty (>1.0 discourages repeats). Counters the "
             "model degenerating into endless newline/character repetition. "
@@ -347,11 +347,11 @@ def parse_args() -> argparse.Namespace:
             "when > 1.0."
         ),
     )
-    parser.add_argument("--gemma-max-new-tokens", type=int, default=1400)
+    parser.add_argument("--llm-max-new-tokens", type=int, default=1400)
     parser.add_argument(
-        "--gemma-num-fewshot",
+        "--llm-num-fewshot",
         type=int,
-        default=int(os.environ.get("GEMMA_NUM_FEWSHOT") or 1),
+        default=int(os.environ.get("LLM_NUM_FEWSHOT") or 1),
         help=(
             "Number of few-shot exemplars to embed in the prompt (0-5). Fewer "
             "keeps the prompt short and the model under tighter control. "
@@ -359,9 +359,9 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--gemma-reasoning-effort",
+        "--llm-reasoning-effort",
         choices=["low", "medium", "high"],
-        default=os.environ.get("GEMMA_REASONING_EFFORT") or None,
+        default=os.environ.get("LLM_REASONING_EFFORT") or None,
         help=(
             "Reasoning effort for reasoning models (e.g. gpt-oss) on the "
             "openai-compatible backend. Lower values stop the model from "
@@ -371,9 +371,9 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--gemma-response-format",
+        "--llm-response-format",
         choices=["json_schema", "json_object", "text"],
-        default=os.environ.get("GEMMA_RESPONSE_FORMAT") or None,
+        default=os.environ.get("LLM_RESPONSE_FORMAT") or None,
         help=(
             "OpenAI-compatible response_format. 'json_schema' (recommended) "
             "forces the exact dialogue structure via vLLM guided decoding, "
@@ -549,7 +549,7 @@ def extract_json_object(text: str) -> dict[str, Any]:
     start = text.find("{")
     end = text.rfind("}")
     if start < 0 or end < start:
-        raise ValueError("No JSON object found in Gemma output.")
+        raise ValueError("No JSON object found in LLM output.")
     return json.loads(text[start: end + 1])
 
 
@@ -813,14 +813,14 @@ def dialogue_from_mapping(data: dict[str, Any], use_case: dict[str, Any]) -> Dia
     )
 
 
-class GemmaDialogueGenerator:
+class LLMDialogueGenerator:
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.pipe = None
-        self.active_task = args.gemma_task
+        self.active_task = args.llm_task
 
     def _torch_dtype(self):
-        if self.args.gemma_dtype == "auto":
+        if self.args.llm_dtype == "auto":
             return "auto"
         import torch
 
@@ -828,10 +828,10 @@ class GemmaDialogueGenerator:
             "bfloat16": torch.bfloat16,
             "float16": torch.float16,
             "float32": torch.float32,
-        }[self.args.gemma_dtype]
+        }[self.args.llm_dtype]
 
     def load(self) -> None:
-        if self.args.gemma_backend in {
+        if self.args.llm_backend in {
             "openai-compatible",
             "template",
             "transformers-subprocess",
@@ -842,15 +842,15 @@ class GemmaDialogueGenerator:
         from transformers import pipeline
 
         kwargs: dict[str, Any] = {
-            "model": self.args.gemma_model,
-            "device_map": self.args.gemma_device_map,
+            "model": self.args.llm_model,
+            "device_map": self.args.llm_device_map,
             "trust_remote_code": self.args.trust_remote_code,
         }
         dtype = self._torch_dtype()
         if dtype != "auto":
             kwargs["torch_dtype"] = dtype
 
-        logger.info("Loading Gemma pipeline task=%s model=%s", self.active_task, self.args.gemma_model)
+        logger.info("Loading LLM pipeline task=%s model=%s", self.active_task, self.args.llm_model)
         try:
             self.pipe = pipeline(self.active_task, **kwargs)
         except Exception:
@@ -861,16 +861,16 @@ class GemmaDialogueGenerator:
             self.pipe = pipeline("text-generation", **kwargs)
 
     def generate(self, use_case: dict[str, Any], rng: random.Random) -> Dialogue:
-        if self.args.gemma_backend == "template":
+        if self.args.llm_backend == "template":
             return template_dialogue(use_case)
-        prompt = build_gemma_prompt(use_case, rng, self.args.gemma_num_fewshot)
+        prompt = build_llm_prompt(use_case, rng, self.args.llm_num_fewshot)
 
-        if self.args.gemma_backend == "openai-compatible":
+        if self.args.llm_backend == "openai-compatible":
             text = self.generate_openai_compatible(prompt)
             data = parse_transcript(text)
             return dialogue_from_mapping(data, use_case)
 
-        if self.args.gemma_backend == "transformers-subprocess":
+        if self.args.llm_backend == "transformers-subprocess":
             text = self.generate_transformers_subprocess(prompt)
             data = parse_transcript(text)
             return dialogue_from_mapping(data, use_case)
@@ -878,8 +878,8 @@ class GemmaDialogueGenerator:
         self.load()
         assert self.pipe is not None
         generation_kwargs = {
-            "max_new_tokens": self.args.gemma_max_new_tokens,
-            "temperature": self.args.gemma_temperature,
+            "max_new_tokens": self.args.llm_max_new_tokens,
+            "temperature": self.args.llm_temperature,
             "do_sample": True,
             "return_full_text": False,
         }
@@ -914,14 +914,14 @@ class GemmaDialogueGenerator:
         cached = getattr(self, "_served_model", None)
         if cached is not None:
             return cached
-        configured = self.args.gemma_model
-        models_url = chat_completions_url(self.args.gemma_api_base).replace(
+        configured = self.args.llm_model
+        models_url = chat_completions_url(self.args.llm_api_base).replace(
             "/chat/completions", "/models"
         )
         try:
             request = urllib.request.Request(models_url, method="GET")
-            if self.args.gemma_api_key:
-                request.add_header("Authorization", f"Bearer {self.args.gemma_api_key}")
+            if self.args.llm_api_key:
+                request.add_header("Authorization", f"Bearer {self.args.llm_api_key}")
             with urllib.request.urlopen(request, timeout=30) as response:
                 data = json.loads(response.read().decode("utf-8"))
             ids = [str(item["id"]) for item in data.get("data", []) if item.get("id")]
@@ -950,37 +950,37 @@ class GemmaDialogueGenerator:
         return served
 
     def generate_openai_compatible(self, prompt: str) -> str:
-        url = chat_completions_url(self.args.gemma_api_base)
+        url = chat_completions_url(self.args.llm_api_base)
         payload = {
             "model": self.resolve_served_model(),
             # The full instructions are already embedded at the top of `prompt`
-            # (build_gemma_prompt). Sending them again as a system message would
+            # (build_llm_prompt). Sending them again as a system message would
             # duplicate ~all of the guidance, so keep the system role minimal.
             "messages": [
                 {"role": "system", "content": "日本語の対話データ作成アシスタント。"},
                 {"role": "user", "content": prompt},
             ],
-            "temperature": self.args.gemma_temperature,
-            "frequency_penalty": self.args.gemma_frequency_penalty,
-            "presence_penalty": self.args.gemma_presence_penalty,
-            "max_tokens": self.args.gemma_max_new_tokens,
+            "temperature": self.args.llm_temperature,
+            "frequency_penalty": self.args.llm_frequency_penalty,
+            "presence_penalty": self.args.llm_presence_penalty,
+            "max_tokens": self.args.llm_max_new_tokens,
         }
         # vLLM extension: multiplicative repetition penalty. Strongly discourages
         # the "\n\n\n..." degeneration that frequency/presence penalties alone do
         # not stop. Only send when enabled so other servers are unaffected.
-        if self.args.gemma_repetition_penalty and self.args.gemma_repetition_penalty > 1.0:
-            payload["repetition_penalty"] = self.args.gemma_repetition_penalty
+        if self.args.llm_repetition_penalty and self.args.llm_repetition_penalty > 1.0:
+            payload["repetition_penalty"] = self.args.llm_repetition_penalty
         # Reasoning models (gpt-oss) otherwise spend the whole token budget on the
         # analysis channel, leaving message.content empty -> we'd fall back to
         # reasoning_content, which is not JSON. Lower the effort to reach the
         # final channel.
-        if self.args.gemma_reasoning_effort:
-            payload["reasoning_effort"] = self.args.gemma_reasoning_effort
+        if self.args.llm_reasoning_effort:
+            payload["reasoning_effort"] = self.args.llm_reasoning_effort
         # Force structured JSON output via vLLM's response_format support.
         # json_schema constrains the exact dialogue shape (no newline wandering,
         # always a closed object); json_object only requires syntactically valid
         # JSON.
-        if self.args.gemma_response_format == "json_schema":
+        if self.args.llm_response_format == "json_schema":
             payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
@@ -988,29 +988,29 @@ class GemmaDialogueGenerator:
                     "schema": dialogue_response_schema(),
                 },
             }
-        elif self.args.gemma_response_format == "json_object":
+        elif self.args.llm_response_format == "json_object":
             payload["response_format"] = {"type": "json_object"}
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        if self.args.gemma_api_key:
-            headers["Authorization"] = f"Bearer {self.args.gemma_api_key}"
+        if self.args.llm_api_key:
+            headers["Authorization"] = f"Bearer {self.args.llm_api_key}"
         request = urllib.request.Request(url, data=body, headers=headers, method="POST")
         try:
             t0 = time.time()
             with urllib.request.urlopen(
                 request,
-                timeout=self.args.gemma_timeout_sec,
+                timeout=self.args.llm_timeout_sec,
             ) as response:
                 data = json.loads(response.read().decode("utf-8"))
             elapsed = time.time() - t0
         except urllib.error.URLError as exc:
             raise RuntimeError(
-                "Could not reach the OpenAI-compatible Gemma endpoint at "
-                f"{url}. Start a Gemma server separately, pass --gemma-api-base, "
-                "or use --dialogues-jsonl / --gemma-backend template."
+                "Could not reach the OpenAI-compatible LLM endpoint at "
+                f"{url}. Start a LLM server separately, pass --llm-api-base, "
+                "or use --dialogues-jsonl / --llm-backend template."
             ) from exc
         logger.info("raw_response: %s", json.dumps(data, ensure_ascii=False))
         usage = data.get("usage") or {}
@@ -1028,26 +1028,26 @@ class GemmaDialogueGenerator:
         return self.generate_transformers_subprocess_batch([prompt])[0]
 
     def generate_transformers_subprocess_batch(self, prompts: list[str]) -> list[str]:
-        python_exe = resolve_gemma_python(self.args)
-        worker = Path(self.args.gemma_worker)
+        python_exe = resolve_llm_python(self.args)
+        worker = Path(self.args.llm_worker)
         if not worker.is_file():
-            raise FileNotFoundError(f"Gemma worker script not found: {worker}")
+            raise FileNotFoundError(f"LLM worker script not found: {worker}")
 
         command = [
             python_exe,
             str(worker),
             "--model",
-            self.args.gemma_model,
+            self.args.llm_model,
             "--task",
-            self.args.gemma_task,
+            self.args.llm_task,
             "--device-map",
-            self.args.gemma_device_map,
+            self.args.llm_device_map,
             "--dtype",
-            self.args.gemma_dtype,
+            self.args.llm_dtype,
             "--temperature",
-            str(self.args.gemma_temperature),
+            str(self.args.llm_temperature),
             "--max-new-tokens",
-            str(self.args.gemma_max_new_tokens),
+            str(self.args.llm_max_new_tokens),
         ]
         if self.args.trust_remote_code:
             command.append("--trust-remote-code")
@@ -1061,20 +1061,20 @@ class GemmaDialogueGenerator:
                 encoding="utf-8",
                 stdout=subprocess.PIPE,
                 stderr=None,  # stderrは親プロセスのターミナルにそのまま流す
-                timeout=self.args.gemma_timeout_sec,
+                timeout=self.args.llm_timeout_sec,
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(
-                f"Gemma subprocess timed out after {self.args.gemma_timeout_sec}s: "
+                f"LLM subprocess timed out after {self.args.llm_timeout_sec}s: "
                 f"{' '.join(command)}"
             ) from exc
 
         if proc.returncode != 0:
             raise RuntimeError(
-                "Gemma subprocess failed. Install the Gemma runtime with "
-                "`uv sync --project gemma_runtime`, or pass --gemma-python to "
-                "a Python environment that has Transformers/Gemma installed.\n"
+                "LLM subprocess failed. Install the LLM runtime with "
+                "`uv sync --project gemma_runtime`, or pass --llm-python to "
+                "a Python environment that has Transformers/LLM installed.\n"
                 f"command: {' '.join(command)}\n"
                 "(stderr output is shown above)"
             )
@@ -1082,19 +1082,19 @@ class GemmaDialogueGenerator:
             data = json.loads(proc.stdout)
         except json.JSONDecodeError as exc:
             raise RuntimeError(
-                "Gemma subprocess did not return JSON.\n"
+                "LLM subprocess did not return JSON.\n"
                 f"stdout:\n{proc.stdout}\n"
                 f"stderr:\n{proc.stderr}"
             ) from exc
         texts = data.get("texts")
         if not isinstance(texts, list):
-            raise RuntimeError(f"Gemma worker returned no 'texts' list: {data}")
+            raise RuntimeError(f"LLM worker returned no 'texts' list: {data}")
         return [str(text) for text in texts]
 
 
-def resolve_gemma_python(args: argparse.Namespace) -> str:
-    if args.gemma_python:
-        return str(args.gemma_python)
+def resolve_llm_python(args: argparse.Namespace) -> str:
+    if args.llm_python:
+        return str(args.llm_python)
 
     runtime_dir = REPO_ROOT / "gemma_runtime" / ".venv"
     candidates = [
@@ -1143,8 +1143,8 @@ def openai_chat_response_to_text(data: dict[str, Any]) -> str:
             # JSON. Surface it loudly instead of silently returning thinking.
             logger.warning(
                 "Empty content channel; falling back to reasoning_content "
-                "(not JSON). Lower --gemma-reasoning-effort or raise "
-                "--gemma-max-new-tokens."
+                "(not JSON). Lower --llm-reasoning-effort or raise "
+                "--llm-max-new-tokens."
             )
             return reasoning_content
     text = choice.get("text") if isinstance(choice, dict) else None
@@ -1228,7 +1228,7 @@ full-duplex学習パターン:
 """.rstrip()
 
 
-def build_gemma_prompt(
+def build_llm_prompt(
     use_case: dict[str, Any], rng: random.Random, num_fewshot: int = 1
 ) -> str:
     turn_count = int(use_case.get("target_turns", rng.choice([6, 8, 10])))
@@ -1546,7 +1546,7 @@ def template_dialogue(use_case: dict[str, Any]) -> Dialogue:
         title=str(use_case.get("situation", case_id)),
         source_use_case=case_id,
         turns=turns,
-        generator_notes="Gemma fallback template.",
+        generator_notes="LLM fallback template.",
     )
 
 
@@ -2092,31 +2092,31 @@ def generate_dialogues(
 
     rng = random.Random(args.seed)
     use_cases = load_use_cases(args)[: args.num_dialogues]
-    generator = GemmaDialogueGenerator(args)
+    generator = LLMDialogueGenerator(args)
     dialogues: list[Dialogue] = []
-    if args.gemma_backend == "transformers-subprocess":
+    if args.llm_backend == "transformers-subprocess":
         prompts = [
-            build_gemma_prompt(use_case, rng, args.gemma_num_fewshot)
+            build_llm_prompt(use_case, rng, args.llm_num_fewshot)
             for use_case in use_cases
         ]
         try:
             texts = generator.generate_transformers_subprocess_batch(prompts)
             if len(texts) != len(use_cases):
                 raise RuntimeError(
-                    f"Gemma returned {len(texts)} dialogues for "
+                    f"LLM returned {len(texts)} dialogues for "
                     f"{len(use_cases)} use cases."
                 )
             for use_case, text in zip(use_cases, texts):
                 data = parse_transcript(text)
                 dialogue = dialogue_from_mapping(data, use_case)
-                logger.info("Generated dialogue with Gemma: %s", dialogue.id)
+                logger.info("Generated dialogue with LLM: %s", dialogue.id)
                 _emit(dialogue, dialogues)
             return dialogues
         except Exception as exc:
             if args.no_template_fallback or not args.allow_template_fallback:
                 raise
             logger.warning(
-                "Gemma batch generation failed; using template fallback: %s",
+                "LLM batch generation failed; using template fallback: %s",
                 exc,
             )
             fallback: list[Dialogue] = []
@@ -2127,12 +2127,12 @@ def generate_dialogues(
     for use_case in use_cases:
         try:
             dialogue = generator.generate(use_case, rng)
-            logger.info("Generated dialogue with Gemma: %s", dialogue.id)
+            logger.info("Generated dialogue with LLM: %s", dialogue.id)
         except Exception as exc:
             if args.no_template_fallback or not args.allow_template_fallback:
                 raise
             logger.warning(
-                "Gemma generation failed for %s; using template fallback: %s",
+                "LLM generation failed for %s; using template fallback: %s",
                 use_case.get("id"),
                 exc,
             )
@@ -2160,7 +2160,7 @@ def render_one_scripted(
         "mode": args.mode,
         "sample_rate": sample_rate,
         "duration_sec": round(stereo.shape[-1] / sample_rate, 4),
-        "transcript_source": "gemma_script",
+        "transcript_source": "llm_script",
     }
     return stereo, segments_to_alignments(segments), meta
 
@@ -2179,7 +2179,7 @@ def render_one_moshi_tts(
         "moshi_tts_repo": args.moshi_tts_repo,
         "moshi_tts_voice_user": args.moshi_tts_voice_user,
         "moshi_tts_voice_moshi": args.moshi_tts_voice_moshi,
-        "transcript_source": "gemma_script",
+        "transcript_source": "llm_script",
         "audio_source": "kyutai_moshi_tts",
     }
     return stereo, segments_to_alignments(segments), meta
@@ -2217,7 +2217,7 @@ def render_dataset(args: argparse.Namespace, dialogues: list[Dialogue]) -> None:
         "datetime": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "mode": args.mode,
         "num_dialogues": len(dialogues),
-        "gemma_model": args.gemma_model,
+        "llm_model": args.llm_model,
         "moshi_hf_repo": args.moshi_hf_repo,
         "sample_rate": sample_rate,
         "args": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},

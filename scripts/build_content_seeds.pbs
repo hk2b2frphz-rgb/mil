@@ -16,7 +16,7 @@
 # Useful overrides:
 #   SEEDS_OUT=data/content_seeds/seeds.jsonl
 #   NUM_SEEDS=3000
-#   GEMMA_MODEL=google/gemma-4-E2B-it
+#   LLM_MODEL=google/gemma-4-E2B-it
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
@@ -24,7 +24,7 @@ source scripts/setup_proxy.sh
 
 SEEDS_OUT="${SEEDS_OUT:-$PWD/data/content_seeds/seeds.jsonl}"
 NUM_SEEDS="${NUM_SEEDS:-3000}"
-GEMMA_MODEL="${GEMMA_MODEL:-google/gemma-4-E2B-it}"
+LLM_MODEL="${LLM_MODEL:-google/gemma-4-E2B-it}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 mkdir -p experiments/pbs_logs
@@ -35,7 +35,7 @@ echo "job_id:    ${PBS_JOBID:-n/a}"
 echo "host:      $(hostname)"
 echo "out:       ${SEEDS_OUT}"
 echo "num:       ${NUM_SEEDS}"
-echo "model:     ${GEMMA_MODEL}"
+echo "model:     ${LLM_MODEL}"
 echo "started:   $(date -Iseconds)"
 echo "============================="
 
@@ -47,8 +47,8 @@ command -v uv >/dev/null 2>&1 || {
 uv run python scripts/build_content_seeds.py \
     --out "$SEEDS_OUT" \
     --num "$NUM_SEEDS" \
-    --gemma-model "$GEMMA_MODEL" \
-    --gemma-dtype float16
+    --llm-model "$LLM_MODEL" \
+    --llm-dtype float16
 
 if [[ ! -s "$SEEDS_OUT" ]]; then
     echo "ERROR: seed bank was not created: $SEEDS_OUT" >&2

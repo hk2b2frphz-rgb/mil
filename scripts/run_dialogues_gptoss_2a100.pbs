@@ -179,23 +179,23 @@ done
 echo "vLLM is ready and serving $VLLM_MODEL; starting dialogue generation."
 
 export STEPS="use_cases,dialogues,enrich"
-export GEMMA_BACKEND="openai-compatible"
-export GEMMA_API_BASE="http://127.0.0.1:${PORT}/v1"
-export GEMMA_API_KEY="${GEMMA_API_KEY:-}"
-export GEMMA_MODEL="$VLLM_MODEL"
-export GEMMA_FREQUENCY_PENALTY="${GEMMA_FREQUENCY_PENALTY:-0.3}"
-export GEMMA_PRESENCE_PENALTY="${GEMMA_PRESENCE_PENALTY:-0.1}"
+export LLM_BACKEND="openai-compatible"
+export LLM_API_BASE="http://127.0.0.1:${PORT}/v1"
+export LLM_API_KEY="${LLM_API_KEY:-}"
+export LLM_MODEL="$VLLM_MODEL"
+export LLM_FREQUENCY_PENALTY="${LLM_FREQUENCY_PENALTY:-0.3}"
+export LLM_PRESENCE_PENALTY="${LLM_PRESENCE_PENALTY:-0.1}"
 # gpt-oss is a reasoning model: keep effort low so it does not spend the whole
 # token budget on the analysis channel before emitting the answer. Dialogues are
 # generated as a plain pipe-delimited transcript (not JSON), so no response_format
 # is forced.
-export GEMMA_REASONING_EFFORT="${GEMMA_REASONING_EFFORT:-low}"
+export LLM_REASONING_EFFORT="${LLM_REASONING_EFFORT:-low}"
 
 bash scripts/run_full_duplex_training_data.sh
 
-test -s "$OUT_ROOT/gemma_dialogues/dialogues.jsonl"
-test -s "$OUT_ROOT/gemma_dialogues/dialogues_enriched.jsonl"
-echo "dialogues: $OUT_ROOT/gemma_dialogues/dialogues.jsonl"
-echo "enriched:  $OUT_ROOT/gemma_dialogues/dialogues_enriched.jsonl"
+test -s "$OUT_ROOT/llm_dialogues/dialogues.jsonl"
+test -s "$OUT_ROOT/llm_dialogues/dialogues_enriched.jsonl"
+echo "dialogues: $OUT_ROOT/llm_dialogues/dialogues.jsonl"
+echo "enriched:  $OUT_ROOT/llm_dialogues/dialogues_enriched.jsonl"
 
 # Audio is produced separately via the existing TTS PBS / TTS comparison harness.

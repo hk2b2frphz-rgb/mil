@@ -15,7 +15,7 @@ from scripts.generate_qwen3_tts_data import (
     validate_duplex_dialogue,
 )
 from scripts.generate_synthetic_moshi_training_data import (
-    build_gemma_prompt,
+    build_llm_prompt,
     template_full_duplex_dialogue,
 )
 
@@ -49,7 +49,7 @@ class FakeTTS:
 
 class FullDuplexTimingTests(unittest.TestCase):
     def test_pause_prompt_requires_user_continuation_after_silence(self) -> None:
-        prompt = build_gemma_prompt(
+        prompt = build_llm_prompt(
             {
                 "id": "pause",
                 "duplex_task": "pause_handling",

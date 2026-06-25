@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 """
-Small subprocess worker for Gemma dialogue generation.
+Small subprocess worker for LLM dialogue generation.
 
 This file intentionally imports Transformers only inside the worker process so
 the main Moshi environment can keep Moshi's huggingface-hub constraints.
@@ -62,7 +62,7 @@ def result_to_text(result: Any) -> str:
 
 
 def progress(msg: str) -> None:
-    print(f"[gemma] {msg}", file=sys.stderr, flush=True)
+    print(f"[llm] {msg}", file=sys.stderr, flush=True)
 
 
 def main() -> None:

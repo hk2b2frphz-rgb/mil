@@ -2,7 +2,7 @@
 # End-to-end pipeline: ~1h of synthetic Japanese counseling audio → Moshi LoRA FT
 #
 # 想定環境: Linux GPU サーバー、リポジトリのルートで実行。
-# Moshi 用と Gemma 用の uv 環境が既に sync 済みであること。
+# Moshi 用と LLM 用の uv 環境が既に sync 済みであること。
 #
 # 各ステップは独立に再実行できる。途中で止めたい場合は --steps を絞る。
 
@@ -37,7 +37,7 @@ OUT_ROOT="$(cd "$OUT_ROOT" && pwd)"
 LOG_DIR="$OUT_ROOT/logs"
 mkdir -p "$LOG_DIR"
 USE_CASES_PATH="$OUT_ROOT/use_cases.jsonl"
-GEMMA_DIALOGUES_DIR="$OUT_ROOT/gemma_dialogues"
+LLM_DIALOGUES_DIR="$OUT_ROOT/llm_dialogues"
 AUDIO_DIR="$OUT_ROOT/training_set"
 # FT_CONFIG / MOSHI_FT_REPO も絶対化（cd 後でも有効）
 FT_CONFIG="$(realpath -m "$FT_CONFIG")"
@@ -64,7 +64,7 @@ META_FILE="$OUT_ROOT/run_meta.txt"
     echo "num_cases: $NUM_CASES"
     echo "ft_config: $FT_CONFIG"
     echo "env:"
-    echo "  GEMMA_MODEL=${GEMMA_MODEL:-}"
+    echo "  LLM_MODEL=${LLM_MODEL:-}"
     echo "  QWEN_TTS_MODEL=${QWEN_TTS_MODEL:-}"
     echo "  TTS_DEVICE=${TTS_DEVICE:-}"
     echo "  TTS_DTYPE=${TTS_DTYPE:-}"
@@ -159,28 +159,28 @@ if run_step use_cases; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Gemma で対話 JSONL を生成（音声合成はしない）
+# 2. LLM で対話 JSONL を生成（音声合成はしない）
 # ---------------------------------------------------------------------------
 if run_step dialogues; then
     # A100 なら bfloat16、V100 なら float16 を環境変数で指定可能
-    # 例: GEMMA_DTYPE=float16 ./scripts/run_pipeline.sh
-    GEMMA_DTYPE_VAL="${GEMMA_DTYPE:-bfloat16}"
-    GEMMA_MAX_NEW_TOKENS_VAL="${GEMMA_MAX_NEW_TOKENS:-900}"
-    log_info "Gemma で対話を ${NUM_CASES} 件生成: $GEMMA_DIALOGUES_DIR"
-    log_info "  model:          ${GEMMA_MODEL:-google/gemma-4-E2B-it}"
-    log_info "  dtype:          ${GEMMA_DTYPE_VAL}"
-    log_info "  max_new_tokens: ${GEMMA_MAX_NEW_TOKENS_VAL}"
+    # 例: LLM_DTYPE=float16 ./scripts/run_pipeline.sh
+    LLM_DTYPE_VAL="${LLM_DTYPE:-bfloat16}"
+    LLM_MAX_NEW_TOKENS_VAL="${LLM_MAX_NEW_TOKENS:-900}"
+    log_info "LLM で対話を ${NUM_CASES} 件生成: $LLM_DIALOGUES_DIR"
+    log_info "  model:          ${LLM_MODEL:-google/gemma-4-E2B-it}"
+    log_info "  dtype:          ${LLM_DTYPE_VAL}"
+    log_info "  max_new_tokens: ${LLM_MAX_NEW_TOKENS_VAL}"
     uv run python scripts/generate_synthetic_moshi_training_data.py \
-        --out-dir "$GEMMA_DIALOGUES_DIR" \
+        --out-dir "$LLM_DIALOGUES_DIR" \
         --use-cases-jsonl "$USE_CASES_PATH" \
         --num-dialogues "$NUM_CASES" \
         --mode dialogues-only \
-        --gemma-backend transformers-subprocess \
-        --gemma-model "${GEMMA_MODEL:-google/gemma-4-E2B-it}" \
-        --gemma-dtype "${GEMMA_DTYPE_VAL}" \
-        --gemma-max-new-tokens "${GEMMA_MAX_NEW_TOKENS_VAL}" \
+        --llm-backend transformers-subprocess \
+        --llm-model "${LLM_MODEL:-google/gemma-4-E2B-it}" \
+        --llm-dtype "${LLM_DTYPE_VAL}" \
+        --llm-max-new-tokens "${LLM_MAX_NEW_TOKENS_VAL}" \
         --allow-template-fallback
-    report_path "dialogues" "$GEMMA_DIALOGUES_DIR/dialogues.jsonl"
+    report_path "dialogues" "$LLM_DIALOGUES_DIR/dialogues.jsonl"
     end_step
 fi
 
@@ -193,7 +193,7 @@ if run_step audio; then
     log_info "  device: ${TTS_DEVICE:-cuda} / dtype: ${TTS_DTYPE:-bfloat16}"
     uv run python scripts/generate_qwen3_tts_data.py \
         --out-dir "$AUDIO_DIR" \
-        --dialogues-jsonl "$GEMMA_DIALOGUES_DIR/dialogues.jsonl" \
+        --dialogues-jsonl "$LLM_DIALOGUES_DIR/dialogues.jsonl" \
         --model "${QWEN_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}" \
         --device "${TTS_DEVICE:-cuda}" \
         --dtype "${TTS_DTYPE:-bfloat16}"

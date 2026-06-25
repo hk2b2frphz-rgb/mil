@@ -32,7 +32,7 @@
 #   FULL_DUPLEX_TASKS=all
 #   STEPS=use_cases,dialogues,audio
 #   SEED=0
-#   GEMMA_MODEL=google/gemma-4-E2B-it
+#   LLM_MODEL=google/gemma-4-E2B-it
 #   QWEN_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
 #   CUDA_VISIBLE_DEVICES=0
 
@@ -54,7 +54,7 @@ export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/$RUN_ID}"
 
 # V100 does not support bfloat16 efficiently. Both generators run sequentially
 # on the same GPU, so one device is sufficient.
-export GEMMA_DTYPE="${GEMMA_DTYPE:-float16}"
+export LLM_DTYPE="${LLM_DTYPE:-float16}"
 export TTS_DTYPE="${TTS_DTYPE:-float16}"
 export TTS_DEVICE="${TTS_DEVICE:-cuda}"
 
@@ -83,7 +83,7 @@ echo "steps:        $STEPS"
 echo "seed:         $SEED"
 echo "out_root:     $OUT_ROOT"
 echo "cuda:         $CUDA_VISIBLE_DEVICES"
-echo "gemma_dtype:  $GEMMA_DTYPE"
+echo "llm_dtype:  $LLM_DTYPE"
 echo "tts_dtype:    $TTS_DTYPE"
 echo "job_log:      $JOB_LOG"
 echo "started_at:   $(date -Iseconds)"

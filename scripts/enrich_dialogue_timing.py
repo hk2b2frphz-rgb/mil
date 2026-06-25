@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gemma が生成した対話 JSONL に、日本語会話に近い相づち(あいづち)と
+LLM が生成した対話 JSONL に、日本語会話に近い相づち(あいづち)と
 ターン構造を後付けする。
 
 なぜ必要か:
@@ -29,8 +29,8 @@ Gemma が生成した対話 JSONL に、日本語会話に近い相づち(あい
 
 使い方:
   uv run python scripts/enrich_dialogue_timing.py \
-      --in  data/runs/<RUN>/gemma_dialogues/dialogues.jsonl \
-      --out data/runs/<RUN>/gemma_dialogues/dialogues_enriched.jsonl \
+      --in  data/runs/<RUN>/llm_dialogues/dialogues.jsonl \
+      --out data/runs/<RUN>/llm_dialogues/dialogues_enriched.jsonl \
       --seed 0
 """
 from __future__ import annotations
@@ -126,7 +126,7 @@ def smooth_user_emotions(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Enrich Gemma dialogues with frequent, natural Japanese backchannels."
+        description="Enrich LLM dialogues with frequent, natural Japanese backchannels."
     )
     parser.add_argument("--in", dest="in_path", required=True, type=Path)
     parser.add_argument("--out", dest="out_path", required=True, type=Path)

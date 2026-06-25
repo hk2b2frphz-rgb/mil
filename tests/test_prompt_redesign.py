@@ -5,14 +5,14 @@ from random import Random
 
 from scripts.generate_synthetic_moshi_training_data import (
     LISTENING_DIALOGUE_EXEMPLARS,
-    build_gemma_prompt,
+    build_llm_prompt,
 )
 
 
 class PromptRedesignTests(unittest.TestCase):
     def test_prompt_is_compact_transcript_format(self) -> None:
         # Default: 1 few-shot exemplar, transcript (pipe) output format.
-        prompt = build_gemma_prompt({"id": "minimal"}, Random(0))
+        prompt = build_llm_prompt({"id": "minimal"}, Random(0))
 
         self.assertIn("傾聴中心", prompt)
         self.assertIn("話者|発話", prompt)
@@ -26,8 +26,8 @@ class PromptRedesignTests(unittest.TestCase):
         self.assertNotIn(LISTENING_DIALOGUE_EXEMPLARS[1]["turns"][0]["text"], prompt)
 
     def test_fewshot_count_is_configurable(self) -> None:
-        p0 = build_gemma_prompt({"id": "m"}, Random(0), num_fewshot=0)
-        p3 = build_gemma_prompt({"id": "m"}, Random(0), num_fewshot=3)
+        p0 = build_llm_prompt({"id": "m"}, Random(0), num_fewshot=0)
+        p3 = build_llm_prompt({"id": "m"}, Random(0), num_fewshot=3)
         self.assertNotIn(LISTENING_DIALOGUE_EXEMPLARS[0]["turns"][0]["text"], p0)
         self.assertIn(LISTENING_DIALOGUE_EXEMPLARS[2]["turns"][0]["text"], p3)
         self.assertLess(len(p0), len(p3))

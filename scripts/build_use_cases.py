@@ -8,7 +8,7 @@
 - 雑談/傾聴を基準に置き、相談だけに偏らない会話の「型」を持たせる
 - 配分はリスクレベルで層化（low:medium:high = 6:3:1 目安）
 - 沈黙ありを 35% 程度混ぜる
-- Gemma に渡せる use case JSONL 1 件ごとに 1 対話が生成される想定
+- LLM に渡せる use case JSONL 1 件ごとに 1 対話が生成される想定
 
 出力:
   data/use_cases/loneliness_<N>.jsonl

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-具体的な「話の種」(talking points) を Gemma で大量に作り、バンク化する。
+具体的な「話の種」(talking points) を LLM で大量に作り、バンク化する。
 
 なぜ必要か:
-  ペルソナ軸を増やしても、Gemma が話す「中身」は定型に収束しがち
+  ペルソナ軸を増やしても、LLM が話す「中身」は定型に収束しがち
   (「最近寂しくて」->「そうなんですね」)。そこで、平凡で具体的な出来事
   ("飼い猫が初めて膝に乗った" 等) を一度に大量生成しておき、対話生成時に
   各対話へ 1〜2 個ずつ注入することで、語彙と内容を強制的にばらけさせる。
@@ -17,8 +17,8 @@
   uv run python scripts/build_content_seeds.py \
       --out data/content_seeds/seeds.jsonl \
       --num 3000 \
-      --gemma-model google/gemma-4-E2B-it \
-      --gemma-dtype float16
+      --llm-model google/gemma-4-E2B-it \
+      --llm-dtype float16
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.generate_synthetic_moshi_training_data import (  # noqa: E402
-    GemmaDialogueGenerator,
+    LLMDialogueGenerator,
 )
 
 # 話の種を広い生活ドメインに散らすためのヒント。各 brainstorm でランダムに使う。
@@ -67,21 +67,21 @@ PROMPT_TEMPLATE = """\
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build a Gemma talking-point seed bank.")
+    parser = argparse.ArgumentParser(description="Build a LLM talking-point seed bank.")
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--num", type=int, default=3000, help="Target number of unique seeds.")
-    parser.add_argument("--per-prompt", type=int, default=20, help="Items requested per Gemma call.")
+    parser.add_argument("--per-prompt", type=int, default=20, help="Items requested per LLM call.")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--gemma-model", default="google/gemma-4-E2B-it")
-    parser.add_argument("--gemma-dtype", choices=["auto", "bfloat16", "float16", "float32"], default="float16")
-    parser.add_argument("--gemma-device-map", default="auto")
-    parser.add_argument("--gemma-task", default="any-to-any")
-    parser.add_argument("--gemma-temperature", type=float, default=1.0)
-    parser.add_argument("--gemma-max-new-tokens", type=int, default=900)
-    parser.add_argument("--gemma-timeout-sec", type=float, default=21600.0)
-    parser.add_argument("--gemma-python", default=None)
+    parser.add_argument("--llm-model", default="google/gemma-4-E2B-it")
+    parser.add_argument("--llm-dtype", choices=["auto", "bfloat16", "float16", "float32"], default="float16")
+    parser.add_argument("--llm-device-map", default="auto")
+    parser.add_argument("--llm-task", default="any-to-any")
+    parser.add_argument("--llm-temperature", type=float, default=1.0)
+    parser.add_argument("--llm-max-new-tokens", type=int, default=900)
+    parser.add_argument("--llm-timeout-sec", type=float, default=21600.0)
+    parser.add_argument("--llm-python", default=None)
     parser.add_argument(
-        "--gemma-worker",
+        "--llm-worker",
         type=Path,
         default=Path(__file__).with_name("gemma_dialogue_worker.py"),
     )
@@ -128,25 +128,25 @@ def main() -> int:
         domain = rng.choice(DOMAINS)
         prompts.append(PROMPT_TEMPLATE.format(n=args.per_prompt, domain=domain))
 
-    generator = GemmaDialogueGenerator(
+    generator = LLMDialogueGenerator(
         SimpleNamespace(
-            gemma_backend="transformers-subprocess",
-            gemma_python=args.gemma_python,
-            gemma_worker=args.gemma_worker,
-            gemma_model=args.gemma_model,
-            gemma_task=args.gemma_task,
-            gemma_device_map=args.gemma_device_map,
-            gemma_dtype=args.gemma_dtype,
-            gemma_temperature=args.gemma_temperature,
-            gemma_frequency_penalty=0.3,
-            gemma_presence_penalty=0.1,
-            gemma_max_new_tokens=args.gemma_max_new_tokens,
-            gemma_timeout_sec=args.gemma_timeout_sec,
+            llm_backend="transformers-subprocess",
+            llm_python=args.llm_python,
+            llm_worker=args.llm_worker,
+            llm_model=args.llm_model,
+            llm_task=args.llm_task,
+            llm_device_map=args.llm_device_map,
+            llm_dtype=args.llm_dtype,
+            llm_temperature=args.llm_temperature,
+            llm_frequency_penalty=0.3,
+            llm_presence_penalty=0.1,
+            llm_max_new_tokens=args.llm_max_new_tokens,
+            llm_timeout_sec=args.llm_timeout_sec,
             trust_remote_code=args.trust_remote_code,
         )
     )
 
-    print(f"[seeds] generating with {len(prompts)} Gemma prompts ...")
+    print(f"[seeds] generating with {len(prompts)} LLM prompts ...")
     texts = generator.generate_transformers_subprocess_batch(prompts)
 
     seen: set[str] = set()
