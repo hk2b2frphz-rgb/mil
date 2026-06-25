@@ -73,7 +73,22 @@ if has_step dialogues; then
         --llm-temperature "${LLM_TEMPERATURE:-0.8}"
         --llm-max-new-tokens "${LLM_MAX_NEW_TOKENS:-4096}"
         --llm-timeout-sec "${LLM_TIMEOUT_SEC:-7200}"
+        --dialogue-generation-mode "${DIALOGUE_GENERATION_MODE:-single}"
+        --multi-agent-min-pairs "${MULTI_AGENT_MIN_PAIRS:-3}"
+        --multi-agent-max-pairs "${MULTI_AGENT_MAX_PAIRS:-5}"
+        --multi-agent-user-temperature "${MULTI_AGENT_USER_TEMPERATURE:-0.85}"
+        --multi-agent-system-temperature "${MULTI_AGENT_SYSTEM_TEMPERATURE:-0.2}"
+        --multi-agent-judge-temperature "${MULTI_AGENT_JUDGE_TEMPERATURE:-0.0}"
+        --multi-agent-aizuchi-temperature "${MULTI_AGENT_AIZUCHI_TEMPERATURE:-0.2}"
+        --multi-agent-aizuchi-min-chars "${MULTI_AGENT_AIZUCHI_MIN_CHARS:-32}"
+        --multi-agent-max-aizuchi-per-user "${MULTI_AGENT_MAX_AIZUCHI_PER_USER:-1}"
     )
+    if [[ "${NO_MULTI_AGENT_AIZUCHI:-0}" == "1" ]]; then
+        llm_args+=(--no-multi-agent-aizuchi)
+    fi
+    if [[ "${DUMP_AGENT_PROMPTS:-0}" == "1" ]]; then
+        llm_args+=(--dump-agent-prompts)
+    fi
     if [[ "${LLM_BACKEND:-transformers-subprocess}" == "openai-compatible" ]]; then
         llm_args+=(
             --llm-api-base "${LLM_API_BASE:-http://127.0.0.1:8080/v1}"

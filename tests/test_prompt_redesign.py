@@ -6,8 +6,17 @@ from pathlib import Path
 from random import Random
 
 from scripts.generate_synthetic_moshi_training_data import (
+    DialogueTurn,
     LISTENING_DIALOGUE_EXEMPLARS,
+    build_aizuchi_agent_prompt,
+    build_judge_agent_prompt,
     build_llm_prompt,
+    build_moshi_agent_prompt,
+    build_user_agent_profile,
+    build_user_agent_prompt,
+    parse_aizuchi_insertions,
+    split_text_into_clauses,
+    user_turns_with_aizuchi,
 )
 
 
@@ -54,6 +63,52 @@ class PromptRedesignTests(unittest.TestCase):
                         casual,
                         f"{path}:{line_number} teaches casual moshi backchannel",
                     )
+
+    def test_multi_agent_prompts_keep_randomness_on_user_side(self) -> None:
+        use_case = {
+            "id": "case",
+            "category": "loneliness_light",
+            "risk_level": "low",
+            "situation": "休日の孤独感",
+            "user_profile": "20代後半、一人暮らし",
+            "opening": "休日が少しつらいです。",
+            "talking_points": ["SNS", "夕方", "予定がない"],
+        }
+        profile = build_user_agent_profile(use_case, Random(0))
+
+        user_prompt = build_user_agent_prompt(use_case, profile, [], 0, 5)
+        self.assertIn("今回の userAI のランダム設定", user_prompt.user)
+        self.assertIn(profile["opening_style"], user_prompt.user)
+        self.assertIn("出力は user の次の発話本文だけ", user_prompt.system)
+
+        turns = [DialogueTurn("user", "休日になると、誰とも話さないまま夕方になります。")]
+        moshi_prompt = build_moshi_agent_prompt(use_case, turns)
+        self.assertIn("孤独・孤立相談窓口の相談員 moshi", moshi_prompt.system)
+        self.assertIn("「うん」「うんうん」は使いません", moshi_prompt.user)
+        self.assertNotIn("今回の userAI のランダム設定", moshi_prompt.user)
+
+        judge_prompt = build_judge_agent_prompt(
+            use_case, turns + [DialogueTurn("moshi", "夕方がつらいんですね。")], 2, 3, 5
+        )
+        self.assertIn('{"complete": true/false', judge_prompt.system)
+
+        aizuchi_prompt = build_aizuchi_agent_prompt(use_case, [], turns[0].text, 1)
+        self.assertIn('"insertions"', aizuchi_prompt.system)
+
+    def test_aizuchi_insertions_split_user_turns_into_current_format(self) -> None:
+        text = "休日になると、誰とも話さないまま夕方になって、急に寂しくなります。"
+        clauses = split_text_into_clauses(text)
+        insertions = parse_aizuchi_insertions(
+            '{"insertions":[{"after_clause":1,"text":"はい。"}]}',
+            clauses,
+            max_insertions=1,
+        )
+        turns = user_turns_with_aizuchi(text, insertions)
+
+        self.assertEqual([turn.speaker for turn in turns], ["user", "moshi", "user"])
+        self.assertEqual(turns[1].text, "はい。")
+        self.assertEqual(turns[1].timing, "overlap_previous")
+        self.assertEqual(turns[1].event, "model_backchannel")
 
 
 if __name__ == "__main__":

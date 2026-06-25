@@ -178,9 +178,10 @@ if [[ "$VLLM_READY" != "1" ]]; then
     exit 1
 fi
 
-# Backchannels are produced by the LLM (few-shot exemplars + prompt) as plain short
-# turns; no overlap/timing meta in the text (full-duplex overlap is designed later).
-# Free-form only + two exemplars for density variety. Mirrors the 1000 job.
+# Smoke run defaults to the multi-agent dialogue generator: userAI carries the
+# randomized相談者 state, systemAI stays as a polite loneliness/isolation counselor,
+# judgeAI decides when the exchange is complete, and aizuchiAI inserts short
+# polite moshi backchannels inside longer user turns.
 export STEPS="use_cases,dialogues"
 export LISTENING_RATIO="${LISTENING_RATIO:-1.0}"
 export LLM_NUM_FEWSHOT="${LLM_NUM_FEWSHOT:-2}"
@@ -191,6 +192,14 @@ export LLM_MODEL="$VLLM_MODEL"
 export LLM_TEMPERATURE
 export LLM_FREQUENCY_PENALTY="0.3"
 export LLM_PRESENCE_PENALTY="0.1"
+export DIALOGUE_GENERATION_MODE="${DIALOGUE_GENERATION_MODE:-multi-agent}"
+export MULTI_AGENT_MIN_PAIRS="${MULTI_AGENT_MIN_PAIRS:-3}"
+export MULTI_AGENT_MAX_PAIRS="${MULTI_AGENT_MAX_PAIRS:-5}"
+export MULTI_AGENT_USER_TEMPERATURE="${MULTI_AGENT_USER_TEMPERATURE:-0.85}"
+export MULTI_AGENT_SYSTEM_TEMPERATURE="${MULTI_AGENT_SYSTEM_TEMPERATURE:-0.2}"
+export MULTI_AGENT_JUDGE_TEMPERATURE="${MULTI_AGENT_JUDGE_TEMPERATURE:-0.0}"
+export MULTI_AGENT_AIZUCHI_TEMPERATURE="${MULTI_AGENT_AIZUCHI_TEMPERATURE:-0.2}"
+export DUMP_AGENT_PROMPTS="${DUMP_AGENT_PROMPTS:-1}"
 # Dialogues are generated as a plain pipe-delimited transcript (not JSON), which
 # the model produces far more reliably, so no response_format is forced. Qwen
 # thinking is controlled separately via the chat template kwargs.

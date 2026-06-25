@@ -182,6 +182,12 @@ class AudioSegment:
     voice_role: str | None = None
 
 
+@dataclass(frozen=True)
+class AgentPrompt:
+    system: str
+    user: str
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -383,6 +389,77 @@ def parse_args() -> argparse.Namespace:
             "preventing newline wandering and truncated/broken JSON. "
             "'json_object' only requires valid JSON (no structure). "
             "Default: unset."
+        ),
+    )
+    parser.add_argument(
+        "--dialogue-generation-mode",
+        choices=["single", "multi-agent"],
+        default=os.environ.get("DIALOGUE_GENERATION_MODE") or "single",
+        help=(
+            "single: existing one-shot prompt. multi-agent: run separate user, "
+            "moshi, completion-judge, and aizuchi agents. multi-agent currently "
+            "requires --llm-backend openai-compatible (vLLM/OpenAI-style server)."
+        ),
+    )
+    parser.add_argument(
+        "--multi-agent-min-pairs",
+        type=int,
+        default=int(os.environ.get("MULTI_AGENT_MIN_PAIRS") or 3),
+        help="Minimum user/moshi exchange pairs before the judge may stop.",
+    )
+    parser.add_argument(
+        "--multi-agent-max-pairs",
+        type=int,
+        default=int(os.environ.get("MULTI_AGENT_MAX_PAIRS") or 5),
+        help="Maximum user/moshi exchange pairs in multi-agent mode.",
+    )
+    parser.add_argument(
+        "--multi-agent-user-temperature",
+        type=float,
+        default=float(os.environ.get("MULTI_AGENT_USER_TEMPERATURE") or 0.85),
+        help="Temperature for userAI; this is where dialogue randomness lives.",
+    )
+    parser.add_argument(
+        "--multi-agent-system-temperature",
+        type=float,
+        default=float(os.environ.get("MULTI_AGENT_SYSTEM_TEMPERATURE") or 0.2),
+        help="Temperature for moshi systemAI responses.",
+    )
+    parser.add_argument(
+        "--multi-agent-judge-temperature",
+        type=float,
+        default=float(os.environ.get("MULTI_AGENT_JUDGE_TEMPERATURE") or 0.0),
+        help="Temperature for the completion judge.",
+    )
+    parser.add_argument(
+        "--multi-agent-aizuchi-temperature",
+        type=float,
+        default=float(os.environ.get("MULTI_AGENT_AIZUCHI_TEMPERATURE") or 0.2),
+        help="Temperature for the aizuchi insertion agent.",
+    )
+    parser.add_argument(
+        "--multi-agent-aizuchi-min-chars",
+        type=int,
+        default=int(os.environ.get("MULTI_AGENT_AIZUCHI_MIN_CHARS") or 32),
+        help="Only ask the aizuchi agent for user turns at least this long.",
+    )
+    parser.add_argument(
+        "--multi-agent-max-aizuchi-per-user",
+        type=int,
+        default=int(os.environ.get("MULTI_AGENT_MAX_AIZUCHI_PER_USER") or 1),
+        help="Maximum moshi backchannels inserted inside one user utterance.",
+    )
+    parser.add_argument(
+        "--no-multi-agent-aizuchi",
+        action="store_true",
+        help="Disable the separate aizuchi agent in multi-agent mode.",
+    )
+    parser.add_argument(
+        "--dump-agent-prompts",
+        action="store_true",
+        help=(
+            "In multi-agent mode, write a prompt preview to "
+            "<out-dir>/multi_agent_prompts.json."
         ),
     )
     parser.add_argument(
@@ -954,21 +1031,35 @@ class LLMDialogueGenerator:
         self._served_model = served
         return served
 
-    def generate_openai_compatible(self, prompt: str) -> str:
+    def generate_openai_compatible_messages(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
+        response_format: str | None = None,
+        json_schema: dict[str, Any] | None = None,
+        json_schema_name: str = "dialogue",
+        role_name: str = "llm",
+    ) -> str:
         url = chat_completions_url(self.args.llm_api_base)
         payload = {
             "model": self.resolve_served_model(),
-            # The full instructions are already embedded at the top of `prompt`
-            # (build_llm_prompt). Sending them again as a system message would
-            # duplicate ~all of the guidance, so keep the system role minimal.
-            "messages": [
-                {"role": "system", "content": "日本語の対話データ作成アシスタント。"},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": self.args.llm_temperature,
-            "frequency_penalty": self.args.llm_frequency_penalty,
-            "presence_penalty": self.args.llm_presence_penalty,
-            "max_tokens": self.args.llm_max_new_tokens,
+            "messages": messages,
+            "temperature": self.args.llm_temperature if temperature is None else temperature,
+            "frequency_penalty": (
+                self.args.llm_frequency_penalty
+                if frequency_penalty is None
+                else frequency_penalty
+            ),
+            "presence_penalty": (
+                self.args.llm_presence_penalty
+                if presence_penalty is None
+                else presence_penalty
+            ),
+            "max_tokens": self.args.llm_max_new_tokens if max_tokens is None else max_tokens,
         }
         # vLLM extension: multiplicative repetition penalty. Strongly discourages
         # the "\n\n\n..." degeneration that frequency/presence penalties alone do
@@ -985,15 +1076,15 @@ class LLMDialogueGenerator:
         # json_schema constrains the exact dialogue shape (no newline wandering,
         # always a closed object); json_object only requires syntactically valid
         # JSON.
-        if self.args.llm_response_format == "json_schema":
+        if response_format == "json_schema" and json_schema is not None:
             payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "dialogue",
-                    "schema": dialogue_response_schema(),
+                    "name": json_schema_name,
+                    "schema": json_schema,
                 },
             }
-        elif self.args.llm_response_format == "json_object":
+        elif response_format == "json_object":
             payload["response_format"] = {"type": "json_object"}
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {
@@ -1017,17 +1108,162 @@ class LLMDialogueGenerator:
                 f"{url}. Start a LLM server separately, pass --llm-api-base, "
                 "or use --dialogues-jsonl / --llm-backend template."
             ) from exc
-        logger.info("raw_response: %s", json.dumps(data, ensure_ascii=False))
+        logger.info(
+            "%s raw_response: %s",
+            role_name,
+            json.dumps(data, ensure_ascii=False),
+        )
         usage = data.get("usage") or {}
         completion_tokens = usage.get("completion_tokens")
         if completion_tokens and elapsed > 0:
             logger.info(
-                "throughput: %.1f tokens/sec (%d tokens in %.2fs)",
+                "%s throughput: %.1f tokens/sec (%d tokens in %.2fs)",
+                role_name,
                 completion_tokens / elapsed,
                 completion_tokens,
                 elapsed,
             )
         return openai_chat_response_to_text(data)
+
+    def generate_openai_compatible(self, prompt: str) -> str:
+        # The full instructions are already embedded at the top of `prompt`
+        # (build_llm_prompt). Sending them again as a system message would
+        # duplicate ~all of the guidance, so keep the system role minimal.
+        return self.generate_openai_compatible_messages(
+            [
+                {"role": "system", "content": "日本語の対話データ作成アシスタント。"},
+                {"role": "user", "content": prompt},
+            ],
+            response_format=self.args.llm_response_format,
+            json_schema=dialogue_response_schema(),
+            role_name="single-dialogue",
+        )
+
+    def call_agent(
+        self,
+        prompt: AgentPrompt,
+        *,
+        temperature: float,
+        max_tokens: int,
+        role_name: str,
+    ) -> str:
+        if self.args.llm_backend != "openai-compatible":
+            raise RuntimeError(
+                "multi-agent dialogue generation requires "
+                "--llm-backend openai-compatible so each agent can be called "
+                "through the same vLLM/OpenAI-compatible endpoint."
+            )
+        return self.generate_openai_compatible_messages(
+            [
+                {"role": "system", "content": prompt.system},
+                {"role": "user", "content": prompt.user},
+            ],
+            temperature=temperature,
+            max_tokens=max_tokens,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            response_format=None,
+            role_name=role_name,
+        )
+
+    def generate_multi_agent(
+        self,
+        use_case: dict[str, Any],
+        rng: random.Random,
+    ) -> Dialogue:
+        if self.args.llm_backend == "template":
+            return template_dialogue(use_case)
+        if self.args.llm_backend != "openai-compatible":
+            raise RuntimeError(
+                "--dialogue-generation-mode multi-agent currently requires "
+                "--llm-backend openai-compatible (vLLM/OpenAI-style server)."
+            )
+
+        profile = build_user_agent_profile(use_case, rng)
+        max_pairs = max(1, int(self.args.multi_agent_max_pairs))
+        min_pairs = max(1, min(int(self.args.multi_agent_min_pairs), max_pairs))
+        turns: list[DialogueTurn] = []
+
+        for pair_index in range(max_pairs):
+            user_prompt = build_user_agent_prompt(
+                use_case, profile, turns, pair_index, max_pairs
+            )
+            user_raw = self.call_agent(
+                user_prompt,
+                temperature=self.args.multi_agent_user_temperature,
+                max_tokens=240,
+                role_name="userAI",
+            )
+            user_text = clean_agent_utterance(user_raw, "user")
+            if not user_text:
+                raise ValueError("userAI produced an empty utterance.")
+
+            insertions: list[dict[str, Any]] = []
+            clauses = split_text_into_clauses(user_text)
+            if (
+                not self.args.no_multi_agent_aizuchi
+                and len(user_text) >= self.args.multi_agent_aizuchi_min_chars
+                and len(clauses) >= 2
+                and self.args.multi_agent_max_aizuchi_per_user > 0
+            ):
+                aizuchi_prompt = build_aizuchi_agent_prompt(
+                    use_case,
+                    turns,
+                    user_text,
+                    self.args.multi_agent_max_aizuchi_per_user,
+                )
+                aizuchi_raw = self.call_agent(
+                    aizuchi_prompt,
+                    temperature=self.args.multi_agent_aizuchi_temperature,
+                    max_tokens=120,
+                    role_name="aizuchiAI",
+                )
+                insertions = parse_aizuchi_insertions(
+                    aizuchi_raw,
+                    clauses,
+                    self.args.multi_agent_max_aizuchi_per_user,
+                )
+            turns.extend(user_turns_with_aizuchi(user_text, insertions))
+
+            moshi_prompt = build_moshi_agent_prompt(use_case, turns)
+            moshi_raw = self.call_agent(
+                moshi_prompt,
+                temperature=self.args.multi_agent_system_temperature,
+                max_tokens=280,
+                role_name="systemAI",
+            )
+            moshi_text = clean_agent_utterance(moshi_raw, "moshi")
+            if not moshi_text:
+                raise ValueError("systemAI produced an empty utterance.")
+            turns.append(DialogueTurn("moshi", moshi_text))
+
+            if pair_index + 1 >= min_pairs:
+                judge_prompt = build_judge_agent_prompt(
+                    use_case, turns, pair_index, min_pairs, max_pairs
+                )
+                judge_raw = self.call_agent(
+                    judge_prompt,
+                    temperature=self.args.multi_agent_judge_temperature,
+                    max_tokens=120,
+                    role_name="judgeAI",
+                )
+                if parse_completion_decision(judge_raw):
+                    break
+
+        dialogue_id = str(use_case.get("id") or "multi_agent_dialogue")
+        return Dialogue(
+            id=safe_stem(dialogue_id, "multi_agent_dialogue"),
+            category=str(use_case.get("category", "unknown")),
+            risk_level=str(use_case.get("risk_level", "low")),
+            title=str(use_case.get("situation") or dialogue_id),
+            source_use_case=str(use_case.get("id") or dialogue_id),
+            turns=turns,
+            generator_notes=(
+                "multi_agent profile="
+                + json.dumps(profile, ensure_ascii=False, sort_keys=True)
+            ),
+            duplex_task=str(use_case.get("duplex_task") or "") or None,
+        )
 
     def generate_transformers_subprocess(self, prompt: str) -> str:
         return self.generate_transformers_subprocess_batch([prompt])[0]
@@ -1173,6 +1409,367 @@ def pipeline_result_to_text(result: Any) -> str:
                 return pipeline_result_to_text(result[key])
         return json.dumps(result, ensure_ascii=False)
     return str(result)
+
+
+USER_AGENT_SYSTEM_PROMPT = """
+あなたは合成対話データの userAI です。孤独・孤立相談窓口に来る相談者 user として発話します。
+会話のランダム性、話題の出し方、ためらい、感情の揺れはあなたが担当します。
+相談者らしく一度に全部を説明せず、少しずつ開示してください。
+出力は user の次の発話本文だけ。話者名、JSON、説明、引用符、箇条書きは出力しません。
+""".strip()
+
+
+MOSHI_AGENT_SYSTEM_PROMPT = """
+あなたは日本語の孤独・孤立相談窓口の相談員 moshi です。
+丁寧語で、傾聴・言い換え・要約・感情の承認を中心に応答します。
+すぐ助言や解決策に飛ばず、相手の言葉を一部受け取り、聞いている感じを出してください。
+「うん」「うんうん」などのくだけた相づちは使いません。
+出力は moshi の次の発話本文だけ。話者名、JSON、説明、引用符、箇条書きは出力しません。
+""".strip()
+
+
+JUDGE_AGENT_SYSTEM_PROMPT = """
+あなたは合成相談対話の外部判定器です。
+会話が自然に一区切りしているかだけを判定します。
+JSONだけを出力してください: {"complete": true/false, "reason": "短い理由"}
+""".strip()
+
+
+AIZUCHI_AGENT_SYSTEM_PROMPT = """
+あなたは相談員 moshi の短い相づちを、user発話の途中に挿入する位置だけを決める agent です。
+相づちは丁寧で短いものだけにします: はい。/ええ。/そうなんですね。/なるほど。
+user発話が短い、重い、または挿入すると邪魔な場合は空配列にしてください。
+JSONだけを出力してください: {"insertions":[{"after_clause": 1, "text": "はい。"}]}
+""".strip()
+
+
+def case_brief(use_case: dict[str, Any]) -> str:
+    talking_points = use_case.get("talking_points") or []
+    if isinstance(talking_points, list):
+        points = " / ".join(str(p) for p in talking_points if str(p).strip())
+    else:
+        points = str(talking_points)
+    lines = [
+        f"id: {use_case.get('id', 'unknown')}",
+        f"category: {use_case.get('category', 'unknown')}",
+        f"risk_level: {use_case.get('risk_level', 'low')}",
+        f"situation: {use_case.get('situation', '')}",
+        f"user_profile: {use_case.get('user_profile', '')}",
+        f"opening_hint: {use_case.get('opening', '')}",
+        f"topic: {use_case.get('topic', '')}",
+        f"talking_points: {points}",
+    ]
+    return "\n".join(line for line in lines if not line.endswith(": "))
+
+
+def build_user_agent_profile(
+    use_case: dict[str, Any], rng: random.Random
+) -> dict[str, str]:
+    talking_points = use_case.get("talking_points") or []
+    if isinstance(talking_points, list):
+        ordered_points = [str(p) for p in talking_points if str(p).strip()]
+        rng.shuffle(ordered_points)
+    else:
+        ordered_points = []
+    return {
+        "opening_style": rng.choice(
+            [
+                "最初は控えめに話してよいか確認する",
+                "日常の出来事から自然に入り、後半で本音が出る",
+                "少し明るく振る舞うが、途中で寂しさがにじむ",
+                "言葉を探しながら短めに話し始める",
+            ]
+        ),
+        "disclosure_pace": rng.choice(
+            [
+                "一度に説明しすぎず、質問されると少し詳しく話す",
+                "感情より先に具体的な出来事を話す",
+                "本題に触れたり戻ったりしながら話す",
+                "相手の受け止めで少しずつ安心していく",
+            ]
+        ),
+        "speech_texture": rng.choice(
+            [
+                "短い文が多く、少し言い淀む",
+                "丁寧だが、ところどころ本音がこぼれる",
+                "沈黙を避けようとして話題を足す",
+                "感情を直接言うのが苦手で比喩的に話す",
+            ]
+        ),
+        "emotional_arc": rng.choice(
+            [
+                "不安が少し和らぐが、完全には解決しない",
+                "話せたことで少し整理される",
+                "安心して、最後にまた相談してよいか確認する",
+                "重さは残るが、聞かれたことへの感謝が出る",
+            ]
+        ),
+        "topic_order": " / ".join(ordered_points[:4]) or "自然な流れで話題を選ぶ",
+    }
+
+
+def dialogue_turns_to_transcript(turns: list[DialogueTurn]) -> str:
+    rows = [asdict(turn) for turn in turns]
+    return dialogue_dict_to_transcript({"turns": rows})
+
+
+def build_user_agent_prompt(
+    use_case: dict[str, Any],
+    profile: dict[str, str],
+    turns: list[DialogueTurn],
+    pair_index: int,
+    max_pairs: int,
+) -> AgentPrompt:
+    transcript = dialogue_turns_to_transcript(turns) or "(まだ会話は始まっていません)"
+    prompt = f"""
+相談ケース:
+{case_brief(use_case)}
+
+今回の userAI のランダム設定:
+- 出だし: {profile['opening_style']}
+- 開示ペース: {profile['disclosure_pace']}
+- 話し方: {profile['speech_texture']}
+- 感情の流れ: {profile['emotional_arc']}
+- 話題順の手がかり: {profile['topic_order']}
+
+これまでの会話:
+{transcript}
+
+次に user として1発話だけ返してください。
+条件:
+- {pair_index + 1}/{max_pairs} 回目の user 発話です。
+- 相談者として自然に、短すぎず長すぎず 1〜3 文で話します。
+- 最終盤なら、少し区切りがつく発話や感謝も自然に入れてよいです。
+- moshi の発話、話者名、相づち指示、JSONは書きません。
+""".strip()
+    return AgentPrompt(system=USER_AGENT_SYSTEM_PROMPT, user=prompt)
+
+
+def build_moshi_agent_prompt(
+    use_case: dict[str, Any], turns: list[DialogueTurn]
+) -> AgentPrompt:
+    transcript = dialogue_turns_to_transcript(turns)
+    prompt = f"""
+相談ケース:
+{case_brief(use_case)}
+
+これまでの会話:
+{transcript}
+
+次に moshi として1発話だけ返してください。
+条件:
+- 丁寧語で、相談員として自然な距離感を保ちます。
+- まず受け止め、必要なら相手の言葉を短く言い換えます。
+- 一問一答にしすぎず、1つだけ開かれた問いを添えてよいです。
+- high/medium risk では断定せず、必要な場合だけ短く安全確認します。
+- 「うん」「うんうん」は使いません。
+- 話者名、JSON、説明は書きません。
+""".strip()
+    return AgentPrompt(system=MOSHI_AGENT_SYSTEM_PROMPT, user=prompt)
+
+
+def build_judge_agent_prompt(
+    use_case: dict[str, Any],
+    turns: list[DialogueTurn],
+    pair_index: int,
+    min_pairs: int,
+    max_pairs: int,
+) -> AgentPrompt:
+    transcript = dialogue_turns_to_transcript(turns)
+    prompt = f"""
+相談ケース:
+{case_brief(use_case)}
+
+これまでの会話:
+{transcript}
+
+判定基準:
+- 相談者が少し受け止められた、整理できた、または次に話す余地を持って自然に一区切りしていれば complete=true。
+- 唐突な終了、相談員の一方的な助言、相談者の強い未完了感が残る場合は complete=false。
+- まだ {min_pairs} 往復未満なら complete=false。
+- {max_pairs} 往復に達したら、破綻していなければ complete=true に寄せる。
+
+現在の往復数: {pair_index + 1}
+JSONだけを返してください。
+""".strip()
+    return AgentPrompt(system=JUDGE_AGENT_SYSTEM_PROMPT, user=prompt)
+
+
+def split_text_into_clauses(text: str) -> list[str]:
+    parts = re.findall(r".*?[、。！？!?]|.+$", text.strip())
+    return [part.strip() for part in parts if part.strip()]
+
+
+def build_aizuchi_agent_prompt(
+    use_case: dict[str, Any],
+    turns: list[DialogueTurn],
+    user_text: str,
+    max_insertions: int,
+) -> AgentPrompt:
+    transcript = dialogue_turns_to_transcript(turns) or "(まだ会話は始まっていません)"
+    clauses = split_text_into_clauses(user_text)
+    numbered = "\n".join(f"{i + 1}: {clause}" for i, clause in enumerate(clauses))
+    prompt = f"""
+相談ケース:
+{case_brief(use_case)}
+
+直前までの会話:
+{transcript}
+
+今回の user 発話を句ごとに分けたもの:
+{numbered}
+
+最大挿入数: {max_insertions}
+判断:
+- user発話の途中に moshi の短い相づちを入れるなら after_clause に句番号を指定します。
+- 最後の句の後には挿入しません。
+- 重い告白や短い発話では insertions を [] にします。
+- text は必ず「はい。」「ええ。」「そうなんですね。」「なるほど。」のどれか。
+JSONだけを返してください。
+""".strip()
+    return AgentPrompt(system=AIZUCHI_AGENT_SYSTEM_PROMPT, user=prompt)
+
+
+def clean_agent_utterance(text: str, speaker: str) -> str:
+    text = strip_thinking(text).strip()
+    lines = [
+        line.strip().strip('"').strip("'")
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("```")
+    ]
+    if not lines:
+        return ""
+    line = lines[0]
+    if "|" in line:
+        left, _, right = line.partition("|")
+        if normalize_speaker(left.strip().lower()) == speaker:
+            line = right.strip()
+    line = re.sub(r"^(user|moshi|相談者|相談員)\s*[:：]\s*", "", line).strip()
+    return line.strip()
+
+
+def extract_json_object(text: str) -> dict[str, Any]:
+    cleaned = strip_thinking(text).strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError(f"No JSON object found: {text}")
+    return json.loads(cleaned[start : end + 1])
+
+
+def parse_completion_decision(text: str) -> bool:
+    try:
+        data = extract_json_object(text)
+    except (ValueError, json.JSONDecodeError):
+        return False
+    value = data.get("complete")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "1", "complete"}
+    return False
+
+
+def parse_aizuchi_insertions(
+    text: str,
+    clauses: list[str],
+    max_insertions: int,
+) -> list[dict[str, Any]]:
+    if len(clauses) < 2 or max_insertions <= 0:
+        return []
+    try:
+        data = extract_json_object(text)
+    except (ValueError, json.JSONDecodeError):
+        return []
+    raw = data.get("insertions")
+    if not isinstance(raw, list):
+        return []
+    allowed = {"はい。", "ええ。", "そうなんですね。", "なるほど。"}
+    out: list[dict[str, Any]] = []
+    used: set[int] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            after_clause = int(item.get("after_clause"))
+        except (TypeError, ValueError):
+            continue
+        text_value = str(item.get("text") or "").strip()
+        if text_value not in allowed:
+            continue
+        if after_clause < 1 or after_clause >= len(clauses):
+            continue
+        if after_clause in used:
+            continue
+        used.add(after_clause)
+        out.append({"after_clause": after_clause, "text": text_value})
+        if len(out) >= max_insertions:
+            break
+    return sorted(out, key=lambda item: int(item["after_clause"]))
+
+
+def user_turns_with_aizuchi(
+    user_text: str,
+    insertions: list[dict[str, Any]],
+) -> list[DialogueTurn]:
+    clauses = split_text_into_clauses(user_text)
+    if not clauses or not insertions:
+        return [DialogueTurn("user", user_text)]
+
+    turns: list[DialogueTurn] = []
+    start = 0
+    for insertion in insertions:
+        after_clause = int(insertion["after_clause"])
+        chunk = "".join(clauses[start:after_clause]).strip()
+        if chunk:
+            turns.append(DialogueTurn("user", chunk))
+        turns.append(
+            DialogueTurn(
+                "moshi",
+                str(insertion["text"]),
+                timing="overlap_previous",
+                start_after_previous_start_sec=1.2,
+                event="model_backchannel",
+            )
+        )
+        start = after_clause
+    rest = "".join(clauses[start:]).strip()
+    if rest:
+        turns.append(DialogueTurn("user", rest))
+    return turns or [DialogueTurn("user", user_text)]
+
+
+def multi_agent_prompt_preview(
+    use_case: dict[str, Any],
+    rng: random.Random,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    profile = build_user_agent_profile(use_case, rng)
+    max_pairs = max(1, args.multi_agent_max_pairs)
+    turns: list[DialogueTurn] = []
+    user_prompt = build_user_agent_prompt(use_case, profile, turns, 0, max_pairs)
+    sample_user = DialogueTurn("user", str(use_case.get("opening", "少し話してもいいですか。")))
+    moshi_prompt = build_moshi_agent_prompt(use_case, [sample_user])
+    judge_prompt = build_judge_agent_prompt(
+        use_case,
+        [sample_user, DialogueTurn("moshi", "話してくださってありがとうございます。")],
+        0,
+        args.multi_agent_min_pairs,
+        max_pairs,
+    )
+    aizuchi_prompt = build_aizuchi_agent_prompt(
+        use_case,
+        [],
+        sample_user.text,
+        args.multi_agent_max_aizuchi_per_user,
+    )
+    return {
+        "profile": profile,
+        "userAI": asdict(user_prompt),
+        "systemAI": asdict(moshi_prompt),
+        "judge": asdict(judge_prompt),
+        "aizuchi": asdict(aizuchi_prompt),
+    }
 
 
 def build_duplex_prompt_section(use_case: dict[str, Any]) -> str:
@@ -2113,6 +2710,31 @@ def generate_dialogues(
     use_cases = load_use_cases(args)[: args.num_dialogues]
     generator = LLMDialogueGenerator(args)
     dialogues: list[Dialogue] = []
+    if args.dialogue_generation_mode == "multi-agent":
+        if args.dump_agent_prompts and use_cases:
+            preview_rng = random.Random(args.seed)
+            preview = multi_agent_prompt_preview(use_cases[0], preview_rng, args)
+            write_json(args.out_dir / "multi_agent_prompts.json", preview)
+            logger.info(
+                "Wrote multi-agent prompt preview to %s",
+                args.out_dir / "multi_agent_prompts.json",
+            )
+        for use_case in use_cases:
+            try:
+                dialogue = generator.generate_multi_agent(use_case, rng)
+                logger.info("Generated dialogue with multi-agent LLM: %s", dialogue.id)
+            except Exception as exc:
+                if args.no_template_fallback or not args.allow_template_fallback:
+                    raise
+                logger.warning(
+                    "Multi-agent generation failed for %s; using template fallback: %s",
+                    use_case.get("id"),
+                    exc,
+                )
+                dialogue = template_dialogue(use_case)
+            _emit(dialogue, dialogues)
+        return dialogues
+
     if args.llm_backend == "transformers-subprocess":
         prompts = [
             build_llm_prompt(use_case, rng, args.llm_num_fewshot)
