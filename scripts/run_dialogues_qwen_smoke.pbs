@@ -158,21 +158,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Readiness requires that /v1/models serves $VLLM_MODEL, so a stale vLLM bound to
+# this port (e.g. a leftover gpt-oss) cannot be mistaken for our server.
 VLLM_READY=0
 for ((i = 0; i < HEALTH_RETRIES; i++)); do
     if curl --fail --silent --show-error \
-        "http://127.0.0.1:${PORT}/v1/models" >/dev/null; then
+        "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null | grep -qF "$VLLM_MODEL"; then
         VLLM_READY=1
         break
     fi
     if ! kill -0 "$VLLM_PID" 2>/dev/null; then
-        echo "ERROR: vLLM exited before becoming healthy." >&2
+        echo "ERROR: vLLM exited before serving $VLLM_MODEL (port ${PORT} may be held by a stale server)." >&2
         exit 1
     fi
     sleep 5
 done
 if [[ "$VLLM_READY" != "1" ]]; then
-    echo "ERROR: vLLM health check timed out after $((HEALTH_RETRIES * 5)) seconds." >&2
+    echo "ERROR: vLLM health check timed out before serving $VLLM_MODEL after $((HEALTH_RETRIES * 5)) seconds." >&2
     exit 1
 fi
 

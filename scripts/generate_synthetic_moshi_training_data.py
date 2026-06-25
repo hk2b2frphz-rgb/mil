@@ -883,17 +883,20 @@ class GemmaDialogueGenerator:
         return dialogue_from_mapping(data, use_case)
 
     def resolve_served_model(self) -> str:
-        """Use the model the server actually serves, not the configured guess.
+        """Verify the endpoint actually serves the configured model.
 
-        These vLLM jobs serve a single model. If gemma_model is unset/stale (e.g.
-        the legacy gemma default) the server rejects the request with
-        "The model '<x>' does not exist". Querying /v1/models once removes that
-        whole class of failures. Falls back to the configured model if the lookup
-        fails."""
+        These vLLM jobs serve a single model. We query /v1/models once and, if the
+        configured model is NOT among the served ids, we raise instead of silently
+        switching: a mismatch means requests are hitting the wrong server (e.g. a
+        stale gpt-oss vLLM still bound to the same host:port as a Qwen job), and
+        generating the whole dataset with the wrong model is far worse than failing
+        fast. A benign id-format difference (e.g. trailing slash) is tolerated by
+        basename comparison. If the lookup itself fails, fall back to the
+        configured model rather than blocking on a transient network error."""
         cached = getattr(self, "_served_model", None)
         if cached is not None:
             return cached
-        served = self.args.gemma_model
+        configured = self.args.gemma_model
         models_url = chat_completions_url(self.args.gemma_api_base).replace(
             "/chat/completions", "/models"
         )
@@ -904,18 +907,27 @@ class GemmaDialogueGenerator:
             with urllib.request.urlopen(request, timeout=30) as response:
                 data = json.loads(response.read().decode("utf-8"))
             ids = [str(item["id"]) for item in data.get("data", []) if item.get("id")]
-            if ids and served not in ids:
-                logger.warning(
-                    "Configured model %r is not served; using %r from /v1/models.",
-                    served,
-                    ids[0],
-                )
-                served = ids[0]
-            elif ids:
-                served = next(m for m in ids if m == served)
-        except (urllib.error.URLError, KeyError, ValueError, StopIteration) as exc:
-            logger.warning("Could not query %s (%s); using configured model %r.",
-                           models_url, exc, served)
+        except (urllib.error.URLError, KeyError, ValueError) as exc:
+            logger.warning(
+                "Could not query %s (%s); using configured model %r.",
+                models_url, exc, configured,
+            )
+            self._served_model = configured
+            return configured
+
+        def _base(name: str) -> str:
+            return name.rsplit("/", 1)[-1].strip().lower()
+
+        if ids and not any(_base(m) == _base(configured) for m in ids):
+            raise RuntimeError(
+                f"Endpoint {models_url} serves {ids} but the job is configured for "
+                f"{configured!r}. Requests are hitting the wrong server -- likely a "
+                f"stale vLLM still bound to this host:port. Stop the stale server or "
+                f"use a distinct PORT for this job; refusing to generate with the "
+                f"wrong model."
+            )
+        # Use the exact served id (handles benign id-format differences).
+        served = next((m for m in ids if _base(m) == _base(configured)), configured)
         self._served_model = served
         return served
 

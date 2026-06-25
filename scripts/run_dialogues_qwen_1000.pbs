@@ -168,21 +168,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# No health-check timeout: wait indefinitely until vLLM is ready. The only failure
-# condition is the vLLM process dying before it becomes healthy.
-echo "waiting for vLLM to become ready (no health-check timeout)..."
+# No health-check timeout: wait indefinitely until OUR vLLM is ready. Readiness
+# requires that /v1/models actually serves $VLLM_MODEL -- otherwise a stale vLLM
+# (e.g. a leftover gpt-oss) still bound to this port would answer and we'd
+# silently generate with the wrong model. If our own process dies (e.g. it could
+# not bind the port because a stale server holds it), fail fast.
+echo "waiting for vLLM ($VLLM_MODEL) to become ready (no health-check timeout)..."
 while true; do
     if curl --fail --silent --show-error \
-        "http://127.0.0.1:${PORT}/v1/models" >/dev/null; then
+        "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null | grep -qF "$VLLM_MODEL"; then
         break
     fi
     if ! kill -0 "$VLLM_PID" 2>/dev/null; then
-        echo "ERROR: vLLM exited before becoming healthy." >&2
+        echo "ERROR: vLLM exited before serving $VLLM_MODEL (port ${PORT} may be held by a stale server)." >&2
         exit 1
     fi
     sleep 5
 done
-echo "vLLM is ready; starting dialogue generation."
+echo "vLLM is ready and serving $VLLM_MODEL; starting dialogue generation."
 
 export STEPS="use_cases,dialogues"
 export GEMMA_BACKEND="openai-compatible"
