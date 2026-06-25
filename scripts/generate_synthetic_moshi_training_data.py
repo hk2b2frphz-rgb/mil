@@ -301,6 +301,16 @@ def parse_args() -> argparse.Namespace:
         help="Optional API key for the OpenAI-compatible LLM endpoint.",
     )
     parser.add_argument(
+        "--llm-openai-endpoint",
+        choices=["chat", "completions"],
+        default=os.environ.get("LLM_OPENAI_ENDPOINT") or "chat",
+        help=(
+            "OpenAI-compatible generation endpoint. chat uses "
+            "/v1/chat/completions with messages. completions uses "
+            "/v1/completions with a ChatML-style prompt. Default: chat."
+        ),
+    )
+    parser.add_argument(
         "--llm-timeout-sec",
         type=float,
         default=300.0,
@@ -997,9 +1007,7 @@ class LLMDialogueGenerator:
         if cached is not None:
             return cached
         configured = self.args.llm_model
-        models_url = chat_completions_url(self.args.llm_api_base).replace(
-            "/chat/completions", "/models"
-        )
+        models_url = openai_models_url(self.args.llm_api_base)
         try:
             request = urllib.request.Request(models_url, method="GET")
             if self.args.llm_api_key:
@@ -1044,10 +1052,12 @@ class LLMDialogueGenerator:
         json_schema_name: str = "dialogue",
         role_name: str = "llm",
     ) -> str:
-        url = chat_completions_url(self.args.llm_api_base)
+        url = openai_generation_url(
+            self.args.llm_api_base,
+            self.args.llm_openai_endpoint,
+        )
         payload = {
             "model": self.resolve_served_model(),
-            "messages": messages,
             "temperature": self.args.llm_temperature if temperature is None else temperature,
             "frequency_penalty": (
                 self.args.llm_frequency_penalty
@@ -1061,6 +1071,11 @@ class LLMDialogueGenerator:
             ),
             "max_tokens": self.args.llm_max_new_tokens if max_tokens is None else max_tokens,
         }
+        if self.args.llm_openai_endpoint == "chat":
+            payload["messages"] = messages
+        else:
+            payload["prompt"] = messages_to_completion_prompt(messages)
+            payload["stop"] = ["<|im_end|>"]
         # vLLM extension: multiplicative repetition penalty. Strongly discourages
         # the "\n\n\n..." degeneration that frequency/presence penalties alone do
         # not stop. Only send when enabled so other servers are unaffected.
@@ -1076,7 +1091,11 @@ class LLMDialogueGenerator:
         # json_schema constrains the exact dialogue shape (no newline wandering,
         # always a closed object); json_object only requires syntactically valid
         # JSON.
-        if response_format == "json_schema" and json_schema is not None:
+        if (
+            self.args.llm_openai_endpoint == "chat"
+            and response_format == "json_schema"
+            and json_schema is not None
+        ):
             payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
@@ -1084,7 +1103,7 @@ class LLMDialogueGenerator:
                     "schema": json_schema,
                 },
             }
-        elif response_format == "json_object":
+        elif self.args.llm_openai_endpoint == "chat" and response_format == "json_object":
             payload["response_format"] = {"type": "json_object"}
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {
@@ -1348,13 +1367,38 @@ def resolve_llm_python(args: argparse.Namespace) -> str:
     return sys.executable
 
 
-def chat_completions_url(api_base: str) -> str:
+def openai_v1_base_url(api_base: str) -> str:
     base = api_base.rstrip("/")
-    if base.endswith("/chat/completions"):
-        return base
+    for suffix in ("/chat/completions", "/completions", "/models"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
     if base.endswith("/v1"):
-        return f"{base}/chat/completions"
-    return f"{base}/v1/chat/completions"
+        return base
+    return f"{base}/v1"
+
+
+def openai_models_url(api_base: str) -> str:
+    return f"{openai_v1_base_url(api_base)}/models"
+
+
+def openai_generation_url(api_base: str, endpoint: str) -> str:
+    suffix = "chat/completions" if endpoint == "chat" else "completions"
+    return f"{openai_v1_base_url(api_base)}/{suffix}"
+
+
+def chat_completions_url(api_base: str) -> str:
+    return openai_generation_url(api_base, "chat")
+
+
+def messages_to_completion_prompt(messages: list[dict[str, str]]) -> str:
+    parts: list[str] = []
+    for message in messages:
+        role = str(message.get("role", "user")).strip() or "user"
+        content = str(message.get("content", "")).strip()
+        parts.append(f"<|im_start|>{role}\n{content}<|im_end|>")
+    parts.append("<|im_start|>assistant\n")
+    return "\n".join(parts)
 
 
 def openai_chat_response_to_text(data: dict[str, Any]) -> str:

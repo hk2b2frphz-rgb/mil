@@ -199,6 +199,7 @@ export LLM_NUM_FEWSHOT="${LLM_NUM_FEWSHOT:-2}"
 export LLM_BACKEND="openai-compatible"
 export LLM_API_BASE="http://127.0.0.1:${PORT}/v1"
 export LLM_API_KEY="${LLM_API_KEY:-}"
+export LLM_OPENAI_ENDPOINT="${LLM_OPENAI_ENDPOINT:-completions}"
 export LLM_MODEL="$VLLM_MODEL"
 export LLM_TEMPERATURE
 export LLM_FREQUENCY_PENALTY="0.3"

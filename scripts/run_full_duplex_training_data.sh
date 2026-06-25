@@ -93,6 +93,7 @@ if has_step dialogues; then
         llm_args+=(
             --llm-api-base "${LLM_API_BASE:-http://127.0.0.1:8080/v1}"
             --llm-api-key "${LLM_API_KEY:-}"
+            --llm-openai-endpoint "${LLM_OPENAI_ENDPOINT:-chat}"
             --llm-frequency-penalty "${LLM_FREQUENCY_PENALTY:-0.3}"
             --llm-presence-penalty "${LLM_PRESENCE_PENALTY:-0.1}"
             --llm-repetition-penalty "${LLM_REPETITION_PENALTY:-1.1}"

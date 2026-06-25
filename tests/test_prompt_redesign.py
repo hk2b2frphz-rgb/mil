@@ -14,6 +14,9 @@ from scripts.generate_synthetic_moshi_training_data import (
     build_moshi_agent_prompt,
     build_user_agent_profile,
     build_user_agent_prompt,
+    messages_to_completion_prompt,
+    openai_generation_url,
+    openai_models_url,
     parse_aizuchi_insertions,
     split_text_into_clauses,
     user_turns_with_aizuchi,
@@ -109,6 +112,32 @@ class PromptRedesignTests(unittest.TestCase):
         self.assertEqual(turns[1].text, "はい。")
         self.assertEqual(turns[1].timing, "overlap_previous")
         self.assertEqual(turns[1].event, "model_backchannel")
+
+    def test_openai_endpoint_urls_support_chat_and_completions(self) -> None:
+        self.assertEqual(
+            openai_generation_url("http://127.0.0.1:8080/v1", "chat"),
+            "http://127.0.0.1:8080/v1/chat/completions",
+        )
+        self.assertEqual(
+            openai_generation_url("http://127.0.0.1:8080/v1", "completions"),
+            "http://127.0.0.1:8080/v1/completions",
+        )
+        self.assertEqual(
+            openai_models_url("http://127.0.0.1:8080/v1/completions"),
+            "http://127.0.0.1:8080/v1/models",
+        )
+
+    def test_messages_to_completion_prompt_uses_chatml_shape(self) -> None:
+        prompt = messages_to_completion_prompt(
+            [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "hello"},
+            ]
+        )
+
+        self.assertIn("<|im_start|>system\nsys<|im_end|>", prompt)
+        self.assertIn("<|im_start|>user\nhello<|im_end|>", prompt)
+        self.assertTrue(prompt.endswith("<|im_start|>assistant\n"))
 
 
 if __name__ == "__main__":
