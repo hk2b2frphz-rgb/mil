@@ -620,11 +620,11 @@ def dialogue_response_schema() -> dict[str, Any]:
 #     moshi|warm|応答テキスト
 #     silence|2.5|沈黙の理由
 #
-# The model emits backchannels itself: a turn that overlaps the previous speaker
-# (相づち) carries a leading <<...>> tag on the text field, taught via the few-shot
-# exemplars and the prompt. The labeled duplex tasks use the same tag for their
-# specific events. (enrich_dialogue_timing can still inject 相づち mechanically, but
-# the default pipeline no longer uses it -- the LLM produces them in context.)
+# The model writes backchannels (相づち) itself, as plain short turns interleaved in
+# the conversation (taught via the few-shot exemplars and the prompt). No overlap/
+# timing meta is encoded in the text; the full-duplex overlap layer is designed
+# separately. The labeled duplex tasks (not used in the default free-form run) still
+# carry explicit timing in a leading <<...>> tag on the text field:
 #
 #     moshi|gentle|<<overlap=1.5 event=model_backchannel>>うん。
 #
@@ -1358,7 +1358,7 @@ moshi|元の相談を維持する応答
         duplex_task,
         """
 user|相談者の発話の前半、
-moshi|<<overlap=1.5 event=model_backchannel>>うん。
+moshi|うん。
 user|発話の続き。
 moshi|内容を受け止める応答。
 """.strip(),
@@ -1399,24 +1399,22 @@ moshi|内容を受け止める応答。
 {case_summary}
 
 出力形式（厳守）: 1行=1ターン「話者|発話」。話者は user か moshi の2つだけ。沈黙は「silence|秒数」。
-感情ラベルなどは付けない。話者と発話内容だけ。
-相づちなど相手の発話に重ねる行は、発話の先頭に重なりタグを付ける:
-  moshi|<<overlap=1.5 event=model_backchannel>>うん。   (moshi が user の話の途中で相づち)
-  user|<<overlap=1.2 event=user_backchannel>>はい。      (user が moshi の長い説明の途中で相づち)
-overlap の秒数はだいたいでよい（直前の発話の終盤に重なる程度）。
+感情ラベルやタイミングなどのメタ情報は付けない。話者と発話内容だけ。
 JSON・説明文・見出し・番号・コードブロックは書かない。会話行だけを出力する。
 
 相づち（あいづち）の入れ方 — ここが最重要。交互ターンにしない:
-- 長めの発話は句読点ごとに2〜3行へ分け、その切れ目に相手の短い相づちを overlap で重ねる。話し手は次の行で続ける。
+- 相手が長めに話している「途中」にも、聞き手の短い相づちの行をどんどん挟む。相づちの次の行で、話し手はそのまま自分の話を続ける。
+- そのために、長い発話は句読点ごとに2〜3行に分け、その切れ目に相手の相づち行を入れる。
 - 相づち語は短く話題を奪わないもの: うん／うんうん／ええ／はい／そうなんですね／なるほど／へえ。同じ語を連続で繰り返さない。
+- moshi だけでなく、moshi が長めに話すときは user も「はい」「うん」などで短く反応してよい（双方向）。
 - 重い相談では相づちを控えめに、雑談では多めに。場面で密度を変える。
 やってはいけない:
-- 言い切りの短文の直後に相づちだけを置かない（浮く・意味が薄い）。相づちは「話の途中」に重ねる。
+- 言い切りの短文の直後に相づちだけを置かない（浮く・意味が薄い）。相づちは「話の途中」に挟む。
 - 「それで」など続きを促す相づちの直後は、必ず話し手が続ける。聞き手がそのまま本題を話し出さない。
-- 相づち行のすぐ後に同じ話者の長い発話を続けない（相づち→本応答の連続を避け、間に相手の発話を挟む）。
+- 相づち行のすぐ後に、同じ話者の長い発話を続けない（相づち→本応答の連続を避け、間に相手の発話を挟む）。
 
 ルール:
-- 最初の行は user。user/moshi 合計 {turn_count} 行前後（相づちで分割した行も数える）。本筋の発話は 1行 8〜45 文字。
+- 最初の行は user。user/moshi 合計 {turn_count} 行前後（相づちの行も数える）。本筋の発話は 1行 8〜45 文字。
 - 話し方 user={user_style} / moshi={counselor_style}。出だしは毎回変え、定型にしない。
 - 性格と今日の状態を語調に反映。気分は急変させず段階的に。無理に前向きにしない。
 - high/medium risk は断定せず安全確認の短い問いを入れる。診断・説教・長い助言は避ける。

@@ -187,14 +187,14 @@ while true; do
 done
 echo "vLLM is ready and serving $VLLM_MODEL; starting dialogue generation."
 
-# The frequent, natural Japanese backchannels (うん/はい/ええ/そうなんですね …) are now
-# produced by the LLM itself: the few-shot exemplars demonstrate moshi/user 相づち
-# overlapping mid-utterance (<<overlap=.. event=model_backchannel/user_backchannel>>)
-# and the prompt instructs it explicitly. So we do NOT run the mechanical enrich
-# injection (it would double up and place 相づち without reading context). Show two
-# exemplars so the model sees both a backchannel-heavy and a measured (heavy-topic)
-# example and modulates density by gravity.
+# Focus of this run: dialogue TEXT with natural, frequent Japanese backchannels
+# (相づち) produced by the LLM itself -- the few-shot exemplars weave うん/はい/ええ/
+# そうなんですね … as short turns mid-conversation and the prompt instructs it. We are
+# NOT encoding any overlap/timing meta in the text here; the full-duplex overlap
+# layer is designed separately later. So: free-form only (LISTENING_RATIO=1.0, no
+# labeled duplex tasks) and two exemplars for backchannel-density variety.
 export STEPS="use_cases,dialogues"
+export LISTENING_RATIO="${LISTENING_RATIO:-1.0}"
 export LLM_NUM_FEWSHOT="${LLM_NUM_FEWSHOT:-2}"
 export LLM_BACKEND="openai-compatible"
 export LLM_API_BASE="http://127.0.0.1:${PORT}/v1"

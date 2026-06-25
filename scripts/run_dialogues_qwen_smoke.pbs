@@ -178,9 +178,11 @@ if [[ "$VLLM_READY" != "1" ]]; then
     exit 1
 fi
 
-# Backchannels are produced by the LLM (few-shot exemplars + prompt); no mechanical
-# enrich injection. Show two exemplars for density variety. Mirrors the 1000 job.
+# Backchannels are produced by the LLM (few-shot exemplars + prompt) as plain short
+# turns; no overlap/timing meta in the text (full-duplex overlap is designed later).
+# Free-form only + two exemplars for density variety. Mirrors the 1000 job.
 export STEPS="use_cases,dialogues"
+export LISTENING_RATIO="${LISTENING_RATIO:-1.0}"
 export LLM_NUM_FEWSHOT="${LLM_NUM_FEWSHOT:-2}"
 export LLM_BACKEND="openai-compatible"
 export LLM_API_BASE="http://127.0.0.1:${PORT}/v1"
