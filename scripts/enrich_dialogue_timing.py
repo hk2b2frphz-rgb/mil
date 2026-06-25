@@ -140,25 +140,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--aizuchi-prob",
         type=float,
-        default=0.75,
+        default=0.9,
         help="Probability of adding backchannels to a qualifying user turn.",
     )
     parser.add_argument(
         "--min-turn-sec",
         type=float,
-        default=2.2,
+        default=1.0,
         help="User turns estimated shorter than this are not split for backchannels.",
     )
     parser.add_argument(
         "--sec-per-aizuchi",
         type=float,
-        default=3.2,
+        default=1.3,
         help="Roughly one backchannel per this many seconds of user speech.",
     )
     parser.add_argument(
         "--max-aizuchi-per-turn",
         type=int,
-        default=3,
+        default=6,
     )
     parser.add_argument(
         "--emotion-inertia",
