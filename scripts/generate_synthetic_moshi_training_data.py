@@ -672,31 +672,31 @@ def strip_thinking(text: str) -> str:
 def parse_transcript(text: str) -> dict[str, Any]:
     """Parse the pipe-delimited transcript into a {"turns": [...]} mapping.
 
-    Coercion/validation (speaker normalization, numeric fields, dropping empty
-    turns) is deferred to dialogue_from_mapping, which already does exactly that
-    for the old JSON path."""
+    Format is "話者|発話" (no emotion field -- emotion labels were error-prone and
+    are no longer requested). Silence is "silence|秒数" (optional 3rd note field).
+    Coercion/validation is deferred to dialogue_from_mapping."""
     text = strip_thinking(text)
     turns: list[dict[str, Any]] = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("```") or line.startswith("#"):
             continue
-        parts = line.split("|", 2)
-        if len(parts) < 2:
+        speaker, sep, rest = line.partition("|")
+        if not sep:
             continue
-        speaker = parts[0].strip().lower()
+        speaker = speaker.strip().lower()
+        rest = rest.strip()
         if speaker == "silence":
+            dur, _, note = rest.partition("|")
             turns.append(
                 {
                     "speaker": "silence",
-                    "duration_sec": parts[1].strip(),
-                    "note": parts[2].strip() if len(parts) > 2 else "",
+                    "duration_sec": dur.strip(),
+                    "note": note.strip(),
                 }
             )
             continue
-        emotion = parts[1].strip()
-        rest = parts[2].strip() if len(parts) > 2 else ""
-        turn: dict[str, Any] = {"speaker": speaker, "emotion": emotion}
+        turn: dict[str, Any] = {"speaker": speaker}
         match = _TRANSCRIPT_TAG_RE.match(rest)
         if match:
             turn.update(_parse_transcript_tags(match.group("tags")))
@@ -707,18 +707,15 @@ def parse_transcript(text: str) -> dict[str, Any]:
 
 
 def dialogue_dict_to_transcript(dialogue: dict[str, Any]) -> str:
-    """Serialize a stored dialogue dict back to the transcript format (few-shot)."""
+    """Serialize a stored dialogue dict to the "話者|発話" transcript (few-shot)."""
     lines: list[str] = []
     for turn in dialogue.get("turns", []):
         if not isinstance(turn, dict):
             continue
         speaker = str(turn.get("speaker", "")).strip().lower()
         if speaker == "silence":
-            dur = turn.get("duration_sec", 2.0)
-            note = str(turn.get("note") or "")
-            lines.append(f"silence|{dur}|{note}")
+            lines.append(f"silence|{turn.get('duration_sec', 2.0)}")
             continue
-        emotion = str(turn.get("emotion") or "neutral")
         tags = []
         if str(turn.get("timing") or "") == "overlap_previous":
             start = turn.get("start_after_previous_start_sec")
@@ -732,7 +729,7 @@ def dialogue_dict_to_transcript(dialogue: dict[str, Any]) -> str:
         if turn.get("gain") not in (None, "", 1.0):
             tags.append(f"gain={turn['gain']}")
         tag_str = f"<<{' '.join(tags)}>>" if tags else ""
-        lines.append(f"{speaker}|{emotion}|{tag_str}{turn.get('text', '')}")
+        lines.append(f"{speaker}|{tag_str}{turn.get('text', '')}")
     return "\n".join(lines)
 
 
@@ -1183,7 +1180,7 @@ def build_duplex_prompt_section(use_case: dict[str, Any]) -> str:
     task_rules = {
         "pause_handling": (
             "user発話を前半、2〜3秒のsilence、後半に分ける。"
-            "silence行は silence|2.5|理由 の形で書く。"
+            "silence行は silence|2.5 の形で書く。"
             "後半が終わる前にmoshiの長い返答を置かない。"
         ),
         "smooth_turn_taking": (
@@ -1297,75 +1294,73 @@ def build_gemma_prompt(
     silence_pattern = str(use_case.get("silence_pattern", "none"))
     if duplex_task == "pause_handling":
         silence_directive = (
-            "- 2〜3秒の沈黙を silence|2.5|userが言葉を探している の形で入れ、"
-            "その直後はuserが同じ発話を続ける。"
+            "- 2〜3秒の沈黙を silence|2.5 の形で入れ、その直後はuserが同じ発話を続ける。"
         )
     elif silence_pattern == "heavy":
         silence_directive = (
-            "- 沈黙の行 silence|3〜6|理由 を 3〜5 回挟む。"
+            "- 沈黙の行 silence|3〜6 を 3〜5 回挟む。"
             "沈黙の直後は必ず moshi が穏やかに声をかける（moshi が連続して話してもよい）。"
         )
     elif silence_pattern == "occasional":
         silence_directive = (
-            "- 沈黙の行 silence|2〜4|理由 を 1〜2 回挟む。"
-            "沈黙の直後は moshi が穏やかに声をかける。"
+            "- 沈黙の行 silence|2〜4 を 1〜2 回挟む。沈黙の直後は moshi が穏やかに声をかける。"
         )
     else:
         silence_directive = "- 沈黙行は入れない。"
     duplex_section = build_duplex_prompt_section(use_case)
     schema_turn_examples = {
         "pause_handling": """
-user|hesitant|発話の前半
-silence|2.4|userが言葉を探している
-user|sad|同じ発話の続き
-moshi|empathetic|続きを受け止める応答
+user|発話の前半
+silence|2.4
+user|同じ発話の続き
+moshi|続きを受け止める応答
 """.strip(),
         "smooth_turn_taking": """
-user|hesitant|相談者の発話
-moshi|warm|発話終了後の自然な応答
+user|相談者の発話
+moshi|発話終了後の自然な応答
 """.strip(),
         "backchannel": """
-user|sad|長めの相談者発話
-moshi|gentle|<<overlap=1.5 event=model_backchannel>>うん。
-user|sad|相談者の続き
-moshi|empathetic|内容を受け止める応答
+user|長めの相談者発話
+moshi|<<overlap=1.5 event=model_backchannel>>うん。
+user|相談者の続き
+moshi|内容を受け止める応答
 """.strip(),
         "user_interruption": """
-user|hesitant|相談者の発話
-moshi|warm|やや長い相談員の発話
-user|neutral|<<overlap=1.2 truncate=0.25 event=user_interruption>>訂正または重要情報
-moshi|empathetic|割り込み内容への応答
+user|相談者の発話
+moshi|やや長い相談員の発話
+user|<<overlap=1.2 truncate=0.25 event=user_interruption>>訂正または重要情報
+moshi|割り込み内容への応答
 """.strip(),
         "user_backchannel": """
-user|hesitant|相談者の発話
-moshi|warm|相談員の説明
-user|neutral|<<overlap=1.0 event=user_backchannel>>はい。
-moshi|warm|同じ話題の自然な続き
+user|相談者の発話
+moshi|相談員の説明
+user|<<overlap=1.0 event=user_backchannel>>はい。
+moshi|同じ話題の自然な続き
 """.strip(),
         "talking_to_other": """
-user|hesitant|相談者の発話
-moshi|warm|相談員の発話
-user|neutral|<<overlap=1.0 voice_role=user event=talking_to_other>>少し待ってて。
-moshi|warm|元の相談を維持する応答
+user|相談者の発話
+moshi|相談員の発話
+user|<<overlap=1.0 voice_role=user event=talking_to_other>>少し待ってて。
+moshi|元の相談を維持する応答
 """.strip(),
         "background_speech": """
-user|hesitant|相談者の発話
-moshi|warm|相談員の発話
-user|neutral|<<overlap=1.0 voice_role=background gain=0.32 event=background_speech>>まもなく電車が到着します。
-moshi|warm|元の相談を維持する応答
+user|相談者の発話
+moshi|相談員の発話
+user|<<overlap=1.0 voice_role=background gain=0.32 event=background_speech>>まもなく電車が到着します。
+moshi|元の相談を維持する応答
 """.strip(),
     }
     schema_turn_example = schema_turn_examples.get(
         duplex_task,
         """
-user|hesitant|相談者の発話
-moshi|warm|相談員の発話
-silence|3.0|なぜ沈黙か簡単に
+user|相談者の発話
+moshi|相談員の発話
+silence|3.0
 """.strip(),
     )
     # Few-shot is the single biggest chunk of the prompt; keep it small so the
     # model stays under the explicit instructions rather than drowning in
-    # examples. Count is configurable (GEMMA_NUM_FEWSHOT), default 1.
+    # examples. Count is configurable (LLM_NUM_FEWSHOT), default 1.
     n_fewshot = max(0, min(num_fewshot, len(LISTENING_DIALOGUE_EXEMPLARS)))
     few_shot_block = ""
     if n_fewshot > 0:
@@ -1374,7 +1369,7 @@ silence|3.0|なぜ沈黙か簡単に
             for d in LISTENING_DIALOGUE_EXEMPLARS[:n_fewshot]
         )
         few_shot_block = (
-            "\n\n品質の参考（コピー禁止。相づちの多様さ・感情の反映・穏やかな深掘りを学ぶ）:\n"
+            "\n\n品質の参考（コピー禁止。相づちの多様さ・言い換え・穏やかな深掘りを学ぶ）:\n"
             + examples
         )
 
@@ -1398,17 +1393,16 @@ silence|3.0|なぜ沈黙か簡単に
 対話設定:
 {case_summary}
 
-出力形式（厳守）: 1行=1ターン「話者|感情|発話」。話者は user か moshi。沈黙は「silence|秒数|理由」。
+出力形式（厳守）: 1行=1ターン「話者|発話」。話者は user か moshi の2つだけ。沈黙は「silence|秒数」。
+感情ラベルなどは付けない。話者と発話内容だけ。
 JSON・説明文・見出し・番号・コードブロックは書かない。会話行だけを出力する。
 
 ルール:
 - 最初の行は user。user/moshi 合計 {turn_count} 行前後。1行 8〜45 文字。
 - 話し方 user={user_style} / moshi={counselor_style}。出だしは毎回変え、定型にしない。
-- 性格と今日の状態を語調・感情に反映。感情は急変させず段階的に。無理に前向きにしない。
+- 性格と今日の状態を語調に反映。気分は急変させず段階的に。無理に前向きにしない。
 - high/medium risk は断定せず安全確認の短い問いを入れる。診断・説教・長い助言は避ける。
-{points_line}- 感情ラベル user: hesitant,sad,lonely,anxious,relieved,grateful,neutral,tearful,sobbing,high_tension,agitated,withdrawn,weary,irritable,laughing
-- 感情ラベル moshi: warm,gentle,empathetic,encouraging,concerned,reassuring,soothing,neutral
-{silence_directive}
+{points_line}{silence_directive}
 {duplex_section}
 
 この対話の形（例）:

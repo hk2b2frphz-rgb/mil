@@ -140,25 +140,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--aizuchi-prob",
         type=float,
-        default=0.9,
+        default=0.97,
         help="Probability of adding backchannels to a qualifying user turn.",
     )
     parser.add_argument(
         "--min-turn-sec",
         type=float,
-        default=1.0,
+        default=0.6,
         help="User turns estimated shorter than this are not split for backchannels.",
     )
     parser.add_argument(
         "--sec-per-aizuchi",
         type=float,
-        default=1.3,
+        default=0.9,
         help="Roughly one backchannel per this many seconds of user speech.",
     )
     parser.add_argument(
         "--max-aizuchi-per-turn",
         type=int,
-        default=6,
+        default=10,
     )
     parser.add_argument(
         "--emotion-inertia",
@@ -203,28 +203,38 @@ def est_sec(text: str, chars_per_sec: float) -> float:
 
 
 def split_into_chunks(text: str, k: int) -> list[str]:
-    """text を句切れで k 個程度のまとまりに分割する。"""
+    """text を最大 k 個の細かい断片へ分割する。
+
+    句切れ(、。！？)を優先しつつ、節が長い場合は文字数でさらに細かく割る。これに
+    より「私、/ 昨日お昼ご飯を / 食べに行って、」のような細かい相づち単位になる。"""
     if k <= 1:
         return [text]
-    clauses = [c for c in CLAUSE_SPLIT_RE.split(text) if c.strip()]
-    if len(clauses) <= 1:
-        # 句読点が無い場合は文字数で等分。ceil で割ることで最大 k チャンクに
-        # 収めつつ末尾文字を取りこぼさない。
-        n = len(text)
-        size = max(1, (n + k - 1) // k)
-        chunks = [text[i : i + size] for i in range(0, n, size)]
-        return chunks or [text]
-    # clauses を k 個のチャンクへ均等にまとめる
+    n = len(text)
+    # 目標断片サイズ(文字)。k 個に均等割りした長さを目安にする。
+    target = max(2, (n + k - 1) // k)
+    clauses = [c for c in CLAUSE_SPLIT_RE.split(text) if c.strip()] or [text]
+
+    # 節が target より長ければ文字数でさらに分割し、細かい atom 列にする。
+    atoms: list[str] = []
+    for clause in clauses:
+        if len(clause) > target:
+            pieces = max(1, (len(clause) + target - 1) // target)
+            size = max(1, (len(clause) + pieces - 1) // pieces)
+            atoms.extend(clause[i : i + size] for i in range(0, len(clause), size))
+        else:
+            atoms.append(clause)
+
+    # atom が k より多ければ、隣接 atom を target 程度にまとめて k 個以内に収める。
+    if len(atoms) <= k:
+        return atoms
     chunks: list[str] = []
-    per = max(1, len(clauses) / k)
     acc = ""
-    target = per
-    for idx, clause in enumerate(clauses, start=1):
-        acc += clause
-        if idx >= round(target) and len(chunks) < k - 1:
+    for atom in atoms:
+        if acc and len(acc) + len(atom) > target and len(chunks) < k - 1:
             chunks.append(acc)
-            acc = ""
-            target += per
+            acc = atom
+        else:
+            acc += atom
     if acc:
         chunks.append(acc)
     return [c for c in chunks if c] or [text]

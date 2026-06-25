@@ -15,8 +15,10 @@ class PromptRedesignTests(unittest.TestCase):
         prompt = build_gemma_prompt({"id": "minimal"}, Random(0))
 
         self.assertIn("傾聴中心", prompt)
-        self.assertIn("話者|感情|発話", prompt)
-        self.assertIn("silence|秒数|理由", prompt)
+        self.assertIn("話者|発話", prompt)
+        self.assertIn("silence|秒数", prompt)
+        # The output format no longer has an emotion column.
+        self.assertNotIn("話者|感情|発話", prompt)
         # Exactly one exemplar by default: the first exemplar's first turn text
         # is present, the second exemplar's is not.
         self.assertEqual(len(LISTENING_DIALOGUE_EXEMPLARS), 5)
