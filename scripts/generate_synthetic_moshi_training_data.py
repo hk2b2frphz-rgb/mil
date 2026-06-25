@@ -356,11 +356,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--gemma-response-format",
-        choices=["json_object", "text"],
+        choices=["json_schema", "json_object", "text"],
         default=os.environ.get("GEMMA_RESPONSE_FORMAT") or None,
         help=(
-            "OpenAI-compatible response_format. 'json_object' forces valid JSON "
-            "via vLLM structured outputs. Default: unset."
+            "OpenAI-compatible response_format. 'json_schema' (recommended) "
+            "forces the exact dialogue structure via vLLM guided decoding, "
+            "preventing newline wandering and truncated/broken JSON. "
+            "'json_object' only requires valid JSON (no structure). "
+            "Default: unset."
         ),
     )
     parser.add_argument(
@@ -532,6 +535,58 @@ def extract_json_object(text: str) -> dict[str, Any]:
     if start < 0 or end < start:
         raise ValueError("No JSON object found in Gemma output.")
     return json.loads(text[start: end + 1])
+
+
+def dialogue_response_schema() -> dict[str, Any]:
+    """JSON schema for guided decoding on the openai-compatible backend.
+
+    Free-form json_object mode lets an unsure model emit unbounded whitespace and
+    never close the object, so it runs to max_tokens and yields broken JSON. A
+    strict schema forces the exact structure and a closed object (xgrammar in
+    vLLM), eliminating the newline wandering and truncation. maxItems also caps
+    runaway turn counts. Fields mirror dialogue_from_mapping()."""
+    return {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"},
+            "category": {"type": "string"},
+            "risk_level": {"type": "string"},
+            "duplex_task": {"type": "string"},
+            "title": {"type": "string"},
+            "turns": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 40,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "speaker": {
+                            "type": "string",
+                            "enum": ["user", "moshi", "silence"],
+                        },
+                        "text": {"type": "string"},
+                        "emotion": {"type": "string"},
+                        "duration_sec": {"type": "number"},
+                        "note": {"type": "string"},
+                        "timing": {
+                            "type": "string",
+                            "enum": ["sequential", "overlap_previous"],
+                        },
+                        "start_after_previous_start_sec": {"type": "number"},
+                        "truncate_previous_after_sec": {"type": "number"},
+                        "gain": {"type": "number"},
+                        "voice_role": {"type": "string"},
+                        "event": {"type": "string"},
+                    },
+                    "required": ["speaker"],
+                    "additionalProperties": False,
+                },
+            },
+            "generator_notes": {"type": "string"},
+        },
+        "required": ["title", "turns"],
+        "additionalProperties": False,
+    }
 
 
 def dialogue_from_mapping(data: dict[str, Any], use_case: dict[str, Any]) -> Dialogue:
@@ -721,7 +776,18 @@ class GemmaDialogueGenerator:
         if self.args.gemma_reasoning_effort:
             payload["reasoning_effort"] = self.args.gemma_reasoning_effort
         # Force structured JSON output via vLLM's response_format support.
-        if self.args.gemma_response_format == "json_object":
+        # json_schema constrains the exact dialogue shape (no newline wandering,
+        # always a closed object); json_object only requires syntactically valid
+        # JSON.
+        if self.args.gemma_response_format == "json_schema":
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "dialogue",
+                    "schema": dialogue_response_schema(),
+                },
+            }
+        elif self.args.gemma_response_format == "json_object":
             payload["response_format"] = {"type": "json_object"}
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {
@@ -1106,10 +1172,13 @@ def build_gemma_prompt(use_case: dict[str, Any], rng: random.Random) -> str:
     {"speaker": "silence", "duration_sec": 3.0, "note": "なぜ沈黙か簡単に"}
 """.strip(),
     )
+    # Compact (no indent) on purpose: pretty-printed examples teach the model to
+    # emit newline-heavy JSON, which under guided decoding turns into endless
+    # whitespace. Compact examples also shrink the ~4k-token prompt.
     few_shot_examples = json.dumps(
         LISTENING_DIALOGUE_EXEMPLARS,
         ensure_ascii=False,
-        indent=2,
+        separators=(",", ":"),
     )
 
     return f"""
