@@ -123,6 +123,7 @@ KOKORO_UV=(
     --with numpy
     --with sphn
     --with "torch==$TORCH_VERSION"
+    --with "torchaudio==$TORCHAUDIO_VERSION"
 )
 
 echo "===== step 2/5: qwen3 baseline ====="
@@ -165,7 +166,7 @@ CUDA_VISIBLE_DEVICES=1 COSYVOICE_REPO="$COSYVOICE_REPO" \
     --backends cosyvoice3
 
 echo "===== step 5/5: Kokoro ====="
-CUDA_VISIBLE_DEVICES=1 "${KOKORO_UV[@]}" python scripts/run_tts_comparison.py \
+CUDA_VISIBLE_DEVICES=0 "${KOKORO_UV[@]}" python scripts/run_tts_comparison.py \
     "${COMMON_ARGS[@]}" \
     --backends kokoro
 
