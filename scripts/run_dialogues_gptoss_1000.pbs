@@ -199,12 +199,11 @@ export GEMMA_MODEL="$VLLM_MODEL"
 export GEMMA_TEMPERATURE
 export GEMMA_FREQUENCY_PENALTY="${GEMMA_FREQUENCY_PENALTY:-0.3}"
 export GEMMA_PRESENCE_PENALTY="${GEMMA_PRESENCE_PENALTY:-0.1}"
-# gpt-oss is a reasoning model: keep effort low so the final JSON channel is
-# emitted (otherwise reasoning eats the whole budget and content is empty), and
-# force the exact dialogue structure via vLLM guided decoding (json_schema
-# prevents newline wandering / truncated JSON).
+# gpt-oss is a reasoning model: keep effort low so it does not spend the whole
+# token budget on the analysis channel before emitting the answer. Dialogues are
+# generated as a plain pipe-delimited transcript (not JSON), so no response_format
+# is forced.
 export GEMMA_REASONING_EFFORT="${GEMMA_REASONING_EFFORT:-low}"
-export GEMMA_RESPONSE_FORMAT="${GEMMA_RESPONSE_FORMAT:-json_schema}"
 export RUN_ID
 export OUT_ROOT
 

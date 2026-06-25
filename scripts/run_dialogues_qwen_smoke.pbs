@@ -184,10 +184,9 @@ export GEMMA_MODEL="$VLLM_MODEL"
 export GEMMA_TEMPERATURE
 export GEMMA_FREQUENCY_PENALTY="0.3"
 export GEMMA_PRESENCE_PENALTY="0.1"
-# Force the exact dialogue structure via vLLM guided decoding (Qwen thinking is
-# controlled separately via the chat template kwargs). json_schema prevents the
-# newline wandering / truncated JSON seen with free-form json_object.
-export GEMMA_RESPONSE_FORMAT="${GEMMA_RESPONSE_FORMAT:-json_schema}"
+# Dialogues are generated as a plain pipe-delimited transcript (not JSON), which
+# the model produces far more reliably, so no response_format is forced. Qwen
+# thinking is controlled separately via the chat template kwargs.
 export RUN_ID
 export OUT_ROOT
 

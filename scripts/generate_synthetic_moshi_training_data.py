@@ -604,6 +604,112 @@ def dialogue_response_schema() -> dict[str, Any]:
     }
 
 
+# --- Plain-text transcript format -------------------------------------------
+# Asking the model for JSON is fragile: a single unclosed brace or a degenerate
+# "\n\n\n" run breaks the whole dialogue. Instead the model emits one turn per
+# line, pipe-delimited, which it can produce far more reliably:
+#
+#     user|hesitant|発話テキスト
+#     moshi|warm|応答テキスト
+#     silence|2.5|沈黙の理由
+#
+# Full-duplex timing for free dialogue is added later by enrich_dialogue_timing,
+# so normal turns carry only speaker/emotion/text. The few labeled duplex tasks
+# need explicit timing; those go in a leading <<...>> tag on the text field:
+#
+#     moshi|gentle|<<overlap=1.5 event=model_backchannel>>うん。
+#
+# We split with maxsplit=2 so text may itself contain "|".
+
+_TRANSCRIPT_TAG_RE = re.compile(r"^<<(?P<tags>.*?)>>\s*(?P<text>.*)$", re.DOTALL)
+
+
+def _parse_transcript_tags(tagstr: str) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for token in tagstr.replace(",", " ").split():
+        if "=" not in token:
+            continue
+        key, _, value = token.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if key == "overlap":
+            out["timing"] = "overlap_previous"
+            out["start_after_previous_start_sec"] = value
+        elif key == "truncate":
+            out["truncate_previous_after_sec"] = value
+        elif key in {"event", "voice_role"}:
+            out[key] = value
+        elif key == "gain":
+            out["gain"] = value
+    return out
+
+
+def parse_transcript(text: str) -> dict[str, Any]:
+    """Parse the pipe-delimited transcript into a {"turns": [...]} mapping.
+
+    Coercion/validation (speaker normalization, numeric fields, dropping empty
+    turns) is deferred to dialogue_from_mapping, which already does exactly that
+    for the old JSON path."""
+    turns: list[dict[str, Any]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("```") or line.startswith("#"):
+            continue
+        parts = line.split("|", 2)
+        if len(parts) < 2:
+            continue
+        speaker = parts[0].strip().lower()
+        if speaker == "silence":
+            turns.append(
+                {
+                    "speaker": "silence",
+                    "duration_sec": parts[1].strip(),
+                    "note": parts[2].strip() if len(parts) > 2 else "",
+                }
+            )
+            continue
+        emotion = parts[1].strip()
+        rest = parts[2].strip() if len(parts) > 2 else ""
+        turn: dict[str, Any] = {"speaker": speaker, "emotion": emotion}
+        match = _TRANSCRIPT_TAG_RE.match(rest)
+        if match:
+            turn.update(_parse_transcript_tags(match.group("tags")))
+            rest = match.group("text").strip()
+        turn["text"] = rest
+        turns.append(turn)
+    return {"turns": turns}
+
+
+def dialogue_dict_to_transcript(dialogue: dict[str, Any]) -> str:
+    """Serialize a stored dialogue dict back to the transcript format (few-shot)."""
+    lines: list[str] = []
+    for turn in dialogue.get("turns", []):
+        if not isinstance(turn, dict):
+            continue
+        speaker = str(turn.get("speaker", "")).strip().lower()
+        if speaker == "silence":
+            dur = turn.get("duration_sec", 2.0)
+            note = str(turn.get("note") or "")
+            lines.append(f"silence|{dur}|{note}")
+            continue
+        emotion = str(turn.get("emotion") or "neutral")
+        tags = []
+        if str(turn.get("timing") or "") == "overlap_previous":
+            start = turn.get("start_after_previous_start_sec")
+            if start is not None:
+                tags.append(f"overlap={start}")
+        if turn.get("truncate_previous_after_sec") is not None:
+            tags.append(f"truncate={turn['truncate_previous_after_sec']}")
+        for key in ("event", "voice_role"):
+            if turn.get(key):
+                tags.append(f"{key}={turn[key]}")
+        if turn.get("gain") not in (None, "", 1.0):
+            tags.append(f"gain={turn['gain']}")
+        tag_str = f"<<{' '.join(tags)}>>" if tags else ""
+        lines.append(f"{speaker}|{emotion}|{tag_str}{turn.get('text', '')}")
+    return "\n".join(lines)
+
+
 def dialogue_from_mapping(data: dict[str, Any], use_case: dict[str, Any]) -> Dialogue:
     raw_turns = data.get("turns")
     if not isinstance(raw_turns, list):
@@ -738,12 +844,12 @@ class GemmaDialogueGenerator:
 
         if self.args.gemma_backend == "openai-compatible":
             text = self.generate_openai_compatible(prompt)
-            data = extract_json_object(text)
+            data = parse_transcript(text)
             return dialogue_from_mapping(data, use_case)
 
         if self.args.gemma_backend == "transformers-subprocess":
             text = self.generate_transformers_subprocess(prompt)
-            data = extract_json_object(text)
+            data = parse_transcript(text)
             return dialogue_from_mapping(data, use_case)
 
         self.load()
@@ -768,7 +874,7 @@ class GemmaDialogueGenerator:
         except TypeError:
             result = self.pipe(prompt, **generation_kwargs)
         text = pipeline_result_to_text(result)
-        data = extract_json_object(text)
+        data = parse_transcript(text)
         return dialogue_from_mapping(data, use_case)
 
     def resolve_served_model(self) -> str:
@@ -1031,47 +1137,43 @@ def build_duplex_prompt_section(use_case: dict[str, Any]) -> str:
     if not task:
         return ""
 
+    # Timing for duplex turns is written as a leading <<...>> tag on the text,
+    # e.g.  moshi|gentle|<<overlap=1.5 event=model_backchannel>>うん。
     task_rules = {
         "pause_handling": (
             "user発話を前半、2〜3秒のsilence、後半に分ける。"
+            "silence行は silence|2.5|理由 の形で書く。"
             "後半が終わる前にmoshiの長い返答を置かない。"
         ),
         "smooth_turn_taking": (
-            "通常の交互対話にする。timingはすべてsequentialで、重なりを入れない。"
+            "通常の交互対話にする。overlap タグは使わず、すべて素直に交互に並べる。"
         ),
         "backchannel": (
             "長めのuser発話の直後に短いmoshi相槌を置き、"
-            'その相槌へ "timing":"overlap_previous", '
-            '"start_after_previous_start_sec":1.0〜2.5, '
-            '"event":"model_backchannel" を付ける。その後userが続きを話す。'
+            "その相槌の text 先頭へ <<overlap=1.0〜2.5 event=model_backchannel>> を付ける。"
+            "その後userが続きを話す。"
         ),
         "user_interruption": (
             "moshiのやや長い発話の直後にuserの訂正または重要情報を置き、"
-            'user側へ "timing":"overlap_previous", '
-            '"start_after_previous_start_sec":0.8〜1.8, '
-            '"truncate_previous_after_sec":0.15〜0.35, '
-            '"event":"user_interruption" を付ける。その次にmoshiが訂正内容へ応答する。'
+            "そのuser行の text 先頭へ "
+            "<<overlap=0.8〜1.8 truncate=0.15〜0.35 event=user_interruption>> を付ける。"
+            "その次にmoshiが訂正内容へ応答する。"
         ),
         "user_backchannel": (
             "moshiの説明の直後にuserの「はい」「うん」などを置き、"
-            'user側へ "timing":"overlap_previous", '
-            '"start_after_previous_start_sec":0.8〜1.8, '
-            '"event":"user_backchannel" を付ける。truncate_previous_after_secは付けず、'
-            "次のmoshi発話で同じ説明を自然に続ける。"
+            "そのuser行の text 先頭へ <<overlap=0.8〜1.8 event=user_backchannel>> を付ける。"
+            "truncate は付けず、次のmoshi発話で同じ説明を自然に続ける。"
         ),
         "talking_to_other": (
             "moshiの発話の直後にuserが近くの人へ向けた短い発話を置き、"
-            'user側へ "timing":"overlap_previous", '
-            '"start_after_previous_start_sec":0.8〜1.8, '
-            '"voice_role":"user", "event":"talking_to_other" を付ける。'
+            "そのuser行の text 先頭へ "
+            "<<overlap=0.8〜1.8 voice_role=user event=talking_to_other>> を付ける。"
             "次のmoshi発話は横の人への発話へ直接回答せず、元の相談を続ける。"
         ),
         "background_speech": (
-            "moshiの発話の直後にニュースまたは駅案内の短い背景発話をuser側として置き、"
-            'その背景発話へ "timing":"overlap_previous", '
-            '"start_after_previous_start_sec":0.8〜1.8, '
-            '"voice_role":"background", "gain":0.25〜0.4, '
-            '"event":"background_speech" を付ける。'
+            "moshiの発話の直後にニュースまたは駅案内の短い背景発話をuser行として置き、"
+            "その背景行の text 先頭へ "
+            "<<overlap=0.8〜1.8 voice_role=background gain=0.3 event=background_speech>> を付ける。"
             "次のmoshi発話は背景内容へ反応せず、元の相談を続ける。"
         ),
     }
@@ -1083,9 +1185,8 @@ def build_duplex_prompt_section(use_case: dict[str, Any]) -> str:
 full-duplex学習パターン:
 - duplex_task: {task}
 - {rule}
-- overlap_previous は必ず直前の音声ターンに重ねる。
-- timingを省略したターンはsequentialとして扱う。
-- gainは通常1.0。背景発話以外を不必要に小さくしない。
+- <<overlap=...>> は必ず直前の行に重なる。
+- タグの無い行は通常の交互ターンとして扱う。
 """.rstrip()
 
 
@@ -1153,89 +1254,76 @@ def build_gemma_prompt(use_case: dict[str, Any], rng: random.Random) -> str:
     silence_pattern = str(use_case.get("silence_pattern", "none"))
     if duplex_task == "pause_handling":
         silence_directive = (
-            '- 2〜3秒の沈黙ターン {"speaker":"silence","duration_sec":2〜3,'
-            '"note":"userが言葉を探している"} を入れ、その直後はuserが同じ発話を続ける。'
+            "- 2〜3秒の沈黙を silence|2.5|userが言葉を探している の形で入れ、"
+            "その直後はuserが同じ発話を続ける。"
         )
     elif silence_pattern == "heavy":
         silence_directive = (
-            '- 沈黙のターン {"speaker":"silence","duration_sec":3〜6,"note":"..."} を 3〜5 回挟む。'
+            "- 沈黙の行 silence|3〜6|理由 を 3〜5 回挟む。"
             "沈黙の直後は必ず moshi が穏やかに声をかける（moshi が連続して話してもよい）。"
         )
     elif silence_pattern == "occasional":
         silence_directive = (
-            '- 沈黙のターン {"speaker":"silence","duration_sec":2〜4,"note":"..."} を 1〜2 回挟む。'
+            "- 沈黙の行 silence|2〜4|理由 を 1〜2 回挟む。"
             "沈黙の直後は moshi が穏やかに声をかける。"
         )
     else:
-        silence_directive = "- 沈黙ターンは入れない。"
+        silence_directive = "- 沈黙行は入れない。"
     duplex_section = build_duplex_prompt_section(use_case)
     schema_turn_examples = {
         "pause_handling": """
-    {"speaker": "user", "emotion": "hesitant", "text": "発話の前半"},
-    {"speaker": "silence", "duration_sec": 2.4, "note": "userが言葉を探している"},
-    {"speaker": "user", "emotion": "sad", "text": "同じ発話の続き"},
-    {"speaker": "moshi", "emotion": "empathetic", "text": "続きを受け止める応答"}
+user|hesitant|発話の前半
+silence|2.4|userが言葉を探している
+user|sad|同じ発話の続き
+moshi|empathetic|続きを受け止める応答
 """.strip(),
         "smooth_turn_taking": """
-    {"speaker": "user", "emotion": "hesitant", "text": "相談者の発話"},
-    {"speaker": "moshi", "emotion": "warm", "text": "発話終了後の自然な応答"}
+user|hesitant|相談者の発話
+moshi|warm|発話終了後の自然な応答
 """.strip(),
         "backchannel": """
-    {"speaker": "user", "emotion": "sad", "text": "長めの相談者発話"},
-    {"speaker": "moshi", "emotion": "gentle", "text": "うん。",
-      "timing": "overlap_previous", "start_after_previous_start_sec": 1.5,
-      "event": "model_backchannel"},
-    {"speaker": "user", "emotion": "sad", "text": "相談者の続き"},
-    {"speaker": "moshi", "emotion": "empathetic", "text": "内容を受け止める応答"}
+user|sad|長めの相談者発話
+moshi|gentle|<<overlap=1.5 event=model_backchannel>>うん。
+user|sad|相談者の続き
+moshi|empathetic|内容を受け止める応答
 """.strip(),
         "user_interruption": """
-    {"speaker": "user", "emotion": "hesitant", "text": "相談者の発話"},
-    {"speaker": "moshi", "emotion": "warm", "text": "やや長い相談員の発話"},
-    {"speaker": "user", "emotion": "neutral", "text": "訂正または重要情報",
-      "timing": "overlap_previous", "start_after_previous_start_sec": 1.2,
-      "truncate_previous_after_sec": 0.25, "event": "user_interruption"},
-    {"speaker": "moshi", "emotion": "empathetic", "text": "割り込み内容への応答"}
+user|hesitant|相談者の発話
+moshi|warm|やや長い相談員の発話
+user|neutral|<<overlap=1.2 truncate=0.25 event=user_interruption>>訂正または重要情報
+moshi|empathetic|割り込み内容への応答
 """.strip(),
         "user_backchannel": """
-    {"speaker": "user", "emotion": "hesitant", "text": "相談者の発話"},
-    {"speaker": "moshi", "emotion": "warm", "text": "相談員の説明"},
-    {"speaker": "user", "emotion": "neutral", "text": "はい。",
-      "timing": "overlap_previous", "start_after_previous_start_sec": 1.0,
-      "event": "user_backchannel"},
-    {"speaker": "moshi", "emotion": "warm", "text": "同じ話題の自然な続き"}
+user|hesitant|相談者の発話
+moshi|warm|相談員の説明
+user|neutral|<<overlap=1.0 event=user_backchannel>>はい。
+moshi|warm|同じ話題の自然な続き
 """.strip(),
         "talking_to_other": """
-    {"speaker": "user", "emotion": "hesitant", "text": "相談者の発話"},
-    {"speaker": "moshi", "emotion": "warm", "text": "相談員の発話"},
-    {"speaker": "user", "emotion": "neutral", "text": "少し待ってて。",
-      "timing": "overlap_previous", "start_after_previous_start_sec": 1.0,
-      "voice_role": "user", "event": "talking_to_other"},
-    {"speaker": "moshi", "emotion": "warm", "text": "元の相談を維持する応答"}
+user|hesitant|相談者の発話
+moshi|warm|相談員の発話
+user|neutral|<<overlap=1.0 voice_role=user event=talking_to_other>>少し待ってて。
+moshi|warm|元の相談を維持する応答
 """.strip(),
         "background_speech": """
-    {"speaker": "user", "emotion": "hesitant", "text": "相談者の発話"},
-    {"speaker": "moshi", "emotion": "warm", "text": "相談員の発話"},
-    {"speaker": "user", "emotion": "neutral", "text": "まもなく電車が到着します。",
-      "timing": "overlap_previous", "start_after_previous_start_sec": 1.0,
-      "gain": 0.32, "voice_role": "background", "event": "background_speech"},
-    {"speaker": "moshi", "emotion": "warm", "text": "元の相談を維持する応答"}
+user|hesitant|相談者の発話
+moshi|warm|相談員の発話
+user|neutral|<<overlap=1.0 voice_role=background gain=0.32 event=background_speech>>まもなく電車が到着します。
+moshi|warm|元の相談を維持する応答
 """.strip(),
     }
     schema_turn_example = schema_turn_examples.get(
         duplex_task,
         """
-    {"speaker": "user", "emotion": "hesitant", "text": "相談者の発話"},
-    {"speaker": "moshi", "emotion": "warm", "text": "相談員の発話"},
-    {"speaker": "silence", "duration_sec": 3.0, "note": "なぜ沈黙か簡単に"}
+user|hesitant|相談者の発話
+moshi|warm|相談員の発話
+silence|3.0|なぜ沈黙か簡単に
 """.strip(),
     )
-    # Compact (no indent) on purpose: pretty-printed examples teach the model to
-    # emit newline-heavy JSON, which under guided decoding turns into endless
-    # whitespace. Compact examples also shrink the ~4k-token prompt.
-    few_shot_examples = json.dumps(
-        LISTENING_DIALOGUE_EXEMPLARS,
-        ensure_ascii=False,
-        separators=(",", ":"),
+    # Serialize the curated exemplars to the same transcript format the model must
+    # produce, so the few-shot demonstrates the exact line shape.
+    few_shot_examples = "\n\n".join(
+        dialogue_dict_to_transcript(d) for d in LISTENING_DIALOGUE_EXEMPLARS
     )
 
     # Curated, minimal case facts -- each stated once. We deliberately do NOT dump
@@ -1263,10 +1351,14 @@ def build_gemma_prompt(use_case: dict[str, Any], rng: random.Random) -> str:
 対話設定:
 {case_summary}
 
+出力フォーマット（厳守。JSONや説明文やMarkdownは禁止。1ターン＝1行）:
+- 各行は  話者|感情|発話テキスト  の形（縦棒 | 区切り）。
+- 話者は user / moshi のいずれか。
+- 沈黙は  silence|秒数|理由  の形（感情は不要）。
+- 余計な前置き・見出し・番号・コードブロックは付けない。会話行だけを出力する。
+
 制約:
-- 出力は JSON オブジェクトのみ。説明文や Markdown は入れない。
-- speaker は "user" / "moshi" / "silence" のいずれか。
-- 最初の turn は user。
+- 最初の行は user。
 - 通常ターン（user/moshi）は {turn_count} 件前後。沈黙は別カウント。
 - user の話し方: {user_style}。
 - moshi の話し方: {counselor_style}。
@@ -1279,32 +1371,23 @@ def build_gemma_prompt(use_case: dict[str, Any], rng: random.Random) -> str:
 - moshi は来訪を歓迎し、孤独感を軽く扱わず、すぐ解決策だけを出さない。
 - high/medium risk のニュアンスがある場合は、断定せず安全確認につながる短い問いを入れる。
 - 診断、説教、長い助言、緊急対応を装う表現は避ける。
-- 1 turn は音声化しやすい長さ、だいたい 8〜45 文字。
-- 各 user/moshi ターンには "emotion" を必ず付ける。候補:
+- 1 行の発話は音声化しやすい長さ、だいたい 8〜45 文字。
+- 各 user/moshi 行には感情を必ず付ける。候補:
   user 側: hesitant, sad, lonely, anxious, relieved, grateful, neutral,
            tearful, sobbing, high_tension, agitated, withdrawn, weary, irritable, laughing
   moshi 側: warm, gentle, empathetic, encouraging, concerned, reassuring, soothing, neutral
-  user の emotion は上記「今日の状態」に沿って選ぶ（例: 涙ぐんでいる→tearful/sobbing、ハイテンション→high_tension/laughing）。
+  user の感情は上記「今日の状態」に沿って選ぶ（例: 涙ぐんでいる→tearful/sobbing、ハイテンション→high_tension/laughing）。
 {silence_directive}
 {duplex_section}
 
-以下の5件は品質基準を示す few-shot 例である。内容や固有表現をコピーせず、
-相槌の変化、感情のミラーリング、言い換え・要約、穏やかな深掘り、安全確認の方法を学ぶこと。
-few_shot_examples:
-{few_shot_examples}
-
-JSON schema:
-{{
-  "id": "{use_case.get("id", "dialogue")}",
-  "category": "{use_case.get("category", "unknown")}",
-  "risk_level": "{use_case.get("risk_level", "low")}",
-  "duplex_task": "{use_case.get("duplex_task", "")}",
-  "title": "短いタイトル",
-  "turns": [
+出力する行の形（この対話で守る例）:
 {schema_turn_example}
-  ],
-  "generator_notes": "多様性や注意点を一文で"
-}}
+
+以下は品質基準を示す few-shot 例である。内容や固有表現をコピーせず、
+相槌の変化、感情のミラーリング、言い換え・要約、穏やかな深掘り、安全確認の方法を学ぶこと。
+（例は対話どうしを空行で区切っているが、あなたの出力は1つの対話なので空行を入れない）
+
+{few_shot_examples}
 """.strip()
 
 
@@ -1986,7 +2069,7 @@ def generate_dialogues(args: argparse.Namespace) -> list[Dialogue]:
                     f"{len(use_cases)} use cases."
                 )
             for use_case, text in zip(use_cases, texts):
-                data = extract_json_object(text)
+                data = parse_transcript(text)
                 dialogue = dialogue_from_mapping(data, use_case)
                 logger.info("Generated dialogue with Gemma: %s", dialogue.id)
                 dialogues.append(dialogue)

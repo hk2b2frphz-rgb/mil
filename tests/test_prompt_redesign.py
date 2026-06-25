@@ -19,9 +19,14 @@ class PromptRedesignTests(unittest.TestCase):
         self.assertIn("同じ対話内で同じ相槌を繰り返さない", prompt)
         self.assertIn("GENTLE PROBING", prompt)
         self.assertIn("開かれた問いで穏やかに掘り下げ", prompt)
+        # The prompt now embeds the few-shot exemplars as a pipe-delimited
+        # transcript (not JSON), so dialogue ids are not present. Verify each
+        # exemplar's content is included by checking its first turn's text.
         self.assertEqual(len(LISTENING_DIALOGUE_EXEMPLARS), 5)
+        self.assertIn("出力フォーマット", prompt)
         for exemplar in LISTENING_DIALOGUE_EXEMPLARS:
-            self.assertIn(exemplar["id"], prompt)
+            first_text = exemplar["turns"][0]["text"]
+            self.assertIn(first_text, prompt)
 
 
 if __name__ == "__main__":
