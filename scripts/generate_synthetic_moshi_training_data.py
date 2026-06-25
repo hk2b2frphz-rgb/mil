@@ -101,7 +101,8 @@ LISTENING_DIALOGUE_EXEMPLARS = load_listening_dialogue_exemplars()
 
 DIALOGUE_SYSTEM_INSTRUCTIONS = """
 あなたは日本語の「孤独・孤立相談窓口」の対話データを作る。相談者 user と相談員 moshi の自然な会話を書く。
-- moshi は傾聴中心。すぐ助言せず、言い換え・要約・感情の承認・短い相づちを織り交ぜる。相づちや文型を繰り返さない。
+- moshi は丁寧語で傾聴中心。すぐ助言せず、言い換え・要約・感情の承認・短い相づちを織り交ぜる。相づちや文型を繰り返さない。
+- moshi は「うん」「うんうん」などのくだけた相づちを避け、「はい」「ええ」「そうなんですね」「なるほど」を使う。
 - user の感情に合わせて語調を変える。設定に沿った具体的な話題を、雑談から相談まで扱う。
 - ターン制の交互会話にしない。日本語の自然な会話のように、相手が話している「途中」で短い相づちを重ね、
   どんどん反応を返す。聞き手の相づちは相手の発話を遮らず、話し手はそのまま続ける。
@@ -626,7 +627,7 @@ def dialogue_response_schema() -> dict[str, Any]:
 # separately. The labeled duplex tasks (not used in the default free-form run) still
 # carry explicit timing in a leading <<...>> tag on the text field:
 #
-#     moshi|gentle|<<overlap=1.5 event=model_backchannel>>うん。
+#     moshi|gentle|<<overlap=1.5 event=model_backchannel>>はい。
 #
 # We split with maxsplit=2 so text may itself contain "|".
 
@@ -1180,7 +1181,7 @@ def build_duplex_prompt_section(use_case: dict[str, Any]) -> str:
         return ""
 
     # Timing for duplex turns is written as a leading <<...>> tag on the text,
-    # e.g.  moshi|gentle|<<overlap=1.5 event=model_backchannel>>うん。
+    # e.g.  moshi|gentle|<<overlap=1.5 event=model_backchannel>>はい。
     task_rules = {
         "pause_handling": (
             "user発話を前半、2〜3秒のsilence、後半に分ける。"
@@ -1251,7 +1252,7 @@ def build_llm_prompt(
     counselor_style = rng.choice(
         [
             "温かく、でも踏み込みすぎない",
-            "相づちを自然に入れる",
+            "丁寧な相づちを自然に入れる",
             "解決策を急がず、気持ちを整理する",
             "一問一答になりすぎず会話を続ける",
             "短い受け止め、言い換え、問いかけの順序を毎回変える",
@@ -1325,7 +1326,7 @@ moshi|発話終了後の自然な応答
 """.strip(),
         "backchannel": """
 user|長めの相談者発話
-moshi|<<overlap=1.5 event=model_backchannel>>うん。
+moshi|<<overlap=1.5 event=model_backchannel>>はい。
 user|相談者の続き
 moshi|内容を受け止める応答
 """.strip(),
@@ -1358,7 +1359,7 @@ moshi|元の相談を維持する応答
         duplex_task,
         """
 user|相談者の発話の前半、
-moshi|うん。
+moshi|はい。
 user|発話の続き。
 moshi|内容を受け止める応答。
 """.strip(),
@@ -1374,7 +1375,7 @@ moshi|内容を受け止める応答。
             for d in LISTENING_DIALOGUE_EXEMPLARS[:n_fewshot]
         )
         few_shot_block = (
-            "\n\n品質の参考（コピー禁止。相づちの多様さ・言い換え・穏やかな深掘りを学ぶ）:\n"
+            "\n\n品質の参考（コピー禁止。moshiの丁寧語・言い換え・穏やかな深掘りを学ぶ）:\n"
             + examples
         )
 
@@ -1405,12 +1406,14 @@ JSON・説明文・見出し・番号・コードブロックは書かない。�
 相づち（あいづち）の入れ方 — ここが最重要。交互ターンにしない:
 - 相手が長めに話している「途中」にも、聞き手の短い相づちの行をどんどん挟む。相づちの次の行で、話し手はそのまま自分の話を続ける。
 - そのために、長い発話は句読点ごとに2〜3行に分け、その切れ目に相手の相づち行を入れる。
-- 相づち語は短く話題を奪わないもの: うん／うんうん／ええ／はい／そうなんですね／なるほど／へえ。同じ語を連続で繰り返さない。
-- moshi だけでなく、moshi が長めに話すときは user も「はい」「うん」などで短く反応してよい（双方向）。
+- moshi の相づちは丁寧語にする: はい／ええ／そうなんですね／なるほど／そうでしたか。単独の「うん」「うんうん」は使わない。
+- user は自然な相談者として「はい」「うん」などで短く反応してよい（双方向）。
+- moshi は相づちだけで終わらせすぎず、適度に「相手の言葉の反映」「感情の言語化」「短い確認」を入れて、聞いている感じを出す。
 - 重い相談では相づちを控えめに、雑談では多めに。場面で密度を変える。
 やってはいけない:
 - 言い切りの短文の直後に相づちだけを置かない（浮く・意味が薄い）。相づちは「話の途中」に挟む。
 - 「それで」など続きを促す相づちの直後は、必ず話し手が続ける。聞き手がそのまま本題を話し出さない。
+- moshi にくだけた「うん」「うんうん」を言わせない。相談員として丁寧な距離感を保つ。
 - 相づち行のすぐ後に、同じ話者の長い発話を続けない（相づち→本応答の連続を避け、間に相手の発話を挟む）。
 
 ルール:
@@ -1443,7 +1446,7 @@ def template_full_duplex_dialogue(use_case: dict[str, Any]) -> Dialogue:
             DialogueTurn("user", "仕事から帰って部屋が静かになると、今日も誰とも話さなかったなって思って。"),
             DialogueTurn(
                 "moshi",
-                "うん。",
+                "はい。",
                 timing="overlap_previous",
                 start_after_previous_start_sec=1.5,
                 event="model_backchannel",

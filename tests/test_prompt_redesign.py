@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
 from random import Random
 
 from scripts.generate_synthetic_moshi_training_data import (
@@ -31,6 +33,27 @@ class PromptRedesignTests(unittest.TestCase):
         self.assertNotIn(LISTENING_DIALOGUE_EXEMPLARS[0]["turns"][0]["text"], p0)
         self.assertIn(LISTENING_DIALOGUE_EXEMPLARS[2]["turns"][0]["text"], p3)
         self.assertLess(len(p0), len(p3))
+
+    def test_prompt_keeps_moshi_polite_and_listening_forward(self) -> None:
+        prompt = build_llm_prompt({"id": "minimal"}, Random(0))
+
+        self.assertIn("moshi は丁寧語で傾聴中心", prompt)
+        self.assertIn("単独の「うん」「うんうん」は使わない", prompt)
+        self.assertIn("相手の言葉の反映", prompt)
+        self.assertIn("感情の言語化", prompt)
+
+    def test_listening_exemplars_do_not_teach_moshi_casual_backchannels(self) -> None:
+        path = Path("tests/fixtures/listening_dialogues.jsonl")
+        casual = {"うん。", "うんうん。", "うん…。", "うんうん、"}
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            row = json.loads(line)
+            for turn in row["turns"]:
+                if turn["speaker"] == "moshi":
+                    self.assertNotIn(
+                        turn["text"],
+                        casual,
+                        f"{path}:{line_number} teaches casual moshi backchannel",
+                    )
 
 
 if __name__ == "__main__":
