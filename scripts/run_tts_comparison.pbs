@@ -120,6 +120,11 @@ KOKORO_UV=(
     --index "pytorch-cu121=https://download.pytorch.org/whl/cu121"
     --with "kokoro>=0.9.4"
     --with "misaki[ja]"
+    # fugashi (pulled by misaki[ja]) needs a MeCab dictionary at runtime; without
+    # one it raises "unidic missing". unidic-lite bundles the dictionary in the
+    # wheel, so no `python -m unidic download` step is needed -- it works offline
+    # in the isolated uv env even behind the cluster proxy.
+    --with unidic-lite
     --with pyopenjtalk
     --with soundfile
     --with numpy
