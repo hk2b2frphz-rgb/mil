@@ -10,23 +10,25 @@ from scripts.generate_synthetic_moshi_training_data import (
 
 
 class PromptRedesignTests(unittest.TestCase):
-    def test_prompt_contains_listening_redesign_and_all_exemplars(self) -> None:
+    def test_prompt_is_compact_transcript_format(self) -> None:
+        # Default: 1 few-shot exemplar, transcript (pipe) output format.
         prompt = build_gemma_prompt({"id": "minimal"}, Random(0))
 
-        self.assertIn("EMOTION MIRRORING", prompt)
-        self.assertIn("user の悲しさ、不安、孤独", prompt)
-        self.assertIn("BACKCHANNEL DIVERSITY", prompt)
-        self.assertIn("同じ対話内で同じ相槌を繰り返さない", prompt)
-        self.assertIn("GENTLE PROBING", prompt)
-        self.assertIn("開かれた問いで穏やかに掘り下げ", prompt)
-        # The prompt now embeds the few-shot exemplars as a pipe-delimited
-        # transcript (not JSON), so dialogue ids are not present. Verify each
-        # exemplar's content is included by checking its first turn's text.
+        self.assertIn("傾聴中心", prompt)
+        self.assertIn("話者|感情|発話", prompt)
+        self.assertIn("silence|秒数|理由", prompt)
+        # Exactly one exemplar by default: the first exemplar's first turn text
+        # is present, the second exemplar's is not.
         self.assertEqual(len(LISTENING_DIALOGUE_EXEMPLARS), 5)
-        self.assertIn("出力フォーマット", prompt)
-        for exemplar in LISTENING_DIALOGUE_EXEMPLARS:
-            first_text = exemplar["turns"][0]["text"]
-            self.assertIn(first_text, prompt)
+        self.assertIn(LISTENING_DIALOGUE_EXEMPLARS[0]["turns"][0]["text"], prompt)
+        self.assertNotIn(LISTENING_DIALOGUE_EXEMPLARS[1]["turns"][0]["text"], prompt)
+
+    def test_fewshot_count_is_configurable(self) -> None:
+        p0 = build_gemma_prompt({"id": "m"}, Random(0), num_fewshot=0)
+        p3 = build_gemma_prompt({"id": "m"}, Random(0), num_fewshot=3)
+        self.assertNotIn(LISTENING_DIALOGUE_EXEMPLARS[0]["turns"][0]["text"], p0)
+        self.assertIn(LISTENING_DIALOGUE_EXEMPLARS[2]["turns"][0]["text"], p3)
+        self.assertLess(len(p0), len(p3))
 
 
 if __name__ == "__main__":

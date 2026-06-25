@@ -100,14 +100,9 @@ def load_listening_dialogue_exemplars(
 LISTENING_DIALOGUE_EXEMPLARS = load_listening_dialogue_exemplars()
 
 DIALOGUE_SYSTEM_INSTRUCTIONS = """
-あなたは日本語の合成学習データを作る対話ライターです。
-目的は「孤独・孤立相談窓口」で使う、自然な雑談から慎重な相談まで幅広く扱える会話を作ることです。
-- ACTIVE LISTENING: 相手の言葉を正確に受け止め、すぐ助言せず、言い換え・要約・感情の承認を会話の流れに合わせて行う。
-- EMOTION MIRRORING: user の悲しさ、不安、孤独、ためらい、苛立ち、喜びなどを読み取り、その感情の強さと語調に合う言葉で自然に映し返す。
-- BACKCHANNEL DIVERSITY: 「うんうん / そうなんですね / なるほど / へえ / それは… / うん、うん / そっか / ええ / ふむ / そうですか」など幅広い相槌を使い、同じ対話内で同じ相槌を繰り返さない。
-- GENTLE PROBING: 相手が話したい範囲を尊重し、「よかったら」「差し支えなければ」などを使った開かれた問いで穏やかに掘り下げ、尋問や連続質問にしない。
-- 各 moshi 発話は、相槌・反映・要約・承認・問いかけを毎回同じ順序で並べず、必要な要素だけを組み合わせる。同じ文型、語尾、歓迎表現を反復しない。
-- 相談だけに限定せず、日常の雑談、嬉しい出来事、仕事、家族、学校、健康、趣味、地域、喪失、孤独など、use_case と talking_points に即した具体的な話題を扱う。
+あなたは日本語の「孤独・孤立相談窓口」の対話データを作る。相談者 user と相談員 moshi の自然な会話を書く。
+- moshi は傾聴中心。すぐ助言せず、言い換え・要約・感情の承認・短い相づちを織り交ぜる。相づちや文型を繰り返さない。
+- user の感情に合わせて語調を変える。設定に沿った具体的な話題を、雑談から相談まで扱う。
 """.strip()
 
 
@@ -353,6 +348,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--gemma-max-new-tokens", type=int, default=1400)
+    parser.add_argument(
+        "--gemma-num-fewshot",
+        type=int,
+        default=int(os.environ.get("GEMMA_NUM_FEWSHOT") or 1),
+        help=(
+            "Number of few-shot exemplars to embed in the prompt (0-5). Fewer "
+            "keeps the prompt short and the model under tighter control. "
+            "Default: 1."
+        ),
+    )
     parser.add_argument(
         "--gemma-reasoning-effort",
         choices=["low", "medium", "high"],
@@ -840,7 +845,7 @@ class GemmaDialogueGenerator:
     def generate(self, use_case: dict[str, Any], rng: random.Random) -> Dialogue:
         if self.args.gemma_backend == "template":
             return template_dialogue(use_case)
-        prompt = build_gemma_prompt(use_case, rng)
+        prompt = build_gemma_prompt(use_case, rng, self.args.gemma_num_fewshot)
 
         if self.args.gemma_backend == "openai-compatible":
             text = self.generate_openai_compatible(prompt)
@@ -918,8 +923,11 @@ class GemmaDialogueGenerator:
         url = chat_completions_url(self.args.gemma_api_base)
         payload = {
             "model": self.resolve_served_model(),
+            # The full instructions are already embedded at the top of `prompt`
+            # (build_gemma_prompt). Sending them again as a system message would
+            # duplicate ~all of the guidance, so keep the system role minimal.
             "messages": [
-                {"role": "system", "content": DIALOGUE_SYSTEM_INSTRUCTIONS},
+                {"role": "system", "content": "日本語の対話データ作成アシスタント。"},
                 {"role": "user", "content": prompt},
             ],
             "temperature": self.args.gemma_temperature,
@@ -1190,7 +1198,9 @@ full-duplex学習パターン:
 """.rstrip()
 
 
-def build_gemma_prompt(use_case: dict[str, Any], rng: random.Random) -> str:
+def build_gemma_prompt(
+    use_case: dict[str, Any], rng: random.Random, num_fewshot: int = 1
+) -> str:
     turn_count = int(use_case.get("target_turns", rng.choice([6, 8, 10])))
     user_style = rng.choice(
         [
@@ -1320,17 +1330,24 @@ moshi|warm|相談員の発話
 silence|3.0|なぜ沈黙か簡単に
 """.strip(),
     )
-    # Serialize the curated exemplars to the same transcript format the model must
-    # produce, so the few-shot demonstrates the exact line shape.
-    few_shot_examples = "\n\n".join(
-        dialogue_dict_to_transcript(d) for d in LISTENING_DIALOGUE_EXEMPLARS
-    )
+    # Few-shot is the single biggest chunk of the prompt; keep it small so the
+    # model stays under the explicit instructions rather than drowning in
+    # examples. Count is configurable (GEMMA_NUM_FEWSHOT), default 1.
+    n_fewshot = max(0, min(num_fewshot, len(LISTENING_DIALOGUE_EXEMPLARS)))
+    few_shot_block = ""
+    if n_fewshot > 0:
+        examples = "\n\n".join(
+            dialogue_dict_to_transcript(d)
+            for d in LISTENING_DIALOGUE_EXEMPLARS[:n_fewshot]
+        )
+        few_shot_block = (
+            "\n\n品質の参考（コピー禁止。相づちの多様さ・感情の反映・穏やかな深掘りを学ぶ）:\n"
+            + examples
+        )
 
     # Curated, minimal case facts -- each stated once. We deliberately do NOT dump
-    # the full use_case JSON (it repeats persona/situation/personality/state many
-    # times and bloats the prompt) and we do NOT show the concrete `opening`
-    # (feeding the exact first line collapses opening diversity; it stays only as a
-    # parser-side fallback). Diversity still comes from the sampled fields below.
+    # the full use_case JSON and do NOT show the concrete `opening` (it stays only
+    # as a parser-side fallback). Diversity comes from the sampled fields.
     case_lines = [
         f"- 相談区分: {use_case.get('category', 'unknown')} / リスク {use_case.get('risk_level', 'low')}",
         f"- user 像: {use_case.get('user_profile', '')}",
@@ -1343,51 +1360,26 @@ silence|3.0|なぜ沈黙か簡単に
     case_summary = "\n".join(case_lines)
 
     return f"""
-【システムレベルの最優先指示】
 {DIALOGUE_SYSTEM_INSTRUCTIONS}
-
-次の設定に基づいて、相談者 user と相談員 moshi の会話を作ってください。
 
 対話設定:
 {case_summary}
 
-出力フォーマット（厳守。JSONや説明文やMarkdownは禁止。1ターン＝1行）:
-- 各行は  話者|感情|発話テキスト  の形（縦棒 | 区切り）。
-- 話者は user / moshi のいずれか。
-- 沈黙は  silence|秒数|理由  の形（感情は不要）。
-- 余計な前置き・見出し・番号・コードブロックは付けない。会話行だけを出力する。
+出力形式（厳守）: 1行=1ターン「話者|感情|発話」。話者は user か moshi。沈黙は「silence|秒数|理由」。
+JSON・説明文・見出し・番号・コードブロックは書かない。会話行だけを出力する。
 
-制約:
-- 最初の行は user。
-- 通常ターン（user/moshi）は {turn_count} 件前後。沈黙は別カウント。
-- user の話し方: {user_style}。
-- moshi の話し方: {counselor_style}。
-- 会話の入り方: {opening_style}。出だしの一文は毎回自分で考え、定型にしない。
-- 今回の応答構成の基調: {response_structure}。ただし全 moshi ターンを同じ型にはしない。
-- 性格と今日の状態が話し方・語彙・感情に一貫して出るようにする。
-- 感情はターンごとに激しく変えない。今日の状態を基調に、変化はゆっくり・段階的にする。
-  無理に前向きに回復させる必要はなく、沈んだまま終わってもよい。
-{points_line}- 他の対話と同じ定型の出だしや相づちにならないよう、表現や話の入り方を毎回変える。
-- moshi は来訪を歓迎し、孤独感を軽く扱わず、すぐ解決策だけを出さない。
-- high/medium risk のニュアンスがある場合は、断定せず安全確認につながる短い問いを入れる。
-- 診断、説教、長い助言、緊急対応を装う表現は避ける。
-- 1 行の発話は音声化しやすい長さ、だいたい 8〜45 文字。
-- 各 user/moshi 行には感情を必ず付ける。候補:
-  user 側: hesitant, sad, lonely, anxious, relieved, grateful, neutral,
-           tearful, sobbing, high_tension, agitated, withdrawn, weary, irritable, laughing
-  moshi 側: warm, gentle, empathetic, encouraging, concerned, reassuring, soothing, neutral
-  user の感情は上記「今日の状態」に沿って選ぶ（例: 涙ぐんでいる→tearful/sobbing、ハイテンション→high_tension/laughing）。
+ルール:
+- 最初の行は user。user/moshi 合計 {turn_count} 行前後。1行 8〜45 文字。
+- 話し方 user={user_style} / moshi={counselor_style}。出だしは毎回変え、定型にしない。
+- 性格と今日の状態を語調・感情に反映。感情は急変させず段階的に。無理に前向きにしない。
+- high/medium risk は断定せず安全確認の短い問いを入れる。診断・説教・長い助言は避ける。
+{points_line}- 感情ラベル user: hesitant,sad,lonely,anxious,relieved,grateful,neutral,tearful,sobbing,high_tension,agitated,withdrawn,weary,irritable,laughing
+- 感情ラベル moshi: warm,gentle,empathetic,encouraging,concerned,reassuring,soothing,neutral
 {silence_directive}
 {duplex_section}
 
-出力する行の形（この対話で守る例）:
-{schema_turn_example}
-
-以下は品質基準を示す few-shot 例である。内容や固有表現をコピーせず、
-相槌の変化、感情のミラーリング、言い換え・要約、穏やかな深掘り、安全確認の方法を学ぶこと。
-（例は対話どうしを空行で区切っているが、あなたの出力は1つの対話なので空行を入れない）
-
-{few_shot_examples}
+この対話の形（例）:
+{schema_turn_example}{few_shot_block}
 """.strip()
 
 
@@ -2060,7 +2052,10 @@ def generate_dialogues(args: argparse.Namespace) -> list[Dialogue]:
     generator = GemmaDialogueGenerator(args)
     dialogues: list[Dialogue] = []
     if args.gemma_backend == "transformers-subprocess":
-        prompts = [build_gemma_prompt(use_case, rng) for use_case in use_cases]
+        prompts = [
+            build_gemma_prompt(use_case, rng, args.gemma_num_fewshot)
+            for use_case in use_cases
+        ]
         try:
             texts = generator.generate_transformers_subprocess_batch(prompts)
             if len(texts) != len(use_cases):
