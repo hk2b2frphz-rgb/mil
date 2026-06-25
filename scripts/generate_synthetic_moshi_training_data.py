@@ -1238,14 +1238,30 @@ def build_gemma_prompt(use_case: dict[str, Any], rng: random.Random) -> str:
         separators=(",", ":"),
     )
 
+    # Curated, minimal case facts -- each stated once. We deliberately do NOT dump
+    # the full use_case JSON (it repeats persona/situation/personality/state many
+    # times and bloats the prompt) and we do NOT show the concrete `opening`
+    # (feeding the exact first line collapses opening diversity; it stays only as a
+    # parser-side fallback). Diversity still comes from the sampled fields below.
+    case_lines = [
+        f"- 相談区分: {use_case.get('category', 'unknown')} / リスク {use_case.get('risk_level', 'low')}",
+        f"- user 像: {use_case.get('user_profile', '')}",
+        f"- user の性格: {personality}（{personality_guidance}）",
+        f"- user の今日の状態: {emotional_state}。{emotional_state_hint}",
+    ]
+    topic = str(use_case.get("topic") or "").strip()
+    if topic:
+        case_lines.append(f"- 話題の手がかり: {topic}")
+    case_summary = "\n".join(case_lines)
+
     return f"""
 【システムレベルの最優先指示】
 {DIALOGUE_SYSTEM_INSTRUCTIONS}
 
-次のユースケースに基づいて、相談者 user と相談員 moshi の会話を作ってください。
+次の設定に基づいて、相談者 user と相談員 moshi の会話を作ってください。
 
-use_case:
-{json.dumps(use_case, ensure_ascii=False, indent=2)}
+対話設定:
+{case_summary}
 
 制約:
 - 出力は JSON オブジェクトのみ。説明文や Markdown は入れない。
@@ -1254,10 +1270,9 @@ use_case:
 - 通常ターン（user/moshi）は {turn_count} 件前後。沈黙は別カウント。
 - user の話し方: {user_style}。
 - moshi の話し方: {counselor_style}。
-- 会話の入り方: {opening_style}。use_case に opening があっても丸写しせず、意味を保って自然に変える。
+- 会話の入り方: {opening_style}。出だしの一文は毎回自分で考え、定型にしない。
 - 今回の応答構成の基調: {response_structure}。ただし全 moshi ターンを同じ型にはしない。
-- user の性格: {personality}（{personality_guidance}）。この性格が話し方や語彙に一貫して出るようにする。
-- user の今日の状態: {emotional_state}。{emotional_state_hint}
+- 性格と今日の状態が話し方・語彙・感情に一貫して出るようにする。
 - 感情はターンごとに激しく変えない。今日の状態を基調に、変化はゆっくり・段階的にする。
   無理に前向きに回復させる必要はなく、沈んだまま終わってもよい。
 {points_line}- 他の対話と同じ定型の出だしや相づちにならないよう、表現や話の入り方を毎回変える。

@@ -295,11 +295,11 @@ def build_one(rng: random.Random, index: int) -> UseCase:
         "high":   "loneliness_high",
     }[risk]
 
-    user_profile = (
-        f"{age}{gender}、{occupation}。{situation}という背景がある。"
-        f"性格は{pers_label}({pers_guidance})。"
-        f"今日は{time_label}に話していて、{state_label}様子。"
-    )
+    # Keep user_profile to demographics + situation only. personality, today's
+    # emotional_state and time_of_day are separate fields with their own prompt
+    # lines; embedding them here too triples the same facts in the prompt and
+    # bloats/derails generation.
+    user_profile = f"{age}{gender}、{occupation}。{situation}という背景がある。"
 
     use_case_id = (
         f"{sit_token}_{conv_token}_{pers_token}_{state_token}_"
