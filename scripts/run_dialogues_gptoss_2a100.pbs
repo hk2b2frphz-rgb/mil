@@ -164,11 +164,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-VLLM_READY=0
-for _ in $(seq 1 120); do
+echo "waiting for vLLM to become ready (no health-check timeout)..."
+while true; do
     if curl --fail --silent --show-error \
         "http://127.0.0.1:${PORT}/v1/models" >/dev/null; then
-        VLLM_READY=1
         break
     fi
     if ! kill -0 "$VLLM_PID" 2>/dev/null; then
@@ -177,10 +176,7 @@ for _ in $(seq 1 120); do
     fi
     sleep 5
 done
-if [[ "$VLLM_READY" != "1" ]]; then
-    echo "ERROR: vLLM health check timed out after 10 minutes." >&2
-    exit 1
-fi
+echo "vLLM is ready; starting dialogue generation."
 
 export STEPS="use_cases,dialogues,enrich"
 export GEMMA_BACKEND="openai-compatible"
