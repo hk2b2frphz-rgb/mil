@@ -183,6 +183,9 @@ export GEMMA_MODEL="$VLLM_MODEL"
 export GEMMA_TEMPERATURE
 export GEMMA_FREQUENCY_PENALTY="0.3"
 export GEMMA_PRESENCE_PENALTY="0.1"
+# Force JSON output via vLLM structured outputs (Qwen thinking is controlled
+# separately via the chat template kwargs).
+export GEMMA_RESPONSE_FORMAT="${GEMMA_RESPONSE_FORMAT:-json_object}"
 export RUN_ID
 export OUT_ROOT
 

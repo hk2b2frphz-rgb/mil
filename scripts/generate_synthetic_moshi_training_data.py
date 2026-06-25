@@ -343,6 +343,27 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--gemma-max-new-tokens", type=int, default=1400)
     parser.add_argument(
+        "--gemma-reasoning-effort",
+        choices=["low", "medium", "high"],
+        default=os.environ.get("GEMMA_REASONING_EFFORT") or None,
+        help=(
+            "Reasoning effort for reasoning models (e.g. gpt-oss) on the "
+            "openai-compatible backend. Lower values stop the model from "
+            "spending the whole token budget on the analysis channel, so the "
+            "final JSON channel is actually emitted. Default: unset (server "
+            "default)."
+        ),
+    )
+    parser.add_argument(
+        "--gemma-response-format",
+        choices=["json_object", "text"],
+        default=os.environ.get("GEMMA_RESPONSE_FORMAT") or None,
+        help=(
+            "OpenAI-compatible response_format. 'json_object' forces valid JSON "
+            "via vLLM structured outputs. Default: unset."
+        ),
+    )
+    parser.add_argument(
         "--trust-remote-code",
         action="store_true",
         help="Pass trust_remote_code=True to Transformers model loading.",
@@ -693,6 +714,15 @@ class GemmaDialogueGenerator:
             "presence_penalty": self.args.gemma_presence_penalty,
             "max_tokens": self.args.gemma_max_new_tokens,
         }
+        # Reasoning models (gpt-oss) otherwise spend the whole token budget on the
+        # analysis channel, leaving message.content empty -> we'd fall back to
+        # reasoning_content, which is not JSON. Lower the effort to reach the
+        # final channel.
+        if self.args.gemma_reasoning_effort:
+            payload["reasoning_effort"] = self.args.gemma_reasoning_effort
+        # Force structured JSON output via vLLM's response_format support.
+        if self.args.gemma_response_format == "json_object":
+            payload["response_format"] = {"type": "json_object"}
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
@@ -841,6 +871,14 @@ def openai_chat_response_to_text(data: dict[str, Any]) -> str:
                 return joined
         reasoning_content = message.get("reasoning_content")
         if isinstance(reasoning_content, str) and reasoning_content:
+            # The final channel was empty: the model spent its whole budget on
+            # reasoning. This text is the analysis channel, not the requested
+            # JSON. Surface it loudly instead of silently returning thinking.
+            logger.warning(
+                "Empty content channel; falling back to reasoning_content "
+                "(not JSON). Lower --gemma-reasoning-effort or raise "
+                "--gemma-max-new-tokens."
+            )
             return reasoning_content
     text = choice.get("text") if isinstance(choice, dict) else None
     if isinstance(text, str):

@@ -187,6 +187,11 @@ export GEMMA_API_KEY="${GEMMA_API_KEY:-}"
 export GEMMA_MODEL="$VLLM_MODEL"
 export GEMMA_FREQUENCY_PENALTY="${GEMMA_FREQUENCY_PENALTY:-0.3}"
 export GEMMA_PRESENCE_PENALTY="${GEMMA_PRESENCE_PENALTY:-0.1}"
+# gpt-oss is a reasoning model: keep effort low so the final JSON channel is
+# emitted (otherwise reasoning eats the whole budget and content is empty), and
+# force JSON via vLLM structured outputs.
+export GEMMA_REASONING_EFFORT="${GEMMA_REASONING_EFFORT:-low}"
+export GEMMA_RESPONSE_FORMAT="${GEMMA_RESPONSE_FORMAT:-json_object}"
 
 bash scripts/run_full_duplex_training_data.sh
 

@@ -81,6 +81,14 @@ if has_step dialogues; then
             --gemma-frequency-penalty "${GEMMA_FREQUENCY_PENALTY:-0.3}"
             --gemma-presence-penalty "${GEMMA_PRESENCE_PENALTY:-0.1}"
         )
+        # Reasoning models (gpt-oss): keep effort low so the JSON channel is
+        # emitted, and force JSON output. Both are no-ops if left empty.
+        if [[ -n "${GEMMA_REASONING_EFFORT:-}" ]]; then
+            gemma_args+=(--gemma-reasoning-effort "$GEMMA_REASONING_EFFORT")
+        fi
+        if [[ -n "${GEMMA_RESPONSE_FORMAT:-}" ]]; then
+            gemma_args+=(--gemma-response-format "$GEMMA_RESPONSE_FORMAT")
+        fi
     fi
     if [[ "${ALLOW_TEMPLATE_FALLBACK:-0}" == "1" ]]; then
         gemma_args+=(--allow-template-fallback)
