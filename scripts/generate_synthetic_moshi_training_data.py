@@ -649,12 +649,33 @@ def _parse_transcript_tags(tagstr: str) -> dict[str, Any]:
     return out
 
 
+_THINK_CLOSE_RE = re.compile(r"</think\s*>", re.IGNORECASE)
+_THINK_OPEN_RE = re.compile(r"<think\s*>", re.IGNORECASE)
+
+
+def strip_thinking(text: str) -> str:
+    """Drop a reasoning model's thinking block from the output.
+
+    Reasoning models (Qwen3, gpt-oss) sometimes leak a <think>...</think> block
+    into the content channel despite enable_thinking=false / reasoning parsers.
+    The real answer is whatever follows the final </think>; if only an unclosed
+    <think> is present, everything is reasoning and there is no usable answer."""
+    closes = list(_THINK_CLOSE_RE.finditer(text))
+    if closes:
+        return text[closes[-1].end():]
+    opened = _THINK_OPEN_RE.search(text)
+    if opened:
+        return text[: opened.start()]
+    return text
+
+
 def parse_transcript(text: str) -> dict[str, Any]:
     """Parse the pipe-delimited transcript into a {"turns": [...]} mapping.
 
     Coercion/validation (speaker normalization, numeric fields, dropping empty
     turns) is deferred to dialogue_from_mapping, which already does exactly that
     for the old JSON path."""
+    text = strip_thinking(text)
     turns: list[dict[str, Any]] = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
