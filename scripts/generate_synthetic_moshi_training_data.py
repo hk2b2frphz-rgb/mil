@@ -304,7 +304,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--gemma-model",
-        default="google/gemma-4-E2B-it",
+        default="google/gemma-2-2b-it",
         help=(
             "Gemma model id/name. For OpenAI-compatible servers this is sent "
             "as the request model field."
@@ -340,6 +340,17 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.1,
         help="OpenAI-compatible presence penalty. Default: 0.1.",
+    )
+    parser.add_argument(
+        "--gemma-repetition-penalty",
+        type=float,
+        default=float(os.environ.get("GEMMA_REPETITION_PENALTY") or 1.0),
+        help=(
+            "vLLM repetition_penalty (>1.0 discourages repeats). Counters the "
+            "model degenerating into endless newline/character repetition. "
+            "Default: 1.0 (off). Only sent on the openai-compatible backend "
+            "when > 1.0."
+        ),
     )
     parser.add_argument("--gemma-max-new-tokens", type=int, default=1400)
     parser.add_argument(
@@ -552,7 +563,7 @@ def dialogue_response_schema() -> dict[str, Any]:
             "category": {"type": "string"},
             "risk_level": {"type": "string"},
             "duplex_task": {"type": "string"},
-            "title": {"type": "string"},
+            "title": {"type": "string", "maxLength": 100},
             "turns": {
                 "type": "array",
                 "minItems": 2,
@@ -564,10 +575,14 @@ def dialogue_response_schema() -> dict[str, Any]:
                             "type": "string",
                             "enum": ["user", "moshi", "silence"],
                         },
-                        "text": {"type": "string"},
-                        "emotion": {"type": "string"},
+                        # maxLength is the key guard against the model degenerating
+                        # into endless "\n\n\n" inside a string: json_schema alone
+                        # permits arbitrarily long strings, so a per-field cap forces
+                        # the string (and thus the turn) to terminate.
+                        "text": {"type": "string", "maxLength": 120},
+                        "emotion": {"type": "string", "maxLength": 32},
                         "duration_sec": {"type": "number"},
-                        "note": {"type": "string"},
+                        "note": {"type": "string", "maxLength": 120},
                         "timing": {
                             "type": "string",
                             "enum": ["sequential", "overlap_previous"],
@@ -575,14 +590,14 @@ def dialogue_response_schema() -> dict[str, Any]:
                         "start_after_previous_start_sec": {"type": "number"},
                         "truncate_previous_after_sec": {"type": "number"},
                         "gain": {"type": "number"},
-                        "voice_role": {"type": "string"},
-                        "event": {"type": "string"},
+                        "voice_role": {"type": "string", "maxLength": 32},
+                        "event": {"type": "string", "maxLength": 64},
                     },
                     "required": ["speaker"],
                     "additionalProperties": False,
                 },
             },
-            "generator_notes": {"type": "string"},
+            "generator_notes": {"type": "string", "maxLength": 300},
         },
         "required": ["title", "turns"],
         "additionalProperties": False,
@@ -756,10 +771,47 @@ class GemmaDialogueGenerator:
         data = extract_json_object(text)
         return dialogue_from_mapping(data, use_case)
 
+    def resolve_served_model(self) -> str:
+        """Use the model the server actually serves, not the configured guess.
+
+        These vLLM jobs serve a single model. If gemma_model is unset/stale (e.g.
+        the legacy gemma default) the server rejects the request with
+        "The model '<x>' does not exist". Querying /v1/models once removes that
+        whole class of failures. Falls back to the configured model if the lookup
+        fails."""
+        cached = getattr(self, "_served_model", None)
+        if cached is not None:
+            return cached
+        served = self.args.gemma_model
+        models_url = chat_completions_url(self.args.gemma_api_base).replace(
+            "/chat/completions", "/models"
+        )
+        try:
+            request = urllib.request.Request(models_url, method="GET")
+            if self.args.gemma_api_key:
+                request.add_header("Authorization", f"Bearer {self.args.gemma_api_key}")
+            with urllib.request.urlopen(request, timeout=30) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            ids = [str(item["id"]) for item in data.get("data", []) if item.get("id")]
+            if ids and served not in ids:
+                logger.warning(
+                    "Configured model %r is not served; using %r from /v1/models.",
+                    served,
+                    ids[0],
+                )
+                served = ids[0]
+            elif ids:
+                served = next(m for m in ids if m == served)
+        except (urllib.error.URLError, KeyError, ValueError, StopIteration) as exc:
+            logger.warning("Could not query %s (%s); using configured model %r.",
+                           models_url, exc, served)
+        self._served_model = served
+        return served
+
     def generate_openai_compatible(self, prompt: str) -> str:
         url = chat_completions_url(self.args.gemma_api_base)
         payload = {
-            "model": self.args.gemma_model,
+            "model": self.resolve_served_model(),
             "messages": [
                 {"role": "system", "content": DIALOGUE_SYSTEM_INSTRUCTIONS},
                 {"role": "user", "content": prompt},
@@ -769,6 +821,11 @@ class GemmaDialogueGenerator:
             "presence_penalty": self.args.gemma_presence_penalty,
             "max_tokens": self.args.gemma_max_new_tokens,
         }
+        # vLLM extension: multiplicative repetition penalty. Strongly discourages
+        # the "\n\n\n..." degeneration that frequency/presence penalties alone do
+        # not stop. Only send when enabled so other servers are unaffected.
+        if self.args.gemma_repetition_penalty and self.args.gemma_repetition_penalty > 1.0:
+            payload["repetition_penalty"] = self.args.gemma_repetition_penalty
         # Reasoning models (gpt-oss) otherwise spend the whole token budget on the
         # analysis channel, leaving message.content empty -> we'd fall back to
         # reasoning_content, which is not JSON. Lower the effort to reach the

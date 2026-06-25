@@ -68,7 +68,7 @@ if has_step dialogues; then
         --seed "$SEED"
         --mode dialogues-only
         --gemma-backend "${GEMMA_BACKEND:-transformers-subprocess}"
-        --gemma-model "${GEMMA_MODEL:-google/gemma-4-E2B-it}"
+        --gemma-model "${GEMMA_MODEL:-google/gemma-2-2b-it}"
         --gemma-dtype "${GEMMA_DTYPE:-bfloat16}"
         --gemma-temperature "${GEMMA_TEMPERATURE:-0.8}"
         --gemma-max-new-tokens "${GEMMA_MAX_NEW_TOKENS:-2000}"
@@ -80,6 +80,7 @@ if has_step dialogues; then
             --gemma-api-key "${GEMMA_API_KEY:-}"
             --gemma-frequency-penalty "${GEMMA_FREQUENCY_PENALTY:-0.3}"
             --gemma-presence-penalty "${GEMMA_PRESENCE_PENALTY:-0.1}"
+            --gemma-repetition-penalty "${GEMMA_REPETITION_PENALTY:-1.1}"
         )
         # Reasoning models (gpt-oss): keep effort low so the JSON channel is
         # emitted, and force JSON output. Both are no-ops if left empty.

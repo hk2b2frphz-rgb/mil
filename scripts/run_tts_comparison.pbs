@@ -120,11 +120,12 @@ KOKORO_UV=(
     --index "pytorch-cu121=https://download.pytorch.org/whl/cu121"
     --with "kokoro>=0.9.4"
     --with "misaki[ja]"
-    # fugashi (pulled by misaki[ja]) needs a MeCab dictionary at runtime; without
-    # one it raises "unidic missing". unidic-lite bundles the dictionary in the
-    # wheel, so no `python -m unidic download` step is needed -- it works offline
-    # in the isolated uv env even behind the cluster proxy.
-    --with unidic-lite
+    # misaki[ja] pulls the full `unidic` package, which ships code only -- the
+    # dictionary data (and mecabrc) must be fetched with `python -m unidic
+    # download` (done just before step 5/5). fugashi prefers full unidic over
+    # unidic-lite, so installing the lite wheel does NOT help while unidic is
+    # present; pin unidic explicitly so the download target is deterministic.
+    --with unidic
     --with pyopenjtalk
     --with soundfile
     --with numpy
@@ -173,6 +174,12 @@ CUDA_VISIBLE_DEVICES=1 COSYVOICE_REPO="$COSYVOICE_REPO" \
     --backends cosyvoice3
 
 echo "===== step 5/5: Kokoro ====="
+# Fetch the unidic dictionary data into the isolated env before inference.
+# fugashi (via misaki[ja]) selects the full `unidic` package, which has no
+# dictionary/mecabrc until this runs. The same --with set means uv reuses the
+# cached env, so the data persists into the inference call below.
+echo "[kokoro] downloading unidic dictionary..."
+"${KOKORO_UV[@]}" python -m unidic download
 CUDA_VISIBLE_DEVICES=0 "${KOKORO_UV[@]}" python scripts/run_tts_comparison.py \
     "${COMMON_ARGS[@]}" \
     --backends kokoro
