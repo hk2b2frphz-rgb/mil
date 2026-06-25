@@ -76,7 +76,9 @@ if ! [[ "$NUM_CASES" =~ ^[0-9]+$ ]] || [[ "$NUM_CASES" -lt 1 ]]; then
 fi
 
 mkdir -p "$OUT_ROOT" experiments/pbs_logs
-exec > >(tee -a "experiments/pbs_logs/${BATCH_ID}_${SHARD_TAG}.log") 2>&1
+JOB_TAG="${PBS_JOBID%%.*}"
+JOB_LOG="experiments/pbs_logs/${BATCH_ID}_${SHARD_TAG}_${JOB_TAG:-local}.log"
+exec > >(tee -a "$JOB_LOG") 2>&1
 
 echo "===== gpt-oss dialogue generation ====="
 echo "job_id:        ${PBS_JOBID:-n/a}"
