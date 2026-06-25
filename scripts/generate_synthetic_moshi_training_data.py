@@ -38,7 +38,7 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -2075,10 +2075,26 @@ def load_dialogues_from_jsonl(path: Path) -> list[Dialogue]:
     return dialogues
 
 
-def generate_dialogues(args: argparse.Namespace) -> list[Dialogue]:
+def generate_dialogues(
+    args: argparse.Namespace,
+    on_generated: Optional[Callable[[Dialogue], None]] = None,
+) -> list[Dialogue]:
+    """Generate dialogues. If on_generated is given it is called for each dialogue
+    as soon as it is produced, so callers can persist incrementally instead of
+    losing everything if a long run is interrupted."""
+
+    def _emit(dialogue: Dialogue, sink: list[Dialogue]) -> None:
+        sink.append(dialogue)
+        if on_generated is not None:
+            on_generated(dialogue)
+
     if args.dialogues_jsonl is not None:
         logger.info("Loading dialogues from %s", args.dialogues_jsonl)
-        return load_dialogues_from_jsonl(args.dialogues_jsonl)[: args.num_dialogues]
+        loaded = load_dialogues_from_jsonl(args.dialogues_jsonl)[: args.num_dialogues]
+        if on_generated is not None:
+            for dialogue in loaded:
+                on_generated(dialogue)
+        return loaded
 
     rng = random.Random(args.seed)
     use_cases = load_use_cases(args)[: args.num_dialogues]
@@ -2100,7 +2116,7 @@ def generate_dialogues(args: argparse.Namespace) -> list[Dialogue]:
                 data = parse_transcript(text)
                 dialogue = dialogue_from_mapping(data, use_case)
                 logger.info("Generated dialogue with Gemma: %s", dialogue.id)
-                dialogues.append(dialogue)
+                _emit(dialogue, dialogues)
             return dialogues
         except Exception as exc:
             if args.no_template_fallback or not args.allow_template_fallback:
@@ -2109,7 +2125,10 @@ def generate_dialogues(args: argparse.Namespace) -> list[Dialogue]:
                 "Gemma batch generation failed; using template fallback: %s",
                 exc,
             )
-            return [template_dialogue(use_case) for use_case in use_cases]
+            fallback: list[Dialogue] = []
+            for use_case in use_cases:
+                _emit(template_dialogue(use_case), fallback)
+            return fallback
 
     for use_case in use_cases:
         try:
@@ -2124,7 +2143,7 @@ def generate_dialogues(args: argparse.Namespace) -> list[Dialogue]:
                 exc,
             )
             dialogue = template_dialogue(use_case)
-        dialogues.append(dialogue)
+        _emit(dialogue, dialogues)
     return dialogues
 
 
@@ -2269,15 +2288,27 @@ def render_dataset(args: argparse.Namespace, dialogues: list[Dialogue]) -> None:
     logger.info("Done. Manifest: %s", manifest_path)
 
 
-def write_dialogues_only(args: argparse.Namespace, dialogues: list[Dialogue]) -> None:
+def write_dialogues_only(args: argparse.Namespace) -> None:
+    """Generate and persist each dialogue as soon as it is produced.
+
+    Appending per dialogue (rather than writing the whole list at the end) means
+    an interrupted long run keeps every dialogue generated so far."""
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     dialogues_path = out_dir / "dialogues.jsonl"
     if dialogues_path.exists():
         dialogues_path.unlink()
-    for dialogue in dialogues:
+
+    count = 0
+
+    def sink(dialogue: Dialogue) -> None:
+        nonlocal count
         append_jsonl(dialogues_path, dialogue_to_json(dialogue))
-    logger.info("dialogues-only mode: wrote %d dialogues to %s", len(dialogues), dialogues_path)
+        count += 1
+        logger.info("saved dialogue %d -> %s (%s)", count, dialogue.id, dialogues_path)
+
+    generate_dialogues(args, on_generated=sink)
+    logger.info("dialogues-only mode: wrote %d dialogues to %s", count, dialogues_path)
 
 
 def main() -> None:
@@ -2285,10 +2316,10 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     random.seed(args.seed)
     np.random.seed(args.seed)
-    dialogues = generate_dialogues(args)
     if args.mode == "dialogues-only":
-        write_dialogues_only(args, dialogues)
+        write_dialogues_only(args)
         return
+    dialogues = generate_dialogues(args)
     render_dataset(args, dialogues)
 
 
