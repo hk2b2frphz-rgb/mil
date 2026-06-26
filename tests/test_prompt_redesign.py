@@ -149,6 +149,18 @@ class PromptRedesignTests(unittest.TestCase):
         self.assertIn("<|im_start|>user\nhello<|im_end|>", prompt)
         self.assertTrue(prompt.endswith("<|im_start|>assistant\n"))
 
+    def test_messages_to_completion_prompt_can_disable_qwen_thinking(self) -> None:
+        prompt = messages_to_completion_prompt(
+            [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "hello"},
+            ],
+            no_think=True,
+        )
+
+        self.assertIn("hello\n\n/no_think<|im_end|>", prompt)
+        self.assertTrue(prompt.endswith("<|im_start|>assistant\n"))
+
     def test_clean_agent_utterance_removes_completion_special_tokens(self) -> None:
         self.assertEqual(clean_agent_utterance("<|im_end|>", "moshi"), "")
         self.assertEqual(

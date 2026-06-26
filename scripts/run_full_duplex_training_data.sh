@@ -108,6 +108,9 @@ if has_step dialogues; then
         if [[ -n "${LLM_RESPONSE_FORMAT:-}" ]]; then
             llm_args+=(--llm-response-format "$LLM_RESPONSE_FORMAT")
         fi
+        if [[ "${LLM_COMPLETIONS_NO_THINK:-0}" == "1" ]]; then
+            llm_args+=(--llm-completions-no-think)
+        fi
     fi
     if [[ "${ALLOW_TEMPLATE_FALLBACK:-0}" == "1" ]]; then
         llm_args+=(--allow-template-fallback)

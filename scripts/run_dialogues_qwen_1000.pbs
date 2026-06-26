@@ -38,7 +38,19 @@ command -v curl >/dev/null 2>&1 || {
     exit 1
 }
 
-export PORT="${PORT:-8000}"
+if [[ -z "${PORT:-}" ]]; then
+    if [[ -n "${PBS_JOBID:-}" ]]; then
+        JOB_NUM="${PBS_JOBID%%.*}"
+        JOB_NUM="${JOB_NUM//[^0-9]/}"
+        if [[ -n "$JOB_NUM" ]]; then
+            export PORT="$((18000 + (10#$JOB_NUM % 20000)))"
+        else
+            export PORT="8000"
+        fi
+    else
+        export PORT="8000"
+    fi
+fi
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 export VLLM_MODEL="${VLLM_MODEL:-Qwen/Qwen3.6-27B}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
@@ -175,13 +187,13 @@ trap cleanup EXIT
 # not bind the port because a stale server holds it), fail fast.
 echo "waiting for vLLM ($VLLM_MODEL) to become ready (no health-check timeout)..."
 while true; do
+    if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+        echo "ERROR: vLLM exited before serving $VLLM_MODEL (port ${PORT} may be held by another server)." >&2
+        exit 1
+    fi
     if curl --fail --silent --show-error \
         "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null | grep -qF "$VLLM_MODEL"; then
         break
-    fi
-    if ! kill -0 "$VLLM_PID" 2>/dev/null; then
-        echo "ERROR: vLLM exited before serving $VLLM_MODEL (port ${PORT} may be held by a stale server)." >&2
-        exit 1
     fi
     sleep 5
 done
@@ -198,6 +210,7 @@ export LLM_BACKEND="openai-compatible"
 export LLM_API_BASE="http://127.0.0.1:${PORT}/v1"
 export LLM_API_KEY="${LLM_API_KEY:-}"
 export LLM_OPENAI_ENDPOINT="${LLM_OPENAI_ENDPOINT:-completions}"
+export LLM_COMPLETIONS_NO_THINK="${LLM_COMPLETIONS_NO_THINK:-1}"
 export LLM_MODEL="$VLLM_MODEL"
 export LLM_TEMPERATURE
 export LLM_FREQUENCY_PENALTY="0.3"

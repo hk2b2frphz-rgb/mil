@@ -311,6 +311,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--llm-completions-no-think",
+        action="store_true",
+        default=(os.environ.get("LLM_COMPLETIONS_NO_THINK") == "1"),
+        help=(
+            "When using --llm-openai-endpoint completions, append /no_think "
+            "to the final user message. This is needed for Qwen reasoning "
+            "models because raw completions do not apply chat-template "
+            "enable_thinking=false kwargs."
+        ),
+    )
+    parser.add_argument(
         "--llm-timeout-sec",
         type=float,
         default=300.0,
@@ -1111,7 +1122,10 @@ class LLMDialogueGenerator:
         if self.args.llm_openai_endpoint == "chat":
             payload["messages"] = messages
         else:
-            payload["prompt"] = messages_to_completion_prompt(messages)
+            payload["prompt"] = messages_to_completion_prompt(
+                messages,
+                no_think=self.args.llm_completions_no_think,
+            )
             payload["stop"] = ["<|im_end|>"]
         # vLLM extension: multiplicative repetition penalty. Strongly discourages
         # the "\n\n\n..." degeneration that frequency/presence penalties alone do
@@ -1251,6 +1265,7 @@ class LLMDialogueGenerator:
                     "speaker": speaker,
                     "attempt": attempt + 1,
                     "empty": not bool(text),
+                    "raw_contains_think": bool(_THINK_OPEN_RE.search(raw)),
                     "prompt_system": current.system,
                     "prompt_user": current.user,
                     "raw_text": raw[:1000],
@@ -1603,11 +1618,22 @@ def chat_completions_url(api_base: str) -> str:
     return openai_generation_url(api_base, "chat")
 
 
-def messages_to_completion_prompt(messages: list[dict[str, str]]) -> str:
+def messages_to_completion_prompt(
+    messages: list[dict[str, str]],
+    *,
+    no_think: bool = False,
+) -> str:
+    last_user_index = -1
+    if no_think:
+        for index, message in enumerate(messages):
+            if str(message.get("role", "")).strip() == "user":
+                last_user_index = index
     parts: list[str] = []
-    for message in messages:
+    for index, message in enumerate(messages):
         role = str(message.get("role", "user")).strip() or "user"
         content = str(message.get("content", "")).strip()
+        if no_think and index == last_user_index and "/no_think" not in content:
+            content = f"{content}\n\n/no_think".strip()
         parts.append(f"<|im_start|>{role}\n{content}<|im_end|>")
     parts.append("<|im_start|>assistant\n")
     return "\n".join(parts)
