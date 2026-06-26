@@ -152,9 +152,14 @@ vllm_args=(
     --port "$PORT"
     --max-model-len "$MAX_MODEL_LEN"
     --gpu-memory-utilization "$VLLM_GPU_MEMORY_UTILIZATION"
-    --enforce-eager
     --reasoning-parser qwen3
 )
+# --enforce-eager disables CUDA graphs (slower decode) but starts faster. With
+# concurrent requests we want graphs ON for throughput, so default to off here.
+# Re-enable by exporting VLLM_ENFORCE_EAGER=1.
+if [[ "${VLLM_ENFORCE_EAGER:-0}" == "1" ]]; then
+    vllm_args+=(--enforce-eager)
+fi
 # Qwen3 thinking runs away on this JSON-generation task: it over-reasons, fails
 # to summarize, and emits broken/unterminated JSON. Disable thinking by default
 # so the model goes straight to the (json_object-constrained) answer. Override by
@@ -240,10 +245,17 @@ export LLM_PRESENCE_PENALTY="0.1"
 export DIALOGUE_GENERATION_MODE="${DIALOGUE_GENERATION_MODE:-multi-agent}"
 export MULTI_AGENT_MIN_PAIRS="${MULTI_AGENT_MIN_PAIRS:-3}"
 export MULTI_AGENT_MAX_PAIRS="${MULTI_AGENT_MAX_PAIRS:-5}"
+# Dialogues are independent; generate many at once so the vLLM server batches
+# requests instead of sitting near-idle. KV cache usage scales ~linearly with
+# this value; raise it until KV approaches a comfortable ceiling (~70-80%).
+export MULTI_AGENT_CONCURRENCY="${MULTI_AGENT_CONCURRENCY:-64}"
 export MULTI_AGENT_USER_TEMPERATURE="${MULTI_AGENT_USER_TEMPERATURE:-0.85}"
 export MULTI_AGENT_SYSTEM_TEMPERATURE="${MULTI_AGENT_SYSTEM_TEMPERATURE:-0.2}"
 export MULTI_AGENT_JUDGE_TEMPERATURE="${MULTI_AGENT_JUDGE_TEMPERATURE:-0.0}"
 export MULTI_AGENT_AIZUCHI_TEMPERATURE="${MULTI_AGENT_AIZUCHI_TEMPERATURE:-0.2}"
+# Make aizuchi actually appear: lower the min-length gate and allow up to 2 per turn.
+export MULTI_AGENT_AIZUCHI_MIN_CHARS="${MULTI_AGENT_AIZUCHI_MIN_CHARS:-16}"
+export MULTI_AGENT_MAX_AIZUCHI_PER_USER="${MULTI_AGENT_MAX_AIZUCHI_PER_USER:-2}"
 export MULTI_AGENT_EMPTY_POLICY="${MULTI_AGENT_EMPTY_POLICY:-fail}"
 export MULTI_AGENT_AIZUCHI_MODE="${MULTI_AGENT_AIZUCHI_MODE:-separate}"
 export DUMP_AGENT_PROMPTS="${DUMP_AGENT_PROMPTS:-1}"
