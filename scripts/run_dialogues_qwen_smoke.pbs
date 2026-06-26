@@ -200,7 +200,29 @@ export LLM_NUM_FEWSHOT="${LLM_NUM_FEWSHOT:-2}"
 export LLM_BACKEND="openai-compatible"
 export LLM_API_BASE="http://127.0.0.1:${PORT}/v1"
 export LLM_API_KEY="${LLM_API_KEY:-}"
-export LLM_OPENAI_ENDPOINT="${LLM_OPENAI_ENDPOINT:-completions}"
+# Prefer /v1/chat/completions when the server actually serves it; vLLM normally
+# exposes both chat and completions, so chat is the right default. Only fall back
+# to /v1/completions if a live probe says chat is unavailable (404 / no chat
+# template). Override either way by exporting LLM_OPENAI_ENDPOINT yourself.
+if [[ -z "${LLM_OPENAI_ENDPOINT:-}" ]]; then
+    CHAT_PROBE_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+        -X POST "http://127.0.0.1:${PORT}/v1/chat/completions" \
+        -H 'Content-Type: application/json' \
+        -d "{\"model\":\"${VLLM_MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"ping /no_think\"}],\"max_tokens\":1}" \
+        2>/dev/null || true)"
+    if [[ "$CHAT_PROBE_CODE" == "200" ]]; then
+        export LLM_OPENAI_ENDPOINT="chat"
+    else
+        export LLM_OPENAI_ENDPOINT="completions"
+    fi
+    echo "endpoint probe: /v1/chat/completions -> HTTP ${CHAT_PROBE_CODE:-none}; using LLM_OPENAI_ENDPOINT=$LLM_OPENAI_ENDPOINT"
+else
+    export LLM_OPENAI_ENDPOINT
+    echo "endpoint: LLM_OPENAI_ENDPOINT=$LLM_OPENAI_ENDPOINT (explicit override)"
+fi
+# Only used for the completions path: append /no_think to the prompt since raw
+# completions do not apply the chat template's enable_thinking flag. Harmless
+# (ignored) when the chat endpoint is selected.
 export LLM_COMPLETIONS_NO_THINK="${LLM_COMPLETIONS_NO_THINK:-1}"
 export LLM_MODEL="$VLLM_MODEL"
 export LLM_TEMPERATURE
