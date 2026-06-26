@@ -237,8 +237,11 @@ export DIALOGUE_GENERATION_MODE="${DIALOGUE_GENERATION_MODE:-multi-agent}"
 export MULTI_AGENT_MIN_PAIRS="${MULTI_AGENT_MIN_PAIRS:-3}"
 export MULTI_AGENT_MAX_PAIRS="${MULTI_AGENT_MAX_PAIRS:-5}"
 # Dialogues are independent; generate many at once so the idle vLLM server
-# (KV cache was sitting near 1%) actually batches requests. Tune to taste.
-export MULTI_AGENT_CONCURRENCY="${MULTI_AGENT_CONCURRENCY:-16}"
+# actually batches requests. KV cache usage scales ~linearly with this value
+# (only one request is in flight per dialogue), so raise it until KV cache
+# approaches a comfortable ceiling (~70-80%). 16 left KV at ~7-10%; 64 should
+# land around 30-40%, 128 around 60-80%. Tune to taste.
+export MULTI_AGENT_CONCURRENCY="${MULTI_AGENT_CONCURRENCY:-64}"
 export MULTI_AGENT_USER_TEMPERATURE="${MULTI_AGENT_USER_TEMPERATURE:-0.85}"
 export MULTI_AGENT_SYSTEM_TEMPERATURE="${MULTI_AGENT_SYSTEM_TEMPERATURE:-0.2}"
 export MULTI_AGENT_JUDGE_TEMPERATURE="${MULTI_AGENT_JUDGE_TEMPERATURE:-0.0}"
