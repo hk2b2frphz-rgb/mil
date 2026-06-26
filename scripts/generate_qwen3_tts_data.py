@@ -255,6 +255,36 @@ class AudioSegment:
     voice_role: str | None = None
 
 
+AIZUCHI_OVERLAP_TEXTS = frozenset({
+    "はい。",
+    "ええ。",
+    "そうなんですね。",
+    "なるほど。",
+})
+AIZUCHI_OVERLAP_START_AFTER_PREVIOUS_START_SEC = 999
+
+
+def apply_aizuchi_overlap(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    updated_turns: list[dict[str, Any]] = []
+    previous_turn: dict[str, Any] | None = None
+    for turn in turns:
+        updated_turn = dict(turn)
+        if (
+            turn.get("speaker") == "moshi"
+            and turn.get("text") in AIZUCHI_OVERLAP_TEXTS
+            and previous_turn is not None
+            and previous_turn.get("speaker") == "user"
+        ):
+            updated_turn["timing"] = "overlap_previous"
+            updated_turn["start_after_previous_start_sec"] = (
+                AIZUCHI_OVERLAP_START_AFTER_PREVIOUS_START_SEC
+            )
+            updated_turn.pop("truncate_previous_after_sec", None)
+        updated_turns.append(updated_turn)
+        previous_turn = turn
+    return updated_turns
+
+
 # ---------------------------------------------------------------------------
 # Qwen3-TTS ラッパー
 # ---------------------------------------------------------------------------
@@ -1090,6 +1120,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not fail when a duplex_task dialogue is missing its required timing event.",
     )
+    parser.add_argument(
+        "--auto-overlap-aizuchi",
+        action="store_true",
+        help="Automatically overlap short moshi backchannels with the preceding user turn.",
+    )
     args = parser.parse_args()
 
     if args.tts_backend == "qwen3":
@@ -1160,6 +1195,11 @@ def main() -> None:
 
     if args.dialogues_jsonl is not None:
         all_templates = load_dialogues_from_jsonl(args.dialogues_jsonl)
+        if args.auto_overlap_aizuchi:
+            all_templates = [
+                {**template, "turns": apply_aizuchi_overlap(template["turns"])}
+                for template in all_templates
+            ]
         logger.info("対話 %d 件を %s から読み込みました", len(all_templates), args.dialogues_jsonl)
     else:
         all_templates = TEMPLATE_DIALOGUES

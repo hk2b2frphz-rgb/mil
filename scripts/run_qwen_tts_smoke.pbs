@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N qwen_tts_smoke
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -V
+
+# Qwen3-TTS smoke generation from the Qwen dialogue smoke output.
+#   qsub -V scripts/run_qwen_tts_smoke.pbs
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+export BATCH_ID="${BATCH_ID:-qwen_tts_smoke}"
+export RUN_ID="$BATCH_ID"
+export DIALOGUES_JSONL="$PWD/data/runs/qwen_dialogue_smoke/llm_dialogues/dialogues.jsonl"
+export OUT_ROOT="$PWD/data/runs/qwen_tts_smoke"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export TTS_DTYPE="${TTS_DTYPE:-float16}"
+export TTS_DEVICE="${TTS_DEVICE:-cuda}"
+
+mkdir -p experiments/pbs_logs
+JOB_LOG="experiments/pbs_logs/${BATCH_ID}.log"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
+echo "===== Qwen3-TTS smoke ====="
+echo "job_id:       ${PBS_JOBID:-n/a}"
+echo "host:         $(hostname)"
+echo "out_root:     $OUT_ROOT"
+echo "dialogues:    $DIALOGUES_JSONL"
+echo "cuda_visible: $CUDA_VISIBLE_DEVICES"
+echo "dtype:        $TTS_DTYPE"
+echo "device:       $TTS_DEVICE"
+echo "started_at:   $(date -Iseconds)"
+echo "==========================="
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH." >&2
+    exit 1
+}
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+fi
+
+if [[ ! -s "$DIALOGUES_JSONL" ]]; then
+    echo "ERROR: dialogues JSONL was not found or is empty: $DIALOGUES_JSONL" >&2
+    exit 1
+fi
+
+echo "===== step 1/1: Qwen3-TTS dialogue audio ====="
+uv run python scripts/generate_qwen3_tts_data.py \
+    --tts-backend qwen3 \
+    --dialogues-jsonl "$DIALOGUES_JSONL" \
+    --num-dialogues 3 \
+    --auto-overlap-aizuchi \
+    --out-dir "$OUT_ROOT" \
+    --device "$TTS_DEVICE" \
+    --dtype "$TTS_DTYPE"
+
+WAV_GLOB="$OUT_ROOT/data_stereo/*.wav"
+if ! compgen -G "$WAV_GLOB" >/dev/null; then
+    echo "ERROR: no stereo WAVs were created in $OUT_ROOT/data_stereo" >&2
+    exit 1
+fi
+
+WAV_COUNT="$(compgen -G "$WAV_GLOB" | wc -l | tr -d ' ')"
+if [[ "$WAV_COUNT" != "3" ]]; then
+    echo "ERROR: expected 3 stereo WAVs in $OUT_ROOT/data_stereo, found $WAV_COUNT" >&2
+    compgen -G "$WAV_GLOB" | sort >&2
+    exit 1
+fi
+
+echo "stereo_wav_dir: $OUT_ROOT/data_stereo"
+echo "stereo_wavs:    $WAV_COUNT"
+echo "finished_at:    $(date -Iseconds)"
