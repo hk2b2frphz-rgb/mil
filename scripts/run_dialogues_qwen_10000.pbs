@@ -3,7 +3,7 @@
 #PBS -N fd_qwen_10000
 #PBS -q xan_s
 #PBS -l select=1:res=small
-#PBS -l walltime=48:00:00
+#PBS -l walltime=24:00:00
 #PBS -j oe
 #PBS -V
 
@@ -14,11 +14,11 @@
 # timeout: we wait indefinitely for vLLM to come up (the job only fails if the
 # vLLM process dies).
 #
-# TODO(cluster): verify that `select=1:res=small` allocates one A100 80GB GPU,
-# and that walltime=48:00:00 is within the xan_s queue cap (lower it if the job
-# is rejected). 10000 cases is ~10x the 1000 run; concurrency offsets much of
-# that, but if 48h is still short, either raise MULTI_AGENT_CONCURRENCY or split
-# into shards (SEED/NUM_CASES + merge).
+# TODO(cluster): verify that `select=1:res=small` allocates one A100 80GB GPU.
+# walltime=24:00:00 is the xan_s queue cap (the hard limit). 10000 cases is ~10x
+# the 1000 run; concurrency offsets much of that, but if 24h is not enough, split
+# into shards (SEED/NUM_CASES + merge) across multiple jobs, or raise
+# MULTI_AGENT_CONCURRENCY.
 #
 # Submit:
 #   qsub -V scripts/run_dialogues_qwen_10000.pbs
