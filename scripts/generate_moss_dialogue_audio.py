@@ -122,6 +122,11 @@ class MossDialogueGenerator:
         self.prompt_wavs: dict[str, Any] = {}
         self.sample_rate = 0
         self.last_full_text_sent = ""
+        # Reference encodings are identical for every dialogue (same prompt
+        # wavs), so they are computed once in load() and reused, instead of
+        # re-running the codec encoder on each generate() call.
+        self.reference_codes: Any = None
+        self.prompt_audio_codes: Any = None
 
     def load(self) -> None:
         if self.model is not None:
@@ -171,35 +176,36 @@ class MossDialogueGenerator:
                 wav = torchaudio.functional.resample(wav, int(sr), self.sample_rate)
             self.prompt_wavs[role] = wav
 
-    def _build_user_message(
-        self,
-        *,
-        text: str,
-        prompt_audio_speaker1: Any,
-        prompt_text_speaker1: str,
-        prompt_audio_speaker2: Any,
-        prompt_text_speaker2: str,
-    ) -> list[list[Any]]:
-        """Translate named two-speaker inputs into the model-card continuation API."""
-        assert self.processor is not None
-        import torch
-
+        # Encode the references once. These inputs never change across dialogues,
+        # so caching here removes two codec-encode passes from every generate().
+        speaker1 = self.prompt_wavs["moshi"]
+        speaker2 = self.prompt_wavs["user"]
         # ASSUMPTION: encode_audios_from_wav preserves list order, so reference
         # index 0 maps to [S1] and reference index 1 maps to [S2].
-        reference_codes = self.processor.encode_audios_from_wav(
-            [prompt_audio_speaker1, prompt_audio_speaker2],
+        self.reference_codes = self.processor.encode_audios_from_wav(
+            [speaker1, speaker2],
             sampling_rate=self.sample_rate,
         )
         # ASSUMPTION: the continuation prompt audio is the two references
         # concatenated in [S1], [S2] order, as shown in the model card.
-        concat_prompt_wav = torch.cat(
-            [prompt_audio_speaker1, prompt_audio_speaker2],
-            dim=-1,
-        )
-        prompt_audio_codes = self.processor.encode_audios_from_wav(
+        concat_prompt_wav = torch.cat([speaker1, speaker2], dim=-1)
+        self.prompt_audio_codes = self.processor.encode_audios_from_wav(
             [concat_prompt_wav],
             sampling_rate=self.sample_rate,
         )[0]
+
+    def _build_user_message(
+        self,
+        *,
+        text: str,
+        prompt_text_speaker1: str,
+        prompt_text_speaker2: str,
+    ) -> list[list[Any]]:
+        """Translate named two-speaker inputs into the model-card continuation API."""
+        assert self.processor is not None
+        assert self.reference_codes is not None
+        assert self.prompt_audio_codes is not None
+
         # ASSUMPTION: prompt transcripts must prefix the requested dialogue in
         # the same text field and retain their matching [S1]/[S2] tags.
         full_text = (
@@ -210,14 +216,15 @@ class MossDialogueGenerator:
         self.last_full_text_sent = full_text
         # ASSUMPTION: current remote code exposes build_user_message(text,
         # reference) plus a continuation assistant message, rather than literal
-        # prompt_audio_speaker1/... keyword parameters.
+        # prompt_audio_speaker1/... keyword parameters. reference_codes and
+        # prompt_audio_codes are cached in load() (identical for every dialogue).
         return [[
             self.processor.build_user_message(
                 text=full_text,
-                reference=reference_codes,
+                reference=self.reference_codes,
             ),
             self.processor.build_assistant_message(
-                audio_codes_list=[prompt_audio_codes],
+                audio_codes_list=[self.prompt_audio_codes],
             ),
         ]]
 
@@ -229,9 +236,7 @@ class MossDialogueGenerator:
 
         conversations = self._build_user_message(
             text=text,
-            prompt_audio_speaker1=self.prompt_wavs["moshi"],
             prompt_text_speaker1=self.ref_texts["moshi"],
-            prompt_audio_speaker2=self.prompt_wavs["user"],
             prompt_text_speaker2=self.ref_texts["user"],
         )
         batch = self.processor(conversations, mode="continuation")
