@@ -32,6 +32,8 @@ export COSYVOICE_REPO="${COSYVOICE_REPO:-$VENDOR_DIR/CosyVoice}"
 export COSYVOICE_GIT_REF="${COSYVOICE_GIT_REF:-main}"
 export TTS_DEVICE="${TTS_DEVICE:-cuda}"
 export TTS_DTYPE="${TTS_DTYPE:-float16}"
+export MOSS_TTS_MODEL="${MOSS_TTS_MODEL:-OpenMOSS-Team/MOSS-TTSD-v1.0}"
+export MOSS_CODEC_MODEL="${MOSS_CODEC_MODEL:-OpenMOSS-Team/MOSS-Audio-Tokenizer}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 
 mkdir -p "$COMPARE_OUT" "$REFS_DIR" "$VENDOR_DIR" experiments/pbs_logs
@@ -61,10 +63,10 @@ fi
 # Preflight: run the TTS smoke tests in the project env before any heavy model
 # loading. Keep this scoped to TTS so unrelated training dependencies do not
 # block a listening smoke job.
-echo "===== step 0/5: preflight tests (fail fast before heavy GPU work) ====="
+echo "===== step 0/6: preflight tests (fail fast before heavy GPU work) ====="
 uv run --with pytest python -m pytest tests/test_tts_comparison.py -q
 
-echo "===== step 1/5: shared Qwen3 reference voices ====="
+echo "===== step 1/6: shared Qwen3 reference voices ====="
 CUDA_VISIBLE_DEVICES=0 uv run python scripts/build_moss_reference_voices.py \
     --out-dir "$REFS_DIR" \
     --model "${QWEN_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}" \
@@ -134,12 +136,34 @@ KOKORO_UV=(
     --with "torchaudio==$TORCHAUDIO_VERSION"
 )
 
-echo "===== step 2/5: qwen3 baseline ====="
+MOSS_UV=(
+    uv run --isolated --no-project
+    --index "pytorch-cu121=https://download.pytorch.org/whl/cu121"
+    --with "transformers==5.0.0"
+    --with safetensors
+    --with tiktoken
+    --with einops
+    --with soundfile
+    --with numpy
+    --with sphn
+    --with tqdm
+    --with "torch==$TORCH_VERSION"
+    --with "torchaudio==$TORCHAUDIO_VERSION"
+)
+
+echo "===== step 2/6: qwen3 baseline ====="
 CUDA_VISIBLE_DEVICES=0 "${QWEN_UV[@]}" python scripts/run_tts_comparison.py \
     "${COMMON_ARGS[@]}" \
     --backends qwen3
 
-echo "===== step 3/5: prepare official CosyVoice checkout ====="
+echo "===== step 3/6: MOSS-TTSD native dialogue (isolated transformers 5 env) ====="
+CUDA_VISIBLE_DEVICES=0 "${MOSS_UV[@]}" python scripts/run_tts_comparison.py \
+    "${COMMON_ARGS[@]}" \
+    --backends moss-ttsd \
+    --moss-model "$MOSS_TTS_MODEL" \
+    --moss-codec-model "$MOSS_CODEC_MODEL"
+
+echo "===== step 4/6: prepare official CosyVoice checkout ====="
 if [[ ! -d "$COSYVOICE_REPO/.git" ]]; then
     git clone --recursive https://github.com/FunAudioLLM/CosyVoice.git "$COSYVOICE_REPO"
 fi
@@ -166,14 +190,14 @@ grep -viE '^[[:space:]]*(--|torch==|torchaudio==|openai-whisper|onnxruntime==|de
 echo "[cosyvoice] inference requirements derived at $COSYVOICE_REQ:"
 cat "$COSYVOICE_REQ"
 
-echo "===== step 4/5: CosyVoice3 ====="
+echo "===== step 5/6: CosyVoice3 ====="
 CUDA_VISIBLE_DEVICES=1 COSYVOICE_REPO="$COSYVOICE_REPO" \
     "${COSYVOICE_UV[@]}" --with-requirements "$COSYVOICE_REQ" \
     python scripts/run_tts_comparison.py \
     "${COMMON_ARGS[@]}" \
     --backends cosyvoice3
 
-echo "===== step 5/5: Kokoro ====="
+echo "===== step 6/6: Kokoro and final four-backend index ====="
 # Fetch the unidic dictionary data into the isolated env before inference.
 # fugashi (via misaki[ja]) selects the full `unidic` package, which has no
 # dictionary/mecabrc until this runs. The same --with set means uv reuses the

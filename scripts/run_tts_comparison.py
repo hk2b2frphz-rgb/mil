@@ -7,13 +7,19 @@ import argparse
 import html
 import json
 import logging
+import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 import numpy as np
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
 try:
+    import scripts.generate_moss_dialogue_audio as generate_moss_dialogue_audio
     from scripts.generate_qwen3_tts_data import (
         Dialogue,
         DialogueTurn,
@@ -30,6 +36,7 @@ try:
         KokoroTTS,
     )
 except ImportError:
+    import generate_moss_dialogue_audio as generate_moss_dialogue_audio
     from generate_qwen3_tts_data import (
         Dialogue,
         DialogueTurn,
@@ -52,11 +59,12 @@ DEFAULT_DIALOGUES = (
     Path("tests/fixtures/listening_dialogues.jsonl"),
     Path("tests/fixtures/aizuchi_dialogues.jsonl"),
 )
-SUPPORTED_BACKENDS = ("cosyvoice3", "qwen3", "kokoro")
+SUPPORTED_BACKENDS = ("cosyvoice3", "qwen3", "kokoro", "moss-ttsd")
 BACKEND_VOICE_MODES = {
     "cosyvoice3": "zero-shot consultant voices",
     "qwen3": "fixed preset voices",
     "kokoro": "fixed Japanese voices",
+    "moss-ttsd": "native multi-speaker dialogue",
 }
 
 
@@ -120,6 +128,18 @@ def make_backend(args: argparse.Namespace, name: str) -> Any:
             device=args.device,
             voice_moshi=args.kokoro_voice_moshi,
             voice_user=args.kokoro_voice_user,
+        )
+    if name == "moss-ttsd":
+        ref_paths, ref_texts = generate_moss_dialogue_audio.load_two_speaker_references(
+            args.refs_json
+        )
+        return generate_moss_dialogue_audio.MossDialogueGenerator(
+            model_name=args.moss_model,
+            codec_model_name=args.moss_codec_model,
+            ref_paths=ref_paths,
+            ref_texts=ref_texts,
+            device=args.device,
+            dtype=args.dtype,
         )
     raise ValueError(f"Unsupported backend: {name}")
 
@@ -188,6 +208,49 @@ def render_variant(
     gap_sec: float,
 ) -> Path:
     dialogue = to_dialogue(raw)
+    if backend_name == "moss-ttsd":
+        dialogue_text = generate_moss_dialogue_audio.build_dialogue_text(raw)
+        if not dialogue_text:
+            raise RuntimeError(f"No dialogue text rendered for {dialogue.id}/{backend_name}")
+        mono = np.asarray(backend.generate(dialogue_text), dtype=np.float32).reshape(-1)
+        if mono.size == 0 or backend.sample_rate <= 0:
+            raise RuntimeError(f"No audio rendered for {dialogue.id}/{backend_name}")
+
+        dialogue_dir = out_dir / dialogue.id
+        wav_path = dialogue_dir / f"{backend_name}.wav"
+        json_path = wav_path.with_suffix(".json")
+        write_wav(wav_path, mono[np.newaxis, :], backend.sample_rate)
+        write_json(
+            json_path,
+            {
+                "dialogue_id": dialogue.id,
+                "title": dialogue.title,
+                "category": dialogue.category,
+                "risk_level": dialogue.risk_level,
+                "source_path": raw["_source_path"],
+                "backend": backend_name,
+                "test_kind": "tts_taste_smoke",
+                "emotion_condition": "taste",
+                "voice_mode": BACKEND_VOICE_MODES[backend_name],
+                "supports_emotion_instruct": False,
+                "sample_rate": backend.sample_rate,
+                "duration_sec": round(mono.shape[-1] / backend.sample_rate, 4),
+                "channels": 1,
+                "channel_layout": "native mono multi-speaker mix",
+                "left_channel": "native mono mix",
+                "right_channel": "native mono mix",
+                "turns": [asdict(turn) for turn in dialogue.turns],
+                "instruct_used": [],
+                "silences": [],
+                "dialogue_text": dialogue_text,
+                "full_text_sent": getattr(backend, "last_full_text_sent", ""),
+                "speaker_mapping": generate_moss_dialogue_audio.SPEAKER_ROLES,
+                "moss_model": getattr(backend, "model_name", ""),
+                "moss_codec_model": getattr(backend, "codec_model_name", ""),
+            },
+        )
+        return wav_path
+
     role_override = backend_name in {"cosyvoice3", "kokoro"}
     segments, silences = build_segments(
         dialogue,
@@ -216,10 +279,12 @@ def render_variant(
             "source_path": raw["_source_path"],
             "backend": backend_name,
             "test_kind": "tts_taste_smoke",
+            "emotion_condition": "taste",
             "voice_mode": BACKEND_VOICE_MODES[backend_name],
             "supports_emotion_instruct": False,
             "sample_rate": backend.sample_rate,
             "duration_sec": round(stereo.shape[-1] / backend.sample_rate, 4),
+            "channels": int(stereo.shape[0]),
             "left_channel": "moshi",
             "right_channel": "user",
             "turns": [asdict(turn) for turn in dialogue.turns],
@@ -255,13 +320,14 @@ def write_indexes(out_dir: Path) -> None:
     markdown = [
         "# TTS smoke listening index",
         "",
-        "Stereo format: left channel = moshi, right channel = user.",
+        "Stereo baselines: left channel = moshi, right channel = user. MOSS-TTSD is a native mono dialogue mix.",
         "",
         "| Backend | Model | Voice mode |",
         "|---|---|---|",
         "| cosyvoice3 | FunAudioLLM/Fun-CosyVoice3-0.5B-2512 | zero-shot consultant voices |",
         "| qwen3 | Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice | fixed preset voices |",
         "| kokoro | hexgrad/Kokoro-82M | fixed Japanese voices |",
+        "| moss-ttsd | OpenMOSS-Team/MOSS-TTSD-v1.0 | native multi-speaker dialogue |",
         "",
     ]
     html_lines = [
@@ -271,7 +337,7 @@ def write_indexes(out_dir: Path) -> None:
         "table{border-collapse:collapse}th,td{border:1px solid #ccc;padding:.4rem}"
         "audio{width:520px}</style></head><body>",
         "<h1>TTS smoke listening index</h1>",
-        "<p>Stereo: left = moshi, right = user.</p>",
+        "<p>Stereo baselines: left = moshi, right = user. MOSS-TTSD is a native mono dialogue mix.</p>",
     ]
     for dialogue_id, rows in sorted(grouped.items()):
         first = rows[0]
@@ -330,6 +396,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cosyvoice-model",
         default="FunAudioLLM/Fun-CosyVoice3-0.5B-2512",
+    )
+    parser.add_argument(
+        "--moss-model",
+        default="OpenMOSS-Team/MOSS-TTSD-v1.0",
+    )
+    parser.add_argument(
+        "--moss-codec-model",
+        default="OpenMOSS-Team/MOSS-Audio-Tokenizer",
     )
     parser.add_argument("--kokoro-voice-moshi", default="jf_alpha")
     parser.add_argument("--kokoro-voice-user", default="jm_kumo")

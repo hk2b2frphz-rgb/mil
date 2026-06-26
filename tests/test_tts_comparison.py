@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import importlib
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 
 class TTSComparisonImportTests(unittest.TestCase):
@@ -21,7 +26,7 @@ class TTSComparisonImportTests(unittest.TestCase):
     def test_backends_render_single_taste_condition(self) -> None:
         module = importlib.import_module("scripts.run_tts_comparison")
         requested = ["on", "off", "mild"]
-        for backend in ("cosyvoice3", "qwen3", "kokoro"):
+        for backend in ("cosyvoice3", "qwen3", "kokoro", "moss-ttsd"):
             self.assertEqual(module.conditions_for_backend(backend, requested), ["taste"])
 
     def test_index_tolerates_legacy_sidecars_without_voice_mode(self) -> None:
@@ -45,6 +50,31 @@ class TTSComparisonImportTests(unittest.TestCase):
             )
             module.write_indexes(out_dir)
             self.assertIn("fixed preset voices", (out_dir / "INDEX.html").read_text())
+
+    def test_index_tolerates_moss_sidecars_without_voice_mode(self) -> None:
+        module = importlib.import_module("scripts.run_tts_comparison")
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            dialogue_dir = out_dir / "moss_case"
+            dialogue_dir.mkdir()
+            wav_path = dialogue_dir / "moss-ttsd.wav"
+            wav_path.write_bytes(b"")
+            (dialogue_dir / "moss-ttsd.json").write_text(
+                json.dumps(
+                    {
+                        "dialogue_id": "moss_case",
+                        "title": "moss",
+                        "backend": "moss-ttsd",
+                        "emotion_condition": "taste",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            module.write_indexes(out_dir)
+            self.assertIn(
+                "native multi-speaker dialogue",
+                (out_dir / "INDEX.html").read_text(),
+            )
 
 
 if __name__ == "__main__":
