@@ -84,6 +84,7 @@ if has_step dialogues; then
         --multi-agent-max-aizuchi-per-user "${MULTI_AGENT_MAX_AIZUCHI_PER_USER:-1}"
         --multi-agent-empty-policy "${MULTI_AGENT_EMPTY_POLICY:-fail}"
         --multi-agent-aizuchi-mode "${MULTI_AGENT_AIZUCHI_MODE:-separate}"
+        --multi-agent-concurrency "${MULTI_AGENT_CONCURRENCY:-1}"
     )
     if [[ "${NO_MULTI_AGENT_AIZUCHI:-0}" == "1" ]]; then
         llm_args+=(--no-multi-agent-aizuchi)

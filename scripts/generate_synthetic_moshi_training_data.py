@@ -32,9 +32,11 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -496,6 +498,17 @@ def parse_args() -> argparse.Namespace:
         help="Disable the separate aizuchi agent in multi-agent mode.",
     )
     parser.add_argument(
+        "--multi-agent-concurrency",
+        type=int,
+        default=int(os.environ.get("MULTI_AGENT_CONCURRENCY") or 1),
+        help=(
+            "Number of dialogues to generate concurrently in multi-agent mode. "
+            "Each dialogue is an independent chain of LLM calls, so running many "
+            "in parallel keeps the vLLM server busy (KV cache otherwise sits near "
+            "0%). 1 = sequential (legacy). Default: 1."
+        ),
+    )
+    parser.add_argument(
         "--dump-agent-prompts",
         action="store_true",
         help=(
@@ -941,6 +954,9 @@ class LLMDialogueGenerator:
         self.args = args
         self.pipe = None
         self.active_task = args.llm_task
+        # Guards the trace-file append so concurrent dialogue workers do not
+        # interleave or corrupt lines in multi_agent_trace.jsonl.
+        self._trace_lock = threading.Lock()
         self.trace_path: Path | None = None
         if getattr(args, "dialogue_generation_mode", "") == "multi-agent":
             self.trace_path = args.out_dir / "multi_agent_trace.jsonl"
@@ -957,7 +973,8 @@ class LLMDialogueGenerator:
             "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
             **event,
         }
-        append_jsonl(self.trace_path, payload)
+        with self._trace_lock:
+            append_jsonl(self.trace_path, payload)
 
     def _torch_dtype(self):
         if self.args.llm_dtype == "auto":
@@ -1702,9 +1719,10 @@ USER_AGENT_SYSTEM_PROMPT = """
 
 
 MOSHI_AGENT_SYSTEM_PROMPT = """
-あなたは日本語の孤独・孤立相談窓口の相談員 moshi です。
-丁寧語で、傾聴・言い換え・要約・感情の承認を中心に応答します。
-すぐ助言や解決策に飛ばず、相手の言葉を一部受け取り、聞いている感じを出してください。
+あなたは日本語の雑談傾聴システム moshi の聞き手です。
+丁寧語で、雑談を聞くように、傾聴・軽い言い換え・感情の承認を中心に、できるだけ短く応答します。
+1発話は必ず1文だけ。短い相づち一言でも構いません。長く話しません。
+助言や解決策に飛ばず、相手の言葉を一部だけ受け取り、聞いている感じを出してください。
 「うん」「うんうん」などのくだけた相づちは使いません。
 出力は moshi の次の発話本文だけ。話者名、JSON、説明、引用符、箇条書きは出力しません。
 """.strip()
@@ -1718,9 +1736,9 @@ JSONだけを出力してください: {"complete": true/false, "reason": "短�
 
 
 AIZUCHI_AGENT_SYSTEM_PROMPT = """
-あなたは相談員 moshi の短い相づちを、user発話の途中に挿入する位置だけを決める agent です。
+あなたは雑談傾聴システム moshi の聞き手です。相手が話している途中に短い相づちを打つ位置を決めます。
+雑談を聞くときと同じように、相手の話に合わせてこまめに相づちを入れてください。
 相づちは丁寧で短いものだけにします: はい。/ええ。/そうなんですね。/なるほど。
-user発話が短い、重い、または挿入すると邪魔な場合は空配列にしてください。
 JSONだけを出力してください: {"insertions":[{"after_clause": 1, "text": "はい。"}]}
 """.strip()
 
@@ -1840,9 +1858,10 @@ def build_moshi_agent_prompt(
 
 次に moshi として1発話だけ返してください。
 条件:
+- 必ず1文だけ。短く、長く話しません（相づち一言でも可）。
 - 丁寧語で、相談員として自然な距離感を保ちます。
 - まず受け止め、必要なら相手の言葉を短く言い換えます。
-- 一問一答にしすぎず、1つだけ開かれた問いを添えてよいです。
+- 問いを添えるなら短く1つだけ。受け止めだけで終えても構いません。
 - high/medium risk では断定せず、必要な場合だけ短く安全確認します。
 - 「うん」「うんうん」は使いません。
 - 話者名、JSON、説明は書きません。
@@ -1907,9 +1926,9 @@ def build_aizuchi_agent_prompt(
 
 最大挿入数: {max_insertions}
 判断:
-- user発話の途中に moshi の短い相づちを入れるなら after_clause に句番号を指定します。
+- 雑談を聞くように、話の途中でこまめに相づちを打ちます。最大挿入数まで入れてよいです。
+- user発話の途中に moshi の短い相づちを入れる位置を after_clause に句番号で指定します。
 - 最後の句の後には挿入しません。
-- 重い告白や短い発話では insertions を [] にします。
 - moshi 本応答の直前に同じ語が重ならないようにします。
 - text は必ず「はい。」「ええ。」「そうなんですね。」「なるほど。」のどれか。
 JSONだけを返してください。
@@ -3006,10 +3025,15 @@ def generate_dialogues(
     as soon as it is produced, so callers can persist incrementally instead of
     losing everything if a long run is interrupted."""
 
+    emit_lock = threading.Lock()
+
     def _emit(dialogue: Dialogue, sink: list[Dialogue]) -> None:
-        sink.append(dialogue)
-        if on_generated is not None:
-            on_generated(dialogue)
+        # Locked so concurrent workers can append + persist incrementally
+        # without racing on the sink list or the on_generated sink.
+        with emit_lock:
+            sink.append(dialogue)
+            if on_generated is not None:
+                on_generated(dialogue)
 
     if args.dialogues_jsonl is not None:
         logger.info("Loading dialogues from %s", args.dialogues_jsonl)
@@ -3032,9 +3056,13 @@ def generate_dialogues(
                 "Wrote multi-agent prompt preview to %s",
                 args.out_dir / "multi_agent_prompts.json",
             )
-        for use_case in use_cases:
+        def _one_dialogue(index: int, use_case: dict[str, Any]) -> Dialogue:
+            # Per-case RNG keyed on the seed so output stays deterministic and
+            # thread-safe regardless of concurrency (a shared random.Random is
+            # neither). Profile selection is the only RNG consumer downstream.
+            case_rng = random.Random(args.seed + index)
             try:
-                dialogue = generator.generate_multi_agent(use_case, rng)
+                dialogue = generator.generate_multi_agent(use_case, case_rng)
                 logger.info("Generated dialogue with multi-agent LLM: %s", dialogue.id)
             except Exception as exc:
                 if args.no_template_fallback or not args.allow_template_fallback:
@@ -3045,7 +3073,25 @@ def generate_dialogues(
                     exc,
                 )
                 dialogue = template_dialogue(use_case)
-            _emit(dialogue, dialogues)
+            return dialogue
+
+        concurrency = max(1, int(getattr(args, "multi_agent_concurrency", 1)))
+        if concurrency <= 1:
+            for index, use_case in enumerate(use_cases):
+                _emit(_one_dialogue(index, use_case), dialogues)
+        else:
+            logger.info(
+                "Generating %d multi-agent dialogues with concurrency=%d",
+                len(use_cases),
+                concurrency,
+            )
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                futures = [
+                    pool.submit(_one_dialogue, index, use_case)
+                    for index, use_case in enumerate(use_cases)
+                ]
+                for future in futures:
+                    _emit(future.result(), dialogues)
         return dialogues
 
     if args.llm_backend == "transformers-subprocess":
