@@ -1,0 +1,98 @@
+#!/bin/bash
+#PBS -N moshi_backchannel_verify
+#PBS -l select=1:ncpus=8:ngpus=1:mem=64gb
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -o logs/verify_moshi_backchannels.log
+# ---------------------------------------------------------------------------
+# 目的（検証 / verification, NOT 本番データ生成）
+#   「LLM-jp-Moshi に会話音声をプロンプトとして与え、その続き（Moshi 側
+#    ストリーム）として日本語の自然な相槌（うん/はい/そうですね/なるほど…）が
+#    生成されるか」を確かめる。miltoka の実データ不足を、Moshi 自身が出す
+#    相槌つき音声で補えるかの feasibility check。
+#
+# 何を見るか
+#   response_recorder.py が user 音声 + 末尾無音を食わせて Moshi 側ストリーム
+#   (text + audio) を全記録する。analyze_backchannels.py が各トークンの時刻を
+#     listening : user 発話中  (time < input_duration_sec) = 真の傾聴相槌  ★狙い
+#     response  : user 発話後  (time >= input_duration_sec) = ターン応答
+#   に分類して集計する。listening 相槌が安定して出れば狙いは成立。
+#
+# 実行
+#   リポジトリルートで:  qsub scripts/verify_moshi_backchannels.pbs
+#   PBS を使わず手元 GPU で:  bash scripts/verify_moshi_backchannels.pbs
+#
+# 注意
+#   - キュー名/資源指定(select 行)は各サーバに合わせて編集すること。
+#   - 実データが無いので prompt は eval_sets の日本語文を response_recorder の
+#     内蔵 TTS(pyopenjtalk) で音声化して使う。本番では実会話音声に差し替える。
+# ---------------------------------------------------------------------------
+set -euo pipefail
+
+# --- リポジトリルートへ移動 -------------------------------------------------
+# PBS は $PBS_O_WORKDIR で投入ディレクトリを渡す。手元実行時はこのファイル基準。
+if [[ -n "${PBS_O_WORKDIR:-}" ]]; then
+    cd "$PBS_O_WORKDIR"
+else
+    cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+REPO_ROOT="$(pwd)"
+echo "===== moshi backchannel verify ====="
+echo "repo_root: $REPO_ROOT"
+echo "host:      $(hostname)"
+echo "started:   $(date -Iseconds)"
+echo "git:       $(git rev-parse --short HEAD 2>/dev/null || echo n/a) / $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo n/a)"
+
+mkdir -p logs
+
+# --- パラメータ（環境変数で上書き可） --------------------------------------
+RUN_ID="${RUN_ID:-$(date +%Y-%m-%d_%H%M%S)}"
+OUT_DIR="${OUT_DIR:-$REPO_ROOT/data/verify/backchannel_$RUN_ID}"
+HF_REPO="${HF_REPO:-llm-jp/llm-jp-moshi-v1}"
+PROMPTS_FILE="${PROMPTS_FILE:-$REPO_ROOT/eval_sets/loneliness_support_prompts.txt}"
+N_PROMPTS="${N_PROMPTS:-12}"          # 先頭から何文を検証に使うか
+SEEDS="${SEEDS:-0,1,2}"               # 相槌は確率的なので複数 seed で見る
+SILENCE_SEC="${SILENCE_SEC:-12}"      # 発話後に Moshi が話す余白
+MAX_GEN_SEC="${MAX_GEN_SEC:-45}"      # 1 トライアルの安全上限
+TEMP_TEXT="${TEMP_TEXT:-0.8}"         # 相槌の多様性を出すため少し高め
+TEMP="${TEMP:-0.8}"
+DEVICE="${DEVICE:-cuda}"
+
+# 検証用プロンプト集（先頭 N_PROMPTS 文）
+PROMPTS_SUBSET="$OUT_DIR/_prompts_subset.txt"
+mkdir -p "$OUT_DIR"
+head -n "$N_PROMPTS" "$PROMPTS_FILE" > "$PROMPTS_SUBSET"
+
+echo "out_dir:      $OUT_DIR"
+echo "hf_repo:      $HF_REPO"
+echo "prompts:      $PROMPTS_SUBSET ($(wc -l < "$PROMPTS_SUBSET") lines)"
+echo "seeds:        $SEEDS / silence=${SILENCE_SEC}s / max_gen=${MAX_GEN_SEC}s"
+echo "temp_text:    $TEMP_TEXT / temp=$TEMP"
+
+# --- 1. Moshi に会話音声プロンプト → 続き（相槌含む）を全記録 ---------------
+# --response-sec 0 で応答音声を全長保存（相槌の聞き取り確認用）。
+echo
+echo "[1/2] response_recorder: Moshi にプロンプト音声を与えて続きを生成..."
+uv run python response_recorder.py \
+    --hf-repo "$HF_REPO" \
+    --text-file "$PROMPTS_SUBSET" \
+    --seeds "$SEEDS" \
+    --silence-sec "$SILENCE_SEC" \
+    --max-gen-sec "$MAX_GEN_SEC" \
+    --temp "$TEMP" \
+    --temp-text "$TEMP_TEXT" \
+    --response-sec 0 \
+    --device "$DEVICE" \
+    --out-dir "$OUT_DIR"
+
+# --- 2. 相槌の検出・分類・集計 ----------------------------------------------
+echo
+echo "[2/2] analyze_backchannels: 相槌を listening/response に分類して集計..."
+uv run python scripts/analyze_backchannels.py --out-dir "$OUT_DIR"
+
+echo
+echo "===== done ====="
+echo "out_dir:  $OUT_DIR"
+echo "report:   $OUT_DIR/backchannel_report.json"
+echo "audio:    $OUT_DIR/<prompt>/seed_<n>/response.wav  (相槌を耳で確認)"
+echo "ended:    $(date -Iseconds)"
