@@ -541,11 +541,8 @@ def train(cfg: GRPOConfig) -> None:
     if total_segs == 0:
         raise ValueError(f"No segments found in {cfg.segment_dir}")
 
-    # Build flat list of (axis, segment) for sampling
-    all_segments: list[tuple[str, dict[str, Any]]] = []
-    for axis, items in seg_datasets.items():
-        for item in items:
-            all_segments.append((axis, item))
+    # Keep per-axis lists for balanced sampling
+    active_axes = [a for a in AXES if seg_datasets[a]]
 
     # ── Load Moshi to CPU ──
     if is_main:
@@ -619,11 +616,23 @@ def train(cfg: GRPOConfig) -> None:
         epoch_rewards: list[float] = []
         epoch_losses: list[float] = []
 
-        # Deterministic segment sampling (all ranks same)
+        # Balanced sampling: round-robin across axes, then fill remainder
         rng = random.Random(cfg.seed + epoch)
-        epoch_segments = rng.sample(
-            all_segments, min(cfg.segments_per_epoch, len(all_segments)),
-        )
+        epoch_segments: list[tuple[str, dict[str, Any]]] = []
+        per_axis = max(1, cfg.segments_per_epoch // len(active_axes))
+        for axis in active_axes:
+            pool = seg_datasets[axis]
+            n = min(per_axis, len(pool))
+            epoch_segments.extend(
+                (axis, s) for s in rng.sample(pool, n)
+            )
+        # Fill remainder to reach segments_per_epoch
+        while len(epoch_segments) < cfg.segments_per_epoch:
+            axis = rng.choice(active_axes)
+            pool = seg_datasets[axis]
+            if pool:
+                epoch_segments.append((axis, rng.choice(pool)))
+        rng.shuffle(epoch_segments)
 
         for s_idx, (axis, segment) in enumerate(epoch_segments):
             if is_main:
