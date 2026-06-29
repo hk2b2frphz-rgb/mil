@@ -746,10 +746,7 @@ class ForcedAligner:
 
     def _clean(self, romanized: str) -> str:
         text = romanized.lower().strip()
-        text = re.sub(r"\s+", "|", text)
-        text = "".join(c for c in text if c in self._vocab)
-        text = re.sub(r"\|{2,}", "|", text)
-        return text.strip("|")
+        return "".join(c for c in text if c in self._vocab)
 
     def _fallback_proportional(
         self,
@@ -793,9 +790,8 @@ class ForcedAligner:
             cleaned_per_seg.append(cleaned)
             logger.debug("FA: %r → %r", text[:30], cleaned[:40])
 
-        seg_char_counts = [len(c.replace("|", "")) for c in cleaned_per_seg]
-        nonempty = [c for c in cleaned_per_seg if c]
-        full_cleaned = "|".join(nonempty)
+        seg_char_counts = [len(c) for c in cleaned_per_seg]
+        full_cleaned = "".join(cleaned_per_seg)
         audio_dur = audio.size / audio_sr
 
         if not full_cleaned or sum(seg_char_counts) == 0:
