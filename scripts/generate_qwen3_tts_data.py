@@ -963,6 +963,30 @@ def build_segments(
     return segments, silences
 
 
+def _find_energy_valley(
+    pcm: np.ndarray,
+    sample_rate: int,
+    min_ratio: float = 0.5,
+) -> float:
+    """Return the time (in seconds from pcm start) of the lowest-energy
+    50ms frame in the latter portion of *pcm*.  Used to place backchannels
+    at a natural pause/breath point inside a preceding turn."""
+    frame_len = int(0.05 * sample_rate)
+    if pcm.size < frame_len * 3:
+        return pcm.size / sample_rate * 0.7
+    n_frames = pcm.size // frame_len
+    energy = np.array([
+        np.mean(pcm[i * frame_len : (i + 1) * frame_len] ** 2)
+        for i in range(n_frames)
+    ])
+    start_frame = max(1, int(n_frames * min_ratio))
+    search = energy[start_frame:]
+    if search.size == 0:
+        return pcm.size / sample_rate * 0.7
+    valley_frame = start_frame + int(np.argmin(search))
+    return valley_frame * frame_len / sample_rate
+
+
 def build_segments_whole_utterance(
     dialogue: Dialogue,
     tts: Qwen3TTS | MossTTSD,
@@ -1060,12 +1084,27 @@ def build_segments_whole_utterance(
             pcm = np.asarray(pcm, dtype=np.float32) * gain
 
         if turn.timing == "overlap_previous" and previous_segment is not None:
-            offset = max(0.0, float(turn.start_after_previous_start_sec or 0.0))
-            latest_overlap_start = max(
-                previous_segment.start_sec,
-                previous_segment.end_sec - 0.05,
+            is_natural_backchannel = (
+                turn.speaker == "moshi"
+                and previous_segment.speaker != "moshi"
+                and turn.truncate_previous_after_sec is None
             )
-            start = min(previous_segment.start_sec + offset, latest_overlap_start)
+            if is_natural_backchannel:
+                valley_offset = _find_energy_valley(
+                    previous_segment.pcm, tts.sample_rate, min_ratio=0.5,
+                )
+                start = previous_segment.start_sec + valley_offset
+                logger.debug(
+                    "aizuchi %r overlaps at %.2fs into prev (valley)",
+                    turn.text[:10], valley_offset,
+                )
+            else:
+                offset = max(0.0, float(turn.start_after_previous_start_sec or 0.0))
+                latest_overlap_start = max(
+                    previous_segment.start_sec,
+                    previous_segment.end_sec - 0.05,
+                )
+                start = min(previous_segment.start_sec + offset, latest_overlap_start)
             if turn.truncate_previous_after_sec is not None:
                 stop = min(
                     previous_segment.end_sec,
