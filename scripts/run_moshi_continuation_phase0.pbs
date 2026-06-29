@@ -1,10 +1,11 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #PBS -S /bin/bash
 #PBS -N moshi_cont_phase0
 #PBS -q xvn_s
 #PBS -l select=1:res=small
 #PBS -l walltime=03:00:00
 #PBS -j oe
+#PBS -V
 # ===========================================================================
 # Phase 0: verify prompted dialogue continuation with a converted
 # llm-jp-moshi-v1 model, separate from our production data path.
@@ -30,6 +31,7 @@ if [[ -n "${PBS_O_WORKDIR:-}" ]]; then
 else
     cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
+source scripts/setup_proxy.sh
 REPO_ROOT="$(pwd)"
 mkdir -p experiments/pbs_logs
 JOB_TAG="${PBS_JOBID%%.*}"
@@ -56,11 +58,22 @@ GENERATION_LENGTH="${GENERATION_LENGTH:-250}"
 TEMPERATURE="${TEMPERATURE:-0.8}"
 NPROC="${NPROC:-1}"
 OUT_DIR="${OUT_DIR:-$INIT_DIR/continuation_phase0}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 echo "nu_ft_repo:  $NU_FT_REPO"
 echo "v1_repo:     $MOSHI_V1_REPO"
 echo "init_dir:    $INIT_DIR (dtype=$MODEL_DTYPE, extend_user_stream=$EXTEND_USER_STREAM)"
 echo "prompt/gen:  $PROMPT_LENGTH / $GENERATION_LENGTH frames (80ms each)"
+echo "cuda_visible: $CUDA_VISIBLE_DEVICES"
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH." >&2
+    exit 1
+}
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+fi
 
 # --- 0. Prepare nu-dialogue/moshi-finetune -------------------------------
 if [[ ! -d "$NU_FT_REPO" ]]; then

@@ -1,10 +1,11 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #PBS -S /bin/bash
 #PBS -N moshi_backchannel_verify
 #PBS -q xvn_s
 #PBS -l select=1:res=small
 #PBS -l walltime=02:00:00
 #PBS -j oe
+#PBS -V
 # ---------------------------------------------------------------------------
 # Purpose: verification only, not production data generation.
 # Feed LLM-jp-Moshi a spoken prompt and record whether the Moshi
@@ -35,6 +36,7 @@ if [[ -n "${PBS_O_WORKDIR:-}" ]]; then
 else
     cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
+source scripts/setup_proxy.sh
 REPO_ROOT="$(pwd)"
 mkdir -p experiments/pbs_logs
 JOB_TAG="${PBS_JOBID%%.*}"
@@ -60,6 +62,16 @@ MAX_GEN_SEC="${MAX_GEN_SEC:-45}"      # Safety cap per trial.
 TEMP_TEXT="${TEMP_TEXT:-0.8}"         # Slightly higher text diversity.
 TEMP="${TEMP:-0.8}"
 DEVICE="${DEVICE:-cuda}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH." >&2
+    exit 1
+}
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+fi
 
 # Build a verification prompt subset from the first N_PROMPTS lines.
 PROMPTS_SUBSET="$OUT_DIR/_prompts_subset.txt"
