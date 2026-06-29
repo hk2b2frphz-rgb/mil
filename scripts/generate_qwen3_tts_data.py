@@ -284,23 +284,20 @@ WHOLE_UTTERANCE_STYLE_PRESETS: dict[str, dict[str, str]] = {
 }
 
 
-AIZUCHI_OVERLAP_TEXTS = frozenset({
-    "はい。",
-    "ええ。",
-    "そうなんですね。",
-    "なるほど。",
-})
+AIZUCHI_MAX_CHARS = 10
 AIZUCHI_OVERLAP_START_AFTER_PREVIOUS_START_SEC = 999
 
 
 def apply_aizuchi_overlap(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Short moshi turns (<=AIZUCHI_MAX_CHARS) after a user turn → overlap."""
     updated_turns: list[dict[str, Any]] = []
     previous_turn: dict[str, Any] | None = None
     for turn in turns:
         updated_turn = dict(turn)
+        text = turn.get("text", "")
         if (
             turn.get("speaker") == "moshi"
-            and turn.get("text") in AIZUCHI_OVERLAP_TEXTS
+            and len(text) <= AIZUCHI_MAX_CHARS
             and previous_turn is not None
             and previous_turn.get("speaker") == "user"
         ):
