@@ -687,6 +687,160 @@ def _resample(pcm: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Forced Alignment (--whole-utterance mode)
+# ---------------------------------------------------------------------------
+
+class ForcedAligner:
+    """CTC forced alignment using torchaudio MMS_FA for segment boundary detection."""
+
+    def __init__(self, device: str):
+        self.device = "cuda:0" if device == "cuda" else device
+        self._model: Any = None
+        self._tokenizer: Any = None
+        self._aligner: Any = None
+        self._sample_rate: int = 16000
+        self._vocab: set[str] = set()
+        self._romanizer: Any = None
+        self._romanizer_kind: str = ""
+
+    def load(self) -> None:
+        if self._model is not None:
+            return
+        import torch
+        import torchaudio
+
+        bundle = torchaudio.pipelines.MMS_FA
+        self._model = bundle.get_model().to(self.device)
+        self._model.eval()
+        self._tokenizer = bundle.get_tokenizer()
+        self._aligner = bundle.get_aligner()
+        self._sample_rate = bundle.sample_rate
+        self._vocab = set(bundle.get_dict().keys())
+        logger.info(
+            "ForcedAligner (MMS_FA) loaded, device=%s, sr=%d, vocab_size=%d",
+            self.device, self._sample_rate, len(self._vocab),
+        )
+
+        try:
+            import uroman as ur
+            self._romanizer = ur.Uroman()
+            self._romanizer_kind = "uroman"
+            logger.info("Romanizer: uroman")
+        except ImportError:
+            try:
+                import pykakasi
+                self._romanizer = pykakasi.kakasi()
+                self._romanizer_kind = "pykakasi"
+                logger.info("Romanizer: pykakasi (uroman not found)")
+            except ImportError:
+                raise RuntimeError(
+                    "--whole-utterance requires Japanese romanization. "
+                    "Install: pip install uroman  or  pip install pykakasi"
+                )
+
+    def _romanize(self, text: str) -> str:
+        if self._romanizer_kind == "uroman":
+            return self._romanizer.romanize_string(text, lcode="jpn")
+        result = self._romanizer.convert(text)
+        return " ".join(item["hepburn"] for item in result)
+
+    def _clean(self, romanized: str) -> str:
+        text = romanized.lower().strip()
+        text = re.sub(r"\s+", "|", text)
+        text = "".join(c for c in text if c in self._vocab)
+        text = re.sub(r"\|{2,}", "|", text)
+        return text.strip("|")
+
+    def _fallback_proportional(
+        self,
+        audio_dur: float,
+        seg_char_counts: list[int],
+    ) -> list[tuple[float, float]]:
+        total_chars = max(sum(seg_char_counts), 1)
+        cursor = 0.0
+        result: list[tuple[float, float]] = []
+        for count in seg_char_counts:
+            seg_dur = audio_dur * max(count, 1) / total_chars
+            result.append((cursor, cursor + seg_dur))
+            cursor += seg_dur
+        return result
+
+    def align(
+        self,
+        audio: np.ndarray,
+        audio_sr: int,
+        segment_texts: list[str],
+    ) -> list[tuple[float, float]]:
+        """
+        Given a single long audio produced from concatenated segment_texts,
+        return (start_sec, end_sec) for each segment.
+        """
+        self.load()
+        assert self._model is not None
+        import torch
+        import torchaudio
+
+        waveform = torch.from_numpy(audio).unsqueeze(0).float()
+        if audio_sr != self._sample_rate:
+            waveform = torchaudio.functional.resample(
+                waveform, audio_sr, self._sample_rate,
+            )
+
+        cleaned_per_seg: list[str] = []
+        for text in segment_texts:
+            romanized = self._romanize(text)
+            cleaned = self._clean(romanized)
+            cleaned_per_seg.append(cleaned)
+            logger.debug("FA: %r → %r", text[:30], cleaned[:40])
+
+        seg_char_counts = [len(c.replace("|", "")) for c in cleaned_per_seg]
+        nonempty = [c for c in cleaned_per_seg if c]
+        full_cleaned = "|".join(nonempty)
+        audio_dur = audio.size / audio_sr
+
+        if not full_cleaned or sum(seg_char_counts) == 0:
+            logger.warning("FA: romanization produced no alignable characters, using proportional fallback")
+            return self._fallback_proportional(audio_dur, seg_char_counts)
+
+        tokens = self._tokenizer(full_cleaned)
+
+        with torch.inference_mode():
+            emission, _ = self._model(waveform.to(self.device))
+
+        token_spans_grouped = self._aligner(emission[0], tokens)
+        all_spans = [span for group in token_spans_grouped for span in group]
+
+        expected_total = sum(seg_char_counts)
+        if len(all_spans) != expected_total:
+            logger.warning(
+                "FA span count mismatch: expected %d, got %d; using proportional fallback",
+                expected_total, len(all_spans),
+            )
+            return self._fallback_proportional(audio_dur, seg_char_counts)
+
+        ratio = waveform.size(1) / emission.size(1) / self._sample_rate
+
+        result: list[tuple[float, float]] = []
+        span_idx = 0
+        for count in seg_char_counts:
+            if count == 0:
+                prev_end = result[-1][1] if result else 0.0
+                result.append((prev_end, prev_end))
+                continue
+            seg_spans = all_spans[span_idx : span_idx + count]
+            span_idx += count
+            start_sec = seg_spans[0].start * ratio
+            end_sec = seg_spans[-1].end * ratio
+            result.append((start_sec, end_sec))
+
+        logger.info(
+            "FA aligned %d segments, total_spans=%d, audio=%.2fs",
+            len(result), len(all_spans), audio_dur,
+        )
+        return result
+
+
+# ---------------------------------------------------------------------------
 # ステレオ合成ユーティリティ
 # ---------------------------------------------------------------------------
 
@@ -778,6 +932,145 @@ def build_segments(
                 )
         else:
             start = cursor
+        end = start + pcm.size / tts.sample_rate
+        segment = AudioSegment(
+            speaker=turn.speaker,
+            label="SPEAKER_MAIN" if turn.speaker == "moshi" else "SPEAKER_USER",
+            text=turn.text,
+            start_sec=start,
+            end_sec=end,
+            pcm=pcm,
+            event=turn.event,
+            voice_role=turn.voice_role,
+        )
+        segments.append(segment)
+        cursor = max(item.end_sec for item in segments) + gap_sec
+        previous_segment = segment
+
+    return segments, silences
+
+
+def build_segments_whole_utterance(
+    dialogue: Dialogue,
+    tts: Qwen3TTS | MossTTSD,
+    aligner: ForcedAligner,
+    lead_in_sec: float,
+    gap_sec: float,
+    user_speaker_override: str | None = None,
+    other_speaker_override: str | None = None,
+    background_speaker_override: str | None = None,
+) -> tuple[list[AudioSegment], list[dict[str, Any]]]:
+    """
+    Whole-utterance TTS: synthesize all turns per speaker in one call,
+    then use forced alignment to recover per-turn boundaries.
+    Special voice_role turns (other/background) fall back to per-segment TTS.
+    """
+    concat_groups: dict[str, list[int]] = {"user": [], "moshi": []}
+    per_segment_indices: list[int] = []
+
+    for i, turn in enumerate(dialogue.turns):
+        if turn.speaker == "silence":
+            continue
+        if turn.speaker in ("user", "moshi") and not turn.voice_role:
+            concat_groups[turn.speaker].append(i)
+        else:
+            per_segment_indices.append(i)
+
+    pcm_slices: dict[int, np.ndarray] = {}
+
+    for speaker, indices in concat_groups.items():
+        if not indices:
+            continue
+        texts = [dialogue.turns[i].text for i in indices]
+        concat_text = "".join(texts)
+
+        override = user_speaker_override if speaker == "user" else None
+        logger.info(
+            "whole-utterance TTS: speaker=%s, %d turns, %d chars",
+            speaker, len(texts), len(concat_text),
+        )
+        audio = tts.synthesize(concat_text, speaker, speaker_override=override)
+
+        times = aligner.align(audio, tts.sample_rate, texts)
+
+        for idx, (start_sec, end_sec) in zip(indices, times):
+            st = max(0, int(round(start_sec * tts.sample_rate)))
+            en = min(audio.size, int(round(end_sec * tts.sample_rate)))
+            pcm_slices[idx] = audio[st:en].copy()
+
+    for i in per_segment_indices:
+        turn = dialogue.turns[i]
+        override = None
+        if turn.speaker == "user":
+            if turn.voice_role == "background":
+                override = background_speaker_override or user_speaker_override
+            elif turn.voice_role == "other":
+                override = other_speaker_override or user_speaker_override
+            else:
+                override = user_speaker_override
+        pcm_slices[i] = tts.synthesize(
+            turn.text, turn.speaker,
+            instruct=turn.instruct,
+            speaker_override=override,
+        )
+
+    cursor = lead_in_sec
+    segments: list[AudioSegment] = []
+    silences: list[dict[str, Any]] = []
+    previous_segment: AudioSegment | None = None
+
+    for i, turn in enumerate(dialogue.turns):
+        if turn.speaker == "silence":
+            dur = float(turn.duration_sec or 0.0)
+            silences.append({
+                "start_sec": round(cursor, 4),
+                "end_sec": round(cursor + dur, 4),
+                "duration_sec": round(dur, 4),
+                "note": turn.note or "",
+            })
+            cursor += dur
+            previous_segment = None
+            continue
+
+        pcm = pcm_slices.get(i)
+        if pcm is None or pcm.size == 0:
+            logger.warning("whole-utterance: turn %d has no audio, skipping", i)
+            continue
+
+        gain = max(0.0, float(turn.gain))
+        if gain != 1.0:
+            pcm = np.asarray(pcm, dtype=np.float32) * gain
+
+        if turn.timing == "overlap_previous" and previous_segment is not None:
+            offset = max(0.0, float(turn.start_after_previous_start_sec or 0.0))
+            latest_overlap_start = max(
+                previous_segment.start_sec,
+                previous_segment.end_sec - 0.05,
+            )
+            start = min(previous_segment.start_sec + offset, latest_overlap_start)
+            if turn.truncate_previous_after_sec is not None:
+                stop = min(
+                    previous_segment.end_sec,
+                    start + max(0.0, float(turn.truncate_previous_after_sec)),
+                )
+                original_samples = previous_segment.pcm.size
+                keep = max(
+                    1,
+                    int(round((stop - previous_segment.start_sec) * tts.sample_rate)),
+                )
+                previous_segment.text = truncate_alignment_text(
+                    previous_segment.text,
+                    kept_samples=keep,
+                    total_samples=original_samples,
+                )
+                previous_segment.pcm = previous_segment.pcm[:keep]
+                previous_segment.end_sec = (
+                    previous_segment.start_sec
+                    + previous_segment.pcm.size / tts.sample_rate
+                )
+        else:
+            start = cursor
+
         end = start + pcm.size / tts.sample_rate
         segment = AudioSegment(
             speaker=turn.speaker,
@@ -1125,6 +1418,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Automatically overlap short moshi backchannels with the preceding user turn.",
     )
+    parser.add_argument(
+        "--whole-utterance",
+        action="store_true",
+        help=(
+            "話者ごとに全発話を連結して1回のTTSで合成し、MMS_FA Forced Alignment で"
+            "セグメント境界を復元する。韻律の一貫性が向上する。"
+            "uroman または pykakasi が必要（pip install uroman）。"
+        ),
+    )
     args = parser.parse_args()
 
     if args.tts_backend == "qwen3":
@@ -1241,6 +1543,12 @@ def main() -> None:
             instruct_moshi=args.instruct_moshi,
         )
     tts.load()
+
+    fa_aligner: ForcedAligner | None = None
+    if args.whole_utterance:
+        fa_aligner = ForcedAligner(device=args.device)
+        fa_aligner.load()
+
     for idx, tmpl in enumerate(templates, start=1):
         turns: list[DialogueTurn] = []
         for t in tmpl["turns"]:
@@ -1292,12 +1600,20 @@ def main() -> None:
             idx, len(templates), dialogue.id, args.speaker_moshi, user_voice,
         )
         t0 = time.time()
-        segments, silences = build_segments(
-            dialogue, tts, args.lead_in_sec, args.gap_sec,
-            user_speaker_override=user_override,
-            other_speaker_override=other_override,
-            background_speaker_override=background_override,
-        )
+        if args.whole_utterance and fa_aligner is not None:
+            segments, silences = build_segments_whole_utterance(
+                dialogue, tts, fa_aligner, args.lead_in_sec, args.gap_sec,
+                user_speaker_override=user_override,
+                other_speaker_override=other_override,
+                background_speaker_override=background_override,
+            )
+        else:
+            segments, silences = build_segments(
+                dialogue, tts, args.lead_in_sec, args.gap_sec,
+                user_speaker_override=user_override,
+                other_speaker_override=other_override,
+                background_speaker_override=background_override,
+            )
         if not segments or tts.sample_rate == 0:
             # 音声ターンが 0 件（沈黙のみ等）の対話。sample_rate が未確定で
             # ゼロ除算になるため、合成せずスキップする。
@@ -1324,9 +1640,13 @@ def main() -> None:
             "alignments": alignments,
             "metadata": {
                 "mode": (
-                    "moss-ttsd-scripted"
-                    if args.tts_backend == "moss-ttsd"
-                    else "qwen3-tts-scripted"
+                    ("whole-utterance-" + args.tts_backend)
+                    if args.whole_utterance
+                    else (
+                        "moss-ttsd-scripted"
+                        if args.tts_backend == "moss-ttsd"
+                        else "qwen3-tts-scripted"
+                    )
                 ),
                 "sample_rate": tts.sample_rate,
                 "duration_sec": round(duration, 4),

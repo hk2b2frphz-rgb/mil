@@ -26,6 +26,7 @@ dependencies = [
     "scipy",
     "silero-vad",
     "soundfile",
+    "uroman",
 ]
 
 [tool.uv]
