@@ -32,6 +32,7 @@ import argparse
 import json
 import logging
 import math
+import random
 import re
 import time
 from dataclasses import asdict, dataclass
@@ -253,6 +254,34 @@ class AudioSegment:
     pcm: np.ndarray
     event: str | None = None
     voice_role: str | None = None
+
+
+WHOLE_UTTERANCE_STYLE_PRESETS: dict[str, dict[str, str]] = {
+    "counseling_anxious": {
+        "user": "不安そうに、少し声を震わせながら、ためらいがちにゆっくり話して",
+        "moshi": "温かく、相手に寄り添うように、ゆっくり穏やかに話して",
+    },
+    "counseling_sad": {
+        "user": "声を落として、沈んだトーンで静かにゆっくり話して",
+        "moshi": "共感を込めて、相手の気持ちを受け止めるように、ゆっくり静かに話して",
+    },
+    "counseling_hesitant": {
+        "user": "少し言い淀みながら、ためらうようにゆっくり話して",
+        "moshi": "やさしく語りかけるように、ゆっくり丁寧に話して",
+    },
+    "counseling_tearful": {
+        "user": "涙ぐんで声を震わせながら、途切れがちにゆっくり話して",
+        "moshi": "なだめるように、とてもやわらかくゆっくり話して",
+    },
+    "counseling_weary": {
+        "user": "疲れて気だるそうに、力なくゆっくり話して",
+        "moshi": "安心させるように、ゆっくり穏やかに話して",
+    },
+    "counseling_neutral": {
+        "user": "自然で落ち着いたトーンで、ゆっくり話して",
+        "moshi": "穏やかで落ち着いたトーンで、ゆっくり話して",
+    },
+}
 
 
 AIZUCHI_OVERLAP_TEXTS = frozenset({
@@ -762,15 +791,33 @@ class ForcedAligner:
             cursor += seg_dur
         return result
 
+    @staticmethod
+    def expand_to_midpoints(
+        tight: list[tuple[float, float]],
+        audio_dur: float,
+    ) -> list[tuple[float, float]]:
+        """Expand tight speech boundaries to midpoints between adjacent segments."""
+        expanded: list[tuple[float, float]] = []
+        for i, (seg_start, seg_end) in enumerate(tight):
+            if seg_start == seg_end:
+                expanded.append((seg_start, seg_end))
+                continue
+            cut_start = 0.0 if i == 0 else (tight[i - 1][1] + seg_start) / 2
+            cut_end = audio_dur if i == len(tight) - 1 else (seg_end + tight[i + 1][0]) / 2
+            expanded.append((cut_start, cut_end))
+        return expanded
+
     def align(
         self,
         audio: np.ndarray,
         audio_sr: int,
         segment_texts: list[str],
-    ) -> list[tuple[float, float]]:
+    ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
         """
         Given a single long audio produced from concatenated segment_texts,
-        return (start_sec, end_sec) for each segment.
+        return (expanded, tight) boundary pairs for each segment.
+        - expanded: midpoint-expanded boundaries (for slicing with natural pauses)
+        - tight: speech-only boundaries (for internal positioning)
         """
         self.load()
         assert self._model is not None
@@ -796,7 +843,8 @@ class ForcedAligner:
 
         if not full_cleaned or sum(seg_char_counts) == 0:
             logger.warning("FA: romanization produced no alignable characters, using proportional fallback")
-            return self._fallback_proportional(audio_dur, seg_char_counts)
+            fb = self._fallback_proportional(audio_dur, seg_char_counts)
+            return fb, fb
 
         tokens = self._tokenizer(full_cleaned)
 
@@ -812,7 +860,8 @@ class ForcedAligner:
                 "FA span count mismatch: expected %d, got %d; using proportional fallback",
                 expected_total, len(all_spans),
             )
-            return self._fallback_proportional(audio_dur, seg_char_counts)
+            fb = self._fallback_proportional(audio_dur, seg_char_counts)
+            return fb, fb
 
         ratio = waveform.size(1) / emission.size(1) / self._sample_rate
 
@@ -829,28 +878,13 @@ class ForcedAligner:
             end_sec = seg_spans[-1].end * ratio
             tight.append((start_sec, end_sec))
 
-        result: list[tuple[float, float]] = []
-        for i, (seg_start, seg_end) in enumerate(tight):
-            if seg_start == seg_end:
-                result.append((seg_start, seg_end))
-                continue
-            if i == 0:
-                cut_start = 0.0
-            else:
-                prev_end = tight[i - 1][1]
-                cut_start = (prev_end + seg_start) / 2
-            if i == len(tight) - 1:
-                cut_end = audio_dur
-            else:
-                next_start = tight[i + 1][0]
-                cut_end = (seg_end + next_start) / 2
-            result.append((cut_start, cut_end))
+        expanded = self.expand_to_midpoints(tight, audio_dur)
 
         logger.info(
             "FA aligned %d segments, total_spans=%d, audio=%.2fs",
-            len(result), len(all_spans), audio_dur,
+            len(expanded), len(all_spans), audio_dur,
         )
-        return result
+        return expanded, tight
 
 
 # ---------------------------------------------------------------------------
@@ -996,12 +1030,17 @@ def build_segments_whole_utterance(
     user_speaker_override: str | None = None,
     other_speaker_override: str | None = None,
     background_speaker_override: str | None = None,
+    instruct_user: str | None = None,
+    instruct_moshi: str | None = None,
 ) -> tuple[list[AudioSegment], list[dict[str, Any]]]:
     """
-    Whole-utterance TTS: synthesize all turns per speaker in one call,
-    then use forced alignment to recover per-turn boundaries.
-    Special voice_role turns (other/background) fall back to per-segment TTS.
+    Whole-utterance TTS with natural aizuchi overlap.
+
+    Adjacent user turns bridged only by aizuchi are merged into a single
+    continuous segment so the user's speech never stops unnaturally.
+    The aizuchi is overlaid at the internal clause boundary.
     """
+    # --- 1. Classify turns ------------------------------------------------
     concat_groups: dict[str, list[int]] = {"user": [], "moshi": []}
     per_segment_indices: list[int] = []
 
@@ -1013,7 +1052,20 @@ def build_segments_whole_utterance(
         else:
             per_segment_indices.append(i)
 
-    pcm_slices: dict[int, np.ndarray] = {}
+    # --- 2. Identify aizuchi turns ----------------------------------------
+    aizuchi_indices: set[int] = set()
+    for i, turn in enumerate(dialogue.turns):
+        if (
+            turn.timing == "overlap_previous"
+            and turn.speaker == "moshi"
+            and turn.truncate_previous_after_sec is None
+        ):
+            aizuchi_indices.add(i)
+
+    # --- 3. Concatenated TTS + alignment per speaker ----------------------
+    speaker_audio: dict[str, np.ndarray] = {}
+    turn_tight: dict[int, tuple[float, float]] = {}
+    turn_expanded: dict[int, tuple[float, float]] = {}
 
     for speaker, indices in concat_groups.items():
         if not indices:
@@ -1022,23 +1074,105 @@ def build_segments_whole_utterance(
         concat_text = "".join(texts)
 
         override = user_speaker_override if speaker == "user" else None
+        instruct = instruct_user if speaker == "user" else instruct_moshi
         logger.info(
-            "whole-utterance TTS: speaker=%s, %d turns, %d chars",
-            speaker, len(texts), len(concat_text),
+            "whole-utterance TTS: speaker=%s, %d turns, %d chars, instruct=%r",
+            speaker, len(texts), len(concat_text), (instruct or "")[:30],
         )
-        audio = tts.synthesize(concat_text, speaker, speaker_override=override)
+        audio = tts.synthesize(
+            concat_text, speaker, instruct=instruct, speaker_override=override,
+        )
+        speaker_audio[speaker] = audio
 
-        times = aligner.align(audio, tts.sample_rate, texts)
+        expanded, tight = aligner.align(audio, tts.sample_rate, texts)
+        for idx, exp, tgt in zip(indices, expanded, tight):
+            turn_expanded[idx] = exp
+            turn_tight[idx] = tgt
 
-        fade_samples = int(0.01 * tts.sample_rate)  # 10ms fade
-        for idx, (start_sec, end_sec) in zip(indices, times):
-            st = max(0, int(round(start_sec * tts.sample_rate)))
-            en = min(audio.size, int(round(end_sec * tts.sample_rate)))
-            sliced = audio[st:en].copy()
-            if sliced.size > 2 * fade_samples and fade_samples > 0:
-                sliced[:fade_samples] *= np.linspace(0, 1, fade_samples, dtype=np.float32)
-                sliced[-fade_samples:] *= np.linspace(1, 0, fade_samples, dtype=np.float32)
-            pcm_slices[idx] = sliced
+    # --- 4. Build user merge groups (bridged by aizuchi) ------------------
+    user_indices = concat_groups["user"]
+    merge_groups: list[list[int]] = []
+    current_group: list[int] = []
+    for turn_idx in user_indices:
+        if not current_group:
+            current_group = [turn_idx]
+            continue
+        prev_idx = current_group[-1]
+        has_silence = any(
+            dialogue.turns[j].speaker == "silence"
+            for j in range(prev_idx + 1, turn_idx)
+        )
+        bridged_by_aizuchi = (
+            not has_silence
+            and all(
+                j in aizuchi_indices
+                for j in range(prev_idx + 1, turn_idx)
+                if dialogue.turns[j].speaker != "silence"
+            )
+        )
+        if bridged_by_aizuchi:
+            current_group.append(turn_idx)
+        else:
+            merge_groups.append(current_group)
+            current_group = [turn_idx]
+    if current_group:
+        merge_groups.append(current_group)
+
+    # --- 5. Build PCM slices with merge-aware slicing ---------------------
+    pcm_slices: dict[int, np.ndarray] = {}
+    merged_turns: set[int] = set()
+    merged_text: dict[int, str] = {}
+    aizuchi_overlay_sec: dict[int, float] = {}
+
+    fade_samples = int(0.01 * tts.sample_rate)
+    user_audio = speaker_audio.get("user")
+
+    def _apply_fade(pcm: np.ndarray) -> np.ndarray:
+        if pcm.size > 2 * fade_samples and fade_samples > 0:
+            pcm[:fade_samples] *= np.linspace(0, 1, fade_samples, dtype=np.float32)
+            pcm[-fade_samples:] *= np.linspace(1, 0, fade_samples, dtype=np.float32)
+        return pcm
+
+    for group in merge_groups:
+        if user_audio is None:
+            break
+        if len(group) == 1:
+            idx = group[0]
+            s, e = turn_expanded[idx]
+            st = max(0, int(round(s * tts.sample_rate)))
+            en = min(user_audio.size, int(round(e * tts.sample_rate)))
+            pcm_slices[idx] = _apply_fade(user_audio[st:en].copy())
+        else:
+            primary = group[0]
+            first_exp_start = turn_expanded[primary][0]
+            last_exp_end = turn_expanded[group[-1]][1]
+            st = max(0, int(round(first_exp_start * tts.sample_rate)))
+            en = min(user_audio.size, int(round(last_exp_end * tts.sample_rate)))
+            pcm_slices[primary] = _apply_fade(user_audio[st:en].copy())
+            merged_text[primary] = "".join(
+                dialogue.turns[idx].text for idx in group
+            )
+            for secondary in group[1:]:
+                merged_turns.add(secondary)
+            for gi in range(len(group) - 1):
+                curr_idx, next_idx = group[gi], group[gi + 1]
+                _, curr_tight_end = turn_tight[curr_idx]
+                overlap_in_merged = curr_tight_end - first_exp_start
+                for a in range(curr_idx + 1, next_idx):
+                    if a in aizuchi_indices:
+                        aizuchi_overlay_sec[a] = overlap_in_merged
+            logger.info(
+                "merged user turns %s into one segment (%.2fs)",
+                group, (last_exp_end - first_exp_start),
+            )
+
+    moshi_audio = speaker_audio.get("moshi")
+    if moshi_audio is not None:
+        for idx in concat_groups["moshi"]:
+            s, e = turn_expanded[idx]
+            st = max(0, int(round(s * tts.sample_rate)))
+            en = min(moshi_audio.size, int(round(e * tts.sample_rate)))
+            pcm_slices[idx] = _apply_fade(moshi_audio[st:en].copy())
 
     for i in per_segment_indices:
         turn = dialogue.turns[i]
@@ -1056,6 +1190,7 @@ def build_segments_whole_utterance(
             speaker_override=override,
         )
 
+    # --- 6. Timeline placement --------------------------------------------
     cursor = lead_in_sec
     segments: list[AudioSegment] = []
     silences: list[dict[str, Any]] = []
@@ -1074,6 +1209,9 @@ def build_segments_whole_utterance(
             previous_segment = None
             continue
 
+        if i in merged_turns:
+            continue
+
         pcm = pcm_slices.get(i)
         if pcm is None or pcm.size == 0:
             logger.warning("whole-utterance: turn %d has no audio, skipping", i)
@@ -1084,19 +1222,12 @@ def build_segments_whole_utterance(
             pcm = np.asarray(pcm, dtype=np.float32) * gain
 
         if turn.timing == "overlap_previous" and previous_segment is not None:
-            is_natural_backchannel = (
-                turn.speaker == "moshi"
-                and previous_segment.speaker != "moshi"
-                and turn.truncate_previous_after_sec is None
-            )
-            if is_natural_backchannel:
-                valley_offset = _find_energy_valley(
-                    previous_segment.pcm, tts.sample_rate, min_ratio=0.5,
-                )
-                start = previous_segment.start_sec + valley_offset
+            if i in aizuchi_overlay_sec and previous_segment.speaker != "moshi":
+                offset = aizuchi_overlay_sec[i]
+                start = previous_segment.start_sec + offset
                 logger.debug(
-                    "aizuchi %r overlaps at %.2fs into prev (valley)",
-                    turn.text[:10], valley_offset,
+                    "aizuchi %r overlays at %.2fs into merged user segment",
+                    turn.text[:10], offset,
                 )
             else:
                 offset = max(0.0, float(turn.start_after_previous_start_sec or 0.0))
@@ -1129,10 +1260,11 @@ def build_segments_whole_utterance(
             start = cursor
 
         end = start + pcm.size / tts.sample_rate
+        text = merged_text.get(i, turn.text)
         segment = AudioSegment(
             speaker=turn.speaker,
             label="SPEAKER_MAIN" if turn.speaker == "moshi" else "SPEAKER_USER",
-            text=turn.text,
+            text=text,
             start_sec=start,
             end_sec=end,
             pcm=pcm,
@@ -1484,6 +1616,16 @@ def parse_args() -> argparse.Namespace:
             "uroman または pykakasi が必要（pip install uroman）。"
         ),
     )
+    _preset_names = sorted(WHOLE_UTTERANCE_STYLE_PRESETS.keys())
+    parser.add_argument(
+        "--style-preset",
+        default=None,
+        help=(
+            "whole-utterance モード用のスタイルプリセット名。"
+            f"候補: {_preset_names}, random（対話ごとにランダム選択）。"
+            "指定すると --instruct-user/--instruct-moshi より優先される。"
+        ),
+    )
     args = parser.parse_args()
 
     if args.tts_backend == "qwen3":
@@ -1509,6 +1651,15 @@ def parse_args() -> argparse.Namespace:
         args.user_speaker_pool_list = pool
     else:
         args.user_speaker_pool_list = [args.speaker_user]
+
+    if args.style_preset is not None:
+        if args.style_preset != "random" and args.style_preset not in WHOLE_UTTERANCE_STYLE_PRESETS:
+            parser.error(
+                f"--style-preset={args.style_preset!r} は無効です。"
+                f"候補: {sorted(WHOLE_UTTERANCE_STYLE_PRESETS.keys())}, random"
+            )
+        if not args.whole_utterance:
+            parser.error("--style-preset は --whole-utterance と一緒に使ってください")
 
     if args.tts_backend == "moss-ttsd":
         if args.moss_refs_json is not None and not args.moss_refs_json.is_file():
@@ -1658,11 +1809,23 @@ def main() -> None:
         )
         t0 = time.time()
         if args.whole_utterance and fa_aligner is not None:
+            instruct_u = args.instruct_user
+            instruct_m = args.instruct_moshi
+            if args.style_preset is not None:
+                preset_key = args.style_preset
+                if preset_key == "random":
+                    preset_key = random.choice(list(WHOLE_UTTERANCE_STYLE_PRESETS))
+                preset = WHOLE_UTTERANCE_STYLE_PRESETS[preset_key]
+                instruct_u = preset["user"]
+                instruct_m = preset["moshi"]
+                logger.info("style-preset: %s", preset_key)
             segments, silences = build_segments_whole_utterance(
                 dialogue, tts, fa_aligner, args.lead_in_sec, args.gap_sec,
                 user_speaker_override=user_override,
                 other_speaker_override=other_override,
                 background_speaker_override=background_override,
+                instruct_user=instruct_u,
+                instruct_moshi=instruct_m,
             )
         else:
             segments, silences = build_segments(
@@ -1727,6 +1890,7 @@ def main() -> None:
                 "right_channel": "user",
                 "wall_time_sec": round(elapsed, 3),
                 "emotion_control": "off" if args.no_emotion else "on",
+                "style_preset": getattr(args, "style_preset", None),
                 "emotion_map_used": {
                     e: emotion_map[e]
                     for e in {t.emotion for t in dialogue.turns if t.emotion}
