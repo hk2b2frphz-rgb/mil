@@ -1,6 +1,8 @@
 #!/bin/bash
+#PBS -S /bin/bash
 #PBS -N moshi_cont_phase0
-#PBS -l select=1:ncpus=8:ngpus=1:mem=80gb
+#PBS -q xvn_s
+#PBS -l select=1:res=small
 #PBS -l walltime=03:00:00
 #PBS -j oe
 #PBS -o logs/run_moshi_continuation_phase0.log

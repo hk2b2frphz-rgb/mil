@@ -1,6 +1,8 @@
 #!/bin/bash
+#PBS -S /bin/bash
 #PBS -N moshi_backchannel_verify
-#PBS -l select=1:ncpus=8:ngpus=1:mem=64gb
+#PBS -q xvn_s
+#PBS -l select=1:res=small
 #PBS -l walltime=02:00:00
 #PBS -j oe
 #PBS -o logs/verify_moshi_backchannels.log
