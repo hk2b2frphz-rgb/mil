@@ -33,6 +33,17 @@ if [[ -f "$PWD/scripts/setup_proxy.sh" ]]; then
     source "$PWD/scripts/setup_proxy.sh"
 fi
 
+export BATCH_ID="${BATCH_ID:-qwen_dialogues_10000}"
+if ! [[ "$BATCH_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "ERROR: BATCH_ID may contain only letters, digits, dot, underscore, hyphen." >&2
+    exit 1
+fi
+
+mkdir -p experiments/pbs_logs
+JOB_TAG="${PBS_JOBID%%.*}"
+JOB_LOG="experiments/pbs_logs/${BATCH_ID}_${JOB_TAG:-local}.log"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
 command -v uv >/dev/null 2>&1 || {
     echo "ERROR: uv is not available on PATH." >&2
     exit 1
@@ -81,26 +92,18 @@ CPU_ARCH="$(uname -m)"
 VLLM_WHEEL_URL="${VLLM_WHEEL_URL:-https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu129-cp38-abi3-manylinux_2_34_${CPU_ARCH}.whl}"
 VLLM_INSTALL_SPEC="${VLLM_INSTALL_SPEC:-$VLLM_WHEEL_URL}"
 
-export BATCH_ID="${BATCH_ID:-qwen_dialogues_10000}"
 export NUM_CASES="${NUM_CASES:-10000}"
 export SEED="${SEED:-0}"
 export RUN_ID="${BATCH_ID}"
 export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/${BATCH_ID}}"
 export LLM_TEMPERATURE="${LLM_TEMPERATURE:-0.9}"
 
-if ! [[ "$BATCH_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
-    echo "ERROR: BATCH_ID may contain only letters, digits, dot, underscore, hyphen." >&2
-    exit 1
-fi
 if ! [[ "$NUM_CASES" =~ ^[0-9]+$ ]] || [[ "$NUM_CASES" -lt 1 ]]; then
     echo "ERROR: NUM_CASES must be a positive integer: $NUM_CASES" >&2
     exit 1
 fi
 
-mkdir -p "$OUT_ROOT" experiments/pbs_logs
-JOB_TAG="${PBS_JOBID%%.*}"
-JOB_LOG="experiments/pbs_logs/${BATCH_ID}_${JOB_TAG:-local}.log"
-exec > >(tee -a "$JOB_LOG") 2>&1
+mkdir -p "$OUT_ROOT"
 
 echo "===== Qwen 10000-dialogue generation ====="
 echo "job_id:        ${PBS_JOBID:-n/a}"
@@ -118,6 +121,7 @@ echo "vllm_install:  $VLLM_INSTALL_SPEC"
 echo "mm_limit:      $VLLM_LIMIT_MM_PER_PROMPT"
 echo "venv:          $VLLM_ENV_DIR"
 echo "out_root:      $OUT_ROOT"
+echo "job_log:       $JOB_LOG"
 echo "started_at:    $(date -Iseconds)"
 echo "=========================================="
 

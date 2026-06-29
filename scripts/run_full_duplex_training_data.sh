@@ -130,7 +130,7 @@ if has_step enrich; then
         --seed "$SEED"
     )
     # Backchannel density knobs (defaults match the script). Lower SEC_PER_AIZUCHI
-    # = more frequent あいづち; higher AIZUCHI_PROB = more user turns get them.
+    # = more frequent backchannels; higher AIZUCHI_PROB = more user turns get them.
     [[ -n "${SEC_PER_AIZUCHI:-}" ]] && enrich_args+=(--sec-per-aizuchi "$SEC_PER_AIZUCHI")
     [[ -n "${AIZUCHI_PROB:-}" ]] && enrich_args+=(--aizuchi-prob "$AIZUCHI_PROB")
     [[ -n "${MAX_AIZUCHI_PER_TURN:-}" ]] && enrich_args+=(--max-aizuchi-per-turn "$MAX_AIZUCHI_PER_TURN")
