@@ -5,7 +5,6 @@
 #PBS -l select=1:res=small
 #PBS -l walltime=03:00:00
 #PBS -j oe
-#PBS -o logs/run_moshi_continuation_phase0.log
 # ===========================================================================
 # Phase 0: 「変換した llm-jp-moshi-v1 で prompted dialogue continuation が
 #           成立するか」だけを検証する（自前データとは切り離す）。
@@ -32,12 +31,16 @@ else
     cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
 REPO_ROOT="$(pwd)"
-mkdir -p logs
+mkdir -p experiments/pbs_logs
+JOB_TAG="${PBS_JOBID%%.*}"
+JOB_LOG="experiments/pbs_logs/moshi_cont_phase0_${JOB_TAG:-local}.log"
+exec > >(tee -a "$JOB_LOG") 2>&1
 
 echo "===== moshi continuation phase0 ====="
 echo "repo_root: $REPO_ROOT"
 echo "host:      $(hostname)"
 echo "started:   $(date -Iseconds)"
+echo "job_log:   $JOB_LOG"
 
 # --- パラメータ -------------------------------------------------------------
 # nu-dialogue/moshi-finetune は kyutai-labs 版とは別物なので別ディレクトリへ

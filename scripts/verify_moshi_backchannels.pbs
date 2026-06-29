@@ -5,7 +5,6 @@
 #PBS -l select=1:res=small
 #PBS -l walltime=02:00:00
 #PBS -j oe
-#PBS -o logs/verify_moshi_backchannels.log
 # ---------------------------------------------------------------------------
 # 目的（検証 / verification, NOT 本番データ生成）
 #   「LLM-jp-Moshi に会話音声をプロンプトとして与え、その続き（Moshi 側
@@ -39,13 +38,17 @@ else
     cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
 REPO_ROOT="$(pwd)"
+mkdir -p experiments/pbs_logs
+JOB_TAG="${PBS_JOBID%%.*}"
+JOB_LOG="experiments/pbs_logs/moshi_backchannel_verify_${JOB_TAG:-local}.log"
+exec > >(tee -a "$JOB_LOG") 2>&1
 echo "===== moshi backchannel verify ====="
 echo "repo_root: $REPO_ROOT"
 echo "host:      $(hostname)"
 echo "started:   $(date -Iseconds)"
 echo "git:       $(git rev-parse --short HEAD 2>/dev/null || echo n/a) / $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo n/a)"
+echo "job_log:   $JOB_LOG"
 
-mkdir -p logs
 
 # --- パラメータ（環境変数で上書き可） --------------------------------------
 RUN_ID="${RUN_ID:-$(date +%Y-%m-%d_%H%M%S)}"
