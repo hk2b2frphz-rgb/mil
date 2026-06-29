@@ -1,0 +1,57 @@
+# GRPO interactivity alignment config — loneliness counseling domain
+#
+# Reproduces the Kyutai Multi-Faceted Interactivity Alignment paper
+# (arxiv 2606.11167) on 2x A100 80GB.
+#
+# Usage:
+#   uv run python scripts/grpo/train_grpo.py --config configs/grpo_loneliness.yaml
+
+# --- Model ---
+hf_repo: "llm-jp/llm-jp-moshi-v1"
+device: "cuda"
+half: false      # bfloat16 by default; set true for fp16
+
+# --- GRPO core (Kyutai paper, adapted for 2x A100) ---
+lr: 2.0e-7
+epochs: 100
+groups_per_epoch: 8      # paper=32
+group_size: 8            # paper G=16
+kl_beta: 0.01
+clip_epsilon: 0.2
+adam_beta1: 0.9
+adam_beta2: 0.95
+weight_decay: 0.1
+grad_clip: 2.0
+max_context_sec: 30.0    # linearly scheduled 0 → 30s
+
+# --- Reward axes ---
+pause_threshold_sec: 1.0
+backchannel_window_sec: 1.0
+backchannel_max_dur_sec: 1.0
+reward_weights: [1.0, 1.0, 1.0, 1.0, 1.0]
+
+# --- LLM judge (Axis 5) ---
+judge_model: "Qwen/Qwen3.6-27B"
+judge_max_tokens: 8
+judge_temperature: 0.0
+
+# --- Data ---
+prompts_file: "eval_sets/loneliness_support_prompts.txt"
+eval_cases_file: "eval_sets/loneliness_support.jsonl"
+segment_dir: ""          # set to extracted segments dir if available
+
+# --- Inference ---
+silence_sec: 12.0
+max_gen_sec: 45.0
+temp: 0.8
+temp_text: 0.8
+
+# --- Checkpointing ---
+save_dir: "experiments/grpo"
+save_every: 5
+log_every: 1
+
+# --- Hardware ---
+nproc: 2
+seed: 42
+disable_triton: false    # set true for V100
