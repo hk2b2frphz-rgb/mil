@@ -64,6 +64,11 @@ TEMP="${TEMP:-0.8}"
 DEVICE="${DEVICE:-cuda}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
+# Disable Triton / torch.compile — V100 lacks support for many Triton kernels.
+export TORCHINDUCTOR_DISABLE=1
+export NO_TORCH_COMPILE="${NO_TORCH_COMPILE:-1}"
+export TORCH_COMPILE_DISABLE=1
+
 command -v uv >/dev/null 2>&1 || {
     echo "ERROR: uv is not available on PATH." >&2
     exit 1
