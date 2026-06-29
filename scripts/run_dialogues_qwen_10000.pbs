@@ -209,7 +209,7 @@ done
 echo "vLLM is ready and serving $VLLM_MODEL; starting dialogue generation."
 
 # This scaled run mirrors the smoke multi-agent dialogue generator: userAI carries
-# the randomized client state, systemAI is a short casual-listening (雑談傾聴)
+# the randomized client state, systemAI is a short casual-listening
 # responder, judgeAI decides when the exchange is complete, and aizuchiAI inserts
 # short polite moshi backchannels inside longer user turns.
 export STEPS="use_cases,dialogues"

@@ -6,22 +6,22 @@
 #PBS -l walltime=03:00:00
 #PBS -j oe
 # ===========================================================================
-# Phase 0: 「変換した llm-jp-moshi-v1 で prompted dialogue continuation が
-#           成立するか」だけを検証する（自前データとは切り離す）。
+# Phase 0: verify prompted dialogue continuation with a converted
+# llm-jp-moshi-v1 model, separate from our production data path.
 #
-#   背景: ステレオ対話継続の参照実装は nu-dialogue/moshi-finetune の
-#   generate.py。ただし --model_dir は同 repo 独自の MoshiForFinetuning 形式を
-#   要求する。kyutai 形式配布の llm-jp/llm-jp-moshi-v1 を tools.init_moshi_for_ft
-#   で変換 → 同梱の spokenwoz_sample parquet で 10秒→20秒 継続を生成 → decode、
-#   までを通す。これが通れば「v1 で統一」の前提が確定する。
+# Background: nu-dialogue/moshi-finetune provides the stereo dialogue
+# continuation reference path via generate.py. It expects its own
+# MoshiForFinetuning model layout, so this job converts llm-jp-moshi-v1
+# with tools.init_moshi_for_ft, runs the bundled spokenwoz_sample
+# 10s->20s continuation, then decodes generated tokens to stereo wav.
 #
-#   ★確認ポイント: v1 は既に両ストリームを学習済みのため、moshiko 用の
-#   --extend_modules_for_user_stream は付けない想定。付けないと変換/生成が
-#   失敗する場合は EXTEND_USER_STREAM=1 で付与して再試行し、挙動を比較する。
+# Checkpoint: v1 should already support both streams. Do not enable
+# --extend_modules_for_user_stream by default; retry with
+# EXTEND_USER_STREAM=1 only if conversion/generation fails.
 #
-# 実行:  リポジトリルートで  qsub scripts/run_moshi_continuation_phase0.pbs
-#        手元GPU:            bash scripts/run_moshi_continuation_phase0.pbs
-# 注意:  select 行のキュー/資源指定は各サーバに合わせて編集すること。
+# Run from repo root: qsub scripts/run_moshi_continuation_phase0.pbs
+# Local GPU run:       bash scripts/run_moshi_continuation_phase0.pbs
+# Note: queue/select resources follow the local xvn_s small-GPU jobs.
 # ===========================================================================
 set -euo pipefail
 
@@ -42,15 +42,15 @@ echo "host:      $(hostname)"
 echo "started:   $(date -Iseconds)"
 echo "job_log:   $JOB_LOG"
 
-# --- パラメータ -------------------------------------------------------------
-# nu-dialogue/moshi-finetune は kyutai-labs 版とは別物なので別ディレクトリへ
-# clone する（run_pipeline.sh が使う ../moshi-finetune を上書きしないため）。
+# --- Parameters -----------------------------------------------------------
+# Keep nu-dialogue/moshi-finetune in a separate sibling checkout; its
+# run_pipeline.sh assumes ../moshi-finetune unless overridden.
 NU_FT_REPO="${NU_FT_REPO:-$REPO_ROOT/../moshi-finetune-nu}"
 MOSHI_V1_REPO="${MOSHI_V1_REPO:-llm-jp/llm-jp-moshi-v1}"
 MODEL_DTYPE="${MODEL_DTYPE:-float32}"
-EXTEND_USER_STREAM="${EXTEND_USER_STREAM:-0}"   # 1 で --extend_modules_for_user_stream を付与
+EXTEND_USER_STREAM="${EXTEND_USER_STREAM:-0}"   # 1 adds --extend_modules_for_user_stream.
 INIT_DIR="${INIT_DIR:-$NU_FT_REPO/init_models/llmjp_moshi_v1-${MODEL_DTYPE}}"
-# 10秒プロンプト→20秒継続（1 frame = 80ms → 125 / 250）
+# 10s prompt -> 20s generation, with 80ms frames: 125 / 250.
 PROMPT_LENGTH="${PROMPT_LENGTH:-125}"
 GENERATION_LENGTH="${GENERATION_LENGTH:-250}"
 TEMPERATURE="${TEMPERATURE:-0.8}"
@@ -62,7 +62,7 @@ echo "v1_repo:     $MOSHI_V1_REPO"
 echo "init_dir:    $INIT_DIR (dtype=$MODEL_DTYPE, extend_user_stream=$EXTEND_USER_STREAM)"
 echo "prompt/gen:  $PROMPT_LENGTH / $GENERATION_LENGTH frames (80ms each)"
 
-# --- 0. nu-dialogue/moshi-finetune を用意 -----------------------------------
+# --- 0. Prepare nu-dialogue/moshi-finetune -------------------------------
 if [[ ! -d "$NU_FT_REPO" ]]; then
     echo "[0] clone nu-dialogue/moshi-finetune -> $NU_FT_REPO"
     git clone https://github.com/nu-dialogue/moshi-finetune.git "$NU_FT_REPO"
@@ -73,8 +73,8 @@ if [[ ! -d ".venv" ]]; then
     uv sync
 fi
 
-# --- 1. llm-jp-moshi-v1 を MoshiForFinetuning 形式へ変換 ---------------------
-# ★ここが v1 採用の検証本体。失敗したら EXTEND_USER_STREAM を切替えて再試行。
+# --- 1. Convert llm-jp-moshi-v1 to MoshiForFinetuning --------------------
+# This is the core v1 compatibility check; retry with EXTEND_USER_STREAM if needed.
 if [[ ! -f "$INIT_DIR/model.safetensors" ]]; then
     echo "[1] init_moshi_for_ft: $MOSHI_V1_REPO -> $INIT_DIR"
     EXTEND_FLAG=()
@@ -91,12 +91,12 @@ else
     echo "[1] init_dir already exists, skip conversion: $INIT_DIR"
 fi
 
-# --- 2. 同梱 spokenwoz_sample の parquet で継続生成 --------------------------
-# 自前データを使わず、まず変換済み v1 で generate.py が回ることだけ確認する。
+# --- 2. Run continuation on bundled spokenwoz_sample parquet -------------
+# Use bundled sample data first to confirm converted v1 can run generate.py.
 EVAL_GLOB="${EVAL_GLOB:-processed_data/spokenwoz_sample/test-*.parquet}"
 if ! ls $EVAL_GLOB >/dev/null 2>&1; then
-    echo "[2] sample parquet が無いので前処理で作成 (tokenize_audio/text -> prepare_dataset)"
-    # 同梱 raw sample から parquet を作る（README の前処理手順）。
+    echo "[2] sample parquet missing; build it first (tokenize_audio/text -> prepare_dataset)"
+    # Build parquet from the bundled raw sample, following the README preprocessing path.
     uv run -m tools.tokenize_audio \
         --audio_dir data/spokenwoz_sample/audio \
         --output_dir data/spokenwoz_sample/tokenized_audio
@@ -121,7 +121,7 @@ uv run accelerate launch \
         --generation_length "$GENERATION_LENGTH" \
         --temperature "$TEMPERATURE"
 
-# --- 4. トークン -> ステレオwav 復元（左=system, 右=user） ------------------
+# --- 4. Decode generated tokens to stereo wav (left=system, right=user) ---
 echo "[4] decode_tokens -> stereo wav"
 uv run -m tools.decode_tokens \
     --tokens_dir "$OUT_DIR/generated_tokens" \
@@ -131,5 +131,5 @@ echo
 echo "===== phase0 done ====="
 echo "init_model: $INIT_DIR"
 echo "tokens:     $OUT_DIR/generated_tokens"
-echo "wavs:       $OUT_DIR/generated_wavs  (継続音声を耳で確認)"
+echo "wavs:       $OUT_DIR/generated_wavs  (manual listening check)"
 echo "ended:      $(date -Iseconds)"
