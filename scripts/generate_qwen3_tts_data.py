@@ -816,18 +816,35 @@ class ForcedAligner:
 
         ratio = waveform.size(1) / emission.size(1) / self._sample_rate
 
-        result: list[tuple[float, float]] = []
+        tight: list[tuple[float, float]] = []
         span_idx = 0
         for count in seg_char_counts:
             if count == 0:
-                prev_end = result[-1][1] if result else 0.0
-                result.append((prev_end, prev_end))
+                prev_end = tight[-1][1] if tight else 0.0
+                tight.append((prev_end, prev_end))
                 continue
             seg_spans = all_spans[span_idx : span_idx + count]
             span_idx += count
             start_sec = seg_spans[0].start * ratio
             end_sec = seg_spans[-1].end * ratio
-            result.append((start_sec, end_sec))
+            tight.append((start_sec, end_sec))
+
+        result: list[tuple[float, float]] = []
+        for i, (seg_start, seg_end) in enumerate(tight):
+            if seg_start == seg_end:
+                result.append((seg_start, seg_end))
+                continue
+            if i == 0:
+                cut_start = 0.0
+            else:
+                prev_end = tight[i - 1][1]
+                cut_start = (prev_end + seg_start) / 2
+            if i == len(tight) - 1:
+                cut_end = audio_dur
+            else:
+                next_start = tight[i + 1][0]
+                cut_end = (seg_end + next_start) / 2
+            result.append((cut_start, cut_end))
 
         logger.info(
             "FA aligned %d segments, total_spans=%d, audio=%.2fs",
@@ -989,10 +1006,15 @@ def build_segments_whole_utterance(
 
         times = aligner.align(audio, tts.sample_rate, texts)
 
+        fade_samples = int(0.01 * tts.sample_rate)  # 10ms fade
         for idx, (start_sec, end_sec) in zip(indices, times):
             st = max(0, int(round(start_sec * tts.sample_rate)))
             en = min(audio.size, int(round(end_sec * tts.sample_rate)))
-            pcm_slices[idx] = audio[st:en].copy()
+            sliced = audio[st:en].copy()
+            if sliced.size > 2 * fade_samples and fade_samples > 0:
+                sliced[:fade_samples] *= np.linspace(0, 1, fade_samples, dtype=np.float32)
+                sliced[-fade_samples:] *= np.linspace(1, 0, fade_samples, dtype=np.float32)
+            pcm_slices[idx] = sliced
 
     for i in per_segment_indices:
         turn = dialogue.turns[i]
