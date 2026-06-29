@@ -11,7 +11,7 @@
 #   qsub -V scripts/run_qwen_tts_smoke.pbs
 #
 # Defaults to:
-#   data/runs/qwen_dialogue_1000/llm_dialogues/dialogues.jsonl
+#   data/runs/qwen_dialogues_1000/llm_dialogues/dialogues.jsonl
 #
 # Useful overrides:
 #   SOURCE_BATCH_ID=qwen_dialogues_1000 qsub -V scripts/run_qwen_tts_smoke.pbs
@@ -22,7 +22,7 @@ set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 source scripts/setup_proxy.sh
 
-export SOURCE_BATCH_ID="${SOURCE_BATCH_ID:-qwen_dialogue_1000}"
+export SOURCE_BATCH_ID="${SOURCE_BATCH_ID:-qwen_dialogues_1000}"
 export BATCH_ID="${BATCH_ID:-${SOURCE_BATCH_ID}_tts}"
 export RUN_ID="$BATCH_ID"
 export DIALOGUES_JSONL="${DIALOGUES_JSONL:-$PWD/data/runs/${SOURCE_BATCH_ID}/llm_dialogues/dialogues.jsonl}"
