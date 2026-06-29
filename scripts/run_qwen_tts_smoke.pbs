@@ -7,21 +7,40 @@
 #PBS -j oe
 #PBS -V
 
-# Qwen3-TTS smoke generation from the Qwen dialogue smoke output.
+# Qwen3-TTS smoke generation from a generated Qwen dialogue run.
 #   qsub -V scripts/run_qwen_tts_smoke.pbs
+#
+# Defaults to:
+#   data/runs/qwen_dialogue_1000/llm_dialogues/dialogues.jsonl
+#
+# Useful overrides:
+#   SOURCE_BATCH_ID=qwen_dialogues_1000 qsub -V scripts/run_qwen_tts_smoke.pbs
+#   NUM_DIALOGUES=all qsub -V scripts/run_qwen_tts_smoke.pbs
 
 set -euo pipefail
 
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 source scripts/setup_proxy.sh
 
-export BATCH_ID="${BATCH_ID:-qwen_tts_smoke}"
+export SOURCE_BATCH_ID="${SOURCE_BATCH_ID:-qwen_dialogue_1000}"
+export BATCH_ID="${BATCH_ID:-${SOURCE_BATCH_ID}_tts}"
 export RUN_ID="$BATCH_ID"
-export DIALOGUES_JSONL="$PWD/data/runs/qwen_dialogue_smoke/llm_dialogues/dialogues.jsonl"
-export OUT_ROOT="$PWD/data/runs/qwen_tts_smoke"
+export DIALOGUES_JSONL="${DIALOGUES_JSONL:-$PWD/data/runs/${SOURCE_BATCH_ID}/llm_dialogues/dialogues.jsonl}"
+export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/$BATCH_ID}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export TTS_DTYPE="${TTS_DTYPE:-float16}"
 export TTS_DEVICE="${TTS_DEVICE:-cuda}"
+export NUM_DIALOGUES="${NUM_DIALOGUES:-3}"
+export LEAD_IN_SEC="${LEAD_IN_SEC:-0.3}"
+export GAP_SEC="${GAP_SEC:-0.2}"
+export EMOTION_MAP_FILE="${EMOTION_MAP_FILE:-$PWD/configs/emotion_presets_mild.json}"
+
+if [[ "$NUM_DIALOGUES" != "all" ]]; then
+    if ! [[ "$NUM_DIALOGUES" =~ ^[0-9]+$ ]] || [[ "$NUM_DIALOGUES" -lt 1 ]]; then
+        echo "ERROR: NUM_DIALOGUES must be a positive integer or 'all': $NUM_DIALOGUES" >&2
+        exit 1
+    fi
+fi
 
 mkdir -p experiments/pbs_logs
 JOB_LOG="experiments/pbs_logs/${BATCH_ID}.log"
@@ -30,11 +49,15 @@ exec > >(tee -a "$JOB_LOG") 2>&1
 echo "===== Qwen3-TTS smoke ====="
 echo "job_id:       ${PBS_JOBID:-n/a}"
 echo "host:         $(hostname)"
+echo "source_batch: $SOURCE_BATCH_ID"
 echo "out_root:     $OUT_ROOT"
 echo "dialogues:    $DIALOGUES_JSONL"
+echo "num_dialogues:$NUM_DIALOGUES"
+echo "emotion_map:  ${EMOTION_MAP_FILE:-n/a}"
 echo "cuda_visible: $CUDA_VISIBLE_DEVICES"
 echo "dtype:        $TTS_DTYPE"
 echo "device:       $TTS_DEVICE"
+echo "timing:       lead_in=$LEAD_IN_SEC gap=$GAP_SEC"
 echo "started_at:   $(date -Iseconds)"
 echo "==========================="
 
@@ -51,16 +74,30 @@ if [[ ! -s "$DIALOGUES_JSONL" ]]; then
     echo "ERROR: dialogues JSONL was not found or is empty: $DIALOGUES_JSONL" >&2
     exit 1
 fi
+if [[ -n "$EMOTION_MAP_FILE" && ! -f "$EMOTION_MAP_FILE" ]]; then
+    echo "ERROR: EMOTION_MAP_FILE does not exist: $EMOTION_MAP_FILE" >&2
+    exit 1
+fi
 
 echo "===== step 1/1: Qwen3-TTS dialogue audio ====="
-uv run python scripts/generate_qwen3_tts_data.py \
-    --tts-backend qwen3 \
-    --dialogues-jsonl "$DIALOGUES_JSONL" \
-    --num-dialogues 3 \
-    --auto-overlap-aizuchi \
-    --out-dir "$OUT_ROOT" \
-    --device "$TTS_DEVICE" \
+tts_args=(
+    uv run python scripts/generate_qwen3_tts_data.py
+    --tts-backend qwen3
+    --dialogues-jsonl "$DIALOGUES_JSONL"
+    --auto-overlap-aizuchi
+    --out-dir "$OUT_ROOT"
+    --device "$TTS_DEVICE"
     --dtype "$TTS_DTYPE"
+    --lead-in-sec "$LEAD_IN_SEC"
+    --gap-sec "$GAP_SEC"
+)
+if [[ "$NUM_DIALOGUES" != "all" ]]; then
+    tts_args+=(--num-dialogues "$NUM_DIALOGUES")
+fi
+if [[ -n "$EMOTION_MAP_FILE" ]]; then
+    tts_args+=(--emotion-map-file "$EMOTION_MAP_FILE")
+fi
+"${tts_args[@]}"
 
 WAV_GLOB="$OUT_ROOT/data_stereo/*.wav"
 if ! compgen -G "$WAV_GLOB" >/dev/null; then
@@ -69,12 +106,15 @@ if ! compgen -G "$WAV_GLOB" >/dev/null; then
 fi
 
 WAV_COUNT="$(compgen -G "$WAV_GLOB" | wc -l | tr -d ' ')"
-if [[ "$WAV_COUNT" != "3" ]]; then
-    echo "ERROR: expected 3 stereo WAVs in $OUT_ROOT/data_stereo, found $WAV_COUNT" >&2
-    compgen -G "$WAV_GLOB" | sort >&2
-    exit 1
+if [[ "$NUM_DIALOGUES" != "all" ]]; then
+    if [[ "$WAV_COUNT" != "$NUM_DIALOGUES" ]]; then
+        echo "ERROR: expected $NUM_DIALOGUES stereo WAVs in $OUT_ROOT/data_stereo, found $WAV_COUNT" >&2
+        compgen -G "$WAV_GLOB" | sort >&2
+        exit 1
+    fi
 fi
 
 echo "stereo_wav_dir: $OUT_ROOT/data_stereo"
 echo "stereo_wavs:    $WAV_COUNT"
+echo "manifest:       $OUT_ROOT/synthetic_moshi_train.jsonl"
 echo "finished_at:    $(date -Iseconds)"
