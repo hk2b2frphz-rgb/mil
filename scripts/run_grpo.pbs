@@ -59,7 +59,41 @@ command -v uv >/dev/null 2>&1 || {
     exit 1
 }
 
-uv run python scripts/grpo/train_grpo.py --config "$CONFIG"
+DS_CONFIG="${DS_CONFIG:-configs/deepspeed_grpo_zero3.json}"
+NUM_PROC="${NUM_PROC:-2}"
+SEGMENT_DIR="${SEGMENT_DIR:-}"
+
+# Auto-detect segment_dir from common batch locations
+if [[ -z "$SEGMENT_DIR" ]]; then
+    for candidate in \
+        data/runs/qwen_dialogues_1000/grpo_segments \
+        data/runs/qwen_dialogues_10000/grpo_segments \
+        data/runs/gptoss_dialogues_1000/grpo_segments; do
+        if [[ -d "$candidate" ]]; then
+            SEGMENT_DIR="$candidate"
+            break
+        fi
+    done
+fi
+if [[ -z "$SEGMENT_DIR" ]]; then
+    echo "ERROR: no segment_dir found. Run segment extraction first:" >&2
+    echo "  qsub scripts/run_extract_grpo_segments.pbs" >&2
+    exit 1
+fi
+
+echo "deepspeed:   $DS_CONFIG"
+echo "num_proc:    $NUM_PROC"
+echo "segment_dir: $SEGMENT_DIR"
+
+# Inject segment_dir into config at runtime via env var override.
+# The YAML config may have segment_dir="" — override it here.
+export GRPO_SEGMENT_DIR="$SEGMENT_DIR"
+
+uv run accelerate launch \
+    --num_processes "$NUM_PROC" \
+    --use_deepspeed \
+    --deepspeed_config_file "$DS_CONFIG" \
+    scripts/grpo/train_grpo.py --config "$CONFIG"
 
 echo "===== done ====="
 echo "ended: $(date -Iseconds)"

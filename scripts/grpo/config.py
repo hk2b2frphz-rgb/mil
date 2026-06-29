@@ -25,8 +25,8 @@ class GRPOConfig:
     # --- GRPO core (Kyutai paper Table 1) ---
     lr: float = 2e-7
     epochs: int = 100
-    groups_per_epoch: int = 8          # paper=32, reduced for 2xA100
-    group_size: int = 8                # paper G=16, reduced for 2xA100
+    segments_per_epoch: int = 8          # paper=32, reduced for 2xA100
+    group_size: int = 8                  # paper G=16, reduced for 2xA100
     kl_beta: float = 0.01
     clip_epsilon: float = 0.2
     adam_beta1: float = 0.9
@@ -34,35 +34,36 @@ class GRPOConfig:
     weight_decay: float = 0.1
     grad_clip: float = 2.0
 
-    # Context length scheduling: linear 0 → max_context_sec over all epochs.
+    # Context length scheduling: 0 → max_context_sec over epochs (Sec 3.3).
+    # Context = recording preceding the segment, prepended to input.
     max_context_sec: float = 30.0
+    context_prob: float = 0.5            # prob of prepending context
+
+    # --- Segment data ---
+    segment_dir: str = ""                # dir with {pause,turn_taking,backchannel,interruption}_segments.jsonl
 
     # --- Reward axes ---
     pause_threshold_sec: float = 1.0
     backchannel_window_sec: float = 1.0
     backchannel_max_dur_sec: float = 1.0
 
-    # LLM judge
+    # LLM judge (applied to turn_taking and interruption only, per paper)
     judge_model: str = "Qwen/Qwen3.6-27B"
-    judge_max_tokens: int = 256
+    judge_max_tokens: int = 8
     judge_temperature: float = 0.0
 
-    # Reward decoupling normalization weights (axis order: pause, turn,
-    # backchannel, interruption, judge). Safety weight is folded into judge.
+    # Reward weights per axis [pause, turn, backchannel, interruption].
+    # LLM judge weight is separate (added to turn_taking and interruption).
     reward_weights: list[float] = dataclasses.field(
-        default_factory=lambda: [1.0, 1.0, 1.0, 1.0, 1.0],
+        default_factory=lambda: [1.0, 1.0, 1.0, 1.0],
     )
-
-    # --- Data ---
-    segment_dir: str = ""
-    prompts_file: str = "eval_sets/loneliness_support_prompts.txt"
-    eval_cases_file: str = "eval_sets/loneliness_support.jsonl"
+    judge_weight: float = 1.0
 
     # --- Inference ---
-    silence_sec: float = 12.0
-    max_gen_sec: float = 45.0
-    temp: float = 0.8
-    temp_text: float = 0.8
+    temp: float = 0.7                    # paper: 0.7 for text
+    temp_text: float = 0.7
+    temp_audio: float = 0.8             # paper: 0.8 for audio
+    top_k_audio: int = 250              # paper: 250
 
     # --- Checkpointing ---
     save_dir: str = "experiments/grpo"
@@ -71,8 +72,15 @@ class GRPOConfig:
 
     # --- Hardware ---
     nproc: int = 2
-    seed: int = 0
+    seed: int = 42
     disable_triton: bool = False
+
+    # --- Legacy (kept for backward compat, not used in segment-based training) ---
+    prompts_file: str = "eval_sets/loneliness_support_prompts.txt"
+    eval_cases_file: str = "eval_sets/loneliness_support.jsonl"
+    silence_sec: float = 12.0
+    max_gen_sec: float = 45.0
+    groups_per_epoch: int = 8
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> GRPOConfig:

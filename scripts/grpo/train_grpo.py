@@ -2,27 +2,31 @@
 """GRPO interactivity alignment training loop for Moshi.
 
 Reproduces the Kyutai Multi-Faceted Interactivity Alignment paper
-(arxiv 2606.11167), adapted for 2x A100 80GB and the Japanese
-loneliness/isolation counseling domain.
+(arxiv 2606.11167) using segment-based training:
 
-Usage (from repo root):
-    uv run python scripts/grpo/train_grpo.py --config configs/grpo_loneliness.yaml
+  1. Load per-axis segment datasets (D_pause, D_turn, D_bc, D_int)
+  2. Each epoch: sample segments, optionally prepend context audio
+  3. Feed user-side audio to Moshi → generate G rollouts
+  4. Apply VAD to generated audio → compute axis-specific rewards
+  5. GRPO policy update (text tokens only)
+
+Launched via accelerate + DeepSpeed ZeRO3:
+    accelerate launch --num_processes 2 --use_deepspeed \
+        --deepspeed_config_file configs/deepspeed_grpo_zero3.json \
+        scripts/grpo/train_grpo.py --config configs/grpo_loneliness.yaml
 """
 from __future__ import annotations
 
 import argparse
-import copy
-import gc
 import inspect
 import json
 import logging
-import math
 import os
 import random
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -47,9 +51,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+AXES = ["pause", "turn_taking", "backchannel", "interruption"]
+SAMPLE_RATE = 24_000
 
-# ── Moshi model helpers (adapted from response_recorder.py) ─────────
 
+# ── Seed ─────────────────────────────────────────────────────────────
 
 def _seed_all(seed: int) -> None:
     torch.manual_seed(seed)
@@ -57,6 +63,72 @@ def _seed_all(seed: int) -> None:
     np.random.seed(seed)
     random.seed(seed)
 
+
+# ── Segment dataset loading ─────────────────────────────────────────
+
+def load_segment_datasets(
+    segment_dir: str | Path,
+) -> dict[str, list[dict[str, Any]]]:
+    """Load per-axis segment JSONL files produced by segment_extractor.py."""
+    seg_dir = Path(segment_dir)
+    datasets: dict[str, list[dict[str, Any]]] = {}
+    for axis in AXES:
+        path = seg_dir / f"{axis}_segments.jsonl"
+        items: list[dict[str, Any]] = []
+        if path.is_file():
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    items.append(json.loads(line.strip()))
+        datasets[axis] = items
+    return datasets
+
+
+def load_segment_audio(
+    segment: dict[str, Any],
+    context_sec: float,
+    context_prob: float,
+    rng: random.Random,
+) -> tuple[np.ndarray, float]:
+    """Load user-side audio for a segment, optionally with context.
+
+    Returns (user_pcm, segment_offset_sec) where segment_offset_sec
+    is the time offset where the actual segment starts within the
+    returned audio (= context length, 0 if no context).
+    """
+    import soundfile as sf
+
+    wav_path = segment["wav_path"]
+    seg_start = segment["segment_start_sec"]
+    seg_end = segment["segment_end_sec"]
+
+    data, sr = sf.read(wav_path, dtype="float32", always_2d=True)
+    if sr != SAMPLE_RATE:
+        import torchaudio
+        t = torch.from_numpy(data.T)
+        t = torchaudio.functional.resample(t, sr, SAMPLE_RATE)
+        data = t.numpy().T
+        sr = SAMPLE_RATE
+
+    user_channel = data[:, 1]  # channel 1 = user (X)
+
+    seg_start_sample = int(seg_start * sr)
+    seg_end_sample = int(seg_end * sr)
+
+    # Context: recording immediately preceding the segment (Sec 3.3)
+    ctx_len_sec = 0.0
+    if context_sec > 0 and rng.random() < context_prob:
+        ctx_len_sec = rng.uniform(0, context_sec)
+        ctx_start_sample = max(0, seg_start_sample - int(ctx_len_sec * sr))
+        actual_ctx_sec = (seg_start_sample - ctx_start_sample) / sr
+    else:
+        ctx_start_sample = seg_start_sample
+        actual_ctx_sec = 0.0
+
+    pcm = user_channel[ctx_start_sample:seg_end_sample]
+    return pcm.copy(), actual_ctx_sec
+
+
+# ── Moshi model helpers ─────────────────────────────────────────────
 
 def _getattr_chain(obj: Any, name: str, default: Any) -> Any:
     try:
@@ -75,18 +147,14 @@ def _try_setattr(obj: Any, name: str, value: Any) -> None:
         pass
 
 
-def load_moshi(cfg: GRPOConfig):
-    """Load Moshi models (mimi, tokenizer, lm_model) for training."""
+def load_moshi_for_grpo(cfg: GRPOConfig):
+    """Load Moshi to CPU (accelerator.prepare moves it to devices)."""
     from moshi.models import loaders
-
-    dtype = torch.float16 if cfg.half else torch.bfloat16
     checkpoint_info = loaders.CheckpointInfo.from_hf_repo(cfg.hf_repo)
-
-    mimi = checkpoint_info.get_mimi(device=cfg.device)
+    mimi = checkpoint_info.get_mimi(device="cpu")
     mimi.eval()
     text_tokenizer = checkpoint_info.get_text_tokenizer()
-    lm_model = checkpoint_info.get_moshi(device=cfg.device, dtype=dtype)
-
+    lm_model = checkpoint_info.get_moshi(device="cpu", dtype=torch.float32)
     return mimi, text_tokenizer, lm_model, checkpoint_info
 
 
@@ -94,7 +162,6 @@ def _ensure_lm_gen(lm_model, checkpoint_info, cfg: GRPOConfig):
     """Wrap lm_model in LMGen for streaming inference."""
     if hasattr(lm_model, "step") and hasattr(lm_model, "streaming"):
         return lm_model
-
     try:
         from moshi.models.lm import LMGen
     except ImportError:
@@ -108,7 +175,6 @@ def _ensure_lm_gen(lm_model, checkpoint_info, cfg: GRPOConfig):
         value = _getattr_chain(lm_gen_cfg, name, None)
         if value is not None and name in supported:
             kwargs[name] = value
-
     lm_gen = LMGen(lm_model, **kwargs)
     _try_setattr(lm_gen, "temp", cfg.temp)
     _try_setattr(lm_gen, "temp_text", cfg.temp_text)
@@ -143,44 +209,44 @@ def _decode_text_piece(text_tokenizer: Any, text_id: int) -> str | None:
     return None
 
 
-# ── Moshi inference for GRPO rollouts ───────────────────────────────
-
+# ── Rollout generation ──────────────────────────────────────────────
 
 def generate_rollout(
-    prompt_pcm: np.ndarray,
+    user_pcm: np.ndarray,
     seed: int,
     lm_gen: Any,
     mimi: Any,
     text_tokenizer: Any,
-    device: str,
-    silence_sec: float,
-    max_gen_sec: float,
+    device: torch.device,
+    context_offset_sec: float,
 ) -> dict[str, Any]:
-    """Run one Moshi inference rollout, collecting text events and log probs."""
+    """Run Moshi inference on user audio, collect generated audio + text.
+
+    The user_pcm is fed as Speaker X's input stream. Moshi generates
+    Speaker Y's response in full-duplex mode.
+
+    context_offset_sec: time offset where the actual segment starts
+    (the preceding portion is context, masked from reward computation).
+    """
     sample_rate = int(mimi.sample_rate)
     frame_rate = float(mimi.frame_rate)
     frame_size = int(sample_rate / frame_rate)
-
-    silence_samples = int(silence_sec * sample_rate)
-    full_pcm = np.concatenate([prompt_pcm, np.zeros(silence_samples, dtype=np.float32)])
-
-    input_steps = (len(prompt_pcm) + frame_size - 1) // frame_size
-    max_steps = int(max_gen_sec * frame_rate)
-    total_frames = (len(full_pcm) + frame_size - 1) // frame_size
-    n_steps = min(total_frames, max_steps)
+    n_steps = (len(user_pcm) + frame_size - 1) // frame_size
 
     _seed_all(seed)
 
     text_events: list[dict[str, Any]] = []
     text_token_ids: list[int] = []
     text_log_probs: list[float] = []
+    audio_codes_in: list[torch.Tensor] = []
+    audio_codes_out: list[torch.Tensor] = []
 
     with torch.no_grad():
         with lm_gen.streaming(1):
             with mimi.streaming(1):
                 for step in range(n_steps):
                     start = step * frame_size
-                    chunk_np = full_pcm[start: start + frame_size]
+                    chunk_np = user_pcm[start: start + frame_size]
                     if len(chunk_np) < frame_size:
                         chunk_np = np.pad(chunk_np, (0, frame_size - len(chunk_np)))
 
@@ -195,22 +261,21 @@ def generate_rollout(
                     codes = mimi.encode(chunk)
                     if codes is None:
                         continue
+                    audio_codes_in.append(codes.cpu())
 
                     out = lm_gen.step(codes)
                     if out is None:
                         continue
 
+                    audio_codes_out.append(out.cpu())
                     text_id = int(out[0, 0, 0].item())
                     piece = _decode_text_piece(text_tokenizer, text_id)
 
-                    # Collect text token log prob (policy ratio on TEXT ONLY)
                     if hasattr(lm_gen, "last_text_logits"):
                         logits = lm_gen.last_text_logits
                         if logits is not None:
                             log_prob = torch.log_softmax(logits, dim=-1)
-                            text_log_probs.append(
-                                log_prob[0, text_id].item()
-                            )
+                            text_log_probs.append(log_prob[0, text_id].item())
                             text_token_ids.append(text_id)
 
                     if piece is not None:
@@ -220,91 +285,186 @@ def generate_rollout(
                             "piece": piece,
                         })
 
+    # Decode generated audio codes → PCM for VAD-based reward
+    generated_pcm = _decode_audio_codes(audio_codes_out, mimi, device)
+
     return {
         "text_events": text_events,
         "text_token_ids": text_token_ids,
         "text_log_probs": text_log_probs,
-        "input_steps": input_steps,
-        "total_steps": n_steps,
-        "input_duration_sec": len(prompt_pcm) / sample_rate,
+        "audio_codes_in": audio_codes_in,
+        "generated_pcm": generated_pcm,
+        "context_offset_sec": context_offset_sec,
+        "total_duration_sec": n_steps / frame_rate,
         "transcript": "".join(e["piece"] for e in text_events).strip(),
     }
 
 
-# ── VAD utility ─────────────────────────────────────────────────────
+def _decode_audio_codes(
+    audio_codes_out: list[torch.Tensor],
+    mimi: Any,
+    device: torch.device,
+) -> np.ndarray:
+    """Decode Moshi's generated audio tokens back to PCM via mimi."""
+    if not audio_codes_out:
+        return np.zeros(0, dtype=np.float32)
 
-def _simple_energy_vad(
-    pcm: np.ndarray,
-    sr: int,
-    frame_ms: int = 30,
-    threshold: float = 0.01,
+    pcm_chunks = []
+    with torch.no_grad():
+        with mimi.streaming(1):
+            for codes in audio_codes_out:
+                # Extract audio codebook tokens (skip text token at index 0)
+                audio_tokens = codes[:, 1:, :].to(device)
+                try:
+                    pcm = mimi.decode(audio_tokens)
+                    if pcm is not None:
+                        pcm_chunks.append(pcm.cpu().squeeze().numpy())
+                except Exception:
+                    pass
+
+    if not pcm_chunks:
+        return np.zeros(0, dtype=np.float32)
+    return np.concatenate(pcm_chunks)
+
+
+# ── VAD on generated audio ──────────────────────────────────────────
+
+def _vad_on_generated(
+    generated_pcm: np.ndarray,
+    sr: int = SAMPLE_RATE,
 ) -> list[tuple[float, float]]:
-    """Simple energy-based VAD for Moshi output."""
-    frame_size = sr * frame_ms // 1000
-    segments: list[tuple[float, float]] = []
-    in_speech = False
-    start = 0.0
-
-    for i in range(0, len(pcm) - frame_size, frame_size):
-        energy = np.sqrt(np.mean(pcm[i:i + frame_size] ** 2))
-        t = i / sr
-        if energy > threshold and not in_speech:
-            in_speech = True
-            start = t
-        elif energy <= threshold and in_speech:
-            in_speech = False
-            segments.append((start, t))
-
-    if in_speech:
-        segments.append((start, len(pcm) / sr))
-    return segments
+    """Run Silero VAD on Moshi's generated audio output."""
+    if len(generated_pcm) < sr * 0.1:
+        return []
+    from scripts.grpo.segment_extractor import _run_vad
+    utts = _run_vad(generated_pcm, sr)
+    return [(u["start"], u["end"]) for u in utts]
 
 
-# ── Prompt loading ──────────────────────────────────────────────────
+# ── Axis-specific reward computation ────────────────────────────────
 
-def load_prompts(cfg: GRPOConfig) -> list[str]:
-    """Load text prompts from file."""
-    path = REPO_ROOT / cfg.prompts_file
-    if not path.is_file():
-        raise FileNotFoundError(f"Prompts file not found: {path}")
-    lines = path.read_text(encoding="utf-8").strip().splitlines()
-    return [line.strip() for line in lines if line.strip()]
+def compute_segment_reward(
+    rollout: dict[str, Any],
+    segment: dict[str, Any],
+    cfg: GRPOConfig,
+) -> float:
+    """Compute the deterministic reward for a rollout based on its axis."""
+    axis = segment["axis"]
+    ctx_offset = rollout["context_offset_sec"]
+    moshi_vad = _vad_on_generated(rollout["generated_pcm"])
+
+    # Shift segment metadata times relative to context offset
+    if axis == "pause":
+        pauses = segment.get("internal_pauses", [])
+        if not pauses:
+            return 0.0
+        total_r = 0.0
+        for p in pauses:
+            p_start = p["start"] - segment["segment_start_sec"] + ctx_offset
+            p_end = p["end"] - segment["segment_start_sec"] + ctx_offset
+            total_r += reward_pause_handling(
+                moshi_vad, p_start, p_end, cfg.pause_threshold_sec,
+            )
+        return total_r / len(pauses)
+
+    elif axis == "turn_taking":
+        user_end = (
+            segment["user_turn_end_sec"]
+            - segment["segment_start_sec"]
+            + ctx_offset
+        )
+        return reward_turn_taking(moshi_vad, user_end)
+
+    elif axis == "backchannel":
+        gt_times_abs = segment.get("gt_backchannel_times", [])
+        gt_times = [
+            t - segment["segment_start_sec"] + ctx_offset
+            for t in gt_times_abs
+        ]
+        return reward_backchannel_f1(
+            rollout["text_events"],
+            gt_times,
+            cfg.backchannel_window_sec,
+            cfg.backchannel_max_dur_sec,
+        )
+
+    elif axis == "interruption":
+        int_start = (
+            segment["interruption_start_sec"]
+            - segment["segment_start_sec"]
+            + ctx_offset
+        )
+        return reward_user_interruption(moshi_vad, int_start)
+
+    return 0.0
 
 
-def text_to_pcm(text: str, sample_rate: int = 24_000) -> np.ndarray:
-    """Convert text to PCM via pyopenjtalk fallback TTS."""
-    try:
-        import pyopenjtalk
-        pcm_int16, sr = pyopenjtalk.tts(text)
-        pcm = pcm_int16.astype(np.float32) / 32768.0
-        if sr != sample_rate:
-            t = torch.from_numpy(pcm).unsqueeze(0)
-            import torchaudio
-            t = torchaudio.functional.resample(t, sr, sample_rate)
-            pcm = t.squeeze(0).numpy()
-        return pcm
-    except ImportError:
-        logger.warning("pyopenjtalk not available; returning silence")
-        return np.zeros(sample_rate * 3, dtype=np.float32)
+# ── Teacher-forced update pass ──────────────────────────────────────
+
+def compute_update_log_probs(
+    rollout: dict[str, Any],
+    lm_gen: Any,
+    mimi: Any,
+    device: torch.device,
+    context_steps: int,
+) -> list[torch.Tensor]:
+    """Re-run rollout in train mode for differentiable text log probs.
+
+    Only collects log probs for steps AFTER context_steps (context is
+    masked from loss, per Kyutai Section 3.3).
+    """
+    audio_codes = rollout["audio_codes_in"]
+    text_token_ids = rollout["text_token_ids"]
+
+    if not text_token_ids or not audio_codes:
+        return []
+
+    new_log_probs: list[torch.Tensor] = []
+    text_idx = 0
+    frame_rate = float(mimi.frame_rate)
+
+    with lm_gen.streaming(1):
+        with mimi.streaming(1):
+            for step_idx, codes_cpu in enumerate(audio_codes):
+                codes = codes_cpu.to(device)
+                out = lm_gen.step(codes)
+                if out is None:
+                    continue
+
+                if step_idx < context_steps:
+                    continue
+
+                if text_idx >= len(text_token_ids):
+                    break
+
+                if hasattr(lm_gen, "last_text_logits"):
+                    logits = lm_gen.last_text_logits
+                    if logits is not None:
+                        log_prob = torch.log_softmax(logits, dim=-1)
+                        tid = text_token_ids[text_idx]
+                        new_log_probs.append(log_prob[0, tid])
+                        text_idx += 1
+
+    return new_log_probs
 
 
-# ── GRPO core ───────────────────────────────────────────────────────
+# ── GRPO loss ────────────────────────────────────────────────────────
 
 def compute_grpo_loss(
     advantages: list[float],
     old_log_probs: list[list[float]],
-    new_log_probs: list[list[float]],
+    new_log_probs: list[list[Any]],
     ref_log_probs: list[list[float]],
     clip_epsilon: float,
     kl_beta: float,
+    device: torch.device,
 ) -> torch.Tensor:
-    """Compute the clipped surrogate GRPO loss with KL penalty.
+    """Clipped surrogate GRPO loss with KL penalty (Kyutai Eq. 3-4).
 
-    All inputs are per-group (list over group members).
-    *_log_probs are per-text-token log probs.
+    new_log_probs: differentiable tensors from teacher-forced pass.
+    old_log_probs / ref_log_probs: detached floats from rollout.
     """
-    total_loss = torch.tensor(0.0, requires_grad=True)
-    n = 0
+    losses: list[torch.Tensor] = []
 
     for i, adv in enumerate(advantages):
         if not old_log_probs[i] or not new_log_probs[i]:
@@ -314,89 +474,170 @@ def compute_grpo_loss(
         if min_len == 0:
             continue
 
-        old_lp = torch.tensor(old_log_probs[i][:min_len])
-        new_lp = torch.stack(new_log_probs[i][:min_len]) if isinstance(new_log_probs[i][0], torch.Tensor) else torch.tensor(new_log_probs[i][:min_len])
+        old_lp = torch.tensor(old_log_probs[i][:min_len], device=device)
+        if isinstance(new_log_probs[i][0], torch.Tensor):
+            new_lp = torch.stack(new_log_probs[i][:min_len]).to(device)
+        else:
+            new_lp = torch.tensor(new_log_probs[i][:min_len], device=device)
 
         ratio = torch.exp(new_lp - old_lp)
         clipped = torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon)
         surrogate = -torch.min(ratio * adv, clipped * adv).mean()
 
-        # KL penalty against reference
-        kl_loss = torch.tensor(0.0)
+        kl_loss = torch.tensor(0.0, device=device)
         if ref_log_probs[i]:
             ref_min = min(min_len, len(ref_log_probs[i]))
-            ref_lp = torch.tensor(ref_log_probs[i][:ref_min])
+            ref_lp = torch.tensor(ref_log_probs[i][:ref_min], device=device)
             new_lp_kl = new_lp[:ref_min]
             kl = (torch.exp(new_lp_kl) * (new_lp_kl - ref_lp)).mean()
             kl_loss = kl_beta * kl
 
-        total_loss = total_loss + surrogate + kl_loss
-        n += 1
+        losses.append(surrogate + kl_loss)
 
-    return total_loss / max(n, 1)
+    if not losses:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+    return torch.stack(losses).mean()
 
 
-# ── Main training loop ─────────────────────────────────────────────
+# ── Main training loop ──────────────────────────────────────────────
 
 def train(cfg: GRPOConfig) -> None:
-    save_dir = Path(cfg.save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
-    cfg.save_json(save_dir / "config.json")
-
-    prompts = load_prompts(cfg)
-    logger.info("Loaded %d prompts", len(prompts))
-
-    # Load Moshi
-    logger.info("Loading Moshi models...")
-    mimi, text_tokenizer, lm_model, checkpoint_info = load_moshi(cfg)
-    lm_gen = _ensure_lm_gen(lm_model, checkpoint_info, cfg)
-
-    # Store reference policy log probs (frozen copy)
-    ref_state = copy.deepcopy(lm_model.state_dict())
-
-    # Optimizer
-    optimizer = torch.optim.AdamW(
-        lm_model.parameters(),
-        lr=cfg.lr,
-        betas=(cfg.adam_beta1, cfg.adam_beta2),
-        weight_decay=cfg.weight_decay,
+    import deepspeed
+    from accelerate import Accelerator
+    from accelerate.utils import (
+        DummyOptim,
+        DummyScheduler,
+        InitProcessGroupKwargs,
+        set_seed,
     )
 
-    # LLM judge (loaded on demand)
+    process_group_kwargs = InitProcessGroupKwargs(
+        timeout=__import__("datetime").timedelta(seconds=3600),
+    )
+    accelerator = Accelerator(
+        kwargs_handlers=[process_group_kwargs],
+        gradient_accumulation_steps=1,
+    )
+    is_main = accelerator.is_main_process
+    device = accelerator.device
+
+    if cfg.seed is not None:
+        set_seed(cfg.seed)
+
+    save_dir = Path(cfg.save_dir)
+    if is_main:
+        save_dir.mkdir(parents=True, exist_ok=True)
+        cfg.save_json(save_dir / "config.json")
+
+    # ── Load segment datasets ──
+    if not cfg.segment_dir:
+        raise ValueError("segment_dir must be set in config")
+    seg_datasets = load_segment_datasets(cfg.segment_dir)
+    total_segs = sum(len(v) for v in seg_datasets.values())
+    if is_main:
+        for axis, items in seg_datasets.items():
+            logger.info("  %s: %d segments", axis, len(items))
+        logger.info("  Total: %d segments", total_segs)
+    if total_segs == 0:
+        raise ValueError(f"No segments found in {cfg.segment_dir}")
+
+    # Build flat list of (axis, segment) for sampling
+    all_segments: list[tuple[str, dict[str, Any]]] = []
+    for axis, items in seg_datasets.items():
+        for item in items:
+            all_segments.append((axis, item))
+
+    # ── Load Moshi to CPU ──
+    if is_main:
+        logger.info("Loading Moshi models to CPU...")
+    mimi, text_tokenizer, lm_model, checkpoint_info = load_moshi_for_grpo(cfg)
+
+    if hasattr(accelerator, "deepspeed_plugin") and accelerator.deepspeed_plugin is not None:
+        ds_config = accelerator.deepspeed_plugin.hf_ds_config.config
+        act_ckpt_kwargs = ds_config.get("activation_checkpointing", {})
+        if act_ckpt_kwargs:
+            deepspeed.checkpointing.configure(
+                mpu_=None, deepspeed_config=None, **act_ckpt_kwargs,
+            )
+            if hasattr(lm_model, "enable_activation_checkpointing"):
+                lm_model.enable_activation_checkpointing(
+                    deepspeed.checkpointing.checkpoint,
+                )
+
+    for param in lm_model.parameters():
+        param.requires_grad = True
+
+    optimizer = DummyOptim(
+        lm_model.parameters(),
+        lr=cfg.lr,
+        weight_decay=cfg.weight_decay,
+    )
+    optimizer.defaults = {"lr": cfg.lr}
+
+    lr_scheduler = DummyScheduler(
+        optimizer=optimizer,
+        warmup_num_steps=0,
+    )
+
+    lm_model, optimizer, lr_scheduler = accelerator.prepare(
+        lm_model, optimizer, lr_scheduler,
+    )
+
+    mimi = mimi.to(device)
+    mimi.eval()
+
+    unwrapped = accelerator.unwrap_model(lm_model)
+    lm_gen = _ensure_lm_gen(unwrapped, checkpoint_info, cfg)
+
     judge = LLMJudge(
         model=cfg.judge_model,
         max_tokens=8,
         temperature=cfg.judge_temperature,
     )
 
-    sample_rate = int(mimi.sample_rate)
+    frame_rate = float(mimi.frame_rate)
+
+    if is_main:
+        logger.info("***** Starting GRPO training *****")
+        logger.info("  Epochs: %d", cfg.epochs)
+        logger.info("  Segments/epoch: %d", cfg.segments_per_epoch)
+        logger.info("  Group size G: %d", cfg.group_size)
+        logger.info("  LR: %s", cfg.lr)
+        logger.info("  KL beta: %s", cfg.kl_beta)
+        logger.info("  Context schedule: 0 → %.0fs", cfg.max_context_sec)
+        logger.info("  Processes: %d", accelerator.num_processes)
 
     for epoch in range(cfg.epochs):
         epoch_start = time.time()
         context_sec = cfg.current_context_sec(epoch)
-        logger.info(
-            "=== Epoch %d/%d | context=%.1fs ===",
-            epoch + 1, cfg.epochs, context_sec,
-        )
+        if is_main:
+            logger.info(
+                "=== Epoch %d/%d | max_context=%.1fs ===",
+                epoch + 1, cfg.epochs, context_sec,
+            )
 
         epoch_rewards: list[float] = []
         epoch_losses: list[float] = []
 
-        # Sample prompts for this epoch
-        epoch_prompts = random.sample(
-            prompts, min(cfg.groups_per_epoch, len(prompts)),
+        # Deterministic segment sampling (all ranks same)
+        rng = random.Random(cfg.seed + epoch)
+        epoch_segments = rng.sample(
+            all_segments, min(cfg.segments_per_epoch, len(all_segments)),
         )
 
-        for g_idx, prompt_text in enumerate(epoch_prompts):
-            logger.info("  Group %d/%d: %s", g_idx + 1, len(epoch_prompts), prompt_text[:40])
+        for s_idx, (axis, segment) in enumerate(epoch_segments):
+            if is_main:
+                logger.info(
+                    "  Segment %d/%d [%s]: %s",
+                    s_idx + 1, len(epoch_segments), axis,
+                    Path(segment["wav_path"]).name,
+                )
 
-            # Convert prompt to audio
-            prompt_pcm = text_to_pcm(prompt_text, sample_rate)
-
-            # Trim to current context length
-            max_samples = int(context_sec * sample_rate)
-            if max_samples > 0 and len(prompt_pcm) > max_samples:
-                prompt_pcm = prompt_pcm[:max_samples]
+            # Load user audio + optional context
+            user_pcm, ctx_offset = load_segment_audio(
+                segment, context_sec, cfg.context_prob, rng,
+            )
+            context_steps = int(ctx_offset * frame_rate)
 
             # ── Phase 1: Generate G rollouts ──
             lm_model.eval()
@@ -404,109 +645,91 @@ def train(cfg: GRPOConfig) -> None:
             for g in range(cfg.group_size):
                 seed = cfg.seed + epoch * cfg.group_size + g
                 rollout = generate_rollout(
-                    prompt_pcm=prompt_pcm,
+                    user_pcm=user_pcm,
                     seed=seed,
                     lm_gen=lm_gen,
                     mimi=mimi,
                     text_tokenizer=text_tokenizer,
-                    device=cfg.device,
-                    silence_sec=cfg.silence_sec,
-                    max_gen_sec=cfg.max_gen_sec,
+                    device=device,
+                    context_offset_sec=ctx_offset,
                 )
                 group_rollouts.append(rollout)
-                logger.info(
-                    "    Rollout %d: %d text events, transcript=%s",
-                    g, len(rollout["text_events"]),
-                    rollout["transcript"][:60],
-                )
+                if is_main:
+                    logger.info(
+                        "    Rollout %d: %s",
+                        g, rollout["transcript"][:50],
+                    )
 
-            # ── Phase 2: Compute deterministic rewards (axes 1-4) ──
-            pause_rewards: list[float] = []
-            turn_rewards: list[float] = []
-            bc_rewards: list[float] = []
-            interrupt_rewards: list[float] = []
-
+            # ── Phase 2: Axis-specific deterministic rewards ──
+            axis_rewards: list[float] = []
             for rollout in group_rollouts:
-                text_events = rollout["text_events"]
-                input_dur = rollout["input_duration_sec"]
+                r = compute_segment_reward(rollout, segment, cfg)
+                axis_rewards.append(r)
 
-                # Approximate Moshi VAD from text events
-                moshi_segs = _text_events_to_vad(text_events)
+            # ── Phase 3: LLM judge (turn_taking and interruption only) ──
+            judge_scores: list[float] = [0.0] * cfg.group_size
+            use_judge = axis in ("turn_taking", "interruption")
 
-                # Axis 1: Pause — check if Moshi talks during first 3s silence
-                r_pause = reward_pause_handling(
-                    moshi_segs,
-                    pause_start=0.0,
-                    pause_end=min(3.0, input_dur),
-                    threshold_sec=cfg.pause_threshold_sec,
-                )
-                pause_rewards.append(r_pause)
+            if use_judge and is_main:
+                logger.info("    Computing LLM judge for %s...", axis)
+                user_text = segment.get("user_text", "")
+                if not user_text:
+                    user_text = f"[{axis}セグメント]"
+                pairs = [
+                    (user_text, r["transcript"])
+                    for r in group_rollouts
+                ]
+                judge.load()
+                judge_scores = judge.score_batch(pairs)
+                judge.unload()
+                torch.cuda.empty_cache()
 
-                # Axis 2: Turn-taking — response delay after input ends
-                r_turn = reward_turn_taking(moshi_segs, input_dur)
-                turn_rewards.append(r_turn)
+            if use_judge:
+                judge_tensor = torch.tensor(judge_scores, device=device)
+                torch.distributed.broadcast(judge_tensor, src=0)
+                judge_scores = judge_tensor.tolist()
 
-                # Axis 3: Backchannel — F1 during user speech
-                gt_bc_times = _extract_gt_backchannels(text_events, input_dur)
-                r_bc = reward_backchannel_f1(
-                    text_events, gt_bc_times,
-                    window_sec=cfg.backchannel_window_sec,
-                    max_dur_sec=cfg.backchannel_max_dur_sec,
-                )
-                bc_rewards.append(r_bc)
+            # ── Phase 4: Reward normalization ──
+            # Per-axis z-normalization within the group, then combine.
+            # For turn_taking/interruption: axis_reward + judge_reward
+            rewards_to_normalize = [axis_rewards]
+            weights = [1.0]
+            if use_judge:
+                rewards_to_normalize.append(judge_scores)
+                weights.append(cfg.judge_weight)
 
-                # Axis 4: User interruption
-                r_int = reward_user_interruption(moshi_segs, input_dur * 0.7)
-                interrupt_rewards.append(r_int)
-
-            # ── Phase 3: LLM judge reward (axis 5) ──
-            judge_pairs = [
-                (prompt_text, r["transcript"])
-                for r in group_rollouts
-            ]
-
-            # Load judge, score, unload
-            logger.info("    Computing LLM judge rewards...")
-            judge.load()
-            judge_scores = judge.score_batch(judge_pairs)
-            judge.unload()
-            torch.cuda.empty_cache()
-
-            # ── Phase 4: Reward decoupling normalization ──
-            all_axis_rewards = [
-                pause_rewards,
-                turn_rewards,
-                bc_rewards,
-                interrupt_rewards,
-                judge_scores,
-            ]
-            advantages = decoupling_normalize(
-                all_axis_rewards, cfg.reward_weights,
-            )
+            advantages = decoupling_normalize(rewards_to_normalize, weights)
 
             mean_reward = sum(advantages) / len(advantages) if advantages else 0.0
             epoch_rewards.append(mean_reward)
 
-            logger.info(
-                "    Rewards: pause=%.2f turn=%.2f bc=%.2f int=%.2f judge=%.2f -> adv_mean=%.3f",
-                sum(pause_rewards) / len(pause_rewards),
-                sum(turn_rewards) / len(turn_rewards),
-                sum(bc_rewards) / len(bc_rewards),
-                sum(interrupt_rewards) / len(interrupt_rewards),
-                sum(judge_scores) / len(judge_scores),
-                mean_reward,
-            )
+            if is_main:
+                mean_axis = sum(axis_rewards) / max(len(axis_rewards), 1)
+                msg = f"    R_{axis}={mean_axis:.3f}"
+                if use_judge:
+                    mean_judge = sum(judge_scores) / max(len(judge_scores), 1)
+                    msg += f" R_judge={mean_judge:.3f}"
+                msg += f" -> adv={mean_reward:.3f}"
+                logger.info(msg)
 
             # ── Phase 5: GRPO update ──
             lm_model.train()
             old_log_probs = [r["text_log_probs"] for r in group_rollouts]
+            ref_log_probs = old_log_probs
 
-            # Reference log probs (from frozen policy)
-            ref_log_probs = old_log_probs  # approximation for first pass
+            if is_main:
+                logger.info("    Teacher-forced update pass...")
 
-            # Recompute forward pass for current policy log probs
-            # For now, use old_log_probs as new (on-policy approximation)
-            new_log_probs = old_log_probs
+            new_log_probs: list[list[torch.Tensor]] = []
+            for rollout in group_rollouts:
+                nlp = compute_update_log_probs(
+                    rollout=rollout,
+                    lm_gen=lm_gen,
+                    mimi=mimi,
+                    device=device,
+                    context_steps=context_steps,
+                )
+                new_log_probs.append(nlp)
 
             loss = compute_grpo_loss(
                 advantages=advantages,
@@ -515,101 +738,60 @@ def train(cfg: GRPOConfig) -> None:
                 ref_log_probs=ref_log_probs,
                 clip_epsilon=cfg.clip_epsilon,
                 kl_beta=cfg.kl_beta,
+                device=device,
             )
 
-            optimizer.zero_grad()
-            if loss.requires_grad:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    lm_model.parameters(), cfg.grad_clip,
-                )
-                optimizer.step()
+            accelerator.backward(loss)
 
             epoch_losses.append(loss.item())
-            logger.info("    Loss: %.6f", loss.item())
+            if is_main:
+                logger.info("    Loss: %.6f", loss.item())
 
         # ── Epoch summary ──
         elapsed = time.time() - epoch_start
-        mean_r = sum(epoch_rewards) / len(epoch_rewards) if epoch_rewards else 0.0
-        mean_l = sum(epoch_losses) / len(epoch_losses) if epoch_losses else 0.0
-        logger.info(
-            "Epoch %d done in %.1fs | mean_reward=%.4f mean_loss=%.6f",
-            epoch + 1, elapsed, mean_r, mean_l,
-        )
+        mean_r = sum(epoch_rewards) / max(len(epoch_rewards), 1)
+        mean_l = sum(epoch_losses) / max(len(epoch_losses), 1)
+        if is_main:
+            logger.info(
+                "Epoch %d done in %.1fs | mean_reward=%.4f mean_loss=%.6f",
+                epoch + 1, elapsed, mean_r, mean_l,
+            )
+            log_entry = {
+                "epoch": epoch + 1,
+                "context_sec": context_sec,
+                "mean_reward": mean_r,
+                "mean_loss": mean_l,
+                "elapsed_sec": elapsed,
+            }
+            log_path = save_dir / "training_log.jsonl"
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
 
-        # Log to JSON
-        log_entry = {
-            "epoch": epoch + 1,
-            "context_sec": context_sec,
-            "mean_reward": mean_r,
-            "mean_loss": mean_l,
-            "elapsed_sec": elapsed,
-        }
-        log_path = save_dir / "training_log.jsonl"
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
-
-        # Checkpoint
         if (epoch + 1) % cfg.save_every == 0:
-            ckpt_dir = save_dir / f"checkpoint_epoch_{epoch + 1:04d}"
-            ckpt_dir.mkdir(parents=True, exist_ok=True)
-            torch.save(lm_model.state_dict(), ckpt_dir / "model.pt")
-            torch.save(optimizer.state_dict(), ckpt_dir / "optimizer.pt")
-            logger.info("Saved checkpoint: %s", ckpt_dir)
+            ckpt_dir = str(save_dir / f"checkpoint_epoch_{epoch + 1:04d}")
+            accelerator.save_state(ckpt_dir)
+            if is_main:
+                logger.info("Saved checkpoint: %s", ckpt_dir)
 
-    logger.info("Training complete.")
-
-
-def _text_events_to_vad(
-    text_events: list[dict[str, Any]],
-    gap_threshold: float = 0.5,
-) -> list[tuple[float, float]]:
-    """Convert text events into approximate speech segments."""
-    if not text_events:
-        return []
-    events = sorted(text_events, key=lambda e: e["time_sec"])
-    segments: list[tuple[float, float]] = []
-    start = events[0]["time_sec"]
-    end = start + 0.08  # one frame
-
-    for ev in events[1:]:
-        t = ev["time_sec"]
-        if t - end > gap_threshold:
-            segments.append((start, end))
-            start = t
-        end = t + 0.08
-
-    segments.append((start, end))
-    return segments
-
-
-def _extract_gt_backchannels(
-    text_events: list[dict[str, Any]],
-    input_dur: float,
-) -> list[float]:
-    """Extract ground-truth backchannel times from listening region."""
-    from scripts.grpo.rewards import AIZUCHI_PATTERNS
-    times: list[float] = []
-    for ev in text_events:
-        if ev["time_sec"] >= input_dur:
-            break
-        piece = ev.get("piece", "")
-        for _, pat in AIZUCHI_PATTERNS:
-            if pat.search(piece):
-                times.append(ev["time_sec"])
-                break
-    return times
+    if is_main:
+        final_dir = str(save_dir / f"checkpoint_epoch_{cfg.epochs:04d}")
+        accelerator.save_state(final_dir)
+        logger.info("Training complete. Final checkpoint: %s", final_dir)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--config", required=True, type=Path,
-        help="Path to GRPO config YAML.",
-    )
+    parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--segment-dir", type=str, default=None,
+                        help="Override segment_dir from config")
     args = parser.parse_args()
-
     cfg = GRPOConfig.from_yaml(args.config)
+
+    # Allow override via CLI arg or env var
+    seg_dir = args.segment_dir or os.environ.get("GRPO_SEGMENT_DIR", "")
+    if seg_dir:
+        cfg.segment_dir = seg_dir
+
     train(cfg)
 
 
