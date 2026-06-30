@@ -103,6 +103,54 @@ qsub scripts/run_experiment.pbs
 
 詳細は [experiments/README.md](experiments/README.md) 参照。
 
+### Whole-utterance TTS (推奨)
+
+話者ごとに全発話を連結して1回のTTSで合成し、MMS_FA Forced Alignment で
+セグメント境界を復元する。韻律が一貫し、相槌もユーザー発話を止めずに
+自然にオーバーラップする。
+
+```bash
+# smoke (1GPU, 3件)
+qsub -V scripts/run_qwen_tts_whole_utterance_smoke.pbs
+
+# 全件 (4GPU並列)
+qsub -V scripts/run_qwen_tts_whole_utterance_1000_4gpu.pbs
+
+# スタイルプリセットを固定したい場合
+STYLE_PRESET=counseling_anxious qsub -V scripts/run_qwen_tts_whole_utterance_1000_4gpu.pbs
+```
+
+出力先は `data/runs/qwen_dialogues_1000_tts_whole_4gpu/`。
+旧方式 (`run_qwen_tts_1000_4gpu.pbs`) の出力先
+`data/runs/qwen_dialogues_1000_tts_4gpu/` とは別フォルダ。
+
+#### シャード一部失敗時のマージ
+
+一部のシャードが CTC alignment エラー等で途中停止した場合でも、
+成功した対話分だけでマージできる。
+
+```bash
+uv run python scripts/merge_training_shards.py \
+  --batch-dir data/runs/qwen_dialogues_1000_tts_whole_4gpu \
+  --out-dir data/runs/qwen_dialogues_1000_tts_whole_4gpu/merged \
+  --expected-shards 4 \
+  --allow-partial
+```
+
+`merge_summary.json` に各シャードの件数と `missing_wavs` 数が記録される。
+
+#### マージ後の学習
+
+```bash
+# LoRA (h01 パターン)
+SRC_RUN_DIR=./data/runs/qwen_dialogues_1000_tts_whole_4gpu/merged \
+SWEEP_PATTERNS=h01 qsub -V scripts/sweep_lora.pbs
+
+# Full FT (f01 パターン)
+SRC_RUN_DIR=./data/runs/qwen_dialogues_1000_tts_whole_4gpu/merged \
+SWEEP_PATTERNS=f01 qsub -V scripts/fullft_sweep.pbs
+```
+
 ### 個別ステップ
 
 ```bash
