@@ -851,7 +851,16 @@ class ForcedAligner:
         with torch.inference_mode():
             emission, _ = self._model(waveform.to(self.device))
 
-        token_spans_grouped = self._aligner(emission[0], tokens)
+        try:
+            token_spans_grouped = self._aligner(emission[0], tokens)
+        except Exception as exc:
+            logger.warning(
+                "FA CTC alignment failed (%s), using proportional fallback",
+                exc,
+            )
+            fb = self._fallback_proportional(audio_dur, seg_char_counts)
+            return fb, fb
+
         all_spans = [span for group in token_spans_grouped for span in group]
 
         expected_total = sum(seg_char_counts)
