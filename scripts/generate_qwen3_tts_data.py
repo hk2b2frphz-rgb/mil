@@ -1565,6 +1565,58 @@ def safe_stem(text: str, fallback: str) -> str:
     return (stem[:60].strip("._-") or fallback)
 
 
+def rebuild_from_completed(
+    data_dir: Path,
+    manifest_path: Path,
+    dialogues_path: Path,
+    done_stems: set[str],
+) -> int:
+    """Resume support: scan already-rendered stereo samples and rebuild the
+    manifest / dialogues.jsonl from them so a re-run appends instead of
+    starting over.
+
+    A sample counts as complete only when both its WAV and sidecar JSON exist
+    and the JSON parses (the JSON is written right after the WAV, and the
+    manifest/dialogues rows are appended after that). Rebuilding the two JSONL
+    files from the surviving sidecars makes them exactly consistent with the
+    rendered audio regardless of where a previous run was killed (e.g. by a
+    walltime limit) -- a half-written trailing manifest row is discarded and
+    the corresponding sample is simply re-rendered. Populates ``done_stems``
+    with the sample stems already on disk and returns their count."""
+    out_dir = manifest_path.parent
+    manifest_rows: list[tuple[str, str]] = []
+    dialogue_rows: list[tuple[str, str]] = []
+    for json_path in sorted(data_dir.glob("*.json")):
+        wav_path = json_path.with_suffix(".wav")
+        if not wav_path.exists():
+            continue
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+            meta = payload["metadata"]
+            duration = float(meta["duration_sec"])
+            dialogue = meta["dialogue"]
+        except (OSError, ValueError, KeyError):
+            # Corrupt/partial sidecar -> not done; it will be re-rendered.
+            continue
+        stem = json_path.stem
+        done_stems.add(stem)
+        rel = str(wav_path.relative_to(out_dir)).replace("\\", "/")
+        manifest_rows.append(
+            (stem, json.dumps({"path": rel, "duration": duration}, ensure_ascii=False))
+        )
+        dialogue_rows.append((stem, json.dumps(dialogue, ensure_ascii=False)))
+
+    manifest_rows.sort()
+    dialogue_rows.sort()
+    manifest_path.write_text(
+        "".join(row + "\n" for _, row in manifest_rows), encoding="utf-8"
+    )
+    dialogues_path.write_text(
+        "".join(row + "\n" for _, row in dialogue_rows), encoding="utf-8"
+    )
+    return len(done_stems)
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -1736,6 +1788,18 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "既存の out-dir を再利用し、data_stereo に WAV+JSON が揃っている"
+            "対話をスキップして未完了分だけを合成する。manifest と "
+            "dialogues.jsonl は完了済みサンプルから再構築してから追記するため、"
+            "walltime 到達などで打ち切られたジョブを同じ out-dir に再投入すると"
+            "途中から継続できる。未指定時は従来どおり out-dir を初期化して"
+            "最初から生成する。"
+        ),
+    )
+    parser.add_argument(
         "--log-every",
         type=int,
         default=20,
@@ -1826,9 +1890,19 @@ def main() -> None:
 
     manifest_path = args.out_dir / args.manifest_name
     dialogues_path = args.out_dir / "dialogues.jsonl"
-    for p in (manifest_path, dialogues_path):
-        if p.exists():
-            p.unlink()
+    done_stems: set[str] = set()
+    if args.resume:
+        resumed = rebuild_from_completed(
+            data_dir, manifest_path, dialogues_path, done_stems
+        )
+        logger.info(
+            "--resume: 完了済みサンプル %d 件を検出。manifest を再構築して"
+            "未完了分のみ合成します。", resumed,
+        )
+    else:
+        for p in (manifest_path, dialogues_path):
+            if p.exists():
+                p.unlink()
 
     emotion_map = load_emotion_map(args.emotion_map_file)
     if args.no_emotion:
@@ -1941,6 +2015,27 @@ def main() -> None:
                 duplex_task=str(tmpl.get("duplex_task") or "") or None,
             )
 
+            # Resume fast-path: if this sample was already rendered in a prior
+            # run (WAV+JSON on disk, captured in done_stems at startup), count
+            # it as a success and skip the expensive synthesis. Its manifest /
+            # dialogues rows were already restored by rebuild_from_completed(),
+            # so we must not re-append them here.
+            stem = f"sample_{idx:03d}_{dialogue.id}"
+            if args.resume and stem in done_stems:
+                success_count += 1
+                if args.log_every <= 1 or idx == 1 or idx % args.log_every == 0:
+                    logger.info(
+                        "[%d/%d] %s は完了済みのためスキップします",
+                        idx, len(templates), stem,
+                    )
+                if args.success_target is not None and success_count >= args.success_target:
+                    logger.info(
+                        "success-target %d に到達（完了済み含む）したため打ち切ります",
+                        args.success_target,
+                    )
+                    break
+                continue
+
             user_voice = args.user_speaker_pool_list[(idx - 1) % len(args.user_speaker_pool_list)]
             user_override = "user" if args.tts_backend == "moss-ttsd" else user_voice
             other_override = "other" if args.tts_backend == "moss-ttsd" else args.speaker_other
@@ -2004,7 +2099,8 @@ def main() -> None:
             stereo = render_stereo(segments, tts.sample_rate)
             elapsed = time.time() - t0
 
-            stem = f"sample_{idx:03d}_{dialogue.id}"
+            # stem was computed above for the resume check; reuse it so the
+            # written filename matches the done_stems bookkeeping exactly.
             wav_path = data_dir / f"{stem}.wav"
             json_path = wav_path.with_suffix(".json")
             duration = stereo.shape[-1] / tts.sample_rate
