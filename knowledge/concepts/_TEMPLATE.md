@@ -1,6 +1,6 @@
 # <概念名>
 
-status: stub / updated: YYYY-MM-DD
+状態: 未着手 / 更新日: YYYY-MM-DD
 
 ## 一言で
 <この概念を1〜2文で>

@@ -1,9 +1,9 @@
 # <論文タイトル>（著者, 年）
 
-status: stub / updated: YYYY-MM-DD
+状態: 未着手 / 更新日: YYYY-MM-DD
 - arXiv/DOI: <id or url>
 - PDF: `references/<cat>/<file>.pdf`（git外）
-- 役割: base | impl | baseline | background
+- 役割: 基盤 | 実装 | 比較 | 背景
 
 ## 3行要約
 - <この論文が何を主張/提案したか>

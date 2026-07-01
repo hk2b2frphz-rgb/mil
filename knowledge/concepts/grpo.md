@@ -1,6 +1,6 @@
 # GRPO (Group Relative Policy Optimization)
 
-status: draft / updated: 2026-07-01
+状態: 下書き / 更新日: 2026-07-01
 
 ## 一言で
 1プロンプトから複数出力をサンプリングし、**グループ内の相対報酬**でアドバンテージを

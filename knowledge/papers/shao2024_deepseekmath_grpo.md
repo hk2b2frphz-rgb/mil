@@ -1,9 +1,9 @@
 # DeepSeekMath: Pushing the Limits of Mathematical Reasoning（Shao et al., 2024）
 
-status: draft / updated: 2026-07-01
+状態: 下書き / 更新日: 2026-07-01
 - arXiv: 2402.03300
 - PDF: `references/03_grpo_rl_alignment/shao2024_deepseekmath_grpo.pdf`（git外）
-- 役割: base（GRPOの初出。本ブランチ `grpo-interactivity-alignment` の根拠）
+- 役割: 基盤（GRPOの初出。本ブランチ `grpo-interactivity-alignment` の根拠）
 
 ## 3行要約
 - 数学推論に特化したLLMを、継続事前学習＋RLで強化した研究。

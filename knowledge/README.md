@@ -42,7 +42,7 @@ knowledge/
   `paper_map.md` の表に1行追加（実装との対応 or 「背景のみ」を明記）。
 - 概念の説明が2回目に必要になったら `concepts/` に切り出して両所からリンク。
 - リンクは相対パスで（例: `[GRPO](concepts/grpo.md)`, `[run_grpo.pbs](../scripts/run_grpo.pbs)`）。
-- **状態タグ**を各メモ冒頭に置く: `status: stub | draft | reviewed`、`updated: YYYY-MM-DD`。
+- **状態タグ**を各メモ冒頭に置く: `状態: 未着手 | 下書き | 確認済み`、`更新日: YYYY-MM-DD`。
 
 ## ナビゲーション
 - まず [overview.md](overview.md) で全体像 → [paper_map.md](paper_map.md) で論文↔実装 →

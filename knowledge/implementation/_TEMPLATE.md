@@ -1,6 +1,6 @@
 # 実装エリア: <名称>（例: full-FT training）
 
-status: stub / updated: YYYY-MM-DD
+状態: 未着手 / 更新日: YYYY-MM-DD
 
 ## 対象コード
 - 主: [<file>](../../<path>)
