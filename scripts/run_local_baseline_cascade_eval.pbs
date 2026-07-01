@@ -15,8 +15,9 @@
 #
 #   qsub -v CASCADE_MODEL_ID=cascade_gemma2b scripts/run_local_baseline_cascade_eval.pbs
 #
-# Requires faster-whisper in the main project env and `uv sync --project
-# gemma_runtime` for the isolated Gemma LLM subprocess -- see
+# faster-whisper (cascade ASR) is a declared pyproject.toml dependency, so the
+# `uv run` calls below install it automatically. The isolated Gemma LLM
+# subprocess still needs `uv sync --project gemma_runtime` -- see
 # docs/local_baselines.md.
 #
 # Useful overrides:

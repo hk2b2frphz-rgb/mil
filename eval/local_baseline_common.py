@@ -251,8 +251,11 @@ class LocalASR:
             from faster_whisper import WhisperModel
         except ImportError as exc:
             raise RuntimeError(
-                "faster-whisper is required for the cascade ASR step. "
-                "Install with `pip install faster-whisper`."
+                "faster-whisper is required for the cascade ASR step. It is a "
+                "declared pyproject.toml dependency, so run `uv sync` (or launch "
+                "via `uv run`) to install it into the project environment. A bare "
+                "`pip install faster-whisper` may land in a different environment "
+                "than the one `uv run` uses."
             ) from exc
         self._model = WhisperModel(
             self.model_size, device=self.device, compute_type=self.compute_type

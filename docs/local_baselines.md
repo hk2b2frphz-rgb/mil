@@ -38,9 +38,12 @@ number on the latency full-duplex Moshi avoids.
 ## Install
 
 ```bash
-# Main project env: ASR + TTS (TTS is already available if you've run the
-# Full-Duplex-Bench-JA dataset builder before).
-pip install faster-whisper
+# Main project env: ASR (faster-whisper) + TTS. faster-whisper is declared in
+# pyproject.toml, so `uv run`/`uv sync` installs it automatically -- no manual
+# `pip install` is needed (and a bare `pip install` would land in the wrong
+# environment when the eval is launched via `uv run`). TTS is already available
+# if you've run the Full-Duplex-Bench-JA dataset builder before.
+uv sync
 
 # Isolated LLM/SpeechLLM env (same one Gemma dialogue generation already uses).
 uv sync --project gemma_runtime
