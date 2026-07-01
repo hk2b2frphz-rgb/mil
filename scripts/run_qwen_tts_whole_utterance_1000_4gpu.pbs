@@ -48,6 +48,13 @@ export TTS_DEVICE="${TTS_DEVICE:-cuda}"
 export LEAD_IN_SEC="${LEAD_IN_SEC:-0.3}"
 export GAP_SEC="${GAP_SEC:-0.2}"
 export STYLE_PRESET="${STYLE_PRESET:-random}"
+# Fraction of each shard's dialogue count added as spare dialogues so that
+# per-dialogue synthesis/CTC-alignment failures (e.g. "target_length is too
+# long for CTC") can be compensated without the final merged training set
+# falling short of NUM_DIALOGUES. Spares are only consumed when a primary
+# dialogue in the shard fails; unused spares cost no extra compute because
+# generate_qwen3_tts_data.py stops once --success-target is reached.
+export SPARE_RATIO="${SPARE_RATIO:-0.15}"
 
 if ! [[ "$NUM_SHARDS" =~ ^[0-9]+$ ]] || [[ "$NUM_SHARDS" -lt 1 ]]; then
     echo "ERROR: NUM_SHARDS must be a positive integer: $NUM_SHARDS" >&2
@@ -83,6 +90,7 @@ echo "out_root:      $OUT_ROOT"
 echo "dialogues:     $DIALOGUES_JSONL"
 echo "num_dialogues: $NUM_DIALOGUES"
 echo "num_shards:    $NUM_SHARDS"
+echo "spare_ratio:   $SPARE_RATIO"
 echo "gpus:          $CUDA_VISIBLE_DEVICES"
 echo "dtype:         $TTS_DTYPE"
 echo "style_preset:  $STYLE_PRESET"
@@ -111,8 +119,9 @@ print("uv/qwen_tts/torchaudio preflight ok")
 PY
 
 echo "===== step 1/3: split dialogues ====="
-uv run python - "$DIALOGUES_JSONL" "$OUT_ROOT" "$NUM_SHARDS" "$NUM_DIALOGUES" <<'PY'
+uv run python - "$DIALOGUES_JSONL" "$OUT_ROOT" "$NUM_SHARDS" "$NUM_DIALOGUES" "$SPARE_RATIO" <<'PY'
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -121,6 +130,7 @@ out_root = Path(sys.argv[2])
 num_shards = int(sys.argv[3])
 limit_arg = sys.argv[4]
 limit = None if limit_arg == "all" else int(limit_arg)
+spare_ratio = float(sys.argv[5])
 
 rows = [line for line in src.read_text(encoding="utf-8").splitlines() if line.strip()]
 if limit is not None:
@@ -128,20 +138,44 @@ if limit is not None:
 if not rows:
     raise SystemExit("No dialogue rows selected")
 
+n = len(rows)
 counts = [0 for _ in range(num_shards)]
+spare_counts = [0 for _ in range(num_shards)]
 for i in range(num_shards):
     shard_dir = out_root / "shard_{:03d}".format(i)
     shard_dir.mkdir(parents=True, exist_ok=True)
+
+    primary = [row for j, row in enumerate(rows) if j % num_shards == i]
+    primary_count = len(primary)
+
+    # Spare dialogues: extra rows appended after the primary quota so a
+    # shard can absorb per-dialogue failures (e.g. CTC alignment giving up
+    # on a too-long concatenated utterance) without falling short of its
+    # primary_count target. Drawn cyclically from the full row pool with a
+    # per-shard stagger so shards don't all reach for the same spares first.
+    spare_n = math.ceil(primary_count * spare_ratio) if primary_count > 0 else 0
+    spares = []
+    start = (i * 37) % n
+    k = 0
+    while len(spares) < spare_n:
+        spares.append(rows[(start + k) % n])
+        k += 1
+
     shard_path = shard_dir / "dialogues.jsonl"
-    selected = [row for j, row in enumerate(rows) if j % num_shards == i]
+    selected = primary + spares
     shard_path.write_text("\n".join(selected) + ("\n" if selected else ""), encoding="utf-8")
-    counts[i] = len(selected)
+    (shard_dir / "success_target.txt").write_text(f"{primary_count}\n", encoding="utf-8")
+
+    counts[i] = primary_count
+    spare_counts[i] = len(spares)
 
 summary = {
     "source": str(src),
-    "selected_dialogues": len(rows),
+    "selected_dialogues": n,
     "num_shards": num_shards,
+    "spare_ratio": spare_ratio,
     "counts": counts,
+    "spare_counts": spare_counts,
 }
 (out_root / "split_summary.json").write_text(
     json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
@@ -164,16 +198,18 @@ for ((i = 0; i < NUM_SHARDS; i++)); do
         echo "ERROR: split shard is empty: $shard_dialogues" >&2
         exit 1
     fi
+    success_target="$(cat "$shard_dir/success_target.txt")"
 
     (
         set -euo pipefail
-        echo "[$shard_tag] gpu=$gpu_id dialogues=$shard_dialogues out=$shard_training"
+        echo "[$shard_tag] gpu=$gpu_id dialogues=$shard_dialogues out=$shard_training success_target=$success_target"
         tts_args=(
             uv run python scripts/generate_qwen3_tts_data.py
             --tts-backend qwen3
             --dialogues-jsonl "$shard_dialogues"
             --auto-overlap-aizuchi
             --whole-utterance
+            --success-target "$success_target"
             --out-dir "$shard_training"
             --device "$TTS_DEVICE"
             --dtype "$TTS_DTYPE"

@@ -124,10 +124,29 @@ Default `BATCH_ID` values include a timestamp/job suffix, so output goes under
 `data/runs/<printed BATCH_ID>/`. The job log prints `out_root`; use that path
 for merge and fine-tuning. Set `BATCH_ID=...` explicitly only when resuming.
 
+#### CTC alignment 失敗と対話数の担保
+
+長い連結発話は TTS の生成長上限で音声が実際のテキストより短くなることが
+あり、その場合 MMS_FA の forced alignment が
+`target_length is too long for CTC` で失敗することがある。対策として:
+
+- `generate_qwen3_tts_data.py` は話者ごとの連結テキストを
+  `--whole-utterance-max-chars`（既定 150 文字）ごとに分割して合成・alignment
+  するため、1回のTTS呼び出しが長くなりすぎて音声が打ち切られる事態を避ける。
+  それでも alignment に失敗した場合は従来どおり比例配分にフォールバックする。
+- 対話単位の合成・書き出しは例外を捕捉するようになり、1件が失敗しても
+  シャード全体は止まらず次の対話へ進む（失敗件数はログの
+  `対話合成完了: 成功 N 件, 失敗 N 件` に出る）。
+- 4GPU本番スクリプトはシャードごとに `SPARE_RATIO`（既定 0.15 = 15%）分の
+  予備対話を追加で割り当て、`--success-target` で本来の割当数に達した時点で
+  打ち切る。失敗が出ても予備対話で埋め合わせるため、`NUM_DIALOGUES` が
+  そのまま維持されやすい。予備込みでも目標に届かない場合はそのシャードの
+  プロセスがエラー終了するので、`shard_*.log` で原因を確認する。
+
 #### シャード一部失敗時のマージ
 
-一部のシャードが CTC alignment エラー等で途中停止した場合でも、
-成功した対話分だけでマージできる。
+上記の対策後もシャードが完全に停止した場合は、成功した対話分だけで
+マージできる。
 
 ```bash
 BATCH_ID=<printed_BATCH_ID>
