@@ -481,3 +481,33 @@ if [[ "$TRAIN_STATUS" -ne 0 ]]; then
     echo "[nu-fullft] ERROR: training failed with status $TRAIN_STATUS" >&2
     exit "$TRAIN_STATUS"
 fi
+
+# ---------------------------------------------------------------------------
+# eval loss が最小の checkpoint を自動選択して export する。
+# SKIP_AUTO_POSTPROCESS=1 で無効化できる。
+# ---------------------------------------------------------------------------
+if [[ "${SKIP_AUTO_POSTPROCESS:-0}" != "1" ]]; then
+    echo
+    echo "[nu-fullft] selecting best checkpoint by eval loss"
+
+    BEST_JSON="$EXP_DIR/best_checkpoint_nu_${RUN_TS}.json"
+    if uv run python "$REPO_ROOT/scripts/select_best_checkpoint.py" \
+        --mode fullft \
+        --log-file "$EXP_LOG" \
+        --checkpoints-dir "$NU_OUTPUT_DIR" \
+        --output-json "$BEST_JSON"; then
+
+        BEST_STEP_DIR="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['checkpoint_path'])" "$BEST_JSON")"
+        EXPORT_OUT="$EXP_DIR/exported/${RUN_TS}_best"
+
+        echo "[nu-fullft] exporting best checkpoint: $BEST_STEP_DIR -> $EXPORT_OUT"
+        uv run python "$REPO_ROOT/scripts/export_fullft_checkpoint.py" \
+            --step-dir "$BEST_STEP_DIR" \
+            --out-dir "$EXPORT_OUT" \
+            --nu-repo "$NU_MOSHI_FT_REPO" \
+            --model-dtype "${NU_EXPORT_DTYPE:-bfloat16}"
+        echo "[nu-fullft] auto-export complete: $EXPORT_OUT/model.safetensors"
+    else
+        echo "[nu-fullft] WARN: could not select a best checkpoint; skipping auto-export" >&2
+    fi
+fi

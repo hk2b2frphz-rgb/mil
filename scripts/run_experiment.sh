@@ -518,3 +518,61 @@ if [[ "$TRAIN_STATUS" -ne 0 ]]; then
     echo "[exp] ERROR: training failed with status $TRAIN_STATUS" >&2
     exit "$TRAIN_STATUS"
 fi
+
+# ---------------------------------------------------------------------------
+# 6) 学習成功後、eval loss が最小の checkpoint を自動選択して merge/export する。
+#    SKIP_AUTO_POSTPROCESS=1 で無効化できる。
+# ---------------------------------------------------------------------------
+if [[ "${SKIP_AUTO_POSTPROCESS:-0}" != "1" ]]; then
+    echo
+    echo "[exp] selecting best checkpoint by eval loss"
+
+    SAVE_ADAPTERS="$(python3 - "$RESOLVED_CONFIG" <<'PY'
+import re, sys, pathlib
+text = pathlib.Path(sys.argv[1]).read_text()
+m = re.search(r'^\s*save_adapters\s*:\s*(true|false)\s*$', text, re.M | re.I)
+print(m.group(1).lower() if m else "true")
+PY
+)"
+    HF_REPO_ID="$(python3 - "$RESOLVED_CONFIG" <<'PY'
+import re, sys, pathlib
+text = pathlib.Path(sys.argv[1]).read_text()
+m = re.search(r'^\s*hf_repo_id\s*:\s*["\']?([^"\'\n]+)["\']?\s*$', text, re.M)
+print(m.group(1).strip() if m else "llm-jp/llm-jp-moshi-v1")
+PY
+)"
+
+    if [[ "$SAVE_ADAPTERS" == "false" ]]; then
+        CKPT_FILENAME="consolidated/consolidated.safetensors"
+    else
+        CKPT_FILENAME="consolidated/lora.safetensors"
+    fi
+
+    BEST_JSON="$EXP_DIR/best_checkpoint_${RUN_TS}.json"
+    if uv run --project "$MOSHI_FT_REPO" python "$REPO_ROOT/scripts/select_best_checkpoint.py" \
+        --mode lora \
+        --metrics-jsonl "$EXP_CKPT_DIR/metrics.eval.jsonl" \
+        --checkpoints-dir "$EXP_CKPT_DIR/checkpoints" \
+        --checkpoint-filename "$CKPT_FILENAME" \
+        --output-json "$BEST_JSON"; then
+
+        BEST_CKPT="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['checkpoint_path'])" "$BEST_JSON")"
+        MERGED_OUT="$EXP_DIR/merged/${RUN_TS}/consolidated.safetensors"
+        mkdir -p "$(dirname "$MERGED_OUT")"
+
+        if [[ "$SAVE_ADAPTERS" == "false" ]]; then
+            echo "[exp] full fine-tuning checkpoint selected (no merge needed): $BEST_CKPT"
+            cp "$BEST_CKPT" "$MERGED_OUT"
+            echo "[exp] copied to: $MERGED_OUT"
+        else
+            echo "[exp] merging best LoRA checkpoint: $BEST_CKPT"
+            uv run --project "$MOSHI_FT_REPO" python "$REPO_ROOT/scripts/merge_lora.py" \
+                --lora-ckpt "$BEST_CKPT" \
+                --out "$MERGED_OUT" \
+                --hf-repo "$HF_REPO_ID"
+        fi
+        echo "[exp] auto-merge complete: $MERGED_OUT"
+    else
+        echo "[exp] WARN: could not select a best checkpoint; skipping auto-merge" >&2
+    fi
+fi
