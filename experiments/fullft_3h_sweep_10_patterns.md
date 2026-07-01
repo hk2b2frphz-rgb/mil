@@ -143,3 +143,28 @@ The important curves are `train.loss`, `train.loss.text`, `train.loss.audio`,
 `eval.accuracy.*`, and `learning_rate.*`. The launch config, raw training log,
 nu config, and dataset health JSON are logged as artifacts. Live sync runs while
 training when `MLFLOW_LIVE_SYNC_INTERVAL` is nonzero.
+
+#### A100 x2 OOM対策
+
+whole-utterance TTS で作った対話は1件あたりの音声が長くなりやすく、
+`duration` の上限付近のシーケンスが増えるとアクティベーションメモリの
+ピークが上がり、A100 80GB x2 でも OOM することがある。対策として:
+
+- `configs/deepspeed_zero3_fp16_warmlr_act_ckpt.json` に ZeRO-3 の
+  `offload_optimizer`（Adam の optimizer state を CPU にオフロード）を
+  デフォルトで有効化し、`sub_group_size` / `stage3_max_live_parameters` /
+  `stage3_max_reuse_distance` を `1e9` から `5e8` に下げてパラメータの
+  ワーキングセットも縮小した。速度は多少落ちるが GPU メモリを大きく削減できる。
+- それでも OOM する場合は、パラメータも CPU オフロードする
+  `configs/deepspeed_zero3_fp16_warmlr_act_ckpt_full_offload.json` に切り替える
+  （さらに遅くなるが、より安全）:
+
+  ```bash
+  NU_DEEPSPEED_CONFIG="$PWD/configs/deepspeed_zero3_fp16_warmlr_act_ckpt_full_offload.json" \
+  SRC_RUN_DIR=/path/to/data/runs/... SWEEP_PATTERNS=f01 \
+  NPROC=2 CUDA_VISIBLE_DEVICES=0,1 bash scripts/run_fullft_sweep_pair.sh
+  ```
+
+- それでも厳しい場合は `f07`（`duration=30`）などの低メモリ・パターンに
+  切り替えるか、`HP_NUM_MICROBATCHES` を増やして per-microbatch のメモリを
+  さらに下げる。

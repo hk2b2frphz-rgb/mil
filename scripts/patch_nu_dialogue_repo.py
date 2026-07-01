@@ -310,6 +310,141 @@ def _log_miltoka_metrics(split, step, epoch, metrics):
     return True
 
 
+def patch_finetune_keep_best_only(path: Path) -> bool:
+    src = path.read_text(encoding="utf-8")
+    if "AUTO_PATCH_KEEP_BEST_ONLY" in src:
+        return False
+
+    if "import shutil\n" not in src:
+        old_import = "import os\nfrom datetime import timedelta\n"
+        new_import = "import os\nimport shutil\nfrom datetime import timedelta\n"
+        if old_import not in src:
+            raise RuntimeError(f"Could not locate import block in {path}")
+        src = src.replace(old_import, new_import, 1)
+
+    old_arg = '''    parser.add_argument(
+        "--save_steps",
+        type=int,
+        default=None,
+        help="Save checkpoint every X updates steps.",
+    )
+'''
+    new_arg = '''    parser.add_argument(
+        "--save_steps",
+        type=int,
+        default=None,
+        help="Save checkpoint every X updates steps.",
+    )
+    parser.add_argument(
+        "--keep_best_only",
+        action="store_true",
+        help="Delete every saved checkpoint except the one at the step with "
+        "the lowest recorded eval loss (loss/total) and the most recently "
+        "saved one (kept until it has been evaluated).",
+    )
+'''
+    if old_arg not in src:
+        raise RuntimeError(f"Could not locate --save_steps argparse block in {path}")
+    src = src.replace(old_arg, new_arg, 1)
+
+    prune_helper = '''# AUTO_PATCH_KEEP_BEST_ONLY: prune saved checkpoints down to the single best
+# (by eval loss) plus the one just written, instead of keeping every step_<N>
+# ZeRO shard. Full-FT checkpoints duplicate the whole model per rank, so
+# unpruned runs can otherwise fill the disk quickly.
+def _prune_checkpoints_keep_best(output_dir, current_steps, eval_loss_by_step, accelerator):
+    accelerator.wait_for_everyone()
+    if not accelerator.is_main_process:
+        return
+    if not os.path.isdir(output_dir):
+        return
+
+    step_dirs = {}
+    for name in os.listdir(output_dir):
+        full = os.path.join(output_dir, name)
+        if not os.path.isdir(full) or not name.startswith("step_"):
+            continue
+        try:
+            step = int(name.split("_")[-1])
+        except ValueError:
+            continue
+        step_dirs[step] = full
+
+    keep_steps = {current_steps}
+    scored = {
+        step: loss
+        for step, loss in eval_loss_by_step.items()
+        if loss is not None and step in step_dirs
+    }
+    if scored:
+        keep_steps.add(min(scored, key=scored.get))
+
+    for step, step_path in step_dirs.items():
+        if step in keep_steps:
+            continue
+        shutil.rmtree(step_path, ignore_errors=True)
+        logger.info(f"[keep_best_only] deleted checkpoint step_{step}")
+'''
+    marker = "def _log_miltoka_metrics(split, step, epoch, metrics):"
+    if marker not in src:
+        raise RuntimeError(f"Could not locate _log_miltoka_metrics definition in {path}")
+    src = src.replace(marker, prune_helper + "\n\n" + marker, 1)
+
+    old_resume = '''    current_steps = 0
+    starting_epoch = 0
+'''
+    new_resume = '''    current_steps = 0
+    starting_epoch = 0
+    # AUTO_PATCH_KEEP_BEST_ONLY: step -> eval loss (loss/total), used by
+    # _prune_checkpoints_keep_best to decide which checkpoint to keep.
+    eval_loss_by_step: dict = {}
+'''
+    if old_resume not in src:
+        raise RuntimeError(f"Could not locate current_steps/starting_epoch block in {path}")
+    src = src.replace(old_resume, new_resume, 1)
+
+    old_eval_log = '''                    _log_miltoka_metrics("eval", current_steps, epoch, eval_metrics_for_log)
+'''
+    new_eval_log = '''                    _log_miltoka_metrics("eval", current_steps, epoch, eval_metrics_for_log)
+                    eval_loss_by_step[current_steps] = eval_metrics_for_log.get("loss/total")
+'''
+    if old_eval_log not in src:
+        raise RuntimeError(f"Could not locate eval metrics logging call in {path}")
+    src = src.replace(old_eval_log, new_eval_log, 1)
+
+    old_periodic_save = '''                # Save checkpoint
+                if args.save_steps is not None and current_steps % args.save_steps == 0:
+                    output_dir = os.path.join(args.output_dir, f"step_{current_steps}")
+                    accelerator.save_state(output_dir)
+'''
+    new_periodic_save = '''                # Save checkpoint
+                if args.save_steps is not None and current_steps % args.save_steps == 0:
+                    output_dir = os.path.join(args.output_dir, f"step_{current_steps}")
+                    accelerator.save_state(output_dir)
+                    if getattr(args, "keep_best_only", False):
+                        _prune_checkpoints_keep_best(
+                            args.output_dir, current_steps, eval_loss_by_step, accelerator
+                        )
+'''
+    if old_periodic_save not in src:
+        raise RuntimeError(f"Could not locate periodic checkpoint save block in {path}")
+    src = src.replace(old_periodic_save, new_periodic_save, 1)
+
+    old_final_save = '''    output_dir = os.path.join(args.output_dir, f"step_{current_steps}")
+    accelerator.save_state(output_dir)
+'''
+    new_final_save = '''    output_dir = os.path.join(args.output_dir, f"step_{current_steps}")
+    accelerator.save_state(output_dir)
+    if getattr(args, "keep_best_only", False):
+        _prune_checkpoints_keep_best(args.output_dir, current_steps, eval_loss_by_step, accelerator)
+'''
+    if old_final_save not in src:
+        raise RuntimeError(f"Could not locate final checkpoint save block in {path}")
+    src = src.replace(old_final_save, new_final_save, 1)
+
+    path.write_text(src, encoding="utf-8")
+    return True
+
+
 def patch_utils_data(path: Path) -> bool:
     src = path.read_text(encoding="utf-8")
     updated = src.replace("np.concat(", "np.concatenate(")
@@ -336,6 +471,8 @@ def main() -> int:
         changes.append("finetune.py:safe-means")
     if patch_finetune_mlflow_stdout_metrics(nu_repo / "finetune.py"):
         changes.append("finetune.py:mlflow-stdout-metrics")
+    if patch_finetune_keep_best_only(nu_repo / "finetune.py"):
+        changes.append("finetune.py:keep-best-only")
     if patch_utils_data(nu_repo / "utils" / "data.py"):
         changes.append("utils/data.py")
 
