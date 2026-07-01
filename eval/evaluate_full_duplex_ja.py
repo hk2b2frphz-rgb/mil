@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import statistics
 from pathlib import Path
@@ -156,11 +157,56 @@ def select_gt_distribution(
 ) -> list[float] | None:
     if backchannel_gt is None:
         return None
-    speaker = metadata.get("spk") or metadata.get("speaker")
+    # "tts_speaker" is what build_full_duplex_ja_dataset.py always records;
+    # "spk"/"speaker" are accepted for upstream-style or hand-authored metadata.
+    speaker = metadata.get("spk") or metadata.get("speaker") or metadata.get("tts_speaker")
     if speaker is None:
         return None
     distribution = backchannel_gt.get(str(speaker))
     return distribution if isinstance(distribution, list) else None
+
+
+GREETING_MATCH_THRESHOLD = 0.6
+GREETING_WINDOW_TOLERANCE_SEC = 1.0  # late-chunk-timestamp slack
+
+
+def normalize_for_greeting_match(text: str) -> str:
+    return "".join(str(text).split())
+
+
+def evaluate_opening_greeting(
+    metadata: dict[str, Any], chunks: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Checks whether the model actually said its trained fixed opening line
+    (build_full_duplex_ja_dataset.py --opening-greeting) during the reserved
+    lead-in, using output text chunks alone (no audio/ASR needed since we
+    already have Moshi's own timestamped text stream)."""
+    greeting = metadata.get("opening_greeting")
+    if not isinstance(greeting, dict):
+        return None
+    expected = greeting.get("text")
+    duration = greeting.get("duration_sec")
+    if not expected or duration is None:
+        return None
+    window_end = float(duration) + GREETING_WINDOW_TOLERANCE_SEC
+    actual = "".join(
+        str(chunk.get("text", ""))
+        for chunk in chunks
+        if (interval := chunk_interval(chunk)) is not None and interval[0] < window_end
+    )
+    expected_norm = normalize_for_greeting_match(expected)
+    actual_norm = normalize_for_greeting_match(actual)
+    similarity = (
+        difflib.SequenceMatcher(None, expected_norm, actual_norm).ratio()
+        if expected_norm
+        else 0.0
+    )
+    return {
+        "expected_text": expected,
+        "actual_text_in_window": actual,
+        "similarity": round(similarity, 4),
+        "matched": similarity >= GREETING_MATCH_THRESHOLD,
+    }
 
 
 def evaluate_case(
@@ -185,6 +231,11 @@ def evaluate_case(
         "output_text_chars": len(text),
         "empty_response": not text.strip() and not segments,
     }
+
+    greeting = evaluate_opening_greeting(metadata, chunks)
+    if greeting is not None:
+        metrics["greeting_similarity"] = greeting["similarity"]
+        metrics["greeting_matched"] = greeting["matched"]
 
     if task == "pause_handling":
         pauses = (metadata.get("events") or {}).get("pause") or []
@@ -311,6 +362,7 @@ def evaluate_case(
         "clean_assistant_text": clean_text or None,
         "clean_assistant_chunks": clean_chunks,
         "clean_speech_segments": clean_segments,
+        "opening_greeting_check": greeting,
         "metrics": metrics,
         "trial_dir": str(trial_dir),
     }

@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from openai_judge_common import (
+    UsageTracker,
     chat_json,
     guard_local_only,
     iter_jsonl,
@@ -150,6 +151,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_user_prompt(row: dict[str, Any]) -> str:
+    # Per-chunk timestamps (assistant_timeline/clean_assistant_timeline) are
+    # deliberately left out: they duplicate assistant_text as a second,
+    # far more verbose encoding of the same content, and exact sub-second
+    # timing is already scored deterministically (deterministic_metrics)
+    # rather than needed for this semantic/quality judgment.
     context: dict[str, Any] = {}
     context["task"] = row.get("task", "")
     context["category"] = row.get("category")
@@ -157,18 +163,14 @@ def build_user_prompt(row: dict[str, Any]) -> str:
     user_timeline = row.get("user_timeline") or row.get("clean_user_timeline") or []
     if user_timeline:
         context["user_utterances"] = [
-            {"text": seg.get("text", ""), "start": seg.get("start_sec"), "end": seg.get("end_sec")}
+            {"text": seg.get("text", ""), "kind": seg.get("kind")}
             for seg in user_timeline
         ]
 
     context["assistant_text"] = row.get("assistant_text", "")
-
-    assistant_timeline = row.get("assistant_timeline") or []
-    if assistant_timeline:
-        context["assistant_chunks"] = [
-            {"text": chunk.get("text", ""), "timestamp": chunk.get("timestamp")}
-            for chunk in assistant_timeline[:50]
-        ]
+    clean_text = row.get("clean_assistant_text")
+    if clean_text:
+        context["clean_assistant_text"] = clean_text
 
     events = row.get("event_timeline") or {}
     if events:
@@ -208,8 +210,9 @@ def run_judge(args: argparse.Namespace) -> int:
         rows = rows[: args.limit]
 
     judged_rows: list[dict[str, Any]] = []
+    tracker = UsageTracker()
     for index, row in enumerate(rows, start=1):
-        raw = chat_json(
+        raw, usage = chat_json(
             client,
             model,
             [
@@ -219,24 +222,26 @@ def run_judge(args: argparse.Namespace) -> int:
             args.temperature,
             args.max_tokens,
         )
+        tracker.add(usage)
+        normalized = normalize(raw)
         judged = dict(row)
         judged["llmjp_judge"] = {
             "provider": args.provider,
             "model": model,
             "scale": "1-10",
             "dimensions": DIMENSIONS,
-            **normalize(raw),
+            **normalized,
+            "usage": usage,
         }
         judged_rows.append(judged)
-        scores_str = " ".join(
-            f"{k}={v:.0f}" for k, v in normalize(raw)["scores"].items()
-        )
-        print(f"[llmjp-judge] {index}/{len(rows)} {row.get('id', '?')} => {scores_str}")
+        scores_str = " ".join(f"{k}={v:.0f}" for k, v in normalized["scores"].items())
+        print(f"[llmjp-judge] {index}/{len(rows)} {row.get('id', '?')} => {scores_str} (tokens={usage['total_tokens']})")
         if args.sleep:
             time.sleep(args.sleep)
 
     write_jsonl(args.out, judged_rows)
     print(f"[llmjp-judge] wrote {len(judged_rows)} rows -> {args.out}")
+    tracker.print_summary("llmjp-judge")
     return 0
 
 

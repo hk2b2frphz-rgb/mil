@@ -99,6 +99,55 @@ def extract_json_object(text: str) -> dict[str, Any]:
     return json.loads(match.group(0))
 
 
+def _usage_dict(response: Any) -> dict[str, int]:
+    usage = getattr(response, "usage", None)
+    prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+    completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached_tokens = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "cached_prompt_tokens": cached_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
+
+
+class UsageTracker:
+    """Accumulates OpenAI/Azure token usage across a judge run so cost stays
+    visible -- these API calls are billed per token, not free."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.cached_prompt_tokens = 0
+
+    def add(self, usage: dict[str, int]) -> None:
+        self.calls += 1
+        self.prompt_tokens += usage.get("prompt_tokens", 0)
+        self.completion_tokens += usage.get("completion_tokens", 0)
+        self.cached_prompt_tokens += usage.get("cached_prompt_tokens", 0)
+
+    def summary(self) -> dict[str, int]:
+        return {
+            "calls": self.calls,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "cached_prompt_tokens": self.cached_prompt_tokens,
+            "total_tokens": self.prompt_tokens + self.completion_tokens,
+        }
+
+    def print_summary(self, label: str) -> None:
+        s = self.summary()
+        print(
+            f"[{label}] token usage: calls={s['calls']} "
+            f"prompt={s['prompt_tokens']} (cached={s['cached_prompt_tokens']}) "
+            f"completion={s['completion_tokens']} total={s['total_tokens']}",
+            file=sys.stderr,
+        )
+
+
 def chat_json(
     client: Any,
     model: str,
@@ -107,7 +156,8 @@ def chat_json(
     max_tokens: int,
     retry: int = 3,
     retry_sleep: float = 5.0,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, int]]:
+    """Returns (parsed_json, usage) where usage has prompt/completion/cached/total token counts."""
     last_exc: Exception | None = None
     for attempt in range(1, retry + 1):
         try:
@@ -127,7 +177,7 @@ def chat_json(
                     max_tokens=max_tokens,
                 )
             content = response.choices[0].message.content or "{}"
-            return extract_json_object(content)
+            return extract_json_object(content), _usage_dict(response)
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             if attempt >= retry:

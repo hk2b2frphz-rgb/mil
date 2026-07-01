@@ -17,8 +17,6 @@ MODEL_CONFIG="${MODEL_CONFIG:-}"
 MIMI_WEIGHT="${MIMI_WEIGHT:-}"
 TOKENIZER="${TOKENIZER:-}"
 FDB_SCENARIOS="${FDB_SCENARIOS:-$REPO_ROOT/eval_sets/full_duplex_ja/scenarios.jsonl}"
-FDB_DATA_DIR="${FDB_DATA_DIR:-$REPO_ROOT/data/full_duplex_ja}"
-FDB_OUT_DIR="${FDB_OUT_DIR:-$REPO_ROOT/eval_runs/full_duplex/$RUN_ID}"
 FDB_TASKS="${FDB_TASKS:-all}"
 FDB_SEEDS="${FDB_SEEDS:-0}"
 FDB_TAIL_SEC="${FDB_TAIL_SEC:-8}"
@@ -28,6 +26,23 @@ FDB_TTS_SPEAKER="${FDB_TTS_SPEAKER:-Ono_Anna}"
 FDB_DEVICE="${FDB_DEVICE:-cuda}"
 FDB_DTYPE="${FDB_DTYPE:-bfloat16}"
 FDB_TTS_SPEED="${FDB_TTS_SPEED:-1.0}"
+FDB_WHOLE_UTTERANCE="${FDB_WHOLE_UTTERANCE:-1}"
+FDB_WHOLE_UTTERANCE_MAX_CHARS="${FDB_WHOLE_UTTERANCE_MAX_CHARS:-150}"
+# Baseline Moshi / llm-jp were never trained to open with the fixed greeting,
+# so they don't need to wait for it: set FDB_OPENING_GREETING=0 for those
+# runs. The dataset dir defaults to a name that encodes this setting, so
+# flipping the flag can never silently reuse a cached dataset built with the
+# other setting (which would otherwise desync scenario timing from what the
+# model in front of it actually expects).
+FDB_OPENING_GREETING="${FDB_OPENING_GREETING:-1}"
+FDB_OPENING_GREETING_GAP_SEC="${FDB_OPENING_GREETING_GAP_SEC:-0.4}"
+if [[ "$FDB_OPENING_GREETING" == "1" ]]; then
+    FDB_DATA_DIR_DEFAULT="$REPO_ROOT/data/full_duplex_ja_greeting"
+else
+    FDB_DATA_DIR_DEFAULT="$REPO_ROOT/data/full_duplex_ja_nogreeting"
+fi
+FDB_DATA_DIR="${FDB_DATA_DIR:-$FDB_DATA_DIR_DEFAULT}"
+FDB_OUT_DIR="${FDB_OUT_DIR:-$REPO_ROOT/eval_runs/full_duplex/$RUN_ID}"
 REFRESH_FDB_DATA="${REFRESH_FDB_DATA:-0}"
 HALF="${HALF:-1}"
 
@@ -79,8 +94,15 @@ if [[ "$REFRESH_FDB_DATA" == "1" || ! -f "$FDB_DATA_DIR/manifest.json" ]]; then
         --device "$FDB_DEVICE"
         --dtype "$FDB_DTYPE"
         --tts-speed "$FDB_TTS_SPEED"
+        --whole-utterance-max-chars "$FDB_WHOLE_UTTERANCE_MAX_CHARS"
+        --opening-greeting-gap-sec "$FDB_OPENING_GREETING_GAP_SEC"
         --overwrite
     )
+    if [[ "$FDB_WHOLE_UTTERANCE" == "1" ]]; then build_args+=(--whole-utterance); fi
+    if [[ "$FDB_OPENING_GREETING" != "1" ]]; then build_args+=(--no-opening-greeting); fi
+    if [[ -n "${FDB_OPENING_GREETING_CACHE_DIR:-}" ]]; then
+        build_args+=(--opening-greeting-cache-dir "$FDB_OPENING_GREETING_CACHE_DIR")
+    fi
     "${build_args[@]}"
 else
     echo "[fdb] reusing Japanese dataset: $FDB_DATA_DIR"
@@ -108,9 +130,16 @@ if [[ -n "${CFG_COEF:-}" ]]; then inference_args+=(--cfg-coef "$CFG_COEF"); fi
 
 "${inference_args[@]}"
 
-uv run python eval/evaluate_full_duplex_ja.py \
-    --run-dir "$FDB_OUT_DIR/inference" \
+FDB_BACKCHANNEL_GT="${FDB_BACKCHANNEL_GT:-$REPO_ROOT/eval_sets/full_duplex_ja/backchannel_gt.json}"
+evaluate_args=(
+    uv run python eval/evaluate_full_duplex_ja.py
+    --run-dir "$FDB_OUT_DIR/inference"
     --out-dir "$FDB_OUT_DIR/benchmark_results"
+)
+if [[ -f "$FDB_BACKCHANNEL_GT" ]]; then
+    evaluate_args+=(--backchannel-gt "$FDB_BACKCHANNEL_GT")
+fi
+"${evaluate_args[@]}"
 
 uv run python eval/pack_full_duplex_azure.py \
     --per-case "$FDB_OUT_DIR/benchmark_results/per_case.jsonl" \

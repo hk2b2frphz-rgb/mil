@@ -103,6 +103,14 @@ python eval/judge_openai.py \
 The judge script refuses to run inside common batch-job environments unless
 `--allow-server` is explicitly passed.
 
+Every judge script (`judge_openai.py`, `judge_llmjp_style.py`,
+`judge_full_duplex_azure.py`, `pairwise_openai.py`) prints a token-usage
+summary to stderr when it finishes (`calls`, `prompt`, `cached`,
+`completion`, `total`) and records per-row `usage` in its output JSONL --
+these are billed API calls, not free, so check that line before re-running a
+judge over a large batch. `pairwise_openai.py --two-pass` doubles the call
+count per case.
+
 ### 4. Aggregate
 
 ```bash

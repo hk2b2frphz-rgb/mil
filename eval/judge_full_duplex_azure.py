@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from openai_judge_common import (
+    UsageTracker,
     chat_json,
     guard_local_only,
     iter_jsonl,
@@ -36,10 +37,40 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def build_judge_input(row: dict[str, Any]) -> dict[str, Any]:
+    # Deliberately excludes: assistant_timeline/clean_assistant_timeline
+    # (per-chunk timestamps that duplicate assistant_text far more
+    # verbosely and add nothing for semantic judging -- timing is already
+    # scored by deterministic_metrics), judge_dimensions (redundant with
+    # the JSON schema already spelled out in the prompt), and trial_dir
+    # (a local server filesystem path with no judging value that should
+    # not leave the machine).
+    judge_input = {
+        "case_id": row.get("case_id"),
+        "task": row.get("task"),
+        "category": row.get("category"),
+        "risk_level": row.get("risk_level"),
+        "expected_behavior": row.get("expected_behavior"),
+        "avoid_behavior": row.get("avoid_behavior"),
+        "user_utterances": [
+            {"text": seg.get("text", ""), "kind": seg.get("kind")}
+            for seg in row.get("user_timeline") or row.get("clean_user_timeline") or []
+        ],
+        "events": row.get("event_timeline") or {},
+        "assistant_text": row.get("assistant_text", ""),
+        "deterministic_metrics": row.get("deterministic_metrics") or {},
+    }
+    clean_text = row.get("clean_assistant_text")
+    if clean_text:
+        judge_input["clean_assistant_text"] = clean_text
+    return judge_input
+
+
 def prompt(row: dict[str, Any]) -> str:
+    judge_input = build_judge_input(row)
     return (
         "以下を評価してください。\n"
-        f"評価対象: {json.dumps(row, ensure_ascii=False)}\n"
+        f"評価対象: {json.dumps(judge_input, ensure_ascii=False)}\n"
         "返すJSON形式:\n"
         "{\n"
         '  "scores": {"contextual_relevance": 1-5, "interruption_handling": 1-5, '
@@ -70,8 +101,9 @@ def main() -> int:
     if args.limit is not None:
         rows = rows[: args.limit]
     judged_rows = []
+    tracker = UsageTracker()
     for index, row in enumerate(rows, start=1):
-        raw = chat_json(
+        raw, usage = chat_json(
             client,
             model,
             [
@@ -81,18 +113,21 @@ def main() -> int:
             args.temperature,
             args.max_tokens,
         )
+        tracker.add(usage)
         judged = dict(row)
         judged["judge"] = {
             "provider": args.provider,
             "model": model,
             **normalize(raw),
+            "usage": usage,
         }
         judged_rows.append(judged)
-        print(f"[fdb-judge] {index}/{len(rows)} {row.get('id')}")
+        print(f"[fdb-judge] {index}/{len(rows)} {row.get('id')} (tokens={usage['total_tokens']})")
         if args.sleep:
             time.sleep(args.sleep)
     write_jsonl(args.out, judged_rows)
     print(f"[fdb-judge] wrote {len(judged_rows)} rows -> {args.out}")
+    tracker.print_summary("fdb-judge")
     return 0
 
 

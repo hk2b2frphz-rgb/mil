@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
@@ -10,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from full_duplex_audio import resample_linear, write_wav_mono
+from full_duplex_audio import read_wav_mono, resample_linear, write_wav_mono
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
@@ -18,10 +19,22 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 try:
-    from generate_qwen3_tts_data import Qwen3TTS, VALID_SPEAKERS
+    from generate_qwen3_tts_data import (
+        OPENING_GREETING_TEXT,
+        ForcedAligner,
+        Qwen3TTS,
+        VALID_SPEAKERS,
+    )
 except ImportError as exc:
     Qwen3TTS = None  # type: ignore[assignment,misc]
+    ForcedAligner = None  # type: ignore[assignment,misc]
     VALID_SPEAKERS: set[str] = set()
+    # Kept in sync by hand with generate_qwen3_tts_data.OPENING_GREETING_TEXT
+    # for when torch/torchaudio aren't installed (e.g. local dev machines)
+    # and that module can't be imported at all.
+    OPENING_GREETING_TEXT = (
+        "こちらは、孤独や孤立について話せる相談窓口です。よかったら、少しお話ししましょう。"
+    )
     QWEN3_IMPORT_ERROR: ImportError | None = exc
 else:
     QWEN3_IMPORT_ERROR = None
@@ -48,6 +61,57 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tts-instruct", default=None)
     parser.add_argument("--tts-speed", type=float, default=1.0)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--whole-utterance",
+        action="store_true",
+        help=(
+            "Synthesize consecutive same-speaker 'speech' timeline items in a "
+            "single TTS call and slice them apart with MMS_FA forced alignment, "
+            "matching the training-data whole-utterance pipeline "
+            "(scripts/generate_qwen3_tts_data.py). Avoids the flat, "
+            "sentence-final prosody that independent per-fragment synthesis "
+            "produces across a scripted pause or backchannel gap. Falls back "
+            "to per-fragment synthesis when forced alignment is unavailable."
+        ),
+    )
+    parser.add_argument(
+        "--whole-utterance-max-chars",
+        type=int,
+        default=150,
+        help="Max characters concatenated into a single TTS call in --whole-utterance mode.",
+    )
+    parser.add_argument(
+        "--opening-greeting",
+        default=OPENING_GREETING_TEXT,
+        help=(
+            "Fixed line the model is trained to always open a session with "
+            "(scripts/generate_qwen3_tts_data.py --opening-greeting). A matching "
+            "silent lead-in is prepended to every scenario's input audio so the "
+            "model has room to say it before the scripted user speech starts. "
+            "Pass '' or --no-opening-greeting to disable."
+        ),
+    )
+    parser.add_argument(
+        "--no-opening-greeting",
+        action="store_true",
+        help="Do not reserve lead-in time for the opening greeting.",
+    )
+    parser.add_argument(
+        "--opening-greeting-gap-sec",
+        type=float,
+        default=0.4,
+        help="Silence after the greeting audio before scripted user speech starts (matches training --gap-sec).",
+    )
+    parser.add_argument(
+        "--opening-greeting-cache-dir",
+        type=Path,
+        default=REPO_ROOT / "data" / ".cache" / "opening_greeting",
+        help=(
+            "Reuse a cached greeting synthesis (keyed by text/backend/speaker/"
+            "model/sample-rate/speed) across dataset builds instead of "
+            "resynthesizing the fixed greeting every time. Pass '' to disable."
+        ),
+    )
     args = parser.parse_args()
     if args.tts_speed <= 0:
         parser.error("--tts-speed must be > 0")
@@ -105,14 +169,34 @@ def initialize_tts(args: argparse.Namespace) -> tuple[str, Any | None]:
     return "qwen3", engine
 
 
-def synthesize(
+def initialize_aligner(enabled: bool, device: str) -> Any | None:
+    if not enabled:
+        return None
+    if ForcedAligner is None:
+        print(
+            f"[ja-data] --whole-utterance requested but forced alignment is "
+            f"unavailable ({QWEN3_IMPORT_ERROR}); falling back to per-fragment synthesis."
+        )
+        return None
+    aligner = ForcedAligner(device=device)
+    try:
+        aligner.load()
+    except Exception as exc:
+        print(
+            f"[ja-data] --whole-utterance requested but ForcedAligner failed to "
+            f"load ({exc}); falling back to per-fragment synthesis."
+        )
+        return None
+    return aligner
+
+
+def synthesize_raw(
     text: str,
-    sample_rate: int,
-    speed: float,
     tts_backend: str,
     tts_engine: Any | None,
     tts_speaker: str,
-) -> np.ndarray:
+) -> tuple[np.ndarray, int]:
+    """Synthesize *text* with no speed adjustment or resampling applied."""
     if tts_backend == "qwen3":
         if tts_engine is None:
             raise RuntimeError("Qwen3-TTS backend selected without a loaded engine.")
@@ -124,30 +208,23 @@ def synthesize(
         pcm = np.asarray(pcm, dtype=np.float32).squeeze()
         if pcm.ndim != 1:
             raise ValueError(f"Qwen3-TTS returned non-mono audio with shape {pcm.shape}")
-        if abs(speed - 1.0) > 1e-6 and pcm.size > 1:
-            new_length = max(1, int(round(len(pcm) / speed)))
-            pcm = np.interp(
-                np.linspace(0.0, 1.0, new_length),
-                np.linspace(0.0, 1.0, len(pcm)),
-                pcm,
-            ).astype(np.float32)
-        pcm = resample_linear(pcm, int(tts_engine.sample_rate), sample_rate)
-        peak = float(np.max(np.abs(pcm))) if pcm.size else 0.0
-        if peak > 1.0:
-            pcm /= peak
-        return pcm
+        return pcm, int(tts_engine.sample_rate)
 
     try:
         import pyopenjtalk
     except ImportError as exc:
         raise SystemExit("pyopenjtalk is required to build the Japanese benchmark data.") from exc
     pcm, source_rate = pyopenjtalk.tts(text)
-    pcm = np.asarray(pcm, dtype=np.float32)
-    peak = float(np.max(np.abs(pcm))) if pcm.size else 0.0
-    if peak > 1.0:
-        pcm /= peak
-    if speed <= 0:
-        raise ValueError("--tts-speed must be > 0")
+    return np.asarray(pcm, dtype=np.float32), int(source_rate)
+
+
+def postprocess_audio(
+    pcm: np.ndarray,
+    source_rate: int,
+    sample_rate: int,
+    speed: float,
+) -> np.ndarray:
+    """Apply speed stretch, resample to *sample_rate*, and peak-normalize."""
     if abs(speed - 1.0) > 1e-6 and pcm.size > 1:
         new_length = max(1, int(round(len(pcm) / speed)))
         pcm = np.interp(
@@ -155,7 +232,120 @@ def synthesize(
             np.linspace(0.0, 1.0, len(pcm)),
             pcm,
         ).astype(np.float32)
-    return resample_linear(pcm, int(source_rate), sample_rate)
+    pcm = resample_linear(pcm, source_rate, sample_rate)
+    peak = float(np.max(np.abs(pcm))) if pcm.size else 0.0
+    if peak > 1.0:
+        pcm = pcm / peak
+    return pcm
+
+
+def synthesize(
+    text: str,
+    sample_rate: int,
+    speed: float,
+    tts_backend: str,
+    tts_engine: Any | None,
+    tts_speaker: str,
+) -> np.ndarray:
+    pcm, source_rate = synthesize_raw(text, tts_backend, tts_engine, tts_speaker)
+    return postprocess_audio(pcm, source_rate, sample_rate, speed)
+
+
+def greeting_cache_path(
+    cache_dir: Path,
+    text: str,
+    tts_backend: str,
+    tts_speaker: str,
+    tts_model: str,
+    sample_rate: int,
+    speed: float,
+) -> Path:
+    key = "|".join(
+        [text, tts_backend, tts_speaker, tts_model, str(sample_rate), str(speed)]
+    )
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    return cache_dir / f"opening_greeting_{digest}.wav"
+
+
+def synthesize_greeting_cached(
+    text: str,
+    sample_rate: int,
+    speed: float,
+    tts_backend: str,
+    tts_engine: Any | None,
+    tts_speaker: str,
+    tts_model: str,
+    cache_dir: Path | None,
+) -> np.ndarray:
+    """The greeting is a fixed phrase synthesized identically on every
+    dataset build; cache it on disk (keyed by every parameter that could
+    change its audio) so repeated builds -- e.g. across --refresh-fdb-data
+    reruns for different models -- skip resynthesizing it."""
+    if cache_dir is None:
+        return synthesize(text, sample_rate, speed, tts_backend, tts_engine, tts_speaker)
+    path = greeting_cache_path(
+        cache_dir, text, tts_backend, tts_speaker, tts_model, sample_rate, speed
+    )
+    if path.exists():
+        pcm, cached_rate = read_wav_mono(path)
+        print(f"[ja-data] opening greeting: cache hit -> {path}")
+        return resample_linear(pcm, cached_rate, sample_rate)
+    pcm = synthesize(text, sample_rate, speed, tts_backend, tts_engine, tts_speaker)
+    write_wav_mono(path, pcm, sample_rate)
+    print(f"[ja-data] opening greeting: cache miss, synthesized -> {path}")
+    return pcm
+
+
+def group_whole_utterance_runs(timeline: list[dict[str, Any]]) -> list[list[int]]:
+    """Group indices of consecutive 'speech' timeline items that belong to the
+    same speaker turn (only bridged by 'silence'), so they can be synthesized
+    as one continuous utterance. A run breaks at 'interrupt'/'overlap_speech'
+    items, which are a different voice/speaker and stay per-fragment."""
+    runs: list[list[int]] = []
+    current: list[int] = []
+    for index, item in enumerate(timeline):
+        kind = str(item["type"])
+        if kind == "speech":
+            current.append(index)
+        elif kind == "silence":
+            continue
+        else:
+            if current:
+                runs.append(current)
+                current = []
+    if current:
+        runs.append(current)
+    return [run for run in runs if len(run) >= 2]
+
+
+def align_whole_utterance_runs(
+    timeline: list[dict[str, Any]],
+    runs: list[list[int]],
+    tts_backend: str,
+    tts_engine: Any | None,
+    tts_speaker: str,
+    aligner: Any,
+    max_chars: int,
+) -> dict[int, tuple[np.ndarray, int, float, float]]:
+    """Return {timeline_index: (raw_pcm, raw_sample_rate, start_sec, end_sec)}
+    for each 'speech' item covered by a whole-utterance run."""
+    boundaries: dict[int, tuple[np.ndarray, int, float, float]] = {}
+    for run in runs:
+        texts = [str(timeline[index]["text"]) for index in run]
+        total_chars = sum(len(text) for text in texts)
+        if max_chars > 0 and total_chars > max_chars:
+            print(
+                f"[ja-data] whole-utterance run at index {run[0]} has "
+                f"{total_chars} chars (> --whole-utterance-max-chars={max_chars}); "
+                "synthesizing anyway as a single call."
+            )
+        raw_pcm, raw_rate = synthesize_raw(
+            "".join(texts), tts_backend, tts_engine, tts_speaker
+        )
+        expanded, _tight = aligner.align(raw_pcm, raw_rate, texts)
+        for index, (start_sec, end_sec) in zip(run, expanded):
+            boundaries[index] = (raw_pcm, raw_rate, start_sec, end_sec)
+    return boundaries
 
 
 def render_scenario(
@@ -166,14 +356,31 @@ def render_scenario(
     tts_engine: Any | None,
     tts_model: str,
     tts_speaker: str,
+    whole_utterance_boundaries: dict[int, tuple[np.ndarray, int, float, float]] | None = None,
+    lead_in_sec: float = 0.0,
+    opening_greeting: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, np.ndarray | None, dict[str, Any]]:
     noisy_parts: list[np.ndarray] = []
     clean_parts: list[np.ndarray] = []
     cursor = 0.0
     user_segments: list[dict[str, Any]] = []
     events: dict[str, list[list[float]]] = {}
+    whole_utterance_boundaries = whole_utterance_boundaries or {}
 
-    for item in scenario["timeline"]:
+    if lead_in_sec > 0:
+        # Silent room for the model to say its trained opening greeting
+        # before the scripted user speech begins. Every deterministic
+        # metric in evaluate_full_duplex_ja.py is anchored to specific
+        # timeline events (pause/interruption/overlap intervals) or to
+        # user_segments end times, not to absolute recording start, so
+        # shifting everything later by lead_in_sec doesn't require any
+        # changes there.
+        lead_in = np.zeros(int(round(lead_in_sec * sample_rate)), dtype=np.float32)
+        noisy_parts.append(lead_in)
+        clean_parts.append(lead_in.copy())
+        cursor = lead_in_sec
+
+    for timeline_index, item in enumerate(scenario["timeline"]):
         kind = str(item["type"])
         if kind == "silence":
             duration = float(item["duration_sec"])
@@ -183,14 +390,24 @@ def render_scenario(
             clean_parts.append(pcm.copy())
         elif kind in {"speech", "interrupt", "overlap_speech"}:
             text = str(item["text"])
-            pcm = synthesize(
-                text,
-                sample_rate,
-                speed,
-                tts_backend,
-                tts_engine,
-                tts_speaker,
-            )
+            boundary = whole_utterance_boundaries.get(timeline_index)
+            if boundary is not None:
+                raw_pcm, raw_rate, start_sec, end_sec = boundary
+                start_sample = max(0, int(round(start_sec * raw_rate)))
+                end_sample = min(raw_pcm.size, int(round(end_sec * raw_rate)))
+                fragment = raw_pcm[start_sample:end_sample]
+                if fragment.size == 0:
+                    fragment = np.zeros(1, dtype=np.float32)
+                pcm = postprocess_audio(fragment, raw_rate, sample_rate, speed)
+            else:
+                pcm = synthesize(
+                    text,
+                    sample_rate,
+                    speed,
+                    tts_backend,
+                    tts_engine,
+                    tts_speaker,
+                )
             gain = float(item.get("gain", 1.0))
             noisy_pcm = np.clip(pcm * gain, -1.0, 1.0)
             start, end = cursor, cursor + len(pcm) / sample_rate
@@ -223,9 +440,12 @@ def render_scenario(
         "tts_backend": tts_backend,
         "tts_model": tts_model,
         "tts_speaker": tts_speaker,
+        "speaker": tts_speaker,
+        "tts_mode": "whole-utterance" if whole_utterance_boundaries else "per-fragment",
         "duration_sec": round(len(noisy) / sample_rate, 4),
         "user_segments": user_segments,
         "events": events,
+        "opening_greeting": opening_greeting,
         "source_scenario": scenario,
     }
     return noisy, clean, metadata
@@ -234,16 +454,65 @@ def render_scenario(
 def main() -> int:
     args = parse_args()
     tts_backend, tts_engine = initialize_tts(args)
+    aligner = initialize_aligner(args.whole_utterance, args.device)
     out_dir = args.out_dir.resolve()
     if out_dir.exists() and args.overwrite:
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    opening_greeting = None
+    lead_in_sec = 0.0
+    if not args.no_opening_greeting and args.opening_greeting:
+        # Synthesize once (same backend/speaker as the rest of the dataset)
+        # purely to measure how long the model's trained greeting takes to
+        # say, so every scenario reserves exactly that much silent lead-in
+        # plus a turn-taking gap before scripted user speech starts. Cached
+        # on disk since this exact phrase never changes between builds.
+        greeting_cache_dir = (
+            args.opening_greeting_cache_dir
+            if str(args.opening_greeting_cache_dir)
+            else None
+        )
+        greeting_pcm = synthesize_greeting_cached(
+            args.opening_greeting,
+            args.sample_rate,
+            args.tts_speed,
+            tts_backend,
+            tts_engine,
+            args.tts_speaker,
+            args.tts_model,
+            greeting_cache_dir,
+        )
+        greeting_duration_sec = round(len(greeting_pcm) / args.sample_rate, 4)
+        lead_in_sec = greeting_duration_sec + args.opening_greeting_gap_sec
+        opening_greeting = {
+            "text": args.opening_greeting,
+            "duration_sec": greeting_duration_sec,
+            "gap_sec": args.opening_greeting_gap_sec,
+        }
+        print(
+            f"[ja-data] opening greeting reserves {lead_in_sec:.2f}s lead-in "
+            f"({greeting_duration_sec:.2f}s speech + {args.opening_greeting_gap_sec:.2f}s gap)"
+        )
 
     rows = list(iter_jsonl(args.scenarios))
     manifest = []
     for index, scenario in enumerate(rows, start=1):
         sample_dir = out_dir / str(scenario["task"]) / str(scenario["id"])
         sample_dir.mkdir(parents=True, exist_ok=True)
+        whole_utterance_boundaries = None
+        if aligner is not None:
+            runs = group_whole_utterance_runs(scenario["timeline"])
+            if runs:
+                whole_utterance_boundaries = align_whole_utterance_runs(
+                    scenario["timeline"],
+                    runs,
+                    tts_backend,
+                    tts_engine,
+                    args.tts_speaker,
+                    aligner,
+                    args.whole_utterance_max_chars,
+                )
         noisy, clean, metadata = render_scenario(
             scenario,
             args.sample_rate,
@@ -252,6 +521,9 @@ def main() -> int:
             tts_engine,
             args.tts_model,
             args.tts_speaker,
+            whole_utterance_boundaries,
+            lead_in_sec,
+            opening_greeting,
         )
         write_wav_mono(sample_dir / "input.wav", noisy, args.sample_rate)
         if clean is not None:
@@ -283,6 +555,8 @@ def main() -> int:
                 "tts_backend": tts_backend,
                 "tts_model": args.tts_model,
                 "tts_speaker": args.tts_speaker,
+                "whole_utterance": aligner is not None,
+                "opening_greeting": opening_greeting,
                 "count": len(manifest),
                 "samples": manifest,
             },

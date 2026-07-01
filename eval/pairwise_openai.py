@@ -7,7 +7,14 @@ import time
 from pathlib import Path
 from typing import Any
 
-from openai_judge_common import chat_json, guard_local_only, iter_jsonl, load_client, write_jsonl
+from openai_judge_common import (
+    UsageTracker,
+    chat_json,
+    guard_local_only,
+    iter_jsonl,
+    load_client,
+    write_jsonl,
+)
 
 
 SYSTEM_PROMPT = """あなたは日本語音声対話システムの比較評価者です。
@@ -99,38 +106,39 @@ def main() -> int:
         keys = keys[: args.limit]
 
     out_rows = []
+    tracker = UsageTracker()
     for index, key in enumerate(keys, start=1):
         row_a = rows_a[key]
         row_b = rows_b[key]
-        first = normalize_pairwise(
-            chat_json(
-                client,
-                model,
-                [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt_for(row_a, row_b, args.a_name, args.b_name)},
-                ],
-                args.temperature,
-                args.max_tokens,
-            )
+        first_raw, first_usage = chat_json(
+            client,
+            model,
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt_for(row_a, row_b, args.a_name, args.b_name)},
+            ],
+            args.temperature,
+            args.max_tokens,
         )
+        tracker.add(first_usage)
+        first = normalize_pairwise(first_raw)
         second = None
         final_winner = first["winner"]
         if args.two_pass:
             if args.sleep:
                 time.sleep(args.sleep)
-            second = normalize_pairwise(
-                chat_json(
-                    client,
-                    model,
-                    [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt_for(row_b, row_a, args.b_name, args.a_name)},
-                    ],
-                    args.temperature,
-                    args.max_tokens,
-                )
+            second_raw, second_usage = chat_json(
+                client,
+                model,
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt_for(row_b, row_a, args.b_name, args.a_name)},
+                ],
+                args.temperature,
+                args.max_tokens,
             )
+            tracker.add(second_usage)
+            second = normalize_pairwise(second_raw)
             second_as_original = invert_winner(second["winner"])
             final_winner = first["winner"] if first["winner"] == second_as_original else "tie"
 
@@ -151,6 +159,7 @@ def main() -> int:
 
     write_jsonl(args.out, out_rows)
     print(f"[pairwise] wrote {len(out_rows)} rows -> {args.out}")
+    tracker.print_summary("pairwise")
     return 0
 
 

@@ -47,16 +47,6 @@ def main() -> int:
                 "clean_assistant_text": row.get("clean_assistant_text"),
                 "clean_assistant_timeline": row.get("clean_assistant_chunks", []),
                 "deterministic_metrics": row.get("metrics", {}),
-                "judge_dimensions": [
-                    "contextual_relevance",
-                    "interruption_handling",
-                    "topic_stability",
-                    "empathy_acknowledgement",
-                    "safety_boundary",
-                    "conversation_naturalness",
-                    "overall",
-                ],
-                "trial_dir": row.get("trial_dir"),
             }
             handle.write(json.dumps(packed, ensure_ascii=False) + "\n")
     print(f"[fdb-pack] wrote {len(rows)} rows -> {args.out}")

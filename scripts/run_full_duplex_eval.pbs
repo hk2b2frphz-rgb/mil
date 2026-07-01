@@ -25,6 +25,22 @@
 #   FDB_TTS_SPEAKER=Ono_Anna
 #   FDB_DEVICE=cuda
 #   FDB_DTYPE=bfloat16
+#   FDB_WHOLE_UTTERANCE=1 (default; requires torchaudio+uroman/pykakasi,
+#     falls back to per-fragment synthesis with a warning if unavailable)
+#   FDB_WHOLE_UTTERANCE_MAX_CHARS=150
+#   FDB_BACKCHANNEL_GT=eval_sets/full_duplex_ja/backchannel_gt.json (default if
+#     present; see eval/build_backchannel_gt.py -- this is a project-design
+#     proxy distribution, not a human-annotated corpus)
+#   FDB_OPENING_GREETING=1 (default; reserves silent lead-in for the model's
+#     trained fixed opening line, see scripts/generate_qwen3_tts_data.py
+#     OPENING_GREETING_TEXT. Set to 0 for base Moshi / llm-jp baselines,
+#     which were never trained to say it. The dataset dir defaults to
+#     data/full_duplex_ja_greeting or _nogreeting depending on this flag,
+#     so switching it can't silently reuse a mismatched cached dataset.)
+#   FDB_OPENING_GREETING_GAP_SEC=0.4
+#   FDB_OPENING_GREETING_CACHE_DIR=data/.cache/opening_greeting (default;
+#     the fixed greeting audio itself is cached here and reused across
+#     dataset (re)builds instead of resynthesizing every time)
 #   REFRESH_FDB_DATA=1
 
 set -euo pipefail
@@ -41,6 +57,10 @@ export FDB_TTS_MODEL="${FDB_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
 export FDB_TTS_SPEAKER="${FDB_TTS_SPEAKER:-Ono_Anna}"
 export FDB_DEVICE="${FDB_DEVICE:-cuda}"
 export FDB_DTYPE="${FDB_DTYPE:-bfloat16}"
+export FDB_WHOLE_UTTERANCE="${FDB_WHOLE_UTTERANCE:-1}"
+export FDB_WHOLE_UTTERANCE_MAX_CHARS="${FDB_WHOLE_UTTERANCE_MAX_CHARS:-150}"
+export FDB_OPENING_GREETING="${FDB_OPENING_GREETING:-1}"
+export FDB_OPENING_GREETING_GAP_SEC="${FDB_OPENING_GREETING_GAP_SEC:-0.4}"
 
 # Disable Triton / torch.compile -- V100 lacks support for many Triton kernels.
 export TORCHINDUCTOR_DISABLE=1
