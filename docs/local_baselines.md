@@ -85,7 +85,7 @@ immediately.
 ### PBS: cascade, both pipelines in one job
 
 `scripts/run_local_baseline_cascade_eval.pbs` runs `--system cascade` over
-*both* pipelines above in one V100 job (queue `xvm_s`, `res=small`),
+*both* pipelines above in one V100 job (queue `xvn_s`, `res=small`),
 including building `data/full_duplex_ja_nogreeting` if it doesn't exist yet,
 and stops before any judging -- this job never calls OpenAI/Azure, same
 rule as `run_full_duplex_eval.pbs`.

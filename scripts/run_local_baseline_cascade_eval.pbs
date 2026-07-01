@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #PBS -S /bin/bash
 #PBS -N cascade_eval
-#PBS -q xvm_s
+#PBS -q xvn_s
 #PBS -l select=1:res=small
 #PBS -l walltime=12:00:00
 #PBS -j oe
@@ -82,7 +82,7 @@ exec > >(tee -a "$JOB_LOG") 2>&1
 
 echo "===== Local cascade baseline eval ====="
 echo "job_id:       ${PBS_JOBID:-n/a}"
-echo "queue:        xvm_s"
+echo "queue:        xvn_s"
 echo "host:         $(hostname)"
 echo "model_id:     $CASCADE_MODEL_ID"
 echo "asr:          $CASCADE_ASR_MODEL ($CASCADE_ASR_COMPUTE_TYPE, $CASCADE_ASR_DEVICE)"
