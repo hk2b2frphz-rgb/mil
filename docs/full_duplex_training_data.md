@@ -1,6 +1,6 @@
 # Japanese full-duplex training data
 
-The 14 fixed cases in `eval_sets/full_duplex_ja/scenarios.jsonl` are evaluation
+The 42 fixed cases in `eval_sets/full_duplex_ja/scenarios.jsonl` are evaluation
 inputs. They are not used as training text.
 
 Full-duplex training data is generated independently through the repository's
@@ -35,7 +35,20 @@ existing pipeline:
      turn. Labeled-task structure is left untouched.
 5. `generate_qwen3_tts_data.py` renders stereo audio with Moshi on the left and
    the user/environment on the right. A short transition gap (`--gap-sec 0.2`)
-   reflects natural Japanese turn-taking.
+   reflects natural Japanese turn-taking. Unless `--no-opening-greeting` is
+   passed, every dialogue's turns are prepended with a fixed Moshi turn
+   (`OPENING_GREETING_TEXT`, default `"こちらは、孤独や孤立について話せる相
+   談窓口です。よかったら、少しお話ししましょう。"`, override with
+   `--opening-greeting TEXT`). Moshi generating this line itself every time --
+   rather than some external layer playing a canned clip -- is the point:
+   emitting it seeds "loneliness/isolation counseling window" as grounding
+   context in the model's own generation history before anything else in the
+   session happens. The insertion happens after `validate_duplex_dialogue()`
+   already ran on the un-prefixed turns, so per-task timing validators (e.g.
+   "`model_backchannel` must overlap a preceding user turn") are unaffected.
+   See [`full_duplex_evaluation.md`](full_duplex_evaluation.md) for how the
+   eval side reserves matching lead-in time and checks the greeting was
+   actually produced.
 6. The usual Moshi fine-tuning launchers consume
    `training_set/synthetic_moshi_train.jsonl`.
 

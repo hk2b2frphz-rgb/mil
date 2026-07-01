@@ -214,6 +214,18 @@ VALID_SPEAKERS = {
 }
 
 
+# Fixed opening line every training dialogue's moshi turns begin with (unless
+# --no-opening-greeting). Moshi actually generating this itself -- rather
+# than a canned clip played by some external layer -- is the point: emitting
+# it establishes "loneliness/isolation counseling window" as grounding
+# context in its own generation history before anything else happens.
+# Time-of-day-neutral by design (this is a fixed, always-on line, not a
+# templated greeting picked per time of day).
+OPENING_GREETING_TEXT = (
+    "こちらは、孤独や孤立について話せる相談窓口です。よかったら、少しお話ししましょう。"
+)
+
+
 # ---------------------------------------------------------------------------
 # データクラス
 # ---------------------------------------------------------------------------
@@ -1030,6 +1042,37 @@ def _find_energy_valley(
     return valley_frame * frame_len / sample_rate
 
 
+def _chunk_indices_by_chars(
+    indices: list[int],
+    texts: list[str],
+    max_chars: int,
+) -> list[list[int]]:
+    """Split *indices* into consecutive chunks whose concatenated text stays
+    under *max_chars*. Keeps at least one index per chunk even if a single
+    turn's text alone exceeds the limit. Chunking bounds how much text a
+    single TTS call must render, which keeps the synthesized audio length
+    in proportion to the text and avoids CTC forced-alignment failures
+    ("target_length is too long for CTC") that occur when a very long
+    concatenated utterance gets truncated by the TTS model's own generation
+    limit relative to the full text."""
+    if max_chars <= 0:
+        return [list(indices)] if indices else []
+    chunks: list[list[int]] = []
+    current: list[int] = []
+    current_len = 0
+    for idx, text in zip(indices, texts):
+        tlen = len(text)
+        if current and current_len + tlen > max_chars:
+            chunks.append(current)
+            current = []
+            current_len = 0
+        current.append(idx)
+        current_len += tlen
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def build_segments_whole_utterance(
     dialogue: Dialogue,
     tts: Qwen3TTS | MossTTSD,
@@ -1041,6 +1084,7 @@ def build_segments_whole_utterance(
     background_speaker_override: str | None = None,
     instruct_user: str | None = None,
     instruct_moshi: str | None = None,
+    max_chars_per_synthesis: int = 150,
 ) -> tuple[list[AudioSegment], list[dict[str, Any]]]:
     """
     Whole-utterance TTS with natural aizuchi overlap.
@@ -1079,24 +1123,36 @@ def build_segments_whole_utterance(
     for speaker, indices in concat_groups.items():
         if not indices:
             continue
-        texts = [dialogue.turns[i].text for i in indices]
-        concat_text = "".join(texts)
-
+        all_texts = [dialogue.turns[i].text for i in indices]
         override = user_speaker_override if speaker == "user" else None
         instruct = instruct_user if speaker == "user" else instruct_moshi
-        logger.info(
-            "whole-utterance TTS: speaker=%s, %d turns, %d chars, instruct=%r",
-            speaker, len(texts), len(concat_text), (instruct or "")[:30],
-        )
-        audio = tts.synthesize(
-            concat_text, speaker, instruct=instruct, speaker_override=override,
-        )
-        speaker_audio[speaker] = audio
 
-        expanded, tight = aligner.align(audio, tts.sample_rate, texts)
-        for idx, exp, tgt in zip(indices, expanded, tight):
-            turn_expanded[idx] = exp
-            turn_tight[idx] = tgt
+        chunks = _chunk_indices_by_chars(indices, all_texts, max_chars_per_synthesis)
+        logger.info(
+            "whole-utterance TTS: speaker=%s, %d turns, %d chars, %d chunk(s), instruct=%r",
+            speaker, len(all_texts), sum(len(t) for t in all_texts), len(chunks),
+            (instruct or "")[:30],
+        )
+
+        audio_parts: list[np.ndarray] = []
+        time_offset = 0.0
+        for chunk_indices in chunks:
+            chunk_texts = [dialogue.turns[i].text for i in chunk_indices]
+            chunk_text = "".join(chunk_texts)
+            audio = tts.synthesize(
+                chunk_text, speaker, instruct=instruct, speaker_override=override,
+            )
+            audio_parts.append(audio)
+
+            expanded, tight = aligner.align(audio, tts.sample_rate, chunk_texts)
+            for idx, exp, tgt in zip(chunk_indices, expanded, tight):
+                turn_expanded[idx] = (exp[0] + time_offset, exp[1] + time_offset)
+                turn_tight[idx] = (tgt[0] + time_offset, tgt[1] + time_offset)
+            time_offset += audio.size / tts.sample_rate
+
+        speaker_audio[speaker] = (
+            np.concatenate(audio_parts) if audio_parts else np.zeros(0, dtype=np.float32)
+        )
 
     # --- 4. Build user merge groups (bridged by aizuchi) ------------------
     user_indices = concat_groups["user"]
@@ -1617,6 +1673,20 @@ def parse_args() -> argparse.Namespace:
         help="Automatically overlap short moshi backchannels with the preceding user turn.",
     )
     parser.add_argument(
+        "--opening-greeting",
+        default=OPENING_GREETING_TEXT,
+        help=(
+            "Fixed moshi turn prepended to every dialogue's turns before synthesis "
+            "(training grounding for a memorized session-opening line). "
+            "Pass '' or --no-opening-greeting to disable."
+        ),
+    )
+    parser.add_argument(
+        "--no-opening-greeting",
+        action="store_true",
+        help="Do not prepend the fixed opening-greeting moshi turn.",
+    )
+    parser.add_argument(
         "--whole-utterance",
         action="store_true",
         help=(
@@ -1633,6 +1703,29 @@ def parse_args() -> argparse.Namespace:
             "whole-utterance モード用のスタイルプリセット名。"
             f"候補: {_preset_names}, random（対話ごとにランダム選択）。"
             "指定すると --instruct-user/--instruct-moshi より優先される。"
+        ),
+    )
+    parser.add_argument(
+        "--whole-utterance-max-chars",
+        type=int,
+        default=150,
+        help=(
+            "whole-utterance モードで話者ごとに連結するテキストの1回のTTS呼び出し"
+            "あたりの最大文字数。長い対話を分割合成することで、TTSモデルの生成長"
+            "上限による音声打ち切りとそれに伴う CTC alignment の "
+            "'target_length is too long for CTC' 失敗を防ぐ。0以下で分割無効。"
+        ),
+    )
+    parser.add_argument(
+        "--success-target",
+        type=int,
+        default=None,
+        help=(
+            "このシャードで成功させたい対話数。指定すると、個々の対話合成が"
+            "例外で失敗してもシャード全体は継続し、次の対話（予備分含む）で"
+            "補って目標数に到達し次第打ち切る。未指定時は渡された対話を"
+            "全件処理する（失敗しても続行するが目標判定はしない）。"
+            "全件処理後も目標に届かない場合はエラー終了する。"
         ),
     )
     args = parser.parse_args()
@@ -1766,183 +1859,222 @@ def main() -> None:
         fa_aligner = ForcedAligner(device=args.device)
         fa_aligner.load()
 
+    success_count = 0
+    failed_count = 0
     for idx, tmpl in enumerate(templates, start=1):
-        turns: list[DialogueTurn] = []
-        for t in tmpl["turns"]:
-            speaker = t["speaker"]
-            if speaker == "silence":
+        try:
+            turns: list[DialogueTurn] = []
+            for t in tmpl["turns"]:
+                speaker = t["speaker"]
+                if speaker == "silence":
+                    turns.append(DialogueTurn(
+                        speaker="silence",
+                        text="",
+                        duration_sec=float(t.get("duration_sec", 2.0)),
+                        note=t.get("note"),
+                    ))
+                    continue
+                emotion = None if args.no_emotion else t.get("emotion")
+                instruct = resolve_emotion(emotion, emotion_map)
                 turns.append(DialogueTurn(
-                    speaker="silence",
-                    text="",
-                    duration_sec=float(t.get("duration_sec", 2.0)),
-                    note=t.get("note"),
+                    speaker=speaker,
+                    text=t["text"],
+                    emotion=emotion,
+                    instruct=instruct,
+                    timing=str(t.get("timing") or "sequential"),
+                    start_after_previous_start_sec=optional_float(
+                        t.get("start_after_previous_start_sec")
+                    ),
+                    truncate_previous_after_sec=optional_float(
+                        t.get("truncate_previous_after_sec")
+                    ),
+                    gain=max(0.0, float(optional_float(t.get("gain"), 1.0) or 0.0)),
+                    voice_role=str(t.get("voice_role") or "") or None,
+                    event=str(t.get("event") or "") or None,
                 ))
-                continue
-            emotion = None if args.no_emotion else t.get("emotion")
-            instruct = resolve_emotion(emotion, emotion_map)
-            turns.append(DialogueTurn(
-                speaker=speaker,
-                text=t["text"],
-                emotion=emotion,
-                instruct=instruct,
-                timing=str(t.get("timing") or "sequential"),
-                start_after_previous_start_sec=optional_float(
-                    t.get("start_after_previous_start_sec")
-                ),
-                truncate_previous_after_sec=optional_float(
-                    t.get("truncate_previous_after_sec")
-                ),
-                gain=max(0.0, float(optional_float(t.get("gain"), 1.0) or 0.0)),
-                voice_role=str(t.get("voice_role") or "") or None,
-                event=str(t.get("event") or "") or None,
-            ))
-        dialogue = Dialogue(
-            id=safe_stem(tmpl["id"], f"dialogue_{idx:03d}"),
-            category=tmpl["category"],
-            risk_level=tmpl["risk_level"],
-            title=tmpl["title"],
-            turns=turns,
-            duplex_task=str(tmpl.get("duplex_task") or "") or None,
-        )
+            # Prepended after validate_duplex_dialogue() has already run on
+            # tmpl["turns"] (see the validation loop above main's dialogue
+            # loop), so index-based duplex-task checks (e.g. "turn 0 must be
+            # X") stay correct -- this greeting only ever affects the
+            # synthesis-time turn list, never the validated template.
+            if not args.no_opening_greeting and args.opening_greeting:
+                turns = [
+                    DialogueTurn(speaker="moshi", text=args.opening_greeting,
+                                 timing="sequential", event="opening_greeting"),
+                    *turns,
+                ]
+            dialogue = Dialogue(
+                id=safe_stem(tmpl["id"], f"dialogue_{idx:03d}"),
+                category=tmpl["category"],
+                risk_level=tmpl["risk_level"],
+                title=tmpl["title"],
+                turns=turns,
+                duplex_task=str(tmpl.get("duplex_task") or "") or None,
+            )
 
-        user_voice = args.user_speaker_pool_list[(idx - 1) % len(args.user_speaker_pool_list)]
-        user_override = "user" if args.tts_backend == "moss-ttsd" else user_voice
-        other_override = "other" if args.tts_backend == "moss-ttsd" else args.speaker_other
-        background_override = (
-            "background" if args.tts_backend == "moss-ttsd"
-            else args.speaker_background
-        )
-        logger.info(
-            "[%d/%d] 対話 %s を合成中 (moshi=%s, user=%s) ...",
-            idx, len(templates), dialogue.id, args.speaker_moshi, user_voice,
-        )
-        t0 = time.time()
-        if args.whole_utterance and fa_aligner is not None:
-            instruct_u = args.instruct_user
-            instruct_m = args.instruct_moshi
-            if args.style_preset is not None:
-                preset_key = args.style_preset
-                if preset_key == "random":
-                    preset_key = random.choice(list(WHOLE_UTTERANCE_STYLE_PRESETS))
-                preset = WHOLE_UTTERANCE_STYLE_PRESETS[preset_key]
-                instruct_u = preset["user"]
-                instruct_m = preset["moshi"]
-                logger.info("style-preset: %s", preset_key)
-            segments, silences = build_segments_whole_utterance(
-                dialogue, tts, fa_aligner, args.lead_in_sec, args.gap_sec,
-                user_speaker_override=user_override,
-                other_speaker_override=other_override,
-                background_speaker_override=background_override,
-                instruct_user=instruct_u,
-                instruct_moshi=instruct_m,
+            user_voice = args.user_speaker_pool_list[(idx - 1) % len(args.user_speaker_pool_list)]
+            user_override = "user" if args.tts_backend == "moss-ttsd" else user_voice
+            other_override = "other" if args.tts_backend == "moss-ttsd" else args.speaker_other
+            background_override = (
+                "background" if args.tts_backend == "moss-ttsd"
+                else args.speaker_background
             )
-        else:
-            segments, silences = build_segments(
-                dialogue, tts, args.lead_in_sec, args.gap_sec,
-                user_speaker_override=user_override,
-                other_speaker_override=other_override,
-                background_speaker_override=background_override,
+            logger.info(
+                "[%d/%d] 対話 %s を合成中 (moshi=%s, user=%s) ...",
+                idx, len(templates), dialogue.id, args.speaker_moshi, user_voice,
             )
-        if not segments or tts.sample_rate == 0:
-            # 音声ターンが 0 件（沈黙のみ等）の対話。sample_rate が未確定で
-            # ゼロ除算になるため、合成せずスキップする。
+            t0 = time.time()
+            if args.whole_utterance and fa_aligner is not None:
+                instruct_u = args.instruct_user
+                instruct_m = args.instruct_moshi
+                if args.style_preset is not None:
+                    preset_key = args.style_preset
+                    if preset_key == "random":
+                        preset_key = random.choice(list(WHOLE_UTTERANCE_STYLE_PRESETS))
+                    preset = WHOLE_UTTERANCE_STYLE_PRESETS[preset_key]
+                    instruct_u = preset["user"]
+                    instruct_m = preset["moshi"]
+                    logger.info("style-preset: %s", preset_key)
+                segments, silences = build_segments_whole_utterance(
+                    dialogue, tts, fa_aligner, args.lead_in_sec, args.gap_sec,
+                    user_speaker_override=user_override,
+                    other_speaker_override=other_override,
+                    background_speaker_override=background_override,
+                    instruct_user=instruct_u,
+                    instruct_moshi=instruct_m,
+                    max_chars_per_synthesis=args.whole_utterance_max_chars,
+                )
+            else:
+                segments, silences = build_segments(
+                    dialogue, tts, args.lead_in_sec, args.gap_sec,
+                    user_speaker_override=user_override,
+                    other_speaker_override=other_override,
+                    background_speaker_override=background_override,
+                )
+            if not segments or tts.sample_rate == 0:
+                # 音声ターンが 0 件（沈黙のみ等）の対話。sample_rate が未確定で
+                # ゼロ除算になるため、合成せずスキップする。
+                logger.warning(
+                    "[%d/%d] 対話 %s は音声ターンが無いためスキップします",
+                    idx, len(templates), dialogue.id,
+                )
+                continue
+            stereo = render_stereo(segments, tts.sample_rate)
+            elapsed = time.time() - t0
+
+            stem = f"sample_{idx:03d}_{dialogue.id}"
+            wav_path = data_dir / f"{stem}.wav"
+            json_path = wav_path.with_suffix(".json")
+            duration = stereo.shape[-1] / tts.sample_rate
+
+            write_wav(wav_path, stereo, tts.sample_rate)
+
+            alignments = [
+                [seg.text, [round(seg.start_sec, 4), round(seg.end_sec, 4)], seg.label]
+                for seg in segments
+            ]
+            write_json(json_path, {
+                "alignments": alignments,
+                "metadata": {
+                    "mode": (
+                        ("whole-utterance-" + args.tts_backend)
+                        if args.whole_utterance
+                        else (
+                            "moss-ttsd-scripted"
+                            if args.tts_backend == "moss-ttsd"
+                            else "qwen3-tts-scripted"
+                        )
+                    ),
+                    "sample_rate": tts.sample_rate,
+                    "duration_sec": round(duration, 4),
+                    "tts_backend": args.tts_backend,
+                    "tts_model": (
+                        args.moss_model if args.tts_backend == "moss-ttsd"
+                        else args.model
+                    ),
+                    "tts_codec_model": (
+                        args.moss_codec_model
+                        if args.tts_backend == "moss-ttsd"
+                        else None
+                    ),
+                    "language": args.language,
+                    "speaker_user": user_voice,
+                    "speaker_user_pool": args.user_speaker_pool_list,
+                    "speaker_moshi": args.speaker_moshi,
+                    "speaker_other": args.speaker_other,
+                    "speaker_background": args.speaker_background,
+                    "left_channel": "moshi",
+                    "right_channel": "user",
+                    "wall_time_sec": round(elapsed, 3),
+                    "emotion_control": "off" if args.no_emotion else "on",
+                    "style_preset": getattr(args, "style_preset", None),
+                    "emotion_map_used": {
+                        e: emotion_map[e]
+                        for e in {t.emotion for t in dialogue.turns if t.emotion}
+                    },
+                    "silences": silences,
+                    "duplex_task": dialogue.duplex_task,
+                    "duplex_events": [
+                        {
+                            "event": seg.event,
+                            "speaker": seg.speaker,
+                            "voice_role": seg.voice_role,
+                            "start_sec": round(seg.start_sec, 4),
+                            "end_sec": round(seg.end_sec, 4),
+                        }
+                        for seg in segments
+                        if seg.event
+                    ],
+                    "dialogue": {
+                        "id": dialogue.id,
+                        "category": dialogue.category,
+                        "risk_level": dialogue.risk_level,
+                        "title": dialogue.title,
+                        "duplex_task": dialogue.duplex_task,
+                        "turns": [asdict(t) for t in dialogue.turns],
+                    },
+                },
+            })
+
+            append_jsonl(dialogues_path, {
+                "id": dialogue.id,
+                "category": dialogue.category,
+                "risk_level": dialogue.risk_level,
+                "title": dialogue.title,
+                "duplex_task": dialogue.duplex_task,
+                "turns": [asdict(t) for t in dialogue.turns],
+            })
+            append_jsonl(manifest_path, {
+                "path": str(wav_path.relative_to(args.out_dir)).replace("\\", "/"),
+                "duration": duration,
+            })
+
+            logger.info("保存完了: %s (%.2f 秒, wall %.1f 秒)", wav_path, duration, elapsed)
+            success_count += 1
+            if args.success_target is not None and success_count >= args.success_target:
+                logger.info(
+                    "success-target %d に到達したため打ち切ります (処理済み %d/%d, 失敗 %d 件)",
+                    args.success_target, idx, len(templates), failed_count,
+                )
+                break
+        except Exception as exc:
+            failed_count += 1
             logger.warning(
-                "[%d/%d] 対話 %s は音声ターンが無いためスキップします",
-                idx, len(templates), dialogue.id,
+                "[%d/%d] 対話 %s の合成に失敗したためスキップします: %s",
+                idx, len(templates), tmpl.get("id", "<unknown>"), exc,
+                exc_info=True,
             )
             continue
-        stereo = render_stereo(segments, tts.sample_rate)
-        elapsed = time.time() - t0
 
-        stem = f"sample_{idx:03d}_{dialogue.id}"
-        wav_path = data_dir / f"{stem}.wav"
-        json_path = wav_path.with_suffix(".json")
-        duration = stereo.shape[-1] / tts.sample_rate
-
-        write_wav(wav_path, stereo, tts.sample_rate)
-
-        alignments = [
-            [seg.text, [round(seg.start_sec, 4), round(seg.end_sec, 4)], seg.label]
-            for seg in segments
-        ]
-        write_json(json_path, {
-            "alignments": alignments,
-            "metadata": {
-                "mode": (
-                    ("whole-utterance-" + args.tts_backend)
-                    if args.whole_utterance
-                    else (
-                        "moss-ttsd-scripted"
-                        if args.tts_backend == "moss-ttsd"
-                        else "qwen3-tts-scripted"
-                    )
-                ),
-                "sample_rate": tts.sample_rate,
-                "duration_sec": round(duration, 4),
-                "tts_backend": args.tts_backend,
-                "tts_model": (
-                    args.moss_model if args.tts_backend == "moss-ttsd"
-                    else args.model
-                ),
-                "tts_codec_model": (
-                    args.moss_codec_model
-                    if args.tts_backend == "moss-ttsd"
-                    else None
-                ),
-                "language": args.language,
-                "speaker_user": user_voice,
-                "speaker_user_pool": args.user_speaker_pool_list,
-                "speaker_moshi": args.speaker_moshi,
-                "speaker_other": args.speaker_other,
-                "speaker_background": args.speaker_background,
-                "left_channel": "moshi",
-                "right_channel": "user",
-                "wall_time_sec": round(elapsed, 3),
-                "emotion_control": "off" if args.no_emotion else "on",
-                "style_preset": getattr(args, "style_preset", None),
-                "emotion_map_used": {
-                    e: emotion_map[e]
-                    for e in {t.emotion for t in dialogue.turns if t.emotion}
-                },
-                "silences": silences,
-                "duplex_task": dialogue.duplex_task,
-                "duplex_events": [
-                    {
-                        "event": seg.event,
-                        "speaker": seg.speaker,
-                        "voice_role": seg.voice_role,
-                        "start_sec": round(seg.start_sec, 4),
-                        "end_sec": round(seg.end_sec, 4),
-                    }
-                    for seg in segments
-                    if seg.event
-                ],
-                "dialogue": {
-                    "id": dialogue.id,
-                    "category": dialogue.category,
-                    "risk_level": dialogue.risk_level,
-                    "title": dialogue.title,
-                    "duplex_task": dialogue.duplex_task,
-                    "turns": [asdict(t) for t in dialogue.turns],
-                },
-            },
-        })
-
-        append_jsonl(dialogues_path, {
-            "id": dialogue.id,
-            "category": dialogue.category,
-            "risk_level": dialogue.risk_level,
-            "title": dialogue.title,
-            "duplex_task": dialogue.duplex_task,
-            "turns": [asdict(t) for t in dialogue.turns],
-        })
-        append_jsonl(manifest_path, {
-            "path": str(wav_path.relative_to(args.out_dir)).replace("\\", "/"),
-            "duration": duration,
-        })
-
-        logger.info("保存完了: %s (%.2f 秒, wall %.1f 秒)", wav_path, duration, elapsed)
-
+    logger.info(
+        "対話合成完了: 成功 %d 件, 失敗 %d 件", success_count, failed_count,
+    )
+    if args.success_target is not None and success_count < args.success_target:
+        raise SystemExit(
+            f"success-target {args.success_target} に届きませんでした "
+            f"(成功 {success_count} 件, 失敗 {failed_count} 件)。"
+            "予備の対話を追加するか success-target を見直してください。"
+        )
     logger.info("完了。manifest: %s", manifest_path)
 
 
