@@ -69,6 +69,32 @@ export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export MASTER_PORT="${MASTER_PORT:-29500}"
 export NO_TORCH_COMPILE="${NO_TORCH_COMPILE:-1}"
 
+# ---------------------------------------------------------------------------
+# GPU preflight. `accelerate launch --num_processes NPROC` maps rank i to
+# cuda:i, so it needs NPROC distinct GPUs actually visible. If fewer are
+# visible -- e.g. a stale single-GPU CUDA_VISIBLE_DEVICES was inherited into a
+# PBS job via `#PBS -V` -- every rank collapses onto cuda:0 and training runs
+# on one GPU without any error ("0,0"). Fail loudly here instead, before the
+# expensive tokenization/launch steps.
+# ---------------------------------------------------------------------------
+echo "[nu-fullft] GPU preflight: CUDA_VISIBLE_DEVICES='${CUDA_VISIBLE_DEVICES:-<unset>}' NPROC=$NPROC"
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=index,name,memory.total --format=csv || true
+fi
+VISIBLE_GPU_COUNT="$(cd "$NU_MOSHI_FT_REPO" && \
+    CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}" \
+    uv run python -c 'import torch; print(torch.cuda.device_count())' 2>/dev/null || echo 0)"
+echo "[nu-fullft] torch.cuda.device_count()=$VISIBLE_GPU_COUNT (need NPROC=$NPROC)"
+if [[ "${VISIBLE_GPU_COUNT:-0}" -lt "$NPROC" ]]; then
+    echo "ERROR: only ${VISIBLE_GPU_COUNT:-0} GPU(s) visible but NPROC=$NPROC requested." >&2
+    echo "  CUDA_VISIBLE_DEVICES='${CUDA_VISIBLE_DEVICES:-<unset>}'." >&2
+    echo "  With fewer GPUs than processes, accelerate launch puts every rank on cuda:0" >&2
+    echo "  (both ranks end up on GPU 0). A stale value is often inherited via '#PBS -V'." >&2
+    echo "  Fix: set NPROC to the number of GPUs actually allocated, or pass the correct" >&2
+    echo "  GPU list (e.g. GPU_LIST=0,1 in the PBS job), then resubmit." >&2
+    exit 1
+fi
+
 RUN_TS="$(date +%Y-%m-%d_%H%M%S)"
 EXP_LOG="$EXP_DIR/run_nu_${RUN_TS}.log"
 NU_OUTPUT_DIR="$EXP_DIR/checkpoints/nu_${RUN_TS}"

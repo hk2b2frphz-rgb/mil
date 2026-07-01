@@ -39,7 +39,18 @@ export RUN_ID="${RUN_ID:-full_${JOB_ID_SHORT}}"
 export SWEEP_PATTERNS="${SWEEP_PATTERNS:-f01}"
 export NUM_CASES="${NUM_CASES:-250}"
 export NPROC="${NPROC:-2}"
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+# `#PBS -V` inherits the submit shell's whole environment, which can carry a
+# stale single-GPU CUDA_VISIBLE_DEVICES (e.g. "0" from a prior interactive
+# session or .bashrc). With `${VAR:-default}` that stale value survives, and
+# `accelerate launch --num_processes 2` then maps both ranks onto cuda:0 --
+# i.e. training silently runs on one GPU ("0,0"). Derive the visible-GPU list
+# from NPROC unconditionally so inheritance can't shrink it. To pick specific
+# GPUs on purpose, pass GPU_LIST=... (e.g. -v GPU_LIST=2,3) instead.
+if [[ -n "${GPU_LIST:-}" ]]; then
+    export CUDA_VISIBLE_DEVICES="$GPU_LIST"
+else
+    export CUDA_VISIBLE_DEVICES="$(seq -s, 0 $((NPROC - 1)))"
+fi
 export MLFLOW_EXPERIMENT_NAME="${MLFLOW_EXPERIMENT_NAME:-job_fullft_hp}"
 export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-sqlite:///$PWD/mlruns/mlflow.db}"
 export MLFLOW_ARTIFACT_ROOT="${MLFLOW_ARTIFACT_ROOT:-file:$PWD/mlruns/artifacts}"
