@@ -55,7 +55,11 @@ apply_pattern() {
     HP_LOG_FREQ=5
 
     case "$pattern" in
-        h01) ;;                                      # fixed 2e-6 after 5% warmup
+        h01) HP_MAX_STEPS=2400 ;;                    # fixed 2e-6 after 5% warmup;
+                                                      # eval loss hadn't converged by
+                                                      # step 1200, so double exposure
+        h01_long) HP_MAX_STEPS=3600 ;;               # h01 with even more exposure,
+                                                      # if 2400 steps still isn't enough
         h02) HP_LR=5e-6 ;;                           # higher learning rate
         h03) HP_LR=1e-6 ;;                           # lower learning rate
         h04) HP_LORA_RANK=64 ;;                      # larger adapter

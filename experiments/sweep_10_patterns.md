@@ -39,7 +39,8 @@ Defaults:
 
 | pattern | change from baseline | purpose |
 |---|---|---|
-| `h01` | `lr=2e-6`, `scheduler=warmup_constant` | fixed-LR baseline |
+| `h01` | `lr=2e-6`, `scheduler=warmup_constant`, `max_steps=2400` | fixed-LR baseline; bumped from 1200 to 2400 steps because eval loss hadn't converged by 1200 |
+| `h01_long` | same as `h01` but `max_steps=3600` | use if `h01` at 2400 steps still hasn't converged |
 | `h02` | `lr=5e-6` | check faster adaptation / instability |
 | `h03` | `lr=1e-6` | check under-training |
 | `h04` | `lora.rank=64` | more adapter capacity |
