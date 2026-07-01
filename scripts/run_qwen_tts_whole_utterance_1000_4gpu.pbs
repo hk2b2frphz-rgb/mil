@@ -48,6 +48,12 @@ export TTS_DEVICE="${TTS_DEVICE:-cuda}"
 export LEAD_IN_SEC="${LEAD_IN_SEC:-0.3}"
 export GAP_SEC="${GAP_SEC:-0.2}"
 export STYLE_PRESET="${STYLE_PRESET:-random}"
+# Throttles generate_qwen3_tts_data.py's per-dialogue progress logging (every
+# LOG_EVERY dialogues instead of every one) to keep shard_*.log from growing
+# unbounded on large runs. Set LOG_EVERY=1 or VERBOSE=1 for full per-call
+# detail when debugging a specific shard.
+export LOG_EVERY="${LOG_EVERY:-20}"
+export VERBOSE="${VERBOSE:-0}"
 # Fraction of each shard's dialogue count added as spare dialogues so that
 # per-dialogue synthesis/CTC-alignment failures (e.g. "target_length is too
 # long for CTC") can be compensated without the final merged training set
@@ -91,6 +97,8 @@ echo "dialogues:     $DIALOGUES_JSONL"
 echo "num_dialogues: $NUM_DIALOGUES"
 echo "num_shards:    $NUM_SHARDS"
 echo "spare_ratio:   $SPARE_RATIO"
+echo "log_every:     $LOG_EVERY"
+echo "verbose:       $VERBOSE"
 echo "gpus:          $CUDA_VISIBLE_DEVICES"
 echo "dtype:         $TTS_DTYPE"
 echo "style_preset:  $STYLE_PRESET"
@@ -217,7 +225,11 @@ for ((i = 0; i < NUM_SHARDS; i++)); do
             --gap-sec "$GAP_SEC"
             --no-emotion
             --style-preset "$STYLE_PRESET"
+            --log-every "$LOG_EVERY"
         )
+        if [[ "$VERBOSE" == "1" ]]; then
+            tts_args+=(--verbose)
+        fi
         CUDA_VISIBLE_DEVICES="$gpu_id" "${tts_args[@]}"
         test -s "$shard_training/synthetic_moshi_train.jsonl"
         echo "[$shard_tag] done"

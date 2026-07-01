@@ -473,7 +473,11 @@ class Qwen3TTS:
         elif sr != self.sample_rate:
             audio = _resample(audio, sr, self.sample_rate)
 
-        logger.info(
+        # Per-call log: whole-utterance mode calls this many times per
+        # dialogue (once per max-chars chunk per speaker), so at INFO this
+        # dominates shard log size on large runs. debug-only; --verbose
+        # re-enables it.
+        logger.debug(
             "Qwen3-TTS 合成完了: role=%s speaker=%s instruct=%r dur=%.2fs text=%r",
             speaker_role, voice, (instruct or "")[:24],
             audio.size / self.sample_rate, text[:30],
@@ -656,7 +660,8 @@ class MossTTSD:
         elif output_sr != self.sample_rate:
             audio = _resample(audio, output_sr, self.sample_rate)
 
-        logger.info(
+        # Per-call log; see the matching Qwen3-TTS.synthesize() note above.
+        logger.debug(
             "MOSS-TTSD synthesis complete role=%s dur=%.2fs text=%r",
             role, audio.size / self.sample_rate, text[:30],
         )
@@ -1128,7 +1133,9 @@ def build_segments_whole_utterance(
         instruct = instruct_user if speaker == "user" else instruct_moshi
 
         chunks = _chunk_indices_by_chars(indices, all_texts, max_chars_per_synthesis)
-        logger.info(
+        # Fires once per speaker per dialogue; debug-only to keep shard logs
+        # from growing unbounded on large sweeps (see synthesize() above).
+        logger.debug(
             "whole-utterance TTS: speaker=%s, %d turns, %d chars, %d chunk(s), instruct=%r",
             speaker, len(all_texts), sum(len(t) for t in all_texts), len(chunks),
             (instruct or "")[:30],
@@ -1226,7 +1233,7 @@ def build_segments_whole_utterance(
                 for a in range(curr_idx + 1, next_idx):
                     if a in aizuchi_indices:
                         aizuchi_overlay_sec[a] = overlap_in_merged
-            logger.info(
+            logger.debug(
                 "merged user turns %s into one segment (%.2fs)",
                 group, (last_exp_end - first_exp_start),
             )
@@ -1728,7 +1735,29 @@ def parse_args() -> argparse.Namespace:
             "全件処理後も目標に届かない場合はエラー終了する。"
         ),
     )
+    parser.add_argument(
+        "--log-every",
+        type=int,
+        default=20,
+        help=(
+            "対話ごとの進捗ログ（開始/保存完了）を N 件おきに間引く"
+            "（既定20）。1件目・最後の1件・失敗は常にログする。"
+            "1以下を指定すると全件ログする。"
+        ),
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help=(
+            "TTS呼び出し単位の詳細ログ（合成完了/チャンク分割/ターン結合）"
+            "をDEBUGからINFOに戻す。大規模実行では既定でDEBUGに落として"
+            "shardログの肥大化を防いでいる。"
+        ),
+    )
     args = parser.parse_args()
+
+    if args.verbose:
+        logging.getLogger(__name__).setLevel(logging.DEBUG)
 
     if args.tts_backend == "qwen3":
         for role, name in [
@@ -1919,10 +1948,22 @@ def main() -> None:
                 "background" if args.tts_backend == "moss-ttsd"
                 else args.speaker_background
             )
-            logger.info(
-                "[%d/%d] 対話 %s を合成中 (moshi=%s, user=%s) ...",
-                idx, len(templates), dialogue.id, args.speaker_moshi, user_voice,
+            # Throttle the per-dialogue progress pair (this + the
+            # "保存完了" log below) so large runs (thousands of dialogues)
+            # don't produce a shard log with two lines per dialogue on top
+            # of the per-chunk debug logs. Failures are always logged
+            # regardless (see the except block below).
+            log_progress = (
+                args.log_every <= 1
+                or idx == 1
+                or idx == len(templates)
+                or idx % args.log_every == 0
             )
+            if log_progress:
+                logger.info(
+                    "[%d/%d] 対話 %s を合成中 (moshi=%s, user=%s) ...",
+                    idx, len(templates), dialogue.id, args.speaker_moshi, user_voice,
+                )
             t0 = time.time()
             if args.whole_utterance and fa_aligner is not None:
                 instruct_u = args.instruct_user
@@ -1934,7 +1975,8 @@ def main() -> None:
                     preset = WHOLE_UTTERANCE_STYLE_PRESETS[preset_key]
                     instruct_u = preset["user"]
                     instruct_m = preset["moshi"]
-                    logger.info("style-preset: %s", preset_key)
+                    if log_progress:
+                        logger.info("style-preset: %s", preset_key)
                 segments, silences = build_segments_whole_utterance(
                     dialogue, tts, fa_aligner, args.lead_in_sec, args.gap_sec,
                     user_speaker_override=user_override,
@@ -2049,7 +2091,8 @@ def main() -> None:
                 "duration": duration,
             })
 
-            logger.info("保存完了: %s (%.2f 秒, wall %.1f 秒)", wav_path, duration, elapsed)
+            if log_progress:
+                logger.info("保存完了: %s (%.2f 秒, wall %.1f 秒)", wav_path, duration, elapsed)
             success_count += 1
             if args.success_target is not None and success_count >= args.success_target:
                 logger.info(
