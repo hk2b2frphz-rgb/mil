@@ -280,3 +280,13 @@ Both judge scripts can run on the same `azure_judge_input.jsonl`. The
 original `judge_full_duplex_azure.py` (5-point, Full-Duplex-Bench style)
 and `judge_llmjp_style.py` (10-point, llm-jp-moshi style) produce
 independent result files and can be compared side by side.
+
+## Comparing against local cascade / SpeechLLM baselines
+
+`eval/run_local_baseline_full_duplex.py` runs a local, turn-based cascade
+(ASR->LLM->TTS) or SpeechLLM (audio-in LLM->TTS) baseline over this same
+dataset format and writes `run_full_duplex_bench.py`-compatible output, so
+everything above (`evaluate_full_duplex_ja.py`, `pack_full_duplex_azure.py`,
+both judges) runs unchanged against it. See
+[`local_baselines.md`](local_baselines.md) for setup, commands, and which
+metrics are/aren't meaningful for a turn-based system.

@@ -386,6 +386,12 @@ fi
 if [[ "${NU_REPORT_TO_WANDB:-0}" == "1" ]]; then
     LAUNCH_CMD+=(--report_to wandb --project_name "${NU_WANDB_PROJECT:-moshi-finetuning}")
 fi
+# Keep only the best-eval-loss checkpoint (plus the just-saved one) during
+# training instead of accumulating every step_<N> ZeRO shard. Default on;
+# set NU_KEEP_BEST_ONLY=0 to keep every checkpoint.
+if [[ "${NU_KEEP_BEST_ONLY:-1}" == "1" ]]; then
+    LAUNCH_CMD+=(--keep_best_only)
+fi
 
 echo "[nu-fullft] launching nu-dialogue full fine-tuning"
 echo "  exp:       $EXP_NAME"
@@ -507,7 +513,41 @@ if [[ "${SKIP_AUTO_POSTPROCESS:-0}" != "1" ]]; then
             --nu-repo "$NU_MOSHI_FT_REPO" \
             --model-dtype "${NU_EXPORT_DTYPE:-bfloat16}"
         echo "[nu-fullft] auto-export complete: $EXPORT_OUT/model.safetensors"
+
+        # -----------------------------------------------------------------
+        # export 済みモデルで Full-Duplex-Bench-JA 評価を自動実行する。
+        # SKIP_AUTO_EVAL=1 で無効化できる。
+        #
+        # FDB_OPENING_GREETING (default 1, inherited from the environment
+        # this script was launched in) controls whether the eval dataset
+        # reserves lead-in time for the fixed opening greeting -- see
+        # docs/full_duplex_evaluation.md. Full fine-tuning on data generated
+        # with the greeting turn (the generate_qwen3_tts_data.py default)
+        # should keep it at 1 to match training. If SRC_RUN_DIR points to
+        # data generated with --no-opening-greeting (or generated before
+        # this feature existed), export FDB_OPENING_GREETING=0 before
+        # running this sweep so the auto-eval doesn't wait for a line the
+        # model was never trained to say.
+        # -----------------------------------------------------------------
+        if [[ "${SKIP_AUTO_EVAL:-0}" != "1" ]]; then
+            EVAL_MODEL_ID="$(printf '%s' "${EXP_NAME//\//_}_${RUN_TS}" | tr -cd 'A-Za-z0-9._-')"
+            echo
+            echo "[nu-fullft] running Full-Duplex-Bench-JA evaluation: model_id=$EVAL_MODEL_ID opening_greeting=${FDB_OPENING_GREETING:-1}"
+            if MODEL_ID="$EVAL_MODEL_ID" \
+               RUN_ID="$EVAL_MODEL_ID" \
+               MODEL_WEIGHT="$EXPORT_OUT/model.safetensors" \
+               MODEL_CONFIG="$EXPORT_OUT/moshi_lm_kwargs.json" \
+               HF_REPO="$NU_MOSHI_LM_REPO" \
+               FDB_OPENING_GREETING="${FDB_OPENING_GREETING:-1}" \
+               bash "$REPO_ROOT/scripts/run_full_duplex_eval.sh"; then
+                echo "[nu-fullft] auto-eval complete: $REPO_ROOT/eval_runs/full_duplex/$EVAL_MODEL_ID/benchmark_results/summary.json"
+            else
+                echo "[nu-fullft] WARN: auto-eval failed; exported model is still available at $EXPORT_OUT" >&2
+            fi
+        else
+            echo "[nu-fullft] SKIP_AUTO_EVAL=1: skipping automatic Full-Duplex-Bench evaluation"
+        fi
     else
-        echo "[nu-fullft] WARN: could not select a best checkpoint; skipping auto-export" >&2
+        echo "[nu-fullft] WARN: could not select a best checkpoint; skipping auto-export and auto-eval" >&2
     fi
 fi

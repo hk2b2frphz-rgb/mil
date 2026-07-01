@@ -141,3 +141,9 @@ python eval/summarize_eval.py \
   --pairwise eval_runs/f01_vs_f04_pairwise.jsonl \
   --out eval_runs/f01_vs_f04_summary.json
 ```
+
+### Comparing against local cascade / SpeechLLM baselines
+
+To put a number on what full-duplex Moshi buys you, run a local cascade
+(ASR->LLM->TTS) or SpeechLLM (audio-in LLM->TTS) baseline through this same
+workflow -- see [`local_baselines.md`](local_baselines.md).
