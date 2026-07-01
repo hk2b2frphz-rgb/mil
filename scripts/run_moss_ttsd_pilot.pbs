@@ -25,8 +25,10 @@ set -euo pipefail
 
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 source scripts/setup_proxy.sh
+# shellcheck source=/dev/null
+source "$PWD/scripts/run_id_utils.sh"
 
-export BATCH_ID="${BATCH_ID:-moss_ttsd_pilot}"
+export BATCH_ID="${BATCH_ID:-$(default_run_id moss_ttsd_pilot)}"
 export RUN_ID="$BATCH_ID"
 export OUT_ROOT="$PWD/data/runs/$BATCH_ID"
 export NUM_CASES="${NUM_CASES:-50}"

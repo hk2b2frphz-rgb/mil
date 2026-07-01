@@ -14,9 +14,9 @@ live anywhere.
 
 Usage:
   uv run python scripts/merge_training_shards.py \
-      --batch-dir data/runs/fd_100h \
-      --out-dir   data/runs/fd_100h/merged
-The fine-tuning launchers then take SRC_RUN_DIR=data/runs/fd_100h/merged.
+      --batch-dir data/runs/<BATCH_ID> \
+      --out-dir   data/runs/<BATCH_ID>/merged
+The fine-tuning launchers then take SRC_RUN_DIR=data/runs/<BATCH_ID>/merged.
 """
 from __future__ import annotations
 

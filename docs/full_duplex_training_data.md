@@ -62,16 +62,21 @@ qsub -J 0-0 scripts/run_full_duplex_training_data_100h.pbs
 qsub scripts/run_full_duplex_training_data_100h.pbs
 
 # After all shards finish, merge into one manifest (CPU only, login node):
+BATCH_ID=<printed_BATCH_ID>
 uv run python scripts/merge_training_shards.py \
-  --batch-dir data/runs/fd_100h \
-  --out-dir   data/runs/fd_100h/merged
+  --batch-dir data/runs/$BATCH_ID \
+  --out-dir   data/runs/$BATCH_ID/merged
 
 # Fine-tune with the merged dataset:
-SRC_RUN_DIR=data/runs/fd_100h/merged qsub scripts/fullft_sweep.pbs
+SRC_RUN_DIR=data/runs/$BATCH_ID/merged qsub scripts/fullft_sweep.pbs
 ```
 
 The merge writes absolute wav paths, so no audio is copied. Useful overrides:
-`BATCH_ID`, `DIALOGUES_PER_SHARD`, `BASE_SEED`, `LISTENING_RATIO`, `GAP_SEC`.
+`BATCH_ID`, `RUN_STAMP`, `DIALOGUES_PER_SHARD`, `BASE_SEED`,
+`LISTENING_RATIO`, `GAP_SEC`. Default output names avoid clobbering existing
+runs: non-array jobs get a timestamp suffix, while array jobs use the PBS array
+job id so all shards share one batch directory. Set `RUN_STAMP=YYYYMMDD_HHMMSS`
+or `BATCH_ID=...` before submission if you want a human-chosen batch name.
 
 ## gpt-oss-120b dialogue generation on 2x A100
 
@@ -121,7 +126,7 @@ qsub -v NUM_CASES=14 scripts/run_full_duplex_training_data.pbs
 ```
 
 The PBS job uses one V100 and defaults Gemma/Qwen3-TTS to `float16`.
-Its output is written under `data/runs/fd_train_<PBS_JOBID>/`.
+Its output is written under `data/runs/fd_train_<timestamp>[_jobid]/`.
 
 Generate only use cases and Gemma dialogue scripts:
 

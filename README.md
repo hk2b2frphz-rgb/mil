@@ -120,9 +120,9 @@ qsub -V scripts/run_qwen_tts_whole_utterance_1000_4gpu.pbs
 STYLE_PRESET=counseling_anxious qsub -V scripts/run_qwen_tts_whole_utterance_1000_4gpu.pbs
 ```
 
-出力先は `data/runs/qwen_dialogues_1000_tts_whole_4gpu/`。
-旧方式 (`run_qwen_tts_1000_4gpu.pbs`) の出力先
-`data/runs/qwen_dialogues_1000_tts_4gpu/` とは別フォルダ。
+Default `BATCH_ID` values include a timestamp/job suffix, so output goes under
+`data/runs/<printed BATCH_ID>/`. The job log prints `out_root`; use that path
+for merge and fine-tuning. Set `BATCH_ID=...` explicitly only when resuming.
 
 #### シャード一部失敗時のマージ
 
@@ -130,9 +130,10 @@ STYLE_PRESET=counseling_anxious qsub -V scripts/run_qwen_tts_whole_utterance_100
 成功した対話分だけでマージできる。
 
 ```bash
+BATCH_ID=<printed_BATCH_ID>
 uv run python scripts/merge_training_shards.py \
-  --batch-dir data/runs/qwen_dialogues_1000_tts_whole_4gpu \
-  --out-dir data/runs/qwen_dialogues_1000_tts_whole_4gpu/merged \
+  --batch-dir data/runs/$BATCH_ID \
+  --out-dir data/runs/$BATCH_ID/merged \
   --expected-shards 4 \
   --allow-partial
 ```
@@ -143,11 +144,11 @@ uv run python scripts/merge_training_shards.py \
 
 ```bash
 # LoRA (h01 パターン)
-SRC_RUN_DIR=./data/runs/qwen_dialogues_1000_tts_whole_4gpu/merged \
+SRC_RUN_DIR=./data/runs/$BATCH_ID/merged \
 SWEEP_PATTERNS=h01 qsub -V scripts/sweep_lora.pbs
 
 # Full FT (f01 パターン)
-SRC_RUN_DIR=./data/runs/qwen_dialogues_1000_tts_whole_4gpu/merged \
+SRC_RUN_DIR=./data/runs/$BATCH_ID/merged \
 SWEEP_PATTERNS=f01 qsub -V scripts/fullft_sweep.pbs
 ```
 
@@ -207,21 +208,22 @@ qsub scripts/run_full_duplex_training_data_100h.pbs
 #    もっと欲しい場合は配列を拡大: -J 0-95 で ~1000h
 
 # 3. 全シャード完了後、1 つの manifest へ統合（CPU のみ・ログインノードで可）
+BATCH_ID=<printed_BATCH_ID>
 uv run python scripts/merge_training_shards.py \
-  --batch-dir data/runs/fd_100h \
-  --out-dir   data/runs/fd_100h/merged \
+  --batch-dir data/runs/$BATCH_ID \
+  --out-dir   data/runs/$BATCH_ID/merged \
   --expected-shards 10
-#    -> data/runs/fd_100h/merged/training_set/synthetic_moshi_train.jsonl
+#    -> data/runs/$BATCH_ID/merged/training_set/synthetic_moshi_train.jsonl
 
 # 4. 統合データセットで学習
-qsub -v SRC_RUN_DIR=data/runs/fd_100h/merged scripts/fullft_sweep.pbs
+qsub -v SRC_RUN_DIR=data/runs/$BATCH_ID/merged scripts/fullft_sweep.pbs
 ```
 
 主な調整用環境変数（`qsub -v KEY=VAL,...` で渡す）:
 
 | 変数 | 既定 | 説明 |
 |---|---|---|
-| `BATCH_ID` | `fd_100h` | 出力先 `data/runs/<BATCH_ID>/shard_*` |
+| `BATCH_ID` | auto (`fd_100h_<jobid>`) | output under `data/runs/<BATCH_ID>/shard_*` |
 | `DIALOGUES_PER_SHARD` | `250` | 1 シャードの対話数（下げると失敗時の損失減・Gemma再ロード増） |
 | `LISTENING_RATIO` | `0.7` | 自由対話（雑談・傾聴）の割合 |
 | `GAP_SEC` | `0.2` | ターン交替の間（応答速度） |
@@ -456,7 +458,7 @@ qsub -V scripts/run_moss_ttsd_pilot.pbs
 ```
 
 Output is written to
-`data/runs/moss_ttsd_pilot/training_set/{data_stereo,synthetic_moshi_train.jsonl}`.
+`data/runs/<timestamped BATCH_ID>/training_set/{data_stereo,synthetic_moshi_train.jsonl}`.
 Override `BATCH_ID` or `NUM_CASES` before submission if needed.
 
 Run `uv sync` for the MOSS runtime dependencies. The cluster must also provide
@@ -476,7 +478,7 @@ qsub -V scripts/run_moss_ttsd_dialogue_pilot.pbs
 ```
 
 Outputs are written under
-`data/runs/moss_ttsd_dialogue_pilot/dialogue_audio/`. This mode is for
+`data/runs/<timestamped BATCH_ID>/dialogue_audio/`. This mode is for
 listening-only naturalness auditions. Its mono mixes and model-selected timing
 are not training data and do not replace the existing per-utterance stereo
 pipeline.
@@ -508,7 +510,7 @@ training-compatible stereo: left is `moshi`, right is `user`.
 Default output:
 
 ```text
-data/runs/tts_comparison/
+data/runs/tts_comparison_<timestamp>[_jobid]/
   shared_refs/
     refs.json
     moshi_Serena.wav

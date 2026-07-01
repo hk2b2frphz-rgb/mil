@@ -26,6 +26,8 @@ if [[ -f "$PWD/scripts/setup_proxy.sh" ]]; then
     # shellcheck source=/dev/null
     source "$PWD/scripts/setup_proxy.sh"
 fi
+# shellcheck source=/dev/null
+source "$PWD/scripts/run_id_utils.sh"
 
 command -v uv >/dev/null 2>&1 || {
     echo "ERROR: uv is not available on PATH." >&2
@@ -59,7 +61,7 @@ VLLM_INSTALL_SPEC="${VLLM_INSTALL_SPEC:-$VLLM_WHEEL_URL}"
 
 SHARD_INDEX="${PBS_ARRAY_INDEX:-0}"
 SHARD_TAG="$(printf 'shard_%03d' "$SHARD_INDEX")"
-export BATCH_ID="${BATCH_ID:-gptoss_dialogues}"
+export BATCH_ID="${BATCH_ID:-$(default_run_id gptoss_dialogues)}"
 export NUM_CASES="${NUM_CASES:-2500}"
 export BASE_SEED="${BASE_SEED:-0}"
 export SEED="${SEED:-$((BASE_SEED + SHARD_INDEX))}"

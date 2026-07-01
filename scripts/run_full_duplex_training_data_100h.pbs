@@ -43,13 +43,14 @@
 #     --out data/content_seeds/seeds.jsonl --num 3000 --llm-dtype float16
 #
 # After all shards finish, merge into one manifest (CPU only, run on login node):
+#   BATCH_ID=<printed_BATCH_ID>
 #   uv run python scripts/merge_training_shards.py \
-#     --batch-dir data/runs/fd_100h \
-#     --out-dir   data/runs/fd_100h/merged
-#   # then fine-tune with: SRC_RUN_DIR=data/runs/fd_100h/merged
+#     --batch-dir data/runs/$BATCH_ID \
+#     --out-dir   data/runs/$BATCH_ID/merged
+#   # then fine-tune with: SRC_RUN_DIR=data/runs/$BATCH_ID/merged
 #
 # Useful overrides:
-#   BATCH_ID=fd_100h
+#   BATCH_ID=fd_100h_20260701
 #   DIALOGUES_PER_SHARD=250
 #   BASE_SEED=0
 #   LISTENING_RATIO=0.7
@@ -62,9 +63,11 @@ set -euo pipefail
 
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 source scripts/setup_proxy.sh
+# shellcheck source=/dev/null
+source "$PWD/scripts/run_id_utils.sh"
 
 SHARD_INDEX="${PBS_ARRAY_INDEX:-0}"
-BATCH_ID="${BATCH_ID:-fd_100h}"
+BATCH_ID="${BATCH_ID:-$(default_run_id fd_100h)}"
 DIALOGUES_PER_SHARD="${DIALOGUES_PER_SHARD:-250}"
 BASE_SEED="${BASE_SEED:-0}"
 

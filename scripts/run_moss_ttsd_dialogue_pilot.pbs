@@ -14,10 +14,12 @@ set -euo pipefail
 
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 source scripts/setup_proxy.sh
+# shellcheck source=/dev/null
+source "$PWD/scripts/run_id_utils.sh"
 
-export BATCH_ID="${BATCH_ID:-moss_ttsd_dialogue_pilot}"
+export BATCH_ID="${BATCH_ID:-$(default_run_id moss_ttsd_dialogue_pilot)}"
 export RUN_ID="$BATCH_ID"
-export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/moss_ttsd_dialogue_pilot}"
+export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/$BATCH_ID}"
 export DIALOGUES_JSONL="${DIALOGUES_JSONL:-$PWD/tests/fixtures/aizuchi_dialogues.jsonl}"
 export MOSS_REFS_DIR="$OUT_ROOT/moss_refs"
 export DIALOGUE_AUDIO_DIR="$OUT_ROOT/dialogue_audio"

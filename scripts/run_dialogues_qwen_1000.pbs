@@ -28,6 +28,8 @@ if [[ -f "$PWD/scripts/setup_proxy.sh" ]]; then
     # shellcheck source=/dev/null
     source "$PWD/scripts/setup_proxy.sh"
 fi
+# shellcheck source=/dev/null
+source "$PWD/scripts/run_id_utils.sh"
 
 command -v uv >/dev/null 2>&1 || {
     echo "ERROR: uv is not available on PATH." >&2
@@ -77,7 +79,7 @@ CPU_ARCH="$(uname -m)"
 VLLM_WHEEL_URL="${VLLM_WHEEL_URL:-https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu129-cp38-abi3-manylinux_2_34_${CPU_ARCH}.whl}"
 VLLM_INSTALL_SPEC="${VLLM_INSTALL_SPEC:-$VLLM_WHEEL_URL}"
 
-export BATCH_ID="${BATCH_ID:-qwen_dialogues_1000}"
+export BATCH_ID="${BATCH_ID:-$(default_run_id qwen_dialogues_1000)}"
 export NUM_CASES="${NUM_CASES:-1000}"
 export SEED="${SEED:-0}"
 export RUN_ID="${BATCH_ID}"

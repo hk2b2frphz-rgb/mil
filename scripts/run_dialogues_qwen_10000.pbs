@@ -32,8 +32,10 @@ if [[ -f "$PWD/scripts/setup_proxy.sh" ]]; then
     # shellcheck source=/dev/null
     source "$PWD/scripts/setup_proxy.sh"
 fi
+# shellcheck source=/dev/null
+source "$PWD/scripts/run_id_utils.sh"
 
-export BATCH_ID="${BATCH_ID:-qwen_dialogues_10000}"
+export BATCH_ID="${BATCH_ID:-$(default_run_id qwen_dialogues_10000)}"
 if ! [[ "$BATCH_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
     echo "ERROR: BATCH_ID may contain only letters, digits, dot, underscore, hyphen." >&2
     exit 1

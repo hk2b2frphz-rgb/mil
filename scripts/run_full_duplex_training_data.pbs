@@ -40,11 +40,10 @@ set -euo pipefail
 
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 source scripts/setup_proxy.sh
+# shellcheck source=/dev/null
+source "$PWD/scripts/run_id_utils.sh"
 
-JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
-JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
-
-export RUN_ID="${RUN_ID:-fd_train_${JOB_ID_SHORT}}"
+export RUN_ID="${RUN_ID:-$(default_run_id fd_train)}"
 export NUM_CASES="${NUM_CASES:-140}"
 export FULL_DUPLEX_TASKS="${FULL_DUPLEX_TASKS:-all}"
 export STEPS="${STEPS:-use_cases,dialogues,audio}"

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +45,12 @@ def parse_args() -> argparse.Namespace:
         "--moss-codec-model",
         default="OpenMOSS-Team/MOSS-Audio-Tokenizer",
     )
-    parser.add_argument("--out-dir", type=Path, default=Path("dialogue_audio"))
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help="Output directory (default: dialogue_audio_<timestamp>).",
+    )
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument(
         "--dtype",
@@ -56,6 +62,8 @@ def parse_args() -> argparse.Namespace:
         parser.error(f"dialogues JSONL does not exist: {args.dialogues_jsonl}")
     if not args.moss_refs_json.is_file():
         parser.error(f"MOSS refs JSON does not exist: {args.moss_refs_json}")
+    if args.out_dir is None:
+        args.out_dir = Path(f"dialogue_audio_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     return args
 
 

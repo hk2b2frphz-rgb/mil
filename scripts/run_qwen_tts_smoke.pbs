@@ -21,9 +21,11 @@ set -euo pipefail
 
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 source scripts/setup_proxy.sh
+# shellcheck source=/dev/null
+source "$PWD/scripts/run_id_utils.sh"
 
 export SOURCE_BATCH_ID="${SOURCE_BATCH_ID:-qwen_dialogues_1000}"
-export BATCH_ID="${BATCH_ID:-${SOURCE_BATCH_ID}_tts}"
+export BATCH_ID="${BATCH_ID:-$(default_run_id "${SOURCE_BATCH_ID}_tts")}"
 export RUN_ID="$BATCH_ID"
 export DIALOGUES_JSONL="${DIALOGUES_JSONL:-$PWD/data/runs/${SOURCE_BATCH_ID}/llm_dialogues/dialogues.jsonl}"
 export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/$BATCH_ID}"

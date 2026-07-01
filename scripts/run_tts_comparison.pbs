@@ -21,8 +21,10 @@ set -euo pipefail
 
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 source scripts/setup_proxy.sh
+# shellcheck source=/dev/null
+source "$PWD/scripts/run_id_utils.sh"
 
-export BATCH_ID="${BATCH_ID:-tts_comparison}"
+export BATCH_ID="${BATCH_ID:-$(default_run_id tts_comparison)}"
 export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/$BATCH_ID}"
 export COMPARE_OUT="${COMPARE_OUT:-$OUT_ROOT/listening}"
 export REFS_DIR="${REFS_DIR:-$OUT_ROOT/shared_refs}"
