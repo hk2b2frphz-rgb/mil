@@ -158,6 +158,11 @@ if m_repo and m_conf:
 dst.write_text(text)
 PY
 
+# Keep only the best-eval-loss checkpoint (plus the just-saved one) during
+# training instead of the num_ckpt_keep most recent ones. Default on; set
+# HP_KEEP_BEST_ONLY=false to restore the recency-based num_ckpt_keep pruning.
+export HP_KEEP_BEST_ONLY="${HP_KEEP_BEST_ONLY:-true}"
+
 # Optional launch-time hyperparameter overrides.
 # Use HP_* env vars from PBS/qsub without editing experiment config files.
 python3 - "$RESOLVED_CONFIG" <<'PY'
@@ -183,6 +188,7 @@ TOP_LEVEL = {
     "HP_NUM_CKPT_KEEP": "num_ckpt_keep",
     "HP_DO_EVAL": "do_eval",
     "HP_EVAL_FREQ": "eval_freq",
+    "HP_KEEP_BEST_ONLY": "keep_best_only",
 }
 SECTIONS = {
     "lora": {
@@ -572,7 +578,28 @@ PY
                 --hf-repo "$HF_REPO_ID"
         fi
         echo "[exp] auto-merge complete: $MERGED_OUT"
+
+        # -----------------------------------------------------------------
+        # 7) マージ済みモデルで Full-Duplex-Bench-JA 評価を自動実行する。
+        #    SKIP_AUTO_EVAL=1 で無効化できる。
+        # -----------------------------------------------------------------
+        if [[ "${SKIP_AUTO_EVAL:-0}" != "1" ]]; then
+            EVAL_MODEL_ID="$(printf '%s' "${EXP_NAME//\//_}_${RUN_TS}" | tr -cd 'A-Za-z0-9._-')"
+            echo
+            echo "[exp] running Full-Duplex-Bench-JA evaluation: model_id=$EVAL_MODEL_ID"
+            if MODEL_ID="$EVAL_MODEL_ID" \
+               RUN_ID="$EVAL_MODEL_ID" \
+               MODEL_WEIGHT="$MERGED_OUT" \
+               HF_REPO="$HF_REPO_ID" \
+               bash "$REPO_ROOT/scripts/run_full_duplex_eval.sh"; then
+                echo "[exp] auto-eval complete: $REPO_ROOT/eval_runs/full_duplex/$EVAL_MODEL_ID/benchmark_results/summary.json"
+            else
+                echo "[exp] WARN: auto-eval failed; merged model is still available at $MERGED_OUT" >&2
+            fi
+        else
+            echo "[exp] SKIP_AUTO_EVAL=1: skipping automatic Full-Duplex-Bench evaluation"
+        fi
     else
-        echo "[exp] WARN: could not select a best checkpoint; skipping auto-merge" >&2
+        echo "[exp] WARN: could not select a best checkpoint; skipping auto-merge and auto-eval" >&2
     fi
 fi
