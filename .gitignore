@@ -18,3 +18,6 @@ experiments/*/_resolved.yaml
 # editor
 .vscode/
 .idea/
+
+# Reference literature (downloaded PDFs etc.) -- kept out of VCS on request.
+references/

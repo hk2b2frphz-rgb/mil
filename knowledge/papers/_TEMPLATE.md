@@ -1,0 +1,26 @@
+# <論文タイトル>（著者, 年）
+
+status: stub / updated: YYYY-MM-DD
+- arXiv/DOI: <id or url>
+- PDF: `references/<cat>/<file>.pdf`（git外）
+- 役割: base | impl | baseline | background
+
+## 3行要約
+- <この論文が何を主張/提案したか>
+- <キーとなる手法・仕組み>
+- <結果・貢献>
+
+## 本repoとの繋がり
+- 実装/利用箇所: [<file>](../../<path>)（該当関数・設定）
+- 何をどう使っている / 論文からの差分・簡略化:
+- 使っていないが背景として重要な点:
+
+## キーアイデア / 押さえどころ
+- <式・図・アルゴリズムのうち理解に必須のもの>
+
+## 疑問・未消化・TODO
+- [ ] <あとで確認>
+
+## 関連
+- 論文: [[<other paper>]]（paper_map / papers/ 内）
+- 概念: [<concept>](../concepts/<c>.md)
