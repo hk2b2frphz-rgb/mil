@@ -125,6 +125,26 @@ def fullft_checkpoint_path(checkpoints_dir: Path, step: int) -> Path:
     return checkpoints_dir / f"step_{step}"
 
 
+def _scan_surviving_steps(checkpoints_dir: Path, glob_pattern: str, exists) -> list[int]:
+    """Return the sorted steps of every on-disk checkpoint that still exists.
+
+    Used only as a fallback when no checkpoint lines up with a recorded eval
+    metric, so the pipeline can still export/evaluate the latest checkpoint
+    instead of aborting.
+    """
+    steps: list[int] = []
+    if not checkpoints_dir.is_dir():
+        return steps
+    for path in checkpoints_dir.glob(glob_pattern):
+        try:
+            step = int(path.name.split("_")[-1])
+        except ValueError:
+            continue
+        if exists(step):
+            steps.append(step)
+    return sorted(steps)
+
+
 def main() -> None:
     args = parse_args()
 
@@ -140,6 +160,9 @@ def main() -> None:
 
         def ckpt_exists(step: int) -> bool:
             return ckpt_path_for(step).is_file()
+
+        def surviving_steps() -> list[int]:
+            return _scan_surviving_steps(args.checkpoints_dir, "checkpoint_*", ckpt_exists)
 
     else:
         if not args.log_file:
@@ -158,6 +181,9 @@ def main() -> None:
                 any(tag_dir.glob("*zero_pp_rank*")) or any(tag_dir.glob("*model_states*"))
             )
 
+        def surviving_steps() -> list[int]:
+            return _scan_surviving_steps(args.checkpoints_dir, "step_*", ckpt_exists)
+
     if not eval_points:
         print(f"ERROR: no eval points found with metric key {metric_key!r}", file=sys.stderr)
         sys.exit(1)
@@ -171,9 +197,41 @@ def main() -> None:
 
     eligible = {step: value for step, value in by_step.items() if ckpt_exists(step)}
     if not eligible:
+        # No checkpoint lines up with a recorded eval metric. This happens when
+        # eval_steps and save_steps are misaligned (a checkpoint is never saved
+        # at a step that was also evaluated) or when the scored checkpoints were
+        # pruned. Rather than abort the whole export/eval pipeline, fall back to
+        # the latest surviving checkpoint on disk so the run still produces a
+        # usable model -- but make the degraded selection loud.
+        surviving = surviving_steps()
+        if surviving:
+            fallback_step = surviving[-1]
+            print(
+                f"WARNING: {len(by_step)} eval point(s) recorded but none has a surviving "
+                f"checkpoint under {args.checkpoints_dir} (eval_steps/save_steps are likely "
+                f"misaligned, or scored checkpoints were pruned). Falling back to the latest "
+                f"surviving checkpoint at step {fallback_step}; it is NOT eval-loss-selected.",
+                file=sys.stderr,
+            )
+            result = {
+                "step": fallback_step,
+                "metric_key": metric_key,
+                "metric_value": by_step.get(fallback_step),
+                "checkpoint_path": str(ckpt_path_for(fallback_step)),
+                "num_eval_points": len(by_step),
+                "num_checkpoints_available": len(surviving),
+                "global_best_step": global_best_step,
+                "global_best_value": by_step[global_best_step],
+                "fallback": "latest_surviving_checkpoint",
+            }
+            print(json.dumps(result, indent=2))
+            if args.output_json:
+                args.output_json.parent.mkdir(parents=True, exist_ok=True)
+                args.output_json.write_text(json.dumps(result, indent=2) + "\n")
+            return
         print(
             f"ERROR: {len(by_step)} eval point(s) recorded but no surviving checkpoint "
-            f"matches any of them under {args.checkpoints_dir} "
+            f"exists under {args.checkpoints_dir} at all "
             "(they were likely pruned by num_ckpt_keep). "
             "Re-run with a larger num_ckpt_keep / HP_NUM_CKPT_KEEP to keep more checkpoints.",
             file=sys.stderr,
