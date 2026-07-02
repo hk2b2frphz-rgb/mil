@@ -50,6 +50,17 @@ if [[ ! -d "$NU_MOSHI_FT_REPO/.git" ]]; then
     git clone https://github.com/nu-dialogue/moshi-finetune "$NU_MOSHI_FT_REPO"
 fi
 
+# DeepSpeed may build CUDA/C++ ops during `uv sync` (before torch is importable
+# in a fresh checkout) and again at runtime. The cluster CUDA module can be a
+# newer minor than the PyTorch wheel runtime, e.g. nvcc 12.9 with torch +cu121.
+# DeepSpeed officially allows skipping this check for same-major CUDA drift, so
+# enable it before dependency sync and validate the major once torch is present.
+export DS_SKIP_CUDA_CHECK=1
+NVCC_CUDA_VERSION=""
+if command -v nvcc >/dev/null 2>&1; then
+    NVCC_CUDA_VERSION="$(nvcc --version | sed -n 's/.*release \([0-9][0-9.]*\),.*/\1/p' | head -n1)"
+fi
+
 if [[ "${NU_SKIP_UV_SYNC:-0}" != "1" && ! -d "$NU_MOSHI_FT_REPO/.venv" ]]; then
     echo "[nu-fullft] installing nu-dialogue dependencies with uv"
     (cd "$NU_MOSHI_FT_REPO" && uv sync --python "${NU_PYTHON:-3.12}")
@@ -69,26 +80,16 @@ export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export MASTER_PORT="${MASTER_PORT:-29500}"
 export NO_TORCH_COMPILE="${NO_TORCH_COMPILE:-1}"
 
-# DeepSpeed JIT-builds CUDA/C++ ops for ZeRO/offload. On clusters the nvcc
-# module can be newer than the PyTorch wheel CUDA runtime (e.g. nvcc 12.9 with
-# torch +cu121). DeepSpeed rejects even same-major CUDA minor drift unless this
-# check is skipped, while the build is normally ABI-compatible within a CUDA
-# major. Do not skip across major versions.
 TORCH_CUDA_VERSION="$(cd "$NU_MOSHI_FT_REPO" && uv run python - <<'PY' 2>/dev/null || true
 import torch
 print(torch.version.cuda or "")
 PY
 )"
-NVCC_CUDA_VERSION=""
-if command -v nvcc >/dev/null 2>&1; then
-    NVCC_CUDA_VERSION="$(nvcc --version | sed -n 's/.*release \([0-9][0-9.]*\),.*/\1/p' | head -n1)"
-fi
 echo "[nu-fullft] CUDA versions: torch=${TORCH_CUDA_VERSION:-<unknown>} nvcc=${NVCC_CUDA_VERSION:-<not-found>}"
-if [[ -z "${DS_SKIP_CUDA_CHECK:-}" && -n "$TORCH_CUDA_VERSION" && -n "$NVCC_CUDA_VERSION" && "$TORCH_CUDA_VERSION" != "$NVCC_CUDA_VERSION" ]]; then
+if [[ -n "$TORCH_CUDA_VERSION" && -n "$NVCC_CUDA_VERSION" && "$TORCH_CUDA_VERSION" != "$NVCC_CUDA_VERSION" ]]; then
     torch_cuda_major="${TORCH_CUDA_VERSION%%.*}"
     nvcc_cuda_major="${NVCC_CUDA_VERSION%%.*}"
     if [[ "$torch_cuda_major" == "$nvcc_cuda_major" ]]; then
-        export DS_SKIP_CUDA_CHECK=1
         echo "[nu-fullft] DS_SKIP_CUDA_CHECK=1 (same CUDA major; allowing minor-version drift)"
     else
         echo "ERROR: nvcc CUDA $NVCC_CUDA_VERSION does not match torch CUDA $TORCH_CUDA_VERSION." >&2
@@ -96,9 +97,7 @@ if [[ -z "${DS_SKIP_CUDA_CHECK:-}" && -n "$TORCH_CUDA_VERSION" && -n "$NVCC_CUDA
         exit 1
     fi
 else
-    if [[ -n "${DS_SKIP_CUDA_CHECK:-}" ]]; then
-        export DS_SKIP_CUDA_CHECK
-    fi
+    echo "[nu-fullft] DS_SKIP_CUDA_CHECK=1"
 fi
 
 # ---------------------------------------------------------------------------
