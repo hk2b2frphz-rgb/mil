@@ -1,19 +1,26 @@
-# exp100_full_ft — フル fine-tuning ベースライン
+# fullft_base_config — フル fine-tuning ベース設定
+
+`scripts/run_fullft_sweep_pair.sh` / `scripts/fullft_sweep.pbs` が
+`BASE_EXP` としてコピーして使うテンプレート（各 sweep パターンはこの
+config.yaml を差分パッチして使う。実際に採用された学習率などは
+[knowledge/decisions/0001_fullft_lr_1e-5.md](../../knowledge/decisions/0001_fullft_lr_1e-5.md)
+を参照）。
 
 ## 目的
 
-exp001 (LoRA rank=32) と同じデータ・同じ曝露量で**全パラメータ更新**した場合の
-eval loss と対話品質を比較する。LoRA の表現力上限を超えられるか確認する実験。
+`lora_base_config` (LoRA rank=32) と同じデータ・同じ曝露量で**全パラメータ更新**
+した場合の eval loss と対話品質を比較する。LoRA の表現力上限を超えられるか
+確認する。
 
-## exp001 との差分
+## lora_base_config との差分
 
-| key | exp001 (LoRA) | exp003 (Full FT) | 理由 |
+| key | lora_base_config (LoRA) | fullft_base_config (Full FT) | 理由 |
 |---|---|---|---|
 | `full_finetuning` | false | **true** | 全パラメータ更新 |
 | `lora.enable` | true (rank=32) | **false** | LoRA 不使用 |
 | `save_adapters` | true | **false** | モデル全体を保存 |
 | `batch_size` | 8 | **1** | full FT の activation/optimizer state で OOM しやすいため per-forward を最小化 |
-| `num_microbatches` | 1 | **8** | 実効 batch = 1×8 = 8 で exp001 と同等 |
+| `num_microbatches` | 1 | **8** | 実効 batch = 1×8 = 8 で lora_base_config と同等 |
 | `optim.lr` | 2e-6 | **5e-7** | 全パラメータが動くので 1/4 に下げる |
 
 ## ハードウェア前提
@@ -30,7 +37,7 @@ eval loss と対話品質を比較する。LoRA の表現力上限を超えら�
 - Activations (gradient checkpointing ON): ~10-20 GB (batch_size 依存)
 - 合計: ~52-62 GB → A100 80GB に収まる見込み
 
-batch_size=1 + microbatch=8 で grad accum し、実効 batch を exp001 と揃える。
+batch_size=1 + microbatch=8 で grad accum し、実効 batch を lora_base_config と揃える。
 これでも OOM が出る場合は `duration_sec=80` などで系列長を下げる。
 
 ## 学習率
@@ -41,9 +48,9 @@ batch_size=1 + microbatch=8 で grad accum し、実効 batch を exp001 と揃�
 
 ## 期待される結果と判断基準
 
-- **eval loss が exp001 を下回る**: フル FT の容量が活きている → データを増やせばさらに改善の余地。
-- **eval loss が exp001 と同等**: LoRA rank=32 で十分な表現力がある → フル FT のコスト不要。
-- **eval loss が exp001 より悪い**: lr が不適切 or catastrophic forgetting → lr 調整で再実験。
+- **eval loss が lora_base_config を下回る**: フル FT の容量が活きている → データを増やせばさらに改善の余地。
+- **eval loss が lora_base_config と同等**: LoRA rank=32 で十分な表現力がある → フル FT のコスト不要。
+- **eval loss が lora_base_config より悪い**: lr が不適切 or catastrophic forgetting → lr 調整で再実験。
 - **OOM**: batch_size=1 / microbatch=8 に変更して再実行。
 
 ## チェックポイントサイズ
@@ -53,4 +60,4 @@ batch_size=1 + microbatch=8 で grad accum し、実効 batch を exp001 と揃�
 
 ## 参考文献
 
-- exp001 と同（`exp001_lora_baseline/HYPERPARAMS.md` 参照）
+- lora_base_config と同（`lora_base_config/HYPERPARAMS.md` 参照）

@@ -11,8 +11,9 @@ automatically. The Kyutai checkout remains `../moshi-finetune` and is used only
 by `scripts/run_experiment.sh` / LoRA sweeps.
 
 This sweep uses the current synthetic data generation pipeline with
-`NUM_CASES=250`, matching the existing ~3h data setting used by
-`exp002_lora_3h_data`.
+`NUM_CASES=250` (~3h of dialogue), the data-volume setting adopted as the
+default across the LoRA/full-FT sweeps after an early one-off comparison
+showed 250 dialogues improved eval loss over the ~100-dialogue baseline.
 
 Use one PBS entrypoint and select full fine-tuning patterns with
 `SWEEP_PATTERNS`. The default PBS run executes `f01` only; pass the patterns you
@@ -32,7 +33,7 @@ qsub -v SRC_RUN_DIR=/path/to/data/runs/3h_dataset,SWEEP_PATTERNS=f01,f04 scripts
 
 Defaults:
 
-- `BASE_EXP=exp100_full_ft`
+- `BASE_EXP=fullft_base_config`
 - `NUM_CASES=250`
 - `MLFLOW_EXPERIMENT_NAME=job_fullft_hp`
 - `MLFLOW_TRACKING_URI=sqlite:///$PWD/mlruns/mlflow.db`

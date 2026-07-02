@@ -3,7 +3,7 @@
 
 Usage:
     uv run --project ../moshi-finetune python scripts/merge_lora.py \
-        --lora-ckpt experiments/exp001_lora_baseline/checkpoints/<ts>/checkpoint_000500/consolidated/lora.safetensors \
+        --lora-ckpt experiments/lora_base_config/checkpoints/<ts>/checkpoint_000500/consolidated/lora.safetensors \
         --out merged_model/consolidated.safetensors
 
     # Then run with response_recorder:

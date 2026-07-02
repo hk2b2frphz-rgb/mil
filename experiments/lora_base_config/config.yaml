@@ -1,5 +1,7 @@
-# exp001 — Japanese loneliness counseling LoRA baseline
+# lora_base_config — Japanese loneliness counseling LoRA base config
 #
+# scripts/run_sweep_pair.sh / scripts/run_experiment.pbs の BASE_EXP 既定値
+# （各 sweep パターンはこの config.yaml を差分パッチして使う）。
 # 設計意図と参考文献は HYPERPARAMS.md を参照。
 # データのパス (train_data / eval_data / run_dir) は
 # scripts/run_experiment.sh が起動時に書き換える。

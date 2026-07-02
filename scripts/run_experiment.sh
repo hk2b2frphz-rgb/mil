@@ -5,7 +5,7 @@
 #   bash scripts/run_experiment.sh <EXP_NAME> <SRC_RUN_DIR>
 #
 # Example:
-#   bash scripts/run_experiment.sh exp001_lora_baseline ./data/runs/2026-06-02_130539
+#   bash scripts/run_experiment.sh lora_base_config ./data/runs/2026-06-02_130539
 #
 # 挙動:
 # - <SRC_RUN_DIR>/training_set/ を experiments/<EXP>/data/training_set へ
@@ -22,7 +22,7 @@ set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
     echo "Usage: bash $0 <EXP_NAME> <SRC_RUN_DIR>" >&2
-    echo "  例: bash $0 exp001_lora_baseline ./data/runs/2026-06-02_130539" >&2
+    echo "  例: bash $0 lora_base_config ./data/runs/2026-06-02_130539" >&2
     exit 1
 fi
 EXP_NAME="$1"

@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-BASE_EXP="${BASE_EXP:-exp100_full_ft}"
+BASE_EXP="${BASE_EXP:-fullft_base_config}"
 NUM_CASES="${NUM_CASES:-250}"
 SWEEP_PATTERNS="${SWEEP_PATTERNS:-f01 f02}"
 SWEEP_PATTERNS="${SWEEP_PATTERNS//,/ }"

@@ -24,8 +24,8 @@ metric among steps that do have one.
 
 Usage:
     uv run python scripts/select_best_checkpoint.py --mode lora \\
-        --metrics-jsonl experiments/exp001/checkpoints/<ts>/metrics.eval.jsonl \\
-        --checkpoints-dir experiments/exp001/checkpoints/<ts>/checkpoints \\
+        --metrics-jsonl experiments/lora_base_config/checkpoints/<ts>/metrics.eval.jsonl \\
+        --checkpoints-dir experiments/lora_base_config/checkpoints/<ts>/checkpoints \\
         --checkpoint-filename consolidated/lora.safetensors \\
         --output-json best.json
 

@@ -3,7 +3,7 @@
 Usage (from repo root):
     uv run --project ../moshi-finetune python scripts/check_llm_jp_config.py
     uv run --project ../moshi-finetune python scripts/check_llm_jp_config.py \\
-        --manifest experiments/exp001_lora_baseline/data/training_set/train.jsonl
+        --manifest experiments/lora_base_config/data/training_set/train.jsonl
 
 Mirrors the loading steps train.py performs but stops *between* each step so
 the failing one is obvious. Each step prints either [OK] or [FAIL] with a
@@ -290,7 +290,7 @@ def main(args) -> int:
         print(f"{PASS} model + mimi + tokenizer まで全て OK。")
         print("       次は --manifest <path/to/train.jsonl> を渡してデータパスも確認:")
         print("       uv run --project ../moshi-finetune python scripts/check_llm_jp_config.py \\")
-        print("           --manifest experiments/exp001_lora_baseline/data/training_set/train.jsonl")
+        print("           --manifest experiments/lora_base_config/data/training_set/train.jsonl")
         return 0
 
     import sphn
@@ -431,7 +431,7 @@ def _parse_args(argv):
                    help="train.jsonl への path。指定すると step 14-16 が走る。")
     p.add_argument("--lora-ckpt", default=None,
                    help="保存された LoRA ckpt の dir or safetensors path。"
-                        "例: experiments/exp001_lora_baseline/checkpoints/"
+                        "例: experiments/lora_base_config/checkpoints/"
                         "checkpoint_000200/consolidated")
     p.add_argument("--generate", action="store_true",
                    help="1 batch forward して GT と model predicted text を表示。"

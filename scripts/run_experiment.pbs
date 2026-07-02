@@ -19,7 +19,7 @@
 #   qsub -v SRC_RUN_DIR=./data/runs/<RUN_ID> scripts/run_experiment.pbs
 #
 # Optional variables:
-#   BASE_EXP=exp001_lora_baseline
+#   BASE_EXP=lora_base_config
 #   NUM_CASES=100
 #   SRC_RUN_DIR=./data/runs/<RUN_ID>
 #   HP_LR=2e-6
@@ -43,7 +43,7 @@ set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 source scripts/setup_proxy.sh
 
-BASE_EXP="${BASE_EXP:-exp001_lora_baseline}"
+BASE_EXP="${BASE_EXP:-lora_base_config}"
 NUM_CASES="${NUM_CASES:-100}"
 NPROC="${NPROC:-1}"
 INPUT_SRC_RUN_DIR="${SRC_RUN_DIR:-}"

@@ -1,11 +1,25 @@
 # experiments/
 
-実験フォルダ。`exp<NNN>_<short_name>/` の単位で 1 つの fine-tune ランを管理する。
+実験フォルダ。1 つの fine-tune ランの構成(config.yaml + HYPERPARAMS.md)を
+`<short_descriptive_name>/` 単位で管理する。
+
+- `lora_base_config/` — LoRA sweep のベース設定。`scripts/run_sweep_pair.sh` /
+  `scripts/run_experiment.pbs` が `BASE_EXP` としてデフォルトでコピーする
+  （sweepパターンは [sweep_10_patterns.md](sweep_10_patterns.md) 参照）。
+- `fullft_base_config/` — full fine-tuning sweep のベース設定。
+  `scripts/run_fullft_sweep_pair.sh` / `scripts/fullft_sweep.pbs` が
+  `BASE_EXP` としてデフォルトでコピーする
+  （sweepパターンは [fullft_3h_sweep_10_patterns.md](fullft_3h_sweep_10_patterns.md) 参照）。
+
+実際の sweep 実行結果は `experiments/_sweeps/<RUN_ID>_<pattern>/` や
+`experiments/_fullft_sweeps/<RUN_ID>_<pattern>/`（いずれも git ignore）に
+生成される。上の2フォルダはその元になるテンプレートであり、それ自体を
+直接学習ジョブとして起動することは通常ない。
 
 ## 各実験フォルダの構成
 
 ```
-exp001_lora_baseline/
+lora_base_config/
 ├── config.yaml             # moshi-finetune 用 YAML（テンプレ、パスは launcher が埋める）
 ├── HYPERPARAMS.md          # 設計意図・参考文献・期待結果（必須）
 ├── data/                   # 学習データのコピー（launcher が作成、git ignore）
@@ -25,7 +39,7 @@ exp001_lora_baseline/
 
 ```bash
 # 学習データのソース run dir を指定して起動
-bash scripts/run_experiment.sh exp001_lora_baseline ./data/runs/2026-06-02_130539
+bash scripts/run_experiment.sh lora_base_config ./data/runs/2026-06-02_130539
 ```
 
 挙動:
@@ -65,11 +79,18 @@ scripts/export_fullft_checkpoint.pbs
 
 ## 新しい実験を追加するとき
 
-1. `cp -r exp001_lora_baseline expNNN_<short_name>`
+単発の比較実験(sweepパターンの追加ではなく、独立したフォルダとして残したい
+もの)を作るときは、何を検証する実験かが名前だけで分かるようにする
+(`exp001`のような連番+短縮名ではなく、`lora_rank64_check` のように内容を表す名前にする):
+
+1. `cp -r lora_base_config <short_descriptive_name>`（例: `lora_rank64_check`）
 2. `HYPERPARAMS.md` の冒頭と「期待される結果と判断基準」を書き直す（差分が明確になるよう、
-   前実験との対比を書く）
+   比較対象の実験との対比を書く）
 3. `config.yaml` の変更したいハイパラだけ書き換える
-4. `bash scripts/run_experiment.sh expNNN_<short_name> <SRC_RUN_DIR>` で起動
+4. `bash scripts/run_experiment.sh <short_descriptive_name> <SRC_RUN_DIR>` で起動
 
 データの再生成が要らない場合は **同じ `<SRC_RUN_DIR>`** を渡して、ハイパラ違いの
-比較実験を高速に回す想定。
+比較実験を高速に回す想定。ハイパラを1〜2軸だけ振って多数比較したい場合は、
+独立フォルダを都度作るのではなく `scripts/sweep_lora.pbs` /
+`scripts/fullft_sweep.pbs` の sweep パターンとして追加する方が管理しやすい
+（[sweep_10_patterns.md](sweep_10_patterns.md) 参照）。

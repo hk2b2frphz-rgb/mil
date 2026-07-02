@@ -5,8 +5,8 @@
 # Usage:
 #   bash scripts/generate_and_run.sh <EXP_NAME> <NUM_CASES>
 #
-# Example (3h dataset → exp002):
-#   bash scripts/generate_and_run.sh exp002_lora_3h_data 250
+# Example (3h dataset against the LoRA base config):
+#   bash scripts/generate_and_run.sh lora_base_config 250
 #
 # Behavior:
 #   1) run_pipeline.sh の STEPS=use_cases,dialogues,audio を NUM_CASES で実行し、
@@ -27,7 +27,7 @@ set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
     echo "Usage: bash $0 <EXP_NAME> <NUM_CASES>" >&2
-    echo "  例: bash $0 exp002_lora_3h_data 250" >&2
+    echo "  例: bash $0 lora_base_config 250" >&2
     exit 1
 fi
 EXP_NAME="$1"

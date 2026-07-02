@@ -62,10 +62,10 @@ STEPS=use_cases,dialogues bash scripts/run_pipeline.sh   # 音声化前まで
 
 ```bash
 # 既存データで実験を起動
-bash scripts/run_experiment.sh exp001_lora_baseline ./data/runs/2026-06-02_130539
+bash scripts/run_experiment.sh lora_base_config ./data/runs/2026-06-02_130539
 
 # データ生成 + 実験をまとめて実行
-bash scripts/generate_and_run.sh exp002_lora_3h_data 250
+bash scripts/generate_and_run.sh lora_base_config 250
 ```
 
 ### 既存の学習データを指定して実行
@@ -254,11 +254,14 @@ qsub -v SRC_RUN_DIR=data/runs/$BATCH_ID/merged scripts/fullft_sweep.pbs
 
 ## 実験一覧
 
+`experiments/` 配下は sweep の**ベース設定テンプレート**を置く場所。実際の
+sweep結果は `experiments/_sweeps/` / `experiments/_fullft_sweeps/`（git ignore）
+に生成される。詳細は [experiments/README.md](experiments/README.md)。
+
 | 実験 | データ量 | 狙い |
 |---|---|---|
-| `exp001_lora_baseline` | ~100 対話 (~1h) | LoRA rank=32 ベースライン |
-| `exp002_lora_3h_data` | ~250 対話 (~3h) | データ量の効果を検証 (ハイパラ同一) |
-| `exp100_full_ft` | ~100 対話 (~1h) | フル fine-tuning で LoRA との比較 |
+| `lora_base_config` | ~100 対話 (~1h) | LoRA rank=32 ベースライン。`sweep_lora.pbs`/`lora_lr_sweep.pbs` の `BASE_EXP` |
+| `fullft_base_config` | ~100 対話 (~1h) | フル fine-tuning で LoRA との比較。`fullft_sweep.pbs` の `BASE_EXP` |
 
 ## 学習済みモデルの利用
 
@@ -269,7 +272,7 @@ LoRA 実験のチェックポイントをベースモデルにマージして、
 ```bash
 # マージ
 uv run --project ../moshi-finetune python scripts/merge_lora.py \
-  --lora-ckpt experiments/exp001_lora_baseline/checkpoints/<ts>/checkpoint_000500/consolidated/lora.safetensors \
+  --lora-ckpt experiments/lora_base_config/checkpoints/<ts>/checkpoint_000500/consolidated/lora.safetensors \
   --out merged_model/consolidated.safetensors
 
 # PBS
@@ -403,9 +406,8 @@ scripts/
   generate_qwen3_tts_data.py       # Qwen3-TTS 音声合成
   merge_lora.py                    # LoRA adapter をベースモデルにマージ
 experiments/
-  exp001_lora_baseline/            # 各実験の config.yaml + HYPERPARAMS.md
-  exp002_lora_3h_data/
-  exp100_full_ft/
+  lora_base_config/                # LoRA sweep のベース config.yaml + HYPERPARAMS.md
+  fullft_base_config/               # full-FT sweep のベース config.yaml + HYPERPARAMS.md
 configs/
   moshi_lora_jp_loneliness.yaml    # パイプライン用 FT config
 data/runs/                         # 実行ごとの出力 (git ignore)

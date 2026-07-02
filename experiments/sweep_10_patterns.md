@@ -35,7 +35,7 @@ Defaults:
 - `MLFLOW_EXPERIMENT_NAME=job_lora_hp`
 - `MLFLOW_TRACKING_URI=sqlite:///$PWD/mlruns/mlflow.db`
 - `MLFLOW_ARTIFACT_ROOT=file:$PWD/mlruns/artifacts`
-- base experiment config: `exp001_lora_baseline`
+- base experiment config: `lora_base_config`
 
 | pattern | change from baseline | purpose |
 |---|---|---|

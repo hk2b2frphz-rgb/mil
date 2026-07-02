@@ -1,4 +1,9 @@
-# exp001_lora_baseline — ハイパラ設計意図
+# lora_base_config — ハイパラ設計意図
+
+`scripts/run_sweep_pair.sh` / `scripts/run_experiment.pbs` が `BASE_EXP` として
+コピーして使うテンプレート（各 sweep パターンはこの config.yaml を差分
+パッチして使う。10パターンsweepの内容は
+[experiments/sweep_10_patterns.md](../sweep_10_patterns.md) を参照）。
 
 llm-jp/llm-jp-moshi-v1 に日本語孤独感カウンセリング会話を LoRA で追加適応する
 最初のベースライン。データは Qwen3-TTS で合成した約 100 対話（~1h）。

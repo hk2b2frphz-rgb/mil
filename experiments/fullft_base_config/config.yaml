@@ -1,8 +1,9 @@
-# exp100 — Full fine-tuning baseline
+# fullft_base_config — Full fine-tuning base config
 #
-# exp001 (LoRA) との比較用。全パラメータを更新する。
-# データのパス (train_data / eval_data / run_dir) は
-# scripts/run_experiment.sh が起動時に書き換える。
+# lora_base_config (LoRA) との比較用。全パラメータを更新する。
+# scripts/run_fullft_sweep_pair.sh / scripts/fullft_sweep.pbs の BASE_EXP
+# 既定値。データのパス (train_data / eval_data / run_dir) は起動時に
+# 書き換えられる。
 
 data:
   train_data: ""   # auto-filled
@@ -23,8 +24,8 @@ text_padding_weight: 0.5
 
 duration_sec: 100
 batch_size: 1           # フル FT は optimizer state が巨大。A100 80GB では per-forward を最小化する。
-num_microbatches: 8     # 実効 batch = 1 × 8 = 8 (exp001 と同等の曝露量)
-max_steps: 500          # exp001 と同じ step 数で比較
+num_microbatches: 8     # 実効 batch = 1 × 8 = 8 (lora_base_config と同等の曝露量)
+max_steps: 500          # lora_base_config と同じ step 数で比較
 max_norm: 1.0
 gradient_checkpointing: true
 param_dtype: "bfloat16"
