@@ -69,6 +69,38 @@ export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export MASTER_PORT="${MASTER_PORT:-29500}"
 export NO_TORCH_COMPILE="${NO_TORCH_COMPILE:-1}"
 
+# DeepSpeed JIT-builds CUDA/C++ ops for ZeRO/offload. On clusters the nvcc
+# module can be newer than the PyTorch wheel CUDA runtime (e.g. nvcc 12.9 with
+# torch +cu121). DeepSpeed rejects even same-major CUDA minor drift unless this
+# check is skipped, while the build is normally ABI-compatible within a CUDA
+# major. Do not skip across major versions.
+TORCH_CUDA_VERSION="$(cd "$NU_MOSHI_FT_REPO" && uv run python - <<'PY' 2>/dev/null || true
+import torch
+print(torch.version.cuda or "")
+PY
+)"
+NVCC_CUDA_VERSION=""
+if command -v nvcc >/dev/null 2>&1; then
+    NVCC_CUDA_VERSION="$(nvcc --version | sed -n 's/.*release \([0-9][0-9.]*\),.*/\1/p' | head -n1)"
+fi
+echo "[nu-fullft] CUDA versions: torch=${TORCH_CUDA_VERSION:-<unknown>} nvcc=${NVCC_CUDA_VERSION:-<not-found>}"
+if [[ -z "${DS_SKIP_CUDA_CHECK:-}" && -n "$TORCH_CUDA_VERSION" && -n "$NVCC_CUDA_VERSION" && "$TORCH_CUDA_VERSION" != "$NVCC_CUDA_VERSION" ]]; then
+    torch_cuda_major="${TORCH_CUDA_VERSION%%.*}"
+    nvcc_cuda_major="${NVCC_CUDA_VERSION%%.*}"
+    if [[ "$torch_cuda_major" == "$nvcc_cuda_major" ]]; then
+        export DS_SKIP_CUDA_CHECK=1
+        echo "[nu-fullft] DS_SKIP_CUDA_CHECK=1 (same CUDA major; allowing minor-version drift)"
+    else
+        echo "ERROR: nvcc CUDA $NVCC_CUDA_VERSION does not match torch CUDA $TORCH_CUDA_VERSION." >&2
+        echo "  Load a CUDA $TORCH_CUDA_VERSION-compatible module or use a torch wheel matching nvcc." >&2
+        exit 1
+    fi
+else
+    if [[ -n "${DS_SKIP_CUDA_CHECK:-}" ]]; then
+        export DS_SKIP_CUDA_CHECK
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # GPU preflight. `accelerate launch --num_processes NPROC` maps rank i to
 # cuda:i, so it needs NPROC distinct GPUs actually visible. If fewer are
@@ -351,6 +383,9 @@ cat > "$NU_LAUNCH_CONFIG" <<EOF
   "deepspeed_config": "$NU_DEEPSPEED_CONFIG",
   "nproc": $NPROC,
   "cuda_visible_devices": "$CUDA_VISIBLE_DEVICES",
+  "torch_cuda_version": "${TORCH_CUDA_VERSION:-}",
+  "nvcc_cuda_version": "${NVCC_CUDA_VERSION:-}",
+  "ds_skip_cuda_check": "${DS_SKIP_CUDA_CHECK:-}",
   "master_addr": "$MASTER_ADDR",
   "master_port": "$MASTER_PORT",
   "per_device_train_batch_size": $HP_BATCH_SIZE,
@@ -428,6 +463,8 @@ echo "  model:     $NU_MODEL_DIR"
 echo "  ds:        $NU_DEEPSPEED_CONFIG"
 echo "  nproc:     $NPROC"
 echo "  cuda:      $CUDA_VISIBLE_DEVICES"
+echo "  torch/nvcc:$TORCH_CUDA_VERSION / ${NVCC_CUDA_VERSION:-<not-found>}"
+echo "  ds_skip:   ${DS_SKIP_CUDA_CHECK:-<unset>}"
 echo "  port:      $MASTER_PORT"
 echo "  hp:        lr=$HP_LR batch=$HP_BATCH_SIZE grad_accum=$HP_NUM_MICROBATCHES steps=$HP_MAX_STEPS wd=$HP_WEIGHT_DECAY warmup=$NU_WARMUP_STEPS max_len=$NU_MAX_LENGTH"
 echo "  log:       $EXP_LOG"
