@@ -12,9 +12,17 @@
 # Base model:
 #   qsub -v MODEL_ID=base scripts/run_full_duplex_eval.pbs
 #
-# Merged LoRA or exported full-FT model:
-#   qsub -v MODEL_ID=lora_h01,MODEL_WEIGHT=/path/model.safetensors,MODEL_CONFIG=/path/moshi_lm_kwargs.json \
+# Exported full-FT model (MODEL_CONFIG is auto-detected from the
+# moshi_lm_kwargs.json that sits next to MODEL_WEIGHT in the export dir):
+#   qsub -v MODEL_ID=full_f01,MODEL_WEIGHT=/path/exported/<ts>_best/model.safetensors \
 #     scripts/run_full_duplex_eval.pbs
+#
+# Merged LoRA model (no sibling config; falls back to the HF base config):
+#   qsub -v MODEL_ID=lora_h01,MODEL_WEIGHT=/path/consolidated.safetensors \
+#     scripts/run_full_duplex_eval.pbs
+#
+# Pass MODEL_CONFIG=/path/moshi_lm_kwargs.json explicitly only to override the
+# auto-detected / default config.
 #
 # Useful overrides:
 #   FDB_TASKS=pause_handling,smooth_turn_taking,user_interruption

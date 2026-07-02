@@ -56,6 +56,20 @@ command -v uv >/dev/null 2>&1 || {
     exit 1
 }
 
+# If MODEL_CONFIG wasn't given, auto-detect a moshi_lm_kwargs.json sitting next
+# to MODEL_WEIGHT. scripts/export_fullft_checkpoint.py (via clean_moshi.py)
+# always writes model.safetensors and moshi_lm_kwargs.json into the same export
+# dir, so full-FT models can be evaluated by passing only MODEL_WEIGHT. Merged
+# LoRA models have no such sibling and correctly fall back to the HF default
+# config (same architecture as the base).
+if [[ -z "$MODEL_CONFIG" && -n "$MODEL_WEIGHT" ]]; then
+    AUTO_MODEL_CONFIG="$(dirname "$MODEL_WEIGHT")/moshi_lm_kwargs.json"
+    if [[ -f "$AUTO_MODEL_CONFIG" ]]; then
+        MODEL_CONFIG="$AUTO_MODEL_CONFIG"
+        echo "[fdb] auto-detected MODEL_CONFIG next to MODEL_WEIGHT: $MODEL_CONFIG"
+    fi
+fi
+
 if [[ -n "$MODEL_WEIGHT" && ! -f "$MODEL_WEIGHT" ]]; then
     echo "ERROR: MODEL_WEIGHT does not exist: $MODEL_WEIGHT" >&2
     exit 1
