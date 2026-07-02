@@ -17,7 +17,7 @@
 #   NUM_SHARDS=4
 #   CUDA_VISIBLE_DEVICES=0,1,2,3
 #   SOURCE_BATCH_ID=qwen_dialogues_1000
-#   STYLE_PRESET=random
+#   STYLE_PRESET=auto             (auto: dialogues.jsonl の emotional_state から対話ごとに声のトーン・テンポを自動選択)
 #   NUM_DIALOGUES=all
 
 set -euo pipefail
@@ -47,7 +47,7 @@ export TTS_DTYPE="${TTS_DTYPE:-float16}"
 export TTS_DEVICE="${TTS_DEVICE:-cuda}"
 export LEAD_IN_SEC="${LEAD_IN_SEC:-0.3}"
 export GAP_SEC="${GAP_SEC:-0.2}"
-export STYLE_PRESET="${STYLE_PRESET:-random}"
+export STYLE_PRESET="${STYLE_PRESET:-auto}"
 # Throttles generate_qwen3_tts_data.py's per-dialogue progress logging (every
 # LOG_EVERY dialogues instead of every one) to keep shard_*.log from growing
 # unbounded on large runs. Set LOG_EVERY=1 or VERBOSE=1 for full per-call

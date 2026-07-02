@@ -89,7 +89,7 @@ class PromptRedesignTests(unittest.TestCase):
         turns = [DialogueTurn("user", "休日になると、誰とも話さないまま夕方になります。")]
         moshi_prompt = build_moshi_agent_prompt(use_case, turns)
         self.assertIn("孤独・孤立相談窓口の相談員 moshi", moshi_prompt.system)
-        self.assertIn("「うん」「うんうん」は使いません", moshi_prompt.user)
+        self.assertIn("「うん」「うんうん」「なるほど」は使いません", moshi_prompt.user)
         self.assertNotIn("model_backchannel", moshi_prompt.user)
         self.assertNotIn("今回の userAI のランダム設定", moshi_prompt.user)
 

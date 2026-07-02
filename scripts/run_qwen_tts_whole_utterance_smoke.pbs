@@ -33,7 +33,7 @@ export TTS_DEVICE="${TTS_DEVICE:-cuda}"
 export NUM_DIALOGUES="${NUM_DIALOGUES:-3}"
 export LEAD_IN_SEC="${LEAD_IN_SEC:-0.3}"
 export GAP_SEC="${GAP_SEC:-0.2}"
-export STYLE_PRESET="${STYLE_PRESET:-random}"
+export STYLE_PRESET="${STYLE_PRESET:-auto}"
 
 if [[ "$NUM_DIALOGUES" != "all" ]]; then
     if ! [[ "$NUM_DIALOGUES" =~ ^[0-9]+$ ]] || [[ "$NUM_DIALOGUES" -lt 1 ]]; then

@@ -86,8 +86,8 @@ The model is trained (`scripts/generate_qwen3_tts_data.py`
 `OPENING_GREETING_TEXT`, see
 [`full_duplex_training_data.md`](full_duplex_training_data.md)) to always
 open a session by saying a fixed line itself, e.g. the default:
-"こちらは、孤独や孤立について話せる相談窓口です。よかったら、少しお話しし
-ましょう。" `build_full_duplex_ja_dataset.py` mirrors this by default
+"もしもし、こちら孤独孤立相談窓口になります。"
+`build_full_duplex_ja_dataset.py` mirrors this by default
 (`--opening-greeting`, matching text; `--no-opening-greeting` to disable):
 
 1. It synthesizes the greeting once with the same backend/speaker as the

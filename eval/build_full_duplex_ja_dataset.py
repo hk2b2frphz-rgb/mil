@@ -32,9 +32,7 @@ except ImportError as exc:
     # Kept in sync by hand with generate_qwen3_tts_data.OPENING_GREETING_TEXT
     # for when torch/torchaudio aren't installed (e.g. local dev machines)
     # and that module can't be imported at all.
-    OPENING_GREETING_TEXT = (
-        "こちらは、孤独や孤立について話せる相談窓口です。よかったら、少しお話ししましょう。"
-    )
+    OPENING_GREETING_TEXT = "もしもし、こちら孤独孤立相談窓口になります。"
     QWEN3_IMPORT_ERROR: ImportError | None = exc
 else:
     QWEN3_IMPORT_ERROR = None

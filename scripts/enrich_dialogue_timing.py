@@ -43,18 +43,58 @@ from pathlib import Path
 from typing import Any
 
 # 短い相づち語(話題を奪わない)。weight で頻度を調整。
-AIZUCHI_POOL: list[tuple[str, int]] = [
-    ("はい。", 24),
-    ("ええ。", 14),
-    ("そうですね。", 10),
-    ("そうなんですね。", 14),
-    ("なるほど。", 10),
-    ("へえ。", 5),
-    ("それで。", 4),
-    ("わかります。", 6),
-]
+# user 発話の感情群(下の EMOTION_GROUP)ごとにプールを分け、相手の気分に
+# 合った相づちをミラーリングする。「なるほど」は事務的で耳につくため使わない。
+# 「そうなんですね」は連発すると冷たく聞こえるので低頻度+対話内1回まで。
+AIZUCHI_POOLS: dict[str, list[tuple[str, int]]] = {
+    "neutral": [
+        ("はい。", 24),
+        ("ええ。", 14),
+        ("えぇ。", 8),
+        ("そうですね。", 8),
+        ("そうなんですね。", 5),
+        ("そうでしたか。", 6),
+        ("へえ。", 4),
+        ("それで。", 3),
+        ("わかります。", 5),
+    ],
+    # 落ち込み・距離: 声が漏れるような共感を厚めに、明るい反応は入れない。
+    "distress": [
+        ("ええ。", 16),
+        ("えぇ。", 10),
+        ("あぁ…。", 14),
+        ("はい。", 10),
+        ("そうでしたか。", 8),
+        ("そうなんですね。", 4),
+        ("わかります。", 4),
+    ],
+    # 不安・高ぶり: 落ち着いた確認を中心に。
+    "anxious": [
+        ("はい。", 16),
+        ("ええ。", 14),
+        ("えぇ。", 8),
+        ("そうでしたか。", 6),
+        ("そうなんですね。", 4),
+        ("わかります。", 6),
+    ],
+    # 上向き・高揚: 明るい短い反応でテンポを合わせる。
+    "positive": [
+        ("はい。", 18),
+        ("ええ。", 12),
+        ("へえ。", 8),
+        ("いいですね。", 6),
+        ("それで。", 4),
+        ("そうなんですね。", 3),
+    ],
+}
 
-AIZUCHI_EMOTIONS = ["gentle", "warm", "empathetic", "reassuring"]
+# 相づちターンに付ける moshi 感情ラベルも user の感情群にミラーリングする。
+AIZUCHI_EMOTIONS_BY_GROUP: dict[str, list[str]] = {
+    "neutral": ["warm", "gentle"],
+    "distress": ["gentle", "empathetic", "soothing"],
+    "anxious": ["reassuring", "gentle"],
+    "positive": ["warm", "encouraging"],
+}
 
 # 句切り文字。ここで分割して句の終盤に相づちを置く。
 CLAUSE_SPLIT_RE = re.compile(r"(?<=[、。！？!?])")
@@ -230,16 +270,42 @@ def split_into_chunks(text: str, k: int) -> list[str]:
     return [c for c in chunks if c] or [text]
 
 
-def make_aizuchi(rng: random.Random, offset_sec: float) -> dict[str, Any]:
+def make_aizuchi(
+    rng: random.Random,
+    offset_sec: float,
+    user_emotion: str | None = None,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """user の感情群に合わせた相づちを 1 つ作る。
+
+    state（対話単位で共有する dict）を渡すと、直前と同じ相づちの連続と
+    「そうなんですね。」の対話内 2 回目以降を避ける。"""
+    group = EMOTION_GROUP.get(str(user_emotion or "neutral"), "neutral")
+    pool = AIZUCHI_POOLS.get(group, AIZUCHI_POOLS["neutral"])
+    if state is not None:
+        last = state.get("last_aizuchi")
+        filtered = [
+            (t, w)
+            for t, w in pool
+            if t != last
+            and not (t == "そうなんですね。" and state.get("sou_nan_count", 0) >= 1)
+        ]
+        if filtered:
+            pool = filtered
     text = rng.choices(
-        [t for t, _ in AIZUCHI_POOL],
-        weights=[w for _, w in AIZUCHI_POOL],
+        [t for t, _ in pool],
+        weights=[w for _, w in pool],
         k=1,
     )[0]
+    if state is not None:
+        state["last_aizuchi"] = text
+        if text == "そうなんですね。":
+            state["sou_nan_count"] = state.get("sou_nan_count", 0) + 1
+    emotions = AIZUCHI_EMOTIONS_BY_GROUP.get(group, AIZUCHI_EMOTIONS_BY_GROUP["neutral"])
     return {
         "speaker": "moshi",
         "text": text,
-        "emotion": rng.choice(AIZUCHI_EMOTIONS),
+        "emotion": rng.choice(emotions),
         "timing": "overlap_previous",
         "start_after_previous_start_sec": round(offset_sec, 3),
         "event": "model_backchannel",
@@ -251,11 +317,13 @@ def enrich_user_turn(
     rng: random.Random,
     args: argparse.Namespace,
     allow_trailing: bool = True,
+    state: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """1 つの user 発話を (分割 user 句 + 相づち) の列へ展開する。
 
     allow_trailing=False のときは最後の句のあとに相づちを置かない。直後が silence の
-    user 発話に使い、「user -> silence -> user」(pause_handling)の隣接関係を保つ。"""
+    user 発話に使い、「user -> silence -> user」(pause_handling)の隣接関係を保つ。
+    state は対話単位の相づち履歴（連続重複・使いすぎの回避に使う）。"""
     text = str(turn.get("text", "")).strip()
     if not text:
         return [turn]
@@ -266,13 +334,14 @@ def enrich_user_turn(
 
     n_aizuchi = max(1, min(args.max_aizuchi_per_turn, int(dur / args.sec_per_aizuchi)))
     chunks = split_into_chunks(text, n_aizuchi)
+    user_emotion = turn.get("emotion")
     if len(chunks) == 1:
         # 分割できない短文。終盤に 1 回だけ相づちを重ねる(直後が silence なら置かない)。
         if not allow_trailing:
             return [dict(turn, text=chunks[0])]
         out = [dict(turn, text=chunks[0])]
         offset = est_sec(chunks[0], args.chars_per_sec) * rng.uniform(0.6, 0.85)
-        out.append(make_aizuchi(rng, offset))
+        out.append(make_aizuchi(rng, offset, user_emotion, state))
         return out
 
     out: list[dict[str, Any]] = []
@@ -299,7 +368,7 @@ def enrich_user_turn(
         if place:
             chunk_sec = est_sec(chunk, args.chars_per_sec)
             offset = chunk_sec * rng.uniform(0.55, 0.85)
-            out.append(make_aizuchi(rng, offset))
+            out.append(make_aizuchi(rng, offset, base_emotion, state))
     return out
 
 
@@ -323,6 +392,7 @@ def enrich_dialogue(dialogue: dict[str, Any], rng: random.Random, args: argparse
         return out
 
     new_turns: list[dict[str, Any]] = []
+    aizuchi_state: dict[str, Any] = {}  # 対話内の相づち履歴（重複・使いすぎ回避）
     for idx, turn in enumerate(turns):
         if not isinstance(turn, dict):
             continue
@@ -335,7 +405,11 @@ def enrich_dialogue(dialogue: dict[str, Any], rng: random.Random, args: argparse
                 and str(next_turn.get("speaker", "")).strip().lower() == "silence"
             )
             new_turns.extend(
-                enrich_user_turn(turn, rng, args, allow_trailing=not next_is_silence)
+                enrich_user_turn(
+                    turn, rng, args,
+                    allow_trailing=not next_is_silence,
+                    state=aizuchi_state,
+                )
             )
         else:
             new_turns.append(turn)

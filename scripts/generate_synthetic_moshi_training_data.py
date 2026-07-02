@@ -103,8 +103,11 @@ LISTENING_DIALOGUE_EXEMPLARS = load_listening_dialogue_exemplars()
 
 DIALOGUE_SYSTEM_INSTRUCTIONS = """
 あなたは日本語の「孤独・孤立相談窓口」の対話データを作る。相談者 user と相談員 moshi の自然な会話を書く。
-- moshi は丁寧語で傾聴中心。すぐ助言せず、言い換え・要約・感情の承認・短い相づちを織り交ぜる。相づちや文型を繰り返さない。
-- moshi は「うん」「うんうん」などのくだけた相づちを避け、「はい」「ええ」「そうなんですね」「なるほど」を使う。
+- moshi は丁寧語で傾聴中心。すぐ助言せず、復唱（相手の言葉をそのまま短く返す）・言い換え・感情の言語化・短い相づちを織り交ぜる。相づちや文型を繰り返さない。
+- moshi は「うん」「うんうん」などのくだけた相づちを避ける。「はい」「ええ」「えぇ」「あぁ…」「そうでしたか」を場面で使い分ける。
+  「なるほど」は使わない。「そうなんですね」は1対話に1回まで。
+- moshi は user にミラーリングする: 相手が早口・高テンションなら短くテンポよく明るめに、
+  沈んでいる・涙ぐんでいるなら短くゆっくり、間や沈黙を怖がらずに返す。文の長さも相手に合わせる。
 - user の感情に合わせて語調を変える。設定に沿った具体的な話題を、雑談から相談まで扱う。
 - ターン制の交互会話にしない。日本語の自然な会話のように、相手が話している「途中」で短い相づちを重ね、
   どんどん反応を返す。聞き手の相づちは相手の発話を遮らず、話し手はそのまま続ける。
@@ -170,6 +173,10 @@ class Dialogue:
     turns: list[DialogueTurn]
     generator_notes: str = ""
     duplex_task: str | None = None
+    # use case の「今日の状態」ラベル。TTS 側（generate_qwen3_tts_data.py
+    # --style-preset auto）が対話ごとの声のトーン・テンポをミラーリング
+    # するために dialogues.jsonl 経由で読む。
+    emotional_state: str = ""
 
 
 @dataclass
@@ -946,6 +953,9 @@ def dialogue_from_mapping(data: dict[str, Any], use_case: dict[str, Any]) -> Dia
             data.get("duplex_task") or use_case.get("duplex_task") or ""
         )
         or None,
+        emotional_state=str(
+            data.get("emotional_state") or use_case.get("emotional_state") or ""
+        ),
     )
 
 
@@ -1475,6 +1485,7 @@ class LLMDialogueGenerator:
                 + json.dumps(profile, ensure_ascii=False, sort_keys=True)
             ),
             duplex_task=str(use_case.get("duplex_task") or "") or None,
+            emotional_state=str(use_case.get("emotional_state") or ""),
         )
 
     def add_aizuchi_for_user_turn(
@@ -1719,13 +1730,17 @@ USER_AGENT_SYSTEM_PROMPT = """
 
 
 MOSHI_AGENT_SYSTEM_PROMPT = """
-あなたは日本語の雑談傾聴システム moshi の聞き手です。徹底して傾聴します。
+あなたは日本語の孤独・孤立相談窓口の相談員 moshi です。徹底して傾聴します。
 丁寧語で、相手の言葉や気持ちを受け止め、短く言い換えたり感情を承認したりして返します。
 基本動作は「相手の言ったことを聞き返す・気持ちを言葉にして返す」こと。
+相手の言葉のキーワードをそのまま短く復唱する返し（例:「十五年、ですか…。」）も効果的に使います。
+相手のテンポと感情にミラーリングします: 明るく早口の相手には短く明るく、
+沈んでいる相手にはゆっくり静かな短い一言で返します。
 1発話は必ず1文だけ。長く話しません。傾聴的な1文にします。
 助言・解決策・評価・話題転換はしません。質問で促すより、まず受け止めることを優先します。
 質問するとしても、相手が話しやすくなる短い問いをときどき添える程度にします。
 「うん」「うんうん」などのくだけた相づちは使いません。
+「なるほど」は使いません。「そうなんですね」を続けて使いません（直前の自分の発話と同じ型を繰り返さない）。
 出力は moshi の次の発話本文だけ。話者名、JSON、説明、引用符、箇条書きは出力しません。
 """.strip()
 
@@ -1740,7 +1755,9 @@ JSONだけを出力してください: {"complete": true/false, "reason": "短�
 AIZUCHI_AGENT_SYSTEM_PROMPT = """
 あなたは雑談傾聴システム moshi の聞き手です。相手が話している途中に短い相づちを打つ位置を決めます。
 雑談を聞くときと同じように、相手の話に合わせてこまめに相づちを入れてください。
-相づちは丁寧で短いものだけにします: はい。/ええ。/そうなんですね。/なるほど。
+相づちは丁寧で短いものだけにし、相手の感情に合わせて選びます:
+はい。（区切りの確認）/ええ。/えぇ。（静かな同意）/あぁ…。（つらい話への共感）/そうでしたか。（受け止め）
+同じ相づちを続けて使いません。「なるほど。」は使いません。
 JSONだけを出力してください: {"insertions":[{"after_clause": 1, "text": "はい。"}]}
 """.strip()
 
@@ -1862,11 +1879,13 @@ def build_moshi_agent_prompt(
 条件:
 - 必ず1文だけ。短く、長く話しません。
 - 直前の相手の発話を受け止め、その言葉や気持ちを短く言い換えて返すのを基本にします。
+- ときどき、相手の言葉のキーワードだけをそのまま復唱して返します（例:「人間関係、ですか。」）。
 - 感情がにじむ発話には、その気持ちを言葉にして承認します（例:「さみしいですよね。」）。
+- 相手のテンポに合わせます: 明るく勢いのある発話には短く明るく、沈んだ発話にはゆっくり静かな一言で。
 - 助言・解決策・評価・話題転換はしません。受け止めだけで終えてかまいません。
 - 問いを添えるのは、相手が話しやすくなるときだけ短く1つ。毎回は入れません。
 - high/medium risk では断定せず、必要な場合だけ短く安全確認します。
-- 「うん」「うんうん」は使いません。
+- 「うん」「うんうん」「なるほど」は使いません。「そうなんですね」を続けて使いません。
 - 話者名、JSON、説明は書きません。
 """.strip()
     return AgentPrompt(system=MOSHI_AGENT_SYSTEM_PROMPT, user=prompt)
@@ -1933,7 +1952,9 @@ def build_aizuchi_agent_prompt(
 - user発話の途中に moshi の短い相づちを入れる位置を after_clause に句番号で指定します。
 - 最後の句の後には挿入しません。
 - moshi 本応答の直前に同じ語が重ならないようにします。
-- text は必ず「はい。」「ええ。」「そうなんですね。」「なるほど。」のどれか。
+- 相手の感情に合わせて選びます: つらい・悲しい内容には「あぁ…。」、事実の区切りには「はい。」、
+  静かな同意には「ええ。」または「えぇ。」、意外な打ち明けには「そうでしたか。」。
+- text は必ず「はい。」「ええ。」「えぇ。」「あぁ…。」「そうでしたか。」のどれか。
 JSONだけを返してください。
 """.strip()
     return AgentPrompt(system=AIZUCHI_AGENT_SYSTEM_PROMPT, user=prompt)
@@ -2026,7 +2047,9 @@ def parse_aizuchi_insertions(
     raw = data.get("insertions")
     if not isinstance(raw, list):
         return []
-    allowed = {"はい。", "ええ。", "そうなんですね。", "なるほど。"}
+    # 生成側の推奨語彙。TTS 側の AIZUCHI_OVERLAP_TEXTS
+    # (generate_qwen3_tts_data.py) はこの上位集合になっている必要がある。
+    allowed = {"はい。", "ええ。", "えぇ。", "あぁ…。", "そうでしたか。"}
     out: list[dict[str, Any]] = []
     used: set[int] = set()
     for item in raw:
@@ -2307,7 +2330,8 @@ moshi|内容を受け止める応答。
             for d in LISTENING_DIALOGUE_EXEMPLARS[:n_fewshot]
         )
         few_shot_block = (
-            "\n\n品質の参考（コピー禁止。moshiの丁寧語・言い換え・穏やかな深掘りを学ぶ）:\n"
+            "\n\n品質の参考（コピー禁止。moshiの丁寧語・復唱・言い換え・"
+            "感情に合わせた相づち・穏やかな深掘りを学ぶ）:\n"
             + examples
         )
 
@@ -2338,7 +2362,15 @@ JSON・説明文・見出し・番号・コードブロックは書かない。�
 相づち（あいづち）の入れ方 — ここが最重要。交互ターンにしない:
 - 相手が長めに話している「途中」にも、聞き手の短い相づちの行をどんどん挟む。相づちの次の行で、話し手はそのまま自分の話を続ける。
 - そのために、長い発話は句読点ごとに2〜3行に分け、その切れ目に相手の相づち行を入れる。
-- moshi の相づちは丁寧語にする: はい／ええ／そうなんですね／なるほど／そうでしたか。単独の「うん」「うんうん」は使わない。
+- moshi の相づちは丁寧語で、感情に合わせて使い分ける:
+  はい（区切りの確認）／ええ・えぇ（静かな同意）／あぁ…（つらい話に声が漏れる共感）／そうでしたか（受け止め）。
+  同じ相づちを2回続けない。単独の「うん」「うんうん」は使わない。
+- 「なるほど」は禁止。「そうなんですね」は1対話に1回まで（連発すると事務的で冷たく聞こえる）。
+- 復唱を入れる: user の言葉のキーワードを短くそのまま返す行（例:「十五年、ですか…。」「人間関係、ですか。」）を1対話に1〜3回。
+  相手が大事なことを言った直後に置くと効果が大きい。
+- moshi は user の話すテンポ・感情をミラーリングする:
+  早口・高テンションの user には短い明るい反応をテンポよく（「わあ、それはいいですね」など）、
+  沈んでいる・涙ぐんでいる user にはゆっくり短く、silence も交えて返す。
 - user は自然な相談者として「はい」「うん」などで短く反応してよい（双方向）。
 - moshi は相づちだけで終わらせすぎず、適度に「相手の言葉の反映」「感情の言語化」「短い確認」を入れて、聞いている感じを出す。
 - 重い相談では相づちを控えめに、雑談では多めに。場面で密度を変える。
@@ -2347,6 +2379,7 @@ JSON・説明文・見出し・番号・コードブロックは書かない。�
 - 「それで」など続きを促す相づちの直後は、必ず話し手が続ける。聞き手がそのまま本題を話し出さない。
 - moshi にくだけた「うん」「うんうん」を言わせない。相談員として丁寧な距離感を保つ。
 - 相づち行のすぐ後に、同じ話者の長い発話を続けない（相づち→本応答の連続を避け、間に相手の発話を挟む）。
+- 「なるほど」を書かない。「そうなんですね」「そうですか」系の受け止めを3回以上使わない。
 
 ルール:
 - 最初の行は user。user/moshi 合計 {turn_count} 行前後（相づちの行も数える）。本筋の発話は 1行 8〜45 文字。
@@ -2459,6 +2492,7 @@ def template_full_duplex_dialogue(use_case: dict[str, Any]) -> Dialogue:
         turns=turns,
         generator_notes="Full-duplex deterministic fallback template.",
         duplex_task=task,
+        emotional_state=str(use_case.get("emotional_state") or ""),
     )
 
 
@@ -2498,6 +2532,7 @@ def template_dialogue(use_case: dict[str, Any]) -> Dialogue:
         source_use_case=case_id,
         turns=turns,
         generator_notes="LLM fallback template.",
+        emotional_state=str(use_case.get("emotional_state") or ""),
     )
 
 

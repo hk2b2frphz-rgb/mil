@@ -29,6 +29,7 @@ Qwen3-TTS のプリセット話者 (CustomVoice モデル):
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import math
@@ -221,8 +222,16 @@ VALID_SPEAKERS = {
 # context in its own generation history before anything else happens.
 # Time-of-day-neutral by design (this is a fixed, always-on line, not a
 # templated greeting picked per time of day).
-OPENING_GREETING_TEXT = (
-    "こちらは、孤独や孤立について話せる相談窓口です。よかったら、少しお話ししましょう。"
+OPENING_GREETING_TEXT = "もしもし、こちら孤独孤立相談窓口になります。"
+
+# The greeting is always synthesized with this exact instruct and the fixed
+# --speaker-moshi voice, independent of the per-dialogue style preset, so the
+# audio is identical in every sample (and can be disk-cached / reused). The
+# model should memorize ONE way of saying its opening line, not a
+# per-dialogue-styled variant of it.
+OPENING_GREETING_INSTRUCT = (
+    "電話に出た相談員の第一声として、落ち着いた電話応対のトーンで、"
+    "やわらかくはっきりと話して"
 )
 
 
@@ -293,12 +302,91 @@ WHOLE_UTTERANCE_STYLE_PRESETS: dict[str, dict[str, str]] = {
         "user": "自然で落ち着いたトーンで、ゆっくり話して",
         "moshi": "穏やかで落ち着いたトーンで、ゆっくり話して",
     },
+    # --- ミラーリング用プリセット。moshi 側の instruct は「相手のテンポ・
+    # 感情に声を合わせる」ことを明示する（早口の相手にはテンポよく、沈んだ
+    # 相手には静かにゆっくり）。
+    "counseling_high_tension": {
+        "user": "テンション高く、やや早口で明るく勢いよく話して",
+        "moshi": "相手の明るさに合わせて、少し明るくテンポよく、丁寧に相づちを打つように話して",
+    },
+    "counseling_agitated": {
+        "user": "感情が高ぶって落ち着かない様子で、少し早口に話して",
+        "moshi": "落ち着いた声のまま、相手のテンポに遅れないように、しっかりと受け止めるトーンで話して",
+    },
+    "counseling_withdrawn": {
+        "user": "消え入りそうな小さな声で、ぽつぽつと途切れがちに話して",
+        "moshi": "とても静かに、小さめの声で、相手の間合いに合わせてゆっくり寄り添うように話して",
+    },
 }
 
 
+# use case id に埋め込まれた「今日の状態」トークン（build_use_cases.py の
+# EMOTIONAL_STATES）→ whole-utterance スタイルプリセット。--style-preset auto
+# のときに対話ごとの感情に合った声（テンポ・トーンのミラーリング）を選ぶ。
+EMOTIONAL_STATE_TO_PRESET: dict[str, str] = {
+    "steady":       "counseling_neutral",
+    "low":          "counseling_sad",
+    "anxious":      "counseling_anxious",
+    "tearful":      "counseling_tearful",
+    "high_tension": "counseling_high_tension",
+    "agitated":     "counseling_agitated",
+    "withdrawn":    "counseling_withdrawn",
+    # dialogues.jsonl の emotional_state は日本語ラベル
+    # （build_use_cases.py の EMOTIONAL_STATES 第2要素）で入ることがある。
+    "落ち着いている":   "counseling_neutral",
+    "気分が沈んでいる": "counseling_sad",
+    "不安が強い":       "counseling_anxious",
+    "涙ぐんでいる":     "counseling_tearful",
+    "ハイテンション":   "counseling_high_tension",
+    "気持ちが高ぶる":   "counseling_agitated",
+    "ふさぎ込んでいる": "counseling_withdrawn",
+}
+
+_AGE_BAND_SEGMENT = re.compile(r"^\d+代$")
+
+
+def resolve_auto_style_preset(
+    dialogue_id: str,
+    emotional_state_token: str | None = None,
+) -> str:
+    """--style-preset auto: 対話の「今日の状態」からプリセットを決める。
+
+    優先順位:
+    1. dialogues.jsonl の emotional_state フィールド（新形式）
+    2. use case id 形式 `{sit}_{conv}_{pers}_{state}_{age}_{gender}_{risk}_...`
+       から、年齢帯セグメント（"30代" など）の直前を state トークンとして読む。
+       （"low" はリスクレベルにも現れるため、単純な部分一致では判定しない。）
+    3. どちらも取れなければ counseling_neutral。
+    """
+    token = (emotional_state_token or "").strip()
+    if token in EMOTIONAL_STATE_TO_PRESET:
+        return EMOTIONAL_STATE_TO_PRESET[token]
+    segments = dialogue_id.split("_")
+    for i, segment in enumerate(segments):
+        if _AGE_BAND_SEGMENT.match(segment) and i > 0:
+            # state トークンは "high_tension" のようにアンダースコアを含む
+            # ことがあるので、直前 1〜2 セグメントを試す。
+            for span in (2, 1):
+                if i - span >= 0:
+                    candidate = "_".join(segments[i - span : i])
+                    if candidate in EMOTIONAL_STATE_TO_PRESET:
+                        return EMOTIONAL_STATE_TO_PRESET[candidate]
+            break
+    return "counseling_neutral"
+
+
+# 相手の発話に重ねてよい短いあいづちの検出セット。生成プロンプト側の推奨
+# 語彙（generate_synthetic_moshi_training_data.py）より広い上位集合にして、
+# 旧データ（なるほど。等）もそのまま重ねられるようにしている。
 AIZUCHI_OVERLAP_TEXTS = frozenset({
     "はい。",
     "ええ。",
+    "えぇ。",
+    "ええ、ええ。",
+    "あぁ…。",
+    "あー…。",
+    "そうでしたか。",
+    "そうだったんですね。",
     "そうなんですね。",
     "なるほど。",
 })
@@ -926,6 +1014,47 @@ def truncate_alignment_text(text: str, kept_samples: int, total_samples: int) ->
     return (shortened or text[:1]) + "…"
 
 
+def synthesize_opening_greeting(
+    tts: Qwen3TTS | MossTTSD,
+    text: str,
+    instruct: str | None,
+    cache_dir: Path | None,
+    backend: str,
+    model_id: str,
+    speaker: str,
+) -> np.ndarray:
+    """固定の冒頭挨拶を1回だけ合成し、全対話で同じ音声を使い回す。
+
+    声色を固定するため、対話ごとの style preset ではなく固定 instruct
+    （OPENING_GREETING_INSTRUCT）と固定の moshi 話者で合成する。音声を
+    変えうる全パラメータをキーにディスクへキャッシュするので、run や
+    shard をまたいでもビット同一の挨拶になる。
+    """
+    cache_path: Path | None = None
+    if cache_dir is not None:
+        key_src = "|".join([text, backend, model_id, speaker, instruct or ""])
+        key = hashlib.sha1(key_src.encode("utf-8")).hexdigest()[:16]
+        cache_path = cache_dir / f"greeting_{key}.npz"
+        if cache_path.exists():
+            data = np.load(cache_path)
+            pcm = np.asarray(data["pcm"], dtype=np.float32)
+            cached_rate = int(data["sample_rate"])
+            if tts.sample_rate == 0:
+                tts.sample_rate = cached_rate
+            elif cached_rate != tts.sample_rate:
+                pcm = _resample(pcm, cached_rate, tts.sample_rate)
+            logger.info("冒頭挨拶: キャッシュを再利用 -> %s", cache_path)
+            return pcm
+    pcm = np.asarray(
+        tts.synthesize(text, "moshi", instruct=instruct), dtype=np.float32
+    )
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(cache_path, pcm=pcm, sample_rate=tts.sample_rate)
+        logger.info("冒頭挨拶: 合成してキャッシュに保存 -> %s", cache_path)
+    return pcm
+
+
 def build_segments(
     dialogue: Dialogue,
     tts: Qwen3TTS | MossTTSD,
@@ -934,6 +1063,7 @@ def build_segments(
     user_speaker_override: str | None = None,
     other_speaker_override: str | None = None,
     background_speaker_override: str | None = None,
+    opening_greeting_pcm: np.ndarray | None = None,
 ) -> tuple[list[AudioSegment], list[dict[str, Any]]]:
     """
     返り値: (音声セグメント列, 沈黙区間のメタデータ列)
@@ -967,12 +1097,15 @@ def build_segments(
                 override = other_speaker_override or user_speaker_override
             else:
                 override = user_speaker_override
-        pcm = tts.synthesize(
-            turn.text,
-            turn.speaker,
-            instruct=turn.instruct,
-            speaker_override=override,
-        )
+        if turn.event == "opening_greeting" and opening_greeting_pcm is not None:
+            pcm = opening_greeting_pcm.copy()
+        else:
+            pcm = tts.synthesize(
+                turn.text,
+                turn.speaker,
+                instruct=turn.instruct,
+                speaker_override=override,
+            )
         gain = max(0.0, float(turn.gain))
         if gain != 1.0:
             pcm = np.asarray(pcm, dtype=np.float32) * gain
@@ -1090,6 +1223,7 @@ def build_segments_whole_utterance(
     instruct_user: str | None = None,
     instruct_moshi: str | None = None,
     max_chars_per_synthesis: int = 150,
+    opening_greeting_pcm: np.ndarray | None = None,
 ) -> tuple[list[AudioSegment], list[dict[str, Any]]]:
     """
     Whole-utterance TTS with natural aizuchi overlap.
@@ -1101,11 +1235,18 @@ def build_segments_whole_utterance(
     # --- 1. Classify turns ------------------------------------------------
     concat_groups: dict[str, list[int]] = {"user": [], "moshi": []}
     per_segment_indices: list[int] = []
+    greeting_indices: set[int] = set()
 
     for i, turn in enumerate(dialogue.turns):
         if turn.speaker == "silence":
             continue
-        if turn.speaker in ("user", "moshi") and not turn.voice_role:
+        if turn.event == "opening_greeting":
+            # 固定挨拶は moshi の連結合成に混ぜない。混ぜると対話ごとの
+            # style preset で韻律が変わってしまい、「毎回同じ声・同じ
+            # 言い方の第一声」という学習目標が崩れる。
+            greeting_indices.add(i)
+            per_segment_indices.append(i)
+        elif turn.speaker in ("user", "moshi") and not turn.voice_role:
             concat_groups[turn.speaker].append(i)
         else:
             per_segment_indices.append(i)
@@ -1248,6 +1389,15 @@ def build_segments_whole_utterance(
 
     for i in per_segment_indices:
         turn = dialogue.turns[i]
+        if i in greeting_indices:
+            if opening_greeting_pcm is not None:
+                pcm_slices[i] = opening_greeting_pcm.copy()
+            else:
+                # 事前合成が無い場合も声色は固定 instruct で合成する
+                pcm_slices[i] = tts.synthesize(
+                    turn.text, "moshi", instruct=OPENING_GREETING_INSTRUCT,
+                )
+            continue
         override = None
         if turn.speaker == "user":
             if turn.voice_role == "background":
@@ -1441,6 +1591,8 @@ def load_dialogues_from_jsonl(path: Path) -> list[dict[str, Any]]:
                 "risk_level": str(row.get("risk_level") or "low"),
                 "title": str(row.get("title") or row.get("id") or f"dialogue {i}"),
                 "duplex_task": str(row.get("duplex_task") or "") or None,
+                # --style-preset auto 用（新形式 dialogues.jsonl のみ持つ）
+                "emotional_state": str(row.get("emotional_state") or "") or None,
                 "turns": turns,
             })
     return out
@@ -1746,6 +1898,24 @@ def parse_args() -> argparse.Namespace:
         help="Do not prepend the fixed opening-greeting moshi turn.",
     )
     parser.add_argument(
+        "--opening-greeting-instruct",
+        default=OPENING_GREETING_INSTRUCT,
+        help=(
+            "Fixed style instruct for the opening greeting. Always used instead "
+            "of the per-dialogue style preset so the greeting voice never varies."
+        ),
+    )
+    parser.add_argument(
+        "--opening-greeting-cache-dir",
+        type=Path,
+        default=Path(__file__).resolve().parents[1] / "data" / ".cache" / "opening_greeting",
+        help=(
+            "Synthesize the fixed greeting once and reuse the cached audio "
+            "across dialogues, runs and shards (keyed by text/backend/model/"
+            "speaker/instruct). Pass '' to disable caching."
+        ),
+    )
+    parser.add_argument(
         "--whole-utterance",
         action="store_true",
         help=(
@@ -1760,7 +1930,10 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "whole-utterance モード用のスタイルプリセット名。"
-            f"候補: {_preset_names}, random（対話ごとにランダム選択）。"
+            f"候補: {_preset_names}, random（対話ごとにランダム選択）, "
+            "auto（dialogues.jsonl の emotional_state または use case id の"
+            "状態トークンから対話ごとに自動選択し、user と moshi の声の"
+            "テンポ・感情をミラーリングさせる）。"
             "指定すると --instruct-user/--instruct-moshi より優先される。"
         ),
     )
@@ -1848,10 +2021,13 @@ def parse_args() -> argparse.Namespace:
         args.user_speaker_pool_list = [args.speaker_user]
 
     if args.style_preset is not None:
-        if args.style_preset != "random" and args.style_preset not in WHOLE_UTTERANCE_STYLE_PRESETS:
+        if (
+            args.style_preset not in {"random", "auto"}
+            and args.style_preset not in WHOLE_UTTERANCE_STYLE_PRESETS
+        ):
             parser.error(
                 f"--style-preset={args.style_preset!r} は無効です。"
-                f"候補: {sorted(WHOLE_UTTERANCE_STYLE_PRESETS.keys())}, random"
+                f"候補: {sorted(WHOLE_UTTERANCE_STYLE_PRESETS.keys())}, random, auto"
             )
         if not args.whole_utterance:
             parser.error("--style-preset は --whole-utterance と一緒に使ってください")
@@ -1957,6 +2133,30 @@ def main() -> None:
         )
     tts.load()
 
+    # 固定挨拶は run の最初に1回だけ合成（またはキャッシュから読み込み）、
+    # 全対話で同じ音声を使い回す。声色は --speaker-moshi と
+    # --opening-greeting-instruct で固定される。
+    greeting_pcm: np.ndarray | None = None
+    if not args.no_opening_greeting and args.opening_greeting:
+        greeting_cache_dir = (
+            args.opening_greeting_cache_dir
+            if str(args.opening_greeting_cache_dir) not in ("", ".")
+            else None
+        )
+        greeting_pcm = synthesize_opening_greeting(
+            tts,
+            args.opening_greeting,
+            args.opening_greeting_instruct,
+            greeting_cache_dir,
+            backend=args.tts_backend,
+            model_id=(
+                args.moss_model if args.tts_backend == "moss-ttsd" else args.model
+            ),
+            speaker=(
+                "moshi" if args.tts_backend == "moss-ttsd" else args.speaker_moshi
+            ),
+        )
+
     fa_aligner: ForcedAligner | None = None
     if args.whole_utterance:
         fa_aligner = ForcedAligner(device=args.device)
@@ -2060,6 +2260,7 @@ def main() -> None:
                     idx, len(templates), dialogue.id, args.speaker_moshi, user_voice,
                 )
             t0 = time.time()
+            resolved_preset_key: str | None = None
             if args.whole_utterance and fa_aligner is not None:
                 instruct_u = args.instruct_user
                 instruct_m = args.instruct_moshi
@@ -2067,6 +2268,11 @@ def main() -> None:
                     preset_key = args.style_preset
                     if preset_key == "random":
                         preset_key = random.choice(list(WHOLE_UTTERANCE_STYLE_PRESETS))
+                    elif preset_key == "auto":
+                        preset_key = resolve_auto_style_preset(
+                            dialogue.id, tmpl.get("emotional_state")
+                        )
+                    resolved_preset_key = preset_key
                     preset = WHOLE_UTTERANCE_STYLE_PRESETS[preset_key]
                     instruct_u = preset["user"]
                     instruct_m = preset["moshi"]
@@ -2080,6 +2286,7 @@ def main() -> None:
                     instruct_user=instruct_u,
                     instruct_moshi=instruct_m,
                     max_chars_per_synthesis=args.whole_utterance_max_chars,
+                    opening_greeting_pcm=greeting_pcm,
                 )
             else:
                 segments, silences = build_segments(
@@ -2087,6 +2294,7 @@ def main() -> None:
                     user_speaker_override=user_override,
                     other_speaker_override=other_override,
                     background_speaker_override=background_override,
+                    opening_greeting_pcm=greeting_pcm,
                 )
             if not segments or tts.sample_rate == 0:
                 # 音声ターンが 0 件（沈黙のみ等）の対話。sample_rate が未確定で
@@ -2146,6 +2354,16 @@ def main() -> None:
                     "wall_time_sec": round(elapsed, 3),
                     "emotion_control": "off" if args.no_emotion else "on",
                     "style_preset": getattr(args, "style_preset", None),
+                    "style_preset_resolved": resolved_preset_key,
+                    "opening_greeting": (
+                        {
+                            "text": args.opening_greeting,
+                            "instruct": args.opening_greeting_instruct,
+                            "reused_fixed_audio": greeting_pcm is not None,
+                        }
+                        if not args.no_opening_greeting and args.opening_greeting
+                        else None
+                    ),
                     "emotion_map_used": {
                         e: emotion_map[e]
                         for e in {t.emotion for t in dialogue.turns if t.emotion}
