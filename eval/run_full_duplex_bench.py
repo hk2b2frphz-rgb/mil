@@ -189,6 +189,7 @@ def main() -> int:
 
     total = len(samples) * len(seeds)
     completed = 0
+    print(f"[fdb] starting inference: {total} trials ({len(samples)} cases x {len(seeds)} seeds)")
     for sample in samples:
         source_dir = dataset_dir / sample["path"]
         metadata = json.loads((source_dir / "metadata.json").read_text(encoding="utf-8"))
@@ -199,6 +200,14 @@ def main() -> int:
             trial_dir = out_dir / sample["task"] / sample["id"] / f"seed_{seed}"
             trial_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_dir / "metadata.json", trial_dir / "metadata.json")
+            # Announce the trial *before* the (potentially minutes-long)
+            # inference so the log shows forward progress instead of going
+            # silent between "Acoustic delay: N frames" and the first
+            # completed trial.
+            print(
+                f"[fdb] {completed + 1}/{total} {sample['task']}/{sample['id']} "
+                f"seed={seed} running ..."
+            )
             for variant in variants:
                 input_wav = source_dir / f"{variant}.wav"
                 output_stem = "clean_output" if variant == "clean_input" else "output"
@@ -266,7 +275,10 @@ def main() -> int:
                     encoding="utf-8",
                 )
             completed += 1
-            print(f"[fdb] {completed}/{total} {sample['task']}/{sample['id']} seed={seed}")
+            print(
+                f"[fdb] {completed}/{total} {sample['task']}/{sample['id']} "
+                f"seed={seed} done"
+            )
 
     print(f"[fdb] inference complete -> {out_dir}")
     return 0

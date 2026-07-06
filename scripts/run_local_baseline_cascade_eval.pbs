@@ -77,6 +77,11 @@ export TORCHINDUCTOR_DISABLE=1
 export NO_TORCH_COMPILE="${NO_TORCH_COMPILE:-1}"
 export TORCH_COMPILE_DISABLE=1
 
+# Unbuffer Python stdout so per-trial progress prints appear in real time
+# through the `tee` pipe below instead of being block-buffered until the
+# buffer fills (see the same note in scripts/run_full_duplex_eval.sh).
+export PYTHONUNBUFFERED=1
+
 mkdir -p experiments/pbs_logs
 JOB_LOG="experiments/pbs_logs/${CASCADE_MODEL_ID}.log"
 exec > >(tee -a "$JOB_LOG") 2>&1

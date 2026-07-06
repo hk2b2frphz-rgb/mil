@@ -70,6 +70,15 @@ export TORCHINDUCTOR_DISABLE=1
 export NO_TORCH_COMPILE="${NO_TORCH_COMPILE:-1}"
 export TORCH_COMPILE_DISABLE=1
 
+# Unbuffer Python stdout. This script pipes stdout through `tee` (see the
+# exec redirect below), so Python block-buffers stdout (~4-8 KB) and the
+# per-trial "[fdb] N/total ..." progress prints don't appear until the
+# buffer fills -- often many trials later, or not until the process exits.
+# The logging module writes to stderr and flushes per line, which is why
+# "Loading ..." / "Acoustic delay: N frames" show immediately but progress
+# then appears to stall. Unbuffering makes progress visible in real time.
+export PYTHONUNBUFFERED=1
+
 command -v uv >/dev/null 2>&1 || {
     echo "ERROR: uv is not available on PATH." >&2
     exit 1
