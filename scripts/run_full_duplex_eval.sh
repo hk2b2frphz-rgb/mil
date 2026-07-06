@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# set -e aborts silently on the first failing command with no explanation --
+# a GPU OOM kill, a PBS walltime kill, or a CUDA driver crash all terminate
+# the python subprocess by signal with no Python traceback, so without this
+# trap the log just stops dead after the subprocess's last printed line
+# (e.g. "Acoustic delay: N frames" from load_models(), right before the
+# first real generation step) with zero indication of why. Report the exit
+# code so 137 (SIGKILL: OOM or walltime) and 139 (SIGSEGV: driver/CUDA
+# crash) can be told apart from an ordinary Python exception (which would
+# already have printed its own traceback above this line).
+trap '
+    status=$?
+    echo "[fdb] ERROR: command failed (exit $status): $BASH_COMMAND" >&2
+    case "$status" in
+        137) echo "[fdb]   exit 137 = SIGKILL -- likely GPU/host OOM kill or PBS walltime/mem limit." >&2 ;;
+        139) echo "[fdb]   exit 139 = SIGSEGV -- likely a CUDA driver/kernel crash, not a Python exception." >&2 ;;
+    esac
+    command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv >&2
+' ERR
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
