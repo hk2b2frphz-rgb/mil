@@ -3,7 +3,7 @@
 #PBS -N fdb_ja_batch
 #PBS -q xvn_s
 #PBS -l select=1:res=small
-#PBS -l walltime=48:00:00
+#PBS -l walltime=04:00:00
 #PBS -j oe
 #PBS -V
 
