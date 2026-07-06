@@ -10,7 +10,12 @@
 #                   model.safetensors. Leave empty to use the HF default
 #                   weight (e.g. for the base model).
 # - model_config    optional. Path to moshi_lm_kwargs.json matching
-#                   model_weight. Leave empty together with model_weight.
+#                   model_weight. Leave empty for merged LoRA models (same
+#                   architecture as the base) or for full-FT exports, since
+#                   run_full_duplex_eval.sh auto-detects moshi_lm_kwargs.json
+#                   sitting next to model_weight (that's where
+#                   scripts/export_fullft_checkpoint.py always writes it).
+#                   Only needed if the config lives somewhere else.
 # - hf_repo         optional. Overrides HF_REPO for this row only
 #                   (default: llm-jp/llm-jp-moshi-v1).
 # - extra_env       optional. ";"-separated KEY=VALUE overrides applied only
@@ -23,5 +28,5 @@
 #     scripts/run_full_duplex_eval_batch.pbs
 
 base||||
-lora_h01|/path/to/lora_h01/consolidated.safetensors|/path/to/lora_h01/moshi_lm_kwargs.json||
-full_f01|/path/to/full_f01/model.safetensors|/path/to/full_f01/moshi_lm_kwargs.json||FDB_SEEDS=0,1,2
+lora_h01|/path/to/lora_h01/consolidated.safetensors|||
+full_f01|/path/to/full_f01/model.safetensors|||FDB_SEEDS=0,1,2

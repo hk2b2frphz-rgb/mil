@@ -186,23 +186,27 @@ Base model:
 qsub -v MODEL_ID=base scripts/run_full_duplex_eval.pbs
 ```
 
-Merged LoRA:
+Merged LoRA (`MODEL_CONFIG` is optional -- omitted here since a merged LoRA
+model keeps the base architecture, so the HF default config already
+matches):
 
 ```bash
 qsub -v \
 MODEL_ID=lora_h01,\
-MODEL_WEIGHT=/path/to/consolidated.safetensors,\
-MODEL_CONFIG=/path/to/moshi_lm_kwargs.json \
+MODEL_WEIGHT=/path/to/consolidated.safetensors \
 scripts/run_full_duplex_eval.pbs
 ```
 
-Exported full fine-tuning model:
+Exported full fine-tuning model (`MODEL_CONFIG` is also optional here --
+`scripts/export_fullft_checkpoint.py` always writes `moshi_lm_kwargs.json`
+next to `model.safetensors`, and `run_full_duplex_eval.sh` auto-detects it
+in that same directory when `MODEL_CONFIG` isn't given; pass `MODEL_CONFIG`
+explicitly only if the config lives somewhere else):
 
 ```bash
 qsub -v \
 MODEL_ID=full_f01,\
-MODEL_WEIGHT=/path/to/exported/model.safetensors,\
-MODEL_CONFIG=/path/to/exported/moshi_lm_kwargs.json \
+MODEL_WEIGHT=/path/to/exported/model.safetensors \
 scripts/run_full_duplex_eval.pbs
 ```
 
@@ -228,9 +232,14 @@ comma-separated fields like `FDB_SEEDS=0,1,2`; `#` starts a comment):
 ```text
 model_id|model_weight|model_config|hf_repo|extra_env
 base||||
-lora_h01|/path/to/consolidated.safetensors|/path/to/moshi_lm_kwargs.json||
-full_f01|/path/to/model.safetensors|/path/to/moshi_lm_kwargs.json||FDB_SEEDS=0,1,2
+lora_h01|/path/to/consolidated.safetensors|||
+full_f01|/path/to/model.safetensors|||FDB_SEEDS=0,1,2
 ```
+
+`model_config` is optional and can usually be left empty: merged LoRA models
+reuse the base architecture (HF default config applies), and full-FT exports
+get their `moshi_lm_kwargs.json` auto-detected next to `model_weight` (see
+above). Only set it when the config lives somewhere else.
 
 `extra_env` is `;`-separated `KEY=VALUE` overrides applied only to that row
 (e.g. `FDB_OPENING_GREETING=0` for a base/llm-jp baseline row mixed into an
