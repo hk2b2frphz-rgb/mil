@@ -74,7 +74,7 @@ from local_baseline_common import (  # noqa: E402
     init_baseline_tts,
 )
 from build_full_duplex_ja_dataset import synthesize  # noqa: E402
-from full_duplex_audio import read_wav_mono, write_wav_mono  # noqa: E402
+from full_duplex_audio import read_wav_mono, write_wav_mono, write_wav_stereo  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -208,6 +208,9 @@ def process_sample(
     silence = np.zeros(int(round(output_start_sec * sample_rate)), dtype=np.float32)
     aligned = np.concatenate([silence, response_pcm])
     write_wav_mono(trial_dir / "output.wav", aligned, sample_rate)
+    # Left = input speech, right = model output, for side-by-side listening
+    # review; not used by any deterministic/LLM-judge metric.
+    write_wav_stereo(trial_dir / "output_stereo.wav", pcm, aligned, sample_rate)
 
     response_duration_sec = len(response_pcm) / sample_rate
     output_json = {

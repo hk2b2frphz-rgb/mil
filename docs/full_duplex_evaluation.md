@@ -291,11 +291,24 @@ eval_runs/full_duplex/<RUN_ID>/
 |-- inference/
 |   |-- run_config.json
 |   `-- <task>/<case>/seed_<N>/
+|       |-- input.wav              user input (mono)
+|       |-- output.wav             model output, aligned (mono)
+|       |-- output_stereo.wav      left=input.wav, right=output.wav, for listening review
+|       |-- output.json
+|       |-- output.meta.json
+|       `-- (clean_input.wav / clean_output.wav / clean_output_stereo.wav for overlap tasks)
 |-- benchmark_results/
 |   |-- per_case.jsonl
 |   `-- summary.json
 `-- azure_judge_input.jsonl
 ```
+
+`*_stereo.wav` is a convenience file only, for quickly listening to a
+trial without switching between two mono files -- it is not read by
+`evaluate_full_duplex_ja.py` or either judge script, so it never affects any
+metric. The two channels are padded to equal length rather than truncated,
+since the aligned model output is normally longer than the raw input (it
+spans the tail-silence window plus the model's own response time).
 
 The fixed evaluation utterances are not training data. The independent
 Gemma/Qwen3-TTS training pipeline is documented in

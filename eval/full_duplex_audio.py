@@ -34,6 +34,33 @@ def write_wav_mono(path: Path, pcm: np.ndarray, sample_rate: int) -> None:
         wav.writeframes(raw)
 
 
+def write_wav_stereo(
+    path: Path, left: np.ndarray, right: np.ndarray, sample_rate: int
+) -> None:
+    """Writes a 2-channel PCM16 WAV for side-by-side listening review:
+    left channel = left (e.g. input speech), right channel = right (e.g.
+    model output), independent of eval metrics. The two are padded to equal
+    length rather than truncated since the model's aligned output is
+    normally longer than the raw input (tail silence + response time)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    left = np.asarray(left, dtype=np.float32)
+    right = np.asarray(right, dtype=np.float32)
+    length = max(len(left), len(right))
+    left_padded = np.zeros(length, dtype=np.float32)
+    right_padded = np.zeros(length, dtype=np.float32)
+    left_padded[: len(left)] = left
+    right_padded[: len(right)] = right
+    stereo = np.empty(length * 2, dtype=np.float32)
+    stereo[0::2] = np.clip(left_padded, -1.0, 1.0)
+    stereo[1::2] = np.clip(right_padded, -1.0, 1.0)
+    raw = (stereo * 32767.0).astype("<i2").tobytes()
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(2)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(raw)
+
+
 def resample_linear(pcm: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
     if source_rate == target_rate or pcm.size == 0:
         return np.asarray(pcm, dtype=np.float32)

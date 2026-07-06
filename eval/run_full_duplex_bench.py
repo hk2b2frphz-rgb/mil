@@ -17,7 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import response_recorder as recorder
-from full_duplex_audio import write_wav_mono
+from full_duplex_audio import write_wav_mono, write_wav_stereo
 
 
 def parse_args() -> argparse.Namespace:
@@ -95,6 +95,8 @@ def save_aligned_output(
     mimi: Any,
     acoustic_delay: int,
     device: str,
+    input_pcm: np.ndarray | None = None,
+    stereo_wav: Path | None = None,
 ) -> dict[str, Any]:
     sample_rate = int(mimi.sample_rate)
     frame_rate = float(mimi.frame_rate)
@@ -114,6 +116,10 @@ def save_aligned_output(
         if end > start:
             aligned[start:end] = decoded[: end - start]
     write_wav_mono(output_wav, aligned, sample_rate)
+    if stereo_wav is not None and input_pcm is not None:
+        # Left = input speech, right = model output, for side-by-side
+        # listening review; not used by any deterministic/LLM-judge metric.
+        write_wav_stereo(stereo_wav, input_pcm, aligned, sample_rate)
     return {
         "sample_rate": sample_rate,
         "frame_rate": frame_rate,
@@ -216,8 +222,15 @@ def main() -> int:
                     ),
                     acoustic_delay=acoustic_delay,
                 )
+                stereo_wav = trial_dir / f"{output_stem}_stereo.wav"
                 timing = save_aligned_output(
-                    output_wav, result, mimi, acoustic_delay, args.device
+                    output_wav,
+                    result,
+                    mimi,
+                    acoustic_delay,
+                    args.device,
+                    input_pcm=pcm,
+                    stereo_wav=stereo_wav,
                 )
                 write_text_output(
                     trial_dir / f"{output_stem}.json",
