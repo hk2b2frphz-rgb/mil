@@ -2,7 +2,7 @@
 #
 # One model per line, "|"-delimited (NOT comma -- FDB_SEEDS=0,1,2 needs commas
 # inside a field):
-#   model_id|model_weight|model_config|hf_repo|extra_env
+#   model_id|model_weight|model_config|hf_repo|extra_env|opening_greeting
 #
 # - model_id       required. Same charset rule as run_full_duplex_eval.sh:
 #                   letters, digits, dot, underscore, hyphen only.
@@ -20,12 +20,19 @@
 #                   (default: llm-jp/llm-jp-moshi-v1).
 # - extra_env       optional. ";"-separated KEY=VALUE overrides applied only
 #                   to this row, e.g. FDB_SEEDS=0,1,2;FDB_TTS_SPEAKER=Ono_Anna
+# - opening_greeting optional. "0" or "1", sets FDB_OPENING_GREETING for this
+#                   row only. Leave empty to use the default described below.
+#                   This dedicated column exists so the greeting toggle
+#                   doesn't need to be smuggled through extra_env; it takes
+#                   precedence over any FDB_OPENING_GREETING inside extra_env.
 #
-# A row with empty model_weight (unmodified HF checkpoint, e.g. "base") is
-# automatically run with FDB_OPENING_GREETING=0 -- it was never trained to
-# say the fixed opening line, so no row-level extra_env is needed for that.
-# Set FDB_OPENING_GREETING=1 in extra_env to override this back on for a
-# specific row (e.g. a HF-hosted checkpoint that *was* trained on it).
+# FDB_OPENING_GREETING precedence for a row (highest first):
+#   1. this row's opening_greeting column
+#   2. FDB_OPENING_GREETING=... inside this row's extra_env
+#   3. auto-default: a row with empty model_weight (unmodified HF checkpoint,
+#      e.g. "base") automatically runs with FDB_OPENING_GREETING=0 -- it was
+#      never trained to say the fixed opening line, so nothing needs to be
+#      set by hand for that case.
 #
 # Blank lines and lines starting with # are ignored. Copy this file to
 # scripts/models_manifest.txt (or anywhere else) and edit before running:
@@ -33,6 +40,7 @@
 #   qsub -v MODELS_FILE=scripts/models_manifest.txt \
 #     scripts/run_full_duplex_eval_batch.pbs
 
-base||||
-lora_h01|/path/to/lora_h01/consolidated.safetensors|||
-full_f01|/path/to/full_f01/model.safetensors|||FDB_SEEDS=0,1,2
+base|||||
+lora_h01|/path/to/lora_h01/consolidated.safetensors||||
+full_f01|/path/to/full_f01/model.safetensors|||FDB_SEEDS=0,1,2|
+hf_pretrained_with_greeting|||llm-jp/some-other-checkpoint||1
