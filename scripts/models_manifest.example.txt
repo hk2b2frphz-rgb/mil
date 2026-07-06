@@ -1,0 +1,27 @@
+# Full-Duplex-Bench-JA batch evaluation manifest.
+#
+# One model per line, "|"-delimited (NOT comma -- FDB_SEEDS=0,1,2 needs commas
+# inside a field):
+#   model_id|model_weight|model_config|hf_repo|extra_env
+#
+# - model_id       required. Same charset rule as run_full_duplex_eval.sh:
+#                   letters, digits, dot, underscore, hyphen only.
+# - model_weight    optional. Path to consolidated.safetensors / exported
+#                   model.safetensors. Leave empty to use the HF default
+#                   weight (e.g. for the base model).
+# - model_config    optional. Path to moshi_lm_kwargs.json matching
+#                   model_weight. Leave empty together with model_weight.
+# - hf_repo         optional. Overrides HF_REPO for this row only
+#                   (default: llm-jp/llm-jp-moshi-v1).
+# - extra_env       optional. ";"-separated KEY=VALUE overrides applied only
+#                   to this row, e.g. FDB_SEEDS=0,1,2;FDB_TTS_SPEAKER=Ono_Anna
+#
+# Blank lines and lines starting with # are ignored. Copy this file to
+# scripts/models_manifest.txt (or anywhere else) and edit before running:
+#
+#   qsub -v MODELS_FILE=scripts/models_manifest.txt \
+#     scripts/run_full_duplex_eval_batch.pbs
+
+base||||
+lora_h01|/path/to/lora_h01/consolidated.safetensors|/path/to/lora_h01/moshi_lm_kwargs.json||
+full_f01|/path/to/full_f01/model.safetensors|/path/to/full_f01/moshi_lm_kwargs.json||FDB_SEEDS=0,1,2
