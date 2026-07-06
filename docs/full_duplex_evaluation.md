@@ -241,6 +241,14 @@ reuse the base architecture (HF default config applies), and full-FT exports
 get their `moshi_lm_kwargs.json` auto-detected next to `model_weight` (see
 above). Only set it when the config lives somewhere else.
 
+A row with an empty `model_weight` (an unmodified HF checkpoint, e.g. the
+`base` row above) automatically runs with `FDB_OPENING_GREETING=0` -- it was
+never trained to say the fixed opening line, so `scripts/run_full_duplex_eval_batch.sh`
+branches that row to skip the greeting lead-in without needing an explicit
+`extra_env` entry. Add `FDB_OPENING_GREETING=1` to that row's `extra_env` to
+override this back on if a particular HF-hosted checkpoint actually was
+trained on it.
+
 `extra_env` is `;`-separated `KEY=VALUE` overrides applied only to that row
 (e.g. `FDB_OPENING_GREETING=0` for a base/llm-jp baseline row mixed into an
 otherwise fine-tuned-model batch). See

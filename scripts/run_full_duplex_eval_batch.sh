@@ -79,11 +79,29 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
         done
     fi
 
+    # A row with no model_weight has no local checkpoint override, i.e. it
+    # pulls the unmodified HF checkpoint (e.g. model_id=base) -- which was
+    # never trained to say the fixed opening greeting (see
+    # run_full_duplex_eval.sh / docs/full_duplex_evaluation.md). Default that
+    # row to FDB_OPENING_GREETING=0 so base/llm-jp rows don't sit through a
+    # dead-air lead-in reserved for a greeting they'll never say. A row's own
+    # extra_env can still override this explicitly.
+    has_greeting_override=0
+    for kv in "${run_env[@]}"; do
+        [[ "$kv" == FDB_OPENING_GREETING=* ]] && has_greeting_override=1
+    done
+    if [[ -z "$model_weight" && "$has_greeting_override" == "0" ]]; then
+        run_env+=("FDB_OPENING_GREETING=0")
+    fi
+
     echo
     echo "===== [$TOTAL] model_id=$model_id ====="
     echo "model_weight: ${model_weight:-<hf default>}"
     echo "model_config: ${model_config:-<hf default>}"
     [[ -n "$extra_env" ]] && echo "extra_env:    $extra_env"
+    if [[ -z "$model_weight" && "$has_greeting_override" == "0" ]]; then
+        echo "opening_greeting: 0 (auto: no model_weight -> unmodified HF checkpoint)"
+    fi
 
     model_start=$(date +%s)
     if env "${run_env[@]}" bash scripts/run_full_duplex_eval.sh; then

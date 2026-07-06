@@ -21,6 +21,12 @@
 # - extra_env       optional. ";"-separated KEY=VALUE overrides applied only
 #                   to this row, e.g. FDB_SEEDS=0,1,2;FDB_TTS_SPEAKER=Ono_Anna
 #
+# A row with empty model_weight (unmodified HF checkpoint, e.g. "base") is
+# automatically run with FDB_OPENING_GREETING=0 -- it was never trained to
+# say the fixed opening line, so no row-level extra_env is needed for that.
+# Set FDB_OPENING_GREETING=1 in extra_env to override this back on for a
+# specific row (e.g. a HF-hosted checkpoint that *was* trained on it).
+#
 # Blank lines and lines starting with # are ignored. Copy this file to
 # scripts/models_manifest.txt (or anywhere else) and edit before running:
 #
