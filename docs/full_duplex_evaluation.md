@@ -30,7 +30,7 @@ evaluation.
 | `epsilon` | `1e-10` for distribution normalization |
 | TOR | If no aligned output chunks exist, `0`. Otherwise, duration is the last chunk end minus the first chunk start. If duration is below `1.0` second, TOR is `0` for at most 3 chunks and `1` otherwise. For duration at least `1.0` second, TOR is `1`. |
 | Response latency | When TOR is `1`, first output chunk start minus the relevant input end, clamped to zero. Otherwise the latency is `null`. |
-| Backchannel frequency | Number of non-takeover Silero VAD speech segments divided by total output audio seconds. |
+| Backchannel frequency | Number of Silero VAD speech segments no longer than `3.0` seconds divided by total output audio seconds. Matching upstream, a short segment still counts here even when its token count marks it as a takeover for TOR. |
 | Backchannel JSD | Jensen-Shannon distance between the normalized `0.2`-second prediction occurrence distribution and the speaker's GT distribution. If no prediction exists, JSD is `1`. If Japanese GT is unavailable, JSD is `null` and excluded from numeric aggregation. See [Backchannel JSD ground truth](#backchannel-jsd-ground-truth) below. |
 
 Task-specific deterministic outputs:
@@ -47,7 +47,16 @@ For backchannel evaluation, each Silero segment is checked in time order. A
 segment longer than `3.0` seconds is a takeover. Otherwise, overlapping Moshi
 text tokens are counted. More than 3 tokens is a takeover; below `1.0` second,
 at most 2 tokens is a backchannel and 3 tokens is a takeover; a segment of at
-least `1.0` second is a takeover. Collection stops at the first takeover.
+least `1.0` second is a takeover. Collection stops only when a segment exceeds
+`3.0` seconds (upstream behavior); shorter token-based takeovers do not stop
+collection and still enter the frequency/JSD prediction list.
+
+One deliberate deviation from the pinned upstream loop: upstream overwrites
+`TOR` on every segment, so a takeover followed by a later clean backchannel
+reports `TOR=0` (last segment wins). This repository takes the maximum across
+segments instead — any takeover anywhere in the output yields `TOR=1`, which
+is the metric's stated intent. Scores here are therefore equal to or stricter
+than a literal upstream run.
 
 ## Backchannel JSD ground truth
 
@@ -201,6 +210,60 @@ The queue is `xvn_s`; fp16 is the default for V100. If `silero-vad` or its
 model cannot be loaded on the offline node, evaluation logs one fallback line
 and uses energy VAD.
 
+### Batch evaluation across multiple model checkpoints
+
+Re-running `qsub` by hand for every checkpoint after each training update is
+tedious. `scripts/run_full_duplex_eval_batch.pbs` runs the same pipeline once
+per model listed in a manifest file, one after another in a single job:
+
+```bash
+cp scripts/models_manifest.example.txt scripts/models_manifest.txt
+# edit scripts/models_manifest.txt to list the checkpoints to compare
+qsub -v MODELS_FILE=scripts/models_manifest.txt scripts/run_full_duplex_eval_batch.pbs
+```
+
+Manifest format (one model per line, `|`-delimited since `|`-conflicts with
+comma-separated fields like `FDB_SEEDS=0,1,2`; `#` starts a comment):
+
+```text
+model_id|model_weight|model_config|hf_repo|extra_env
+base||||
+lora_h01|/path/to/consolidated.safetensors|/path/to/moshi_lm_kwargs.json||
+full_f01|/path/to/model.safetensors|/path/to/moshi_lm_kwargs.json||FDB_SEEDS=0,1,2
+```
+
+`extra_env` is `;`-separated `KEY=VALUE` overrides applied only to that row
+(e.g. `FDB_OPENING_GREETING=0` for a base/llm-jp baseline row mixed into an
+otherwise fine-tuned-model batch). See
+[`scripts/models_manifest.example.txt`](../scripts/models_manifest.example.txt)
+for the full field reference.
+
+One model's failure does not stop the rest of the batch -- each model's
+success/failure and elapsed time is printed in a summary table at the end of
+the job log. Outputs land under:
+
+```text
+eval_runs/full_duplex_batches/<BATCH_ID>/
+|-- batch.log
+|-- <model_id>/
+|   |-- inference/
+|   |-- benchmark_results/
+|   `-- azure_judge_input.jsonl
+|-- <model_id_2>/...
+`-- combined_summary.json
+```
+
+Each `<model_id>/` subdirectory is exactly what a single
+`run_full_duplex_eval.pbs` run produces (see the layout above), so every
+downstream step (Azure/llm-jp judges, `summarize_eval.py`) works unchanged on
+any one of them. `combined_summary.json` additionally reindexes every
+model's `benchmark_results/summary.json` by task and metric
+(`comparison.<task>.means.<metric>.<model_id>`), so a metric like `TOR` or
+`greeting_matched` can be read across every model in the batch without
+opening each `summary.json` separately. Regenerate it standalone with
+`eval/combine_full_duplex_summaries.py --batch-dir <dir> --out
+<dir>/combined_summary.json` if a model was re-run after the batch finished.
+
 Outputs:
 
 ```text
@@ -280,6 +343,13 @@ Both judge scripts can run on the same `azure_judge_input.jsonl`. The
 original `judge_full_duplex_azure.py` (5-point, Full-Duplex-Bench style)
 and `judge_llmjp_style.py` (10-point, llm-jp-moshi style) produce
 independent result files and can be compared side by side.
+
+`judge_llmjp_style.py --summarize` reports, in addition to the overall and
+per-task means, `by_risk_level` and `by_category` breakdowns. For the
+loneliness/isolation counseling domain, read SAF means and `unsafe_content`
+flag counts on `risk_level=high` (the `crisis_signal` cases) as the primary
+safety signal — the overall mean is dominated by low-risk smalltalk cases
+and can hide a crisis-handling regression.
 
 ## Comparing against local cascade / SpeechLLM baselines
 

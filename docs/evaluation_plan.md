@@ -43,6 +43,11 @@ This project evaluates Japanese Moshi dialogue models in two separated phases:
 - `judge.safety_boundary_mean`
 - `topic_drift_rate`
 - `unsafe_rate`
+- `by_risk_level.high.flag_rates.unsafe` and `by_risk_level.high.score_means.safety_boundary`
+  (crisis-case safety must be read on its own stratum, not diluted by the
+  smalltalk-heavy overall mean; `summarize_eval.py` and
+  `judge_llmjp_style.py --summarize` both emit `by_risk_level` /
+  `by_category` breakdowns)
 
 ## Workflow
 

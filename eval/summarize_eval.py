@@ -35,22 +35,11 @@ def mean(values: list[float]) -> float | None:
     return statistics.fmean(values) if values else None
 
 
-def summarize_judged(path: Path) -> dict[str, Any]:
-    rows = list(iter_jsonl(path))
-    lat_text = []
-    lat_audio = []
+def collect_judge_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
     scores: dict[str, list[float]] = {}
     flags: dict[str, int] = {}
     empty = 0
     for row in rows:
-        meta = row.get("meta") or {}
-        for target, dest in (
-            ("first_response_latency_sec", lat_text),
-            ("audible_start_after_input_sec", lat_audio),
-        ):
-            value = meta.get(target)
-            if isinstance(value, (int, float)):
-                dest.append(float(value))
         if not str(row.get("assistant_text") or "").strip():
             empty += 1
         judge = row.get("judge") or {}
@@ -60,19 +49,56 @@ def summarize_judged(path: Path) -> dict[str, Any]:
         for key, value in (judge.get("flags") or {}).items():
             if value:
                 flags[key] = flags.get(key, 0) + 1
-
     n = len(rows)
+    return {
+        "n": n,
+        "empty_response_rate": empty / n if n else None,
+        "score_means": {key: mean(values) for key, values in sorted(scores.items())},
+        "flag_rates": {key: count / n for key, count in sorted(flags.items())} if n else {},
+    }
+
+
+def summarize_judged(path: Path) -> dict[str, Any]:
+    rows = list(iter_jsonl(path))
+    lat_text = []
+    lat_audio = []
+    by_risk: dict[str, list[dict[str, Any]]] = {}
+    by_category: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        meta = row.get("meta") or {}
+        for target, dest in (
+            ("first_response_latency_sec", lat_text),
+            ("audible_start_after_input_sec", lat_audio),
+        ):
+            value = meta.get(target)
+            if isinstance(value, (int, float)):
+                dest.append(float(value))
+        by_risk.setdefault(str(row.get("risk_level") or "unknown"), []).append(row)
+        by_category.setdefault(str(row.get("category") or "unknown"), []).append(row)
+
+    overall = collect_judge_stats(rows)
     return {
         "type": "judged",
         "input": str(path),
-        "n": n,
-        "empty_response_rate": empty / n if n else None,
+        "n": overall["n"],
+        "empty_response_rate": overall["empty_response_rate"],
         "first_response_latency_sec_p50": percentile(lat_text, 0.50),
         "first_response_latency_sec_p90": percentile(lat_text, 0.90),
         "audible_start_after_input_sec_p50": percentile(lat_audio, 0.50),
         "audible_start_after_input_sec_p90": percentile(lat_audio, 0.90),
-        "score_means": {key: mean(values) for key, values in sorted(scores.items())},
-        "flag_rates": {key: count / n for key, count in sorted(flags.items())} if n else {},
+        "score_means": overall["score_means"],
+        "flag_rates": overall["flag_rates"],
+        # Counseling-domain stratification: unsafe/safety numbers on
+        # risk_level=high (crisis_signal etc.) are the headline; overall
+        # averages dilute them with smalltalk-heavy case mixes.
+        "by_risk_level": {
+            risk: collect_judge_stats(risk_rows)
+            for risk, risk_rows in sorted(by_risk.items())
+        },
+        "by_category": {
+            category: collect_judge_stats(category_rows)
+            for category, category_rows in sorted(by_category.items())
+        },
     }
 
 

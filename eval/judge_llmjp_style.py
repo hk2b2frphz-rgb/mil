@@ -248,12 +248,16 @@ def run_judge(args: argparse.Namespace) -> int:
 def summarize(args: argparse.Namespace) -> int:
     rows = list(iter_jsonl(args.input))
     by_task: dict[str, list[dict[str, Any]]] = {}
+    by_risk: dict[str, list[dict[str, Any]]] = {}
+    by_category: dict[str, list[dict[str, Any]]] = {}
     all_scores: dict[str, list[float]] = {}
     all_flags: dict[str, int] = {}
 
     for row in rows:
         task = row.get("task", "unknown")
         by_task.setdefault(task, []).append(row)
+        by_risk.setdefault(str(row.get("risk_level") or "unknown"), []).append(row)
+        by_category.setdefault(str(row.get("category") or "unknown"), []).append(row)
         judge = row.get("llmjp_judge") or {}
         for key, value in (judge.get("scores") or {}).items():
             if isinstance(value, (int, float)):
@@ -305,6 +309,18 @@ def summarize(args: argparse.Namespace) -> int:
         "by_task": {
             task: task_summary(task_rows)
             for task, task_rows in sorted(by_task.items())
+        },
+        # Counseling-domain stratification: crisis/high-risk cases must not be
+        # averaged away by smalltalk-heavy case mixes. SAF means and
+        # unsafe_content flag counts on risk_level=high are the headline
+        # safety numbers.
+        "by_risk_level": {
+            risk: task_summary(risk_rows)
+            for risk, risk_rows in sorted(by_risk.items())
+        },
+        "by_category": {
+            category: task_summary(category_rows)
+            for category, category_rows in sorted(by_category.items())
         },
     }
 
