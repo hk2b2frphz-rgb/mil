@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import difflib
 import json
 import statistics
 from pathlib import Path
@@ -18,6 +17,7 @@ from full_duplex_audio import (
     silero_vad,
     total_duration,
 )
+from greeting_check import chunk_interval, evaluate_opening_greeting
 
 # Upstream Full-Duplex-Bench deterministic metric constants.
 turn_duration_threshold = 1.0
@@ -57,13 +57,6 @@ def speech_after(segments: list[list[float]], timestamp: float) -> float:
 def event_interval(metadata: dict[str, Any], name: str) -> list[float] | None:
     intervals = (metadata.get("events") or {}).get(name) or []
     return intervals[0] if intervals else None
-
-
-def chunk_interval(chunk: dict[str, Any]) -> list[float] | None:
-    timestamp = chunk.get("timestamp")
-    if not isinstance(timestamp, list) or len(timestamp) != 2:
-        return None
-    return [float(timestamp[0]), float(timestamp[1])]
 
 
 def chunks_overlapping(
@@ -164,49 +157,6 @@ def select_gt_distribution(
         return None
     distribution = backchannel_gt.get(str(speaker))
     return distribution if isinstance(distribution, list) else None
-
-
-GREETING_MATCH_THRESHOLD = 0.6
-GREETING_WINDOW_TOLERANCE_SEC = 1.0  # late-chunk-timestamp slack
-
-
-def normalize_for_greeting_match(text: str) -> str:
-    return "".join(str(text).split())
-
-
-def evaluate_opening_greeting(
-    metadata: dict[str, Any], chunks: list[dict[str, Any]]
-) -> dict[str, Any] | None:
-    """Checks whether the model actually said its trained fixed opening line
-    (build_full_duplex_ja_dataset.py --opening-greeting) during the reserved
-    lead-in, using output text chunks alone (no audio/ASR needed since we
-    already have Moshi's own timestamped text stream)."""
-    greeting = metadata.get("opening_greeting")
-    if not isinstance(greeting, dict):
-        return None
-    expected = greeting.get("text")
-    duration = greeting.get("duration_sec")
-    if not expected or duration is None:
-        return None
-    window_end = float(duration) + GREETING_WINDOW_TOLERANCE_SEC
-    actual = "".join(
-        str(chunk.get("text", ""))
-        for chunk in chunks
-        if (interval := chunk_interval(chunk)) is not None and interval[0] < window_end
-    )
-    expected_norm = normalize_for_greeting_match(expected)
-    actual_norm = normalize_for_greeting_match(actual)
-    similarity = (
-        difflib.SequenceMatcher(None, expected_norm, actual_norm).ratio()
-        if expected_norm
-        else 0.0
-    )
-    return {
-        "expected_text": expected,
-        "actual_text_in_window": actual,
-        "similarity": round(similarity, 4),
-        "matched": similarity >= GREETING_MATCH_THRESHOLD,
-    }
 
 
 def evaluate_case(

@@ -18,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import response_recorder as recorder
 from full_duplex_audio import write_wav_mono, write_wav_stereo
+from greeting_check import evaluate_opening_greeting
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,9 +61,9 @@ def model_args(args: argparse.Namespace) -> Namespace:
     )
 
 
-def write_text_output(
-    path: Path, text_events: list[dict[str, Any]], frame_rate: float
-) -> None:
+def build_text_output(
+    text_events: list[dict[str, Any]], frame_rate: float
+) -> dict[str, Any]:
     chunks = [
         {
             "text": event["piece"],
@@ -73,18 +74,17 @@ def write_text_output(
         }
         for event in text_events
     ]
+    return {
+        "text": "".join(event["piece"] for event in text_events).strip(),
+        "chunks": chunks,
+        "source": "moshi_text_tokens",
+        "language": "ja",
+    }
+
+
+def write_text_output(path: Path, output: dict[str, Any]) -> None:
     path.write_text(
-        json.dumps(
-            {
-                "text": "".join(event["piece"] for event in text_events).strip(),
-                "chunks": chunks,
-                "source": "moshi_text_tokens",
-                "language": "ja",
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
+        json.dumps(output, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
 
@@ -232,11 +232,23 @@ def main() -> int:
                     input_pcm=pcm,
                     stereo_wav=stereo_wav,
                 )
-                write_text_output(
-                    trial_dir / f"{output_stem}.json",
-                    result["text_events"],
-                    frame_rate,
-                )
+                text_output = build_text_output(result["text_events"], frame_rate)
+                write_text_output(trial_dir / f"{output_stem}.json", text_output)
+
+                # Log whether the model actually said its trained fixed
+                # opening line during the reserved lead-in -- while the job
+                # is still running, not only after the separate
+                # evaluate_full_duplex_ja.py post-processing step. Only the
+                # main ("input" -> "output") variant carries opening_greeting
+                # metadata; the "clean_input" overlap variant never does.
+                greeting = evaluate_opening_greeting(metadata, text_output["chunks"])
+                if greeting is not None:
+                    status = "OK" if greeting["matched"] else "MISMATCH"
+                    print(
+                        f"[fdb] greeting {sample['task']}/{sample['id']} seed={seed}: "
+                        f"{status} similarity={greeting['similarity']}"
+                    )
+
                 meta = {
                     **timing,
                     "model_id": args.model_id,

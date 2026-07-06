@@ -126,6 +126,15 @@ manual inspection. A low `greeting_matched` rate is a regression signal that
 fine-tuning eroded the memorized opening line, independent of the Azure/LLM
 judge.
 
+The same check (`eval/greeting_check.py`, shared by both scripts) also runs
+during inference itself: `run_full_duplex_bench.py` and
+`run_local_baseline_full_duplex.py` print one `[fdb] greeting <task>/<case>
+seed=<N>: OK|MISMATCH similarity=<0-1>` line per trial as soon as that
+trial's output is generated, so `run.log` shows whether the greeting was
+said without waiting for the separate `evaluate_full_duplex_ja.py` step
+(or reading `per_case.jsonl` at all). No line is printed for a case with no
+`opening_greeting` metadata (e.g. `FDB_OPENING_GREETING=0` runs).
+
 Toggle via `run_full_duplex_eval.sh`'s `FDB_OPENING_GREETING=1` (default) /
 `FDB_OPENING_GREETING_GAP_SEC=0.4`. **Set `FDB_OPENING_GREETING=0` when
 evaluating base Moshi or llm-jp baselines** -- they were never trained to say

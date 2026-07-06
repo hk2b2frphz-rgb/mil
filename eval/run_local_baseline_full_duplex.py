@@ -75,6 +75,7 @@ from local_baseline_common import (  # noqa: E402
 )
 from build_full_duplex_ja_dataset import synthesize  # noqa: E402
 from full_duplex_audio import read_wav_mono, write_wav_mono, write_wav_stereo  # noqa: E402
+from greeting_check import evaluate_opening_greeting  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -226,6 +227,14 @@ def process_sample(
     (trial_dir / "output.json").write_text(
         json.dumps(output_json, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+
+    greeting = evaluate_opening_greeting(metadata, output_json["chunks"])
+    if greeting is not None:
+        status = "OK" if greeting["matched"] else "MISMATCH"
+        print(
+            f"[cascade-eval] greeting {sample['task']}/{sample['id']} seed={seed}: "
+            f"{status} similarity={greeting['similarity']}"
+        )
 
     output_meta = {
         "model_id": model_id,
