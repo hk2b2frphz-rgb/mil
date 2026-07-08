@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs scripts/run_full_duplex_eval.sh once per model listed in MODELS_FILE,
-# writing each model's results under BATCH_OUT_DIR/<model_id>/ and a final
+# writing each model's results under BATCH_OUT_DIR/<output_name>/ and a final
 # combined_summary.json comparing every model side by side. See
 # scripts/models_manifest.example.txt for the manifest format.
 #
@@ -37,6 +37,7 @@ command -v uv >/dev/null 2>&1 || {
 }
 
 RESULT_LINES=()
+OUTPUT_NAMES=()
 TOTAL=0
 FAILED=0
 
@@ -45,13 +46,21 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
     line="$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
     [[ -z "$line" ]] && continue
 
-    IFS='|' read -r model_id model_weight model_config hf_repo extra_env opening_greeting <<< "$line"
+    IFS='|' read -r model_id model_weight model_config hf_repo extra_env opening_greeting output_name <<< "$line"
     model_id="$(echo "$model_id" | xargs)"
     model_weight="$(echo "$model_weight" | xargs)"
     model_config="$(echo "$model_config" | xargs)"
     hf_repo="$(echo "$hf_repo" | xargs)"
     extra_env="$(echo "$extra_env" | xargs)"
     opening_greeting="$(echo "$opening_greeting" | xargs)"
+    output_name="$(echo "${output_name:-}" | xargs)"
+
+    # Backward-compatible shorthand: in a 6-column manifest, a final value
+    # other than 0/1 is treated as output_name, not opening_greeting.
+    if [[ -z "$output_name" && -n "$opening_greeting" && "$opening_greeting" != "0" && "$opening_greeting" != "1" ]]; then
+        output_name="$opening_greeting"
+        opening_greeting=""
+    fi
     if [[ -n "$opening_greeting" && "$opening_greeting" != "0" && "$opening_greeting" != "1" ]]; then
         echo "[batch] WARN: opening_greeting must be 0 or 1 for $model_id, ignoring invalid value: $opening_greeting" >&2
         opening_greeting=""
@@ -65,13 +74,30 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
         echo "[batch] WARN: skipping invalid model_id (letters/digits/dot/underscore/hyphen only): $model_id" >&2
         continue
     fi
+    output_name="${output_name:-$model_id}"
+    if ! [[ "$output_name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "[batch] WARN: skipping invalid output_name for $model_id (letters/digits/dot/underscore/hyphen only): $output_name" >&2
+        continue
+    fi
+    duplicate_output=0
+    for seen_output_name in "${OUTPUT_NAMES[@]}"; do
+        if [[ "$seen_output_name" == "$output_name" ]]; then
+            duplicate_output=1
+            break
+        fi
+    done
+    if [[ "$duplicate_output" == "1" ]]; then
+        echo "[batch] WARN: skipping duplicate output_name (would overwrite previous result): $output_name" >&2
+        continue
+    fi
+    OUTPUT_NAMES+=("$output_name")
 
     TOTAL=$((TOTAL + 1))
 
     run_env=(
         "MODEL_ID=$model_id"
-        "RUN_ID=$model_id"
-        "FDB_OUT_DIR=$BATCH_OUT_DIR/$model_id"
+        "RUN_ID=$output_name"
+        "FDB_OUT_DIR=$BATCH_OUT_DIR/$output_name"
     )
     [[ -n "$model_weight" ]] && run_env+=("MODEL_WEIGHT=$model_weight")
     [[ -n "$model_config" ]] && run_env+=("MODEL_CONFIG=$model_config")
@@ -114,9 +140,10 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
     fi
 
     echo
-    echo "===== [$TOTAL] model_id=$model_id ====="
+    echo "===== [$TOTAL] model_id=$model_id output_name=$output_name ====="
     echo "model_weight: ${model_weight:-<hf default>}"
     echo "model_config: ${model_config:-<hf default>}"
+    [[ "$output_name" != "$model_id" ]] && echo "output_name:  $output_name"
     [[ -n "$extra_env" ]] && echo "extra_env:    $extra_env"
     [[ -n "$greeting_source" ]] && echo "opening_greeting: $greeting_source"
 
@@ -129,16 +156,16 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
     fi
     model_end=$(date +%s)
     elapsed=$((model_end - model_start))
-    echo "[batch] model_id=$model_id status=$status elapsed_sec=$elapsed"
-    RESULT_LINES+=("$model_id|$status|$elapsed")
+    echo "[batch] model_id=$model_id output_name=$output_name status=$status elapsed_sec=$elapsed"
+    RESULT_LINES+=("$model_id|$output_name|$status|$elapsed")
 done < "$MODELS_FILE"
 
 echo
 echo "===== Batch summary ====="
-printf '%-24s %-8s %s\n' "model_id" "status" "elapsed_sec"
+printf '%-24s %-24s %-8s %s\n' "model_id" "output_name" "status" "elapsed_sec"
 for line in "${RESULT_LINES[@]}"; do
-    IFS='|' read -r m s e <<< "$line"
-    printf '%-24s %-8s %s\n' "$m" "$s" "$e"
+    IFS='|' read -r m o s e <<< "$line"
+    printf '%-24s %-24s %-8s %s\n' "$m" "$o" "$s" "$e"
 done
 
 uv run python eval/combine_full_duplex_summaries.py \
@@ -147,7 +174,7 @@ uv run python eval/combine_full_duplex_summaries.py \
     || echo "[batch] WARN: combined_summary.json step failed (see above)" >&2
 
 echo
-echo "[batch] per-model results: $BATCH_OUT_DIR/<model_id>/"
+echo "[batch] per-model results: $BATCH_OUT_DIR/<output_name>/"
 echo "[batch] combined summary:  $BATCH_OUT_DIR/combined_summary.json"
 echo "[batch] total: $TOTAL failed: $FAILED"
 echo "finished_at: $(date -Iseconds)"

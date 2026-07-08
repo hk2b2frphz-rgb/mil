@@ -9,7 +9,7 @@
 
 # Runs scripts/run_full_duplex_eval.sh once per model listed in MODELS_FILE,
 # one after another in a single job, writing each model's results under
-# BATCH_OUT_DIR/<model_id>/ plus a combined_summary.json comparing every
+# BATCH_OUT_DIR/<output_name>/ plus a combined_summary.json comparing every
 # model side by side (eval/combine_full_duplex_summaries.py). One model's
 # failure does not stop the remaining models -- see the summary table at the
 # end of the log / <BATCH_OUT_DIR>/batch.log. This job never calls
@@ -19,7 +19,7 @@
 #     scripts/run_full_duplex_eval_batch.pbs
 #
 # Manifest format (one model per line, "|"-delimited, "#" starts a comment):
-#   model_id|model_weight|model_config|hf_repo|extra_env
+#   model_id|model_weight|model_config|hf_repo|extra_env|opening_greeting|output_name
 # See scripts/models_manifest.example.txt for details and an example.
 #
 # Useful overrides (batch-wide defaults; a manifest row's own extra_env

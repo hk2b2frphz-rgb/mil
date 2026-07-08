@@ -3,7 +3,7 @@
 into one side-by-side comparison file.
 
 Expects the layout produced by scripts/run_full_duplex_eval_batch.sh:
-    <batch-dir>/<model_id>/benchmark_results/summary.json
+    <batch-dir>/<output_name>/benchmark_results/summary.json
 """
 from __future__ import annotations
 

@@ -2,7 +2,7 @@
 #
 # One model per line, "|"-delimited (NOT comma -- FDB_SEEDS=0,1,2 needs commas
 # inside a field):
-#   model_id|model_weight|model_config|hf_repo|extra_env|opening_greeting
+#   model_id|model_weight|model_config|hf_repo|extra_env|opening_greeting|output_name
 #
 # - model_id       required. Same charset rule as run_full_duplex_eval.sh:
 #                   letters, digits, dot, underscore, hyphen only.
@@ -25,6 +25,12 @@
 #                   This dedicated column exists so the greeting toggle
 #                   doesn't need to be smuggled through extra_env; it takes
 #                   precedence over any FDB_OPENING_GREETING inside extra_env.
+# - output_name     optional. Folder/comparison label under BATCH_OUT_DIR.
+#                   Defaults to model_id. Use this for run labels such as
+#                   v1, v2, f01_epoch12, or ablation_no_greeting while keeping
+#                   model_id stable in run metadata. Same charset rule as
+#                   model_id. For shorthand compatibility, a 6-column row
+#                   whose last column is not 0 or 1 is treated as output_name.
 #
 # FDB_OPENING_GREETING precedence for a row (highest first):
 #   1. this row's opening_greeting column
@@ -40,7 +46,8 @@
 #   qsub -v MODELS_FILE=scripts/models_manifest.txt \
 #     scripts/run_full_duplex_eval_batch.pbs
 
-base|||||
-lora_h01|/path/to/lora_h01/consolidated.safetensors||||
-full_f01|/path/to/full_f01/model.safetensors|||FDB_SEEDS=0,1,2|
-hf_pretrained_with_greeting|||llm-jp/some-other-checkpoint||1
+base||||||
+lora_h01|/path/to/lora_h01/consolidated.safetensors|||||v1
+lora_h01|/path/to/lora_h01_v2/consolidated.safetensors|||||v2
+full_f01|/path/to/full_f01/model.safetensors|||FDB_SEEDS=0,1,2||full_f01_seed012
+hf_pretrained_with_greeting|||llm-jp/some-other-checkpoint||1|hf_greeting_v1

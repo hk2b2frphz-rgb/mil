@@ -239,10 +239,11 @@ Manifest format (one model per line, `|`-delimited since `|`-conflicts with
 comma-separated fields like `FDB_SEEDS=0,1,2`; `#` starts a comment):
 
 ```text
-model_id|model_weight|model_config|hf_repo|extra_env|opening_greeting
-base|||||
-lora_h01|/path/to/consolidated.safetensors||||
-full_f01|/path/to/model.safetensors|||FDB_SEEDS=0,1,2|
+model_id|model_weight|model_config|hf_repo|extra_env|opening_greeting|output_name
+base||||||
+lora_h01|/path/to/consolidated.safetensors|||||v1
+lora_h01|/path/to/consolidated_v2.safetensors|||||v2
+full_f01|/path/to/model.safetensors|||FDB_SEEDS=0,1,2||full_f01_seed012
 ```
 
 `model_config` is optional and can usually be left empty: merged LoRA models
@@ -260,6 +261,13 @@ never trained to say the fixed opening line. Set `opening_greeting` to `1`
 for a specific row to turn the greeting lead-in back on (e.g. a HF-hosted
 checkpoint that actually was trained on it).
 
+`output_name` is an optional final column used as the output folder and
+comparison label under `BATCH_OUT_DIR`. It defaults to `model_id`. Use it for
+run labels such as `v1`, `v2`, or `full_f01_seed012` while keeping `model_id`
+stable in run metadata. It has the same allowed characters as `model_id`
+(letters, digits, dot, underscore, hyphen). For shorthand compatibility, a
+6-column row whose final value is not `0` or `1` is treated as `output_name`.
+
 `extra_env` is `;`-separated `KEY=VALUE` overrides applied only to that row
 (e.g. `FDB_OPENING_GREETING=0` for a base/llm-jp baseline row mixed into an
 otherwise fine-tuned-model batch). See
@@ -273,20 +281,20 @@ the job log. Outputs land under:
 ```text
 eval_runs/full_duplex_batches/<BATCH_ID>/
 |-- batch.log
-|-- <model_id>/
+|-- <output_name>/
 |   |-- inference/
 |   |-- benchmark_results/
 |   `-- azure_judge_input.jsonl
-|-- <model_id_2>/...
+|-- <output_name_2>/...
 `-- combined_summary.json
 ```
 
-Each `<model_id>/` subdirectory is exactly what a single
+Each `<output_name>/` subdirectory is exactly what a single
 `run_full_duplex_eval.pbs` run produces (see the layout above), so every
 downstream step (Azure/llm-jp judges, `summarize_eval.py`) works unchanged on
 any one of them. `combined_summary.json` additionally reindexes every
 model's `benchmark_results/summary.json` by task and metric
-(`comparison.<task>.means.<metric>.<model_id>`), so a metric like `TOR` or
+(`comparison.<task>.means.<metric>.<output_name>`), so a metric like `TOR` or
 `greeting_matched` can be read across every model in the batch without
 opening each `summary.json` separately. Regenerate it standalone with
 `eval/combine_full_duplex_summaries.py --batch-dir <dir> --out
