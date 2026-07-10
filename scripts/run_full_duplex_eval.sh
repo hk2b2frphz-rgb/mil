@@ -24,6 +24,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Keep direct launches consistent with the PBS wrapper: stale inherited
+# proxies are cleared before model/TTS downloads initialize HTTP clients.
+source "$SCRIPT_DIR/setup_proxy.sh"
+
 MODEL_ID="${MODEL_ID:?Set MODEL_ID to a stable label such as base, lora_h01, or full_f01}"
 if ! [[ "$MODEL_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
     echo "ERROR: MODEL_ID may contain only letters, digits, dot, underscore, and hyphen." >&2

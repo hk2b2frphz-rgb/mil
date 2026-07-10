@@ -45,6 +45,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
+# This script is also run directly (not only through its PBS wrapper).  Make
+# sure a login-node-only proxy inherited from that shell never reaches ASR,
+# TTS, or the isolated Gemma worker.
+source "$SCRIPT_DIR/setup_proxy.sh"
+
 MODEL_ID="${MODEL_ID:?Set MODEL_ID to a stable label such as cascade_gemma2b}"
 if ! [[ "$MODEL_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
     echo "ERROR: MODEL_ID may contain only letters, digits, dot, underscore, and hyphen." >&2

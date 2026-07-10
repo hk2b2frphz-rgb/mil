@@ -18,6 +18,11 @@
 # from the submission host. Those implicit values are deliberately cleared
 # unless PROXY_USE_ENV=1 is set. Prefer PROXY_URL or PROXY_HOST explicitly.
 
+# Idempotent: PBS wrappers source this before invoking the reusable .sh
+# runners, while users may invoke a runner directly on a compute node.
+if [[ "${PROXY_CONFIG_INITIALIZED:-0}" == "1" ]]; then
+    return 0 2>/dev/null || exit 0
+fi
 unset PROXY_CONFIG_VALID
 
 if [[ -n "${PROXY_URL:-}" ]]; then
@@ -51,6 +56,7 @@ else
     # Do not let #PBS -V silently reuse a proxy hostname that only resolves on
     # the login/submission host. urllib reports that case as getaddrinfo -2.
     unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
+    export PROXY_CONFIG_INITIALIZED=1
     echo "[proxy] disabled (set PROXY_URL/PROXY_HOST explicitly if required)"
     return 0 2>/dev/null || exit 0
 fi
@@ -105,8 +111,18 @@ except socket.gaierror as exc:
 print(parsed.geturl())
 PY
     ); then
+        # A proxy inherited from a login node is frequently not resolvable on
+        # a compute node.  Let callers use their direct network route rather
+        # than leaking the bad value to requests/httpx.  Set PROXY_REQUIRED=1
+        # for installations where direct access is intentionally forbidden.
+        if [[ "${PROXY_REQUIRED:-0}" != "1" ]]; then
+            unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
+            export PROXY_CONFIG_INITIALIZED=1
+            echo "[proxy] disabled: proxy is not resolvable on this node; using direct network" >&2
+            return 0 2>/dev/null || exit 0
+        fi
         echo "ERROR: invalid/unresolvable proxy configuration." >&2
-        echo "Submit with PROXY_URL=http://<host>:<port> or correct PROXY_HOST." >&2
+        echo "Submit with a compute-node-resolvable PROXY_URL/PROXY_HOST, or unset PROXY_REQUIRED to use direct network." >&2
         return 1 2>/dev/null || exit 1
     fi
     # The validation step also normalizes shorthand such as "proxy:8080" to
@@ -120,6 +136,7 @@ export https_proxy="$proxy_url"
 export HTTP_PROXY="$proxy_url"
 export HTTPS_PROXY="$proxy_url"
 export PROXY_CONFIG_VALID=1
+export PROXY_CONFIG_INITIALIZED=1
 
 proxy_no_proxy="${NO_PROXY:-${no_proxy:-localhost,127.0.0.1,::1}}"
 export no_proxy="$proxy_no_proxy"
