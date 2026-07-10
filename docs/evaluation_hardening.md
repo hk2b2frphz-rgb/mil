@@ -8,7 +8,7 @@ In a parallel mixed batch, all first-time input-TTS builds share a global lock. 
 
 ## v1.5 acoustic adaptation
 
-The server writes `benchmark_results/acoustic_adaptation.json` for every paired overlap trial. It contains WPM, pitch, intensity, abrupt-cutoff count, optional UTMOSv2, paired t-tests, and Holm-adjusted p values for pre/post and clean/post comparisons. The normal runner enables UTMOSv2; use `FDB_WITH_UTMOS=0` only when it cannot be installed.
+The server writes `benchmark_results/acoustic_adaptation.json` for every paired overlap trial. It contains WPM, pitch, intensity, abrupt-cutoff count, optional UTMOSv2, paired t-tests, and Holm-adjusted p values for pre/post and clean/post comparisons. UTMOSv2 is installed from the official GitHub implementation pinned in `pyproject.toml` (it is not available as a normal PyPI distribution). The normal runner enables UTMOSv2; use `FDB_WITH_UTMOS=0` only when the optional model weights or runtime cannot be installed.
 
 After local semantic judging, filter acoustic significance tests by action class:
 
