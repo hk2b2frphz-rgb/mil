@@ -27,7 +27,6 @@ Pipeline pieces:
 import json
 import os
 import re
-import socket
 import subprocess
 import sys
 import tempfile
@@ -66,12 +65,9 @@ def worker_environment() -> dict[str, str]:
 
     Cascade launches an isolated Python runtime for Gemma/SpeechLLM.  Unlike
     the in-process Moshi path, that runtime eagerly initializes HTTP clients,
-    so a proxy inherited from a PBS submission host can fail the entire run
-    before model loading.  A proxy hostname that does not resolve *on this
-    compute node* is not passed to the child; it gets a direct connection
-    instead.  This does not hide a required-proxy network failure -- the HTTP
-    client will report that directly -- but prevents a stale proxy from being
-    reported as a Cascade/model failure.
+    so a proxy inherited from a PBS submission host must be normalized before
+    it is passed to the child. The PBS wrapper's established proxy route is
+    preserved; only malformed values are discarded.
     """
     environment = os.environ.copy()
     proxy_setting = next(
@@ -87,15 +83,14 @@ def worker_environment() -> dict[str, str]:
         )
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("missing http(s) scheme or hostname")
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+        _ = parsed.port
         normalized = parsed.geturl()
     except (OSError, ValueError) as exc:
         for key in (*_PROXY_KEYS, "all_proxy", "ALL_PROXY"):
             environment.pop(key, None)
         print(
             "[cascade] proxy from "
-            f"{proxy_source} is unusable on this node ({exc}); "
+            f"{proxy_source} is malformed ({exc}); "
             "starting the worker without a proxy.",
             file=sys.stderr,
         )

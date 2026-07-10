@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import io
 import json
-import socket
 import tempfile
 import unittest
 from pathlib import Path
@@ -151,11 +150,8 @@ class CascadeBaselineTests(unittest.TestCase):
         self.assertEqual(payload["seed"], 23)
         self.assertIn("相談内容", payload["prompt"])
 
-    def test_worker_drops_proxy_unresolvable_on_compute_node(self) -> None:
-        with patch.dict("os.environ", {"HTTPS_PROXY": "http://stale-proxy:8080"}, clear=True), patch(
-            "eval.local_baseline_common.socket.getaddrinfo",
-            side_effect=socket.gaierror("not found"),
-        ):
+    def test_worker_drops_malformed_proxy(self) -> None:
+        with patch.dict("os.environ", {"HTTPS_PROXY": "http://proxy:bad"}, clear=True):
             environment = worker_environment()
         self.assertNotIn("HTTPS_PROXY", environment)
         self.assertNotIn("HTTP_PROXY", environment)

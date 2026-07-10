@@ -14,9 +14,10 @@
 # If PROXY_USER or PROXY_PASS contains URL-special characters, set PROXY_URL
 # directly with those values URL-encoded.
 #
-# PBS jobs use `#PBS -V`, which can carry stale HTTP_PROXY/HTTPS_PROXY values
-# from the submission host. Those implicit values are deliberately cleared
-# unless PROXY_USE_ENV=1 is set. Prefer PROXY_URL or PROXY_HOST explicitly.
+# PBS jobs use `#PBS -V`; the cluster's working HTTP_PROXY/HTTPS_PROXY is
+# therefore normally inherited from the submission shell. Preserve that
+# established path, but normalize shorthand such as `proxy:8080` before
+# requests/httpx sees it.
 
 # Idempotent: PBS wrappers source this before invoking the reusable .sh
 # runners, while users may invoke a runner directly on a compute node.
@@ -46,15 +47,9 @@ elif [[ -n "${PROXY_HOST:-}" ]]; then
     else
         proxy_url="$proxy_base"
     fi
-elif [[ "${PROXY_USE_ENV:-0}" == "1" ]]; then
+elif [[ -n "${https_proxy:-}${http_proxy:-}${HTTPS_PROXY:-}${HTTP_PROXY:-}" ]]; then
     proxy_url="${https_proxy:-${http_proxy:-${HTTPS_PROXY:-${HTTP_PROXY:-}}}}"
-    if [[ -z "$proxy_url" ]]; then
-        echo "ERROR: PROXY_USE_ENV=1 but no HTTP_PROXY/HTTPS_PROXY value is set." >&2
-        return 1 2>/dev/null || exit 1
-    fi
 else
-    # Do not let #PBS -V silently reuse a proxy hostname that only resolves on
-    # the login/submission host. urllib reports that case as getaddrinfo -2.
     unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
     export PROXY_CONFIG_INITIALIZED=1
     echo "[proxy] disabled (set PROXY_URL/PROXY_HOST explicitly if required)"
@@ -76,7 +71,6 @@ done
 if [[ -n "$proxy_python" ]]; then
     if ! normalized_proxy_url=$(PROXY_CHECK_URL="$proxy_url" "$proxy_python" - <<'PY'
 import os
-import socket
 import sys
 from urllib.parse import urlsplit
 
@@ -90,39 +84,18 @@ if parsed.scheme not in {"http", "https"}:
     raise SystemExit(1)
 host = parsed.hostname
 try:
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    _ = parsed.port
 except ValueError as exc:
     print(f"ERROR: invalid proxy port: {exc}", file=sys.stderr)
     raise SystemExit(1)
 if not host:
     print("ERROR: proxy URL has no hostname.", file=sys.stderr)
     raise SystemExit(1)
-if not 1 <= port <= 65535:
-    print(f"ERROR: proxy port is out of range: {port}", file=sys.stderr)
-    raise SystemExit(1)
-try:
-    socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-except socket.gaierror as exc:
-    print(
-        f"ERROR: proxy hostname cannot be resolved on this node: {host}:{port} ({exc})",
-        file=sys.stderr,
-    )
-    raise SystemExit(1)
 print(parsed.geturl())
 PY
     ); then
-        # A proxy inherited from a login node is frequently not resolvable on
-        # a compute node.  Let callers use their direct network route rather
-        # than leaking the bad value to requests/httpx.  Set PROXY_REQUIRED=1
-        # for installations where direct access is intentionally forbidden.
-        if [[ "${PROXY_REQUIRED:-0}" != "1" ]]; then
-            unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
-            export PROXY_CONFIG_INITIALIZED=1
-            echo "[proxy] disabled: proxy is not resolvable on this node; using direct network" >&2
-            return 0 2>/dev/null || exit 0
-        fi
-        echo "ERROR: invalid/unresolvable proxy configuration." >&2
-        echo "Submit with a compute-node-resolvable PROXY_URL/PROXY_HOST, or unset PROXY_REQUIRED to use direct network." >&2
+        echo "ERROR: invalid proxy configuration." >&2
+        echo "Submit with PROXY_URL=http://<host>:<port> or correct PROXY_HOST." >&2
         return 1 2>/dev/null || exit 1
     fi
     # The validation step also normalizes shorthand such as "proxy:8080" to
