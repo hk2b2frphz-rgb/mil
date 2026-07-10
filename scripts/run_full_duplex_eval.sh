@@ -69,6 +69,8 @@ FDB_DATA_DIR="${FDB_DATA_DIR:-$FDB_DATA_DIR_DEFAULT}"
 FDB_OUT_DIR="${FDB_OUT_DIR:-$REPO_ROOT/eval_runs/full_duplex/$RUN_ID}"
 REFRESH_FDB_DATA="${REFRESH_FDB_DATA:-0}"
 FDB_REQUIRE_OVERLAP="${FDB_REQUIRE_OVERLAP:-1}"
+FDB_ASR_MODEL="${FDB_ASR_MODEL:-large-v3}"
+FDB_ASR_COMPUTE_TYPE="${FDB_ASR_COMPUTE_TYPE:-float16}"
 # In the 4-GPU batch PBS job this is set to all allocated GPUs. It is used
 # only for the one-time, cache-miss input-TTS build; each model inference
 # process remains pinned to its own single GPU.
@@ -249,6 +251,17 @@ if [[ -n "${TEMP_TEXT:-}" ]]; then inference_args+=(--temp-text "$TEMP_TEXT"); f
 if [[ -n "${CFG_COEF:-}" ]]; then inference_args+=(--cfg-coef "$CFG_COEF"); fi
 
 "${inference_args[@]}"
+
+# Full-Duplex-Bench evaluates ASR-aligned output/clean-output transcripts,
+# not model-internal text events. Replace the inference-side convenience JSON
+# with this reproducible alignment before deterministic evaluation.
+uv run python eval/align_full_duplex_asr.py \
+    --run-dir "$FDB_OUT_DIR/inference" \
+    --asr-model "$FDB_ASR_MODEL" \
+    --device "$FDB_DEVICE" \
+    --compute-type "$FDB_ASR_COMPUTE_TYPE" \
+    --overwrite
+uv run python eval/full_duplex_official_timing.py --run-dir "$FDB_OUT_DIR/inference"
 
 FDB_BACKCHANNEL_GT="${FDB_BACKCHANNEL_GT:-$REPO_ROOT/eval_sets/full_duplex_ja/backchannel_gt.json}"
 evaluate_args=(

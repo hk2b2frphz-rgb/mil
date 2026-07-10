@@ -200,6 +200,14 @@ uv run python eval/run_local_baseline_full_duplex.py \
     --dtype "$CASCADE_DTYPE" \
     --overwrite
 
+uv run python eval/align_full_duplex_asr.py \
+    --run-dir "$FDB_OUT_DIR/inference" \
+    --asr-model "$CASCADE_ASR_MODEL" \
+    --device "$CASCADE_ASR_DEVICE" \
+    --compute-type "$CASCADE_ASR_COMPUTE_TYPE" \
+    --overwrite
+uv run python eval/full_duplex_official_timing.py --run-dir "$FDB_OUT_DIR/inference"
+
 FDB_BACKCHANNEL_GT="${FDB_BACKCHANNEL_GT:-$REPO_ROOT/eval_sets/full_duplex_ja/backchannel_gt.json}"
 evaluate_args=(
     uv run python eval/evaluate_full_duplex_ja.py

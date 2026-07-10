@@ -393,6 +393,14 @@ class LocalASR:
         )
 
     def transcribe(self, pcm: np.ndarray, sample_rate: int) -> tuple[str, float]:
+        text, _chunks, wall_time = self.transcribe_aligned(pcm, sample_rate)
+        return text, wall_time
+
+    def transcribe_aligned(
+        self, pcm: np.ndarray, sample_rate: int
+    ) -> tuple[str, list[dict[str, Any]], float]:
+        """Return an ASR transcript with the word/segment timing contract
+        consumed by the upstream Full-Duplex-Bench evaluators."""
         from full_duplex_audio import resample_linear
 
         self.load()
@@ -402,6 +410,14 @@ class LocalASR:
         segments, _info = self._model.transcribe(
             pcm_16k, language=self.language, vad_filter=True
         )
-        text = "".join(segment.text for segment in segments).strip()
+        chunks = [
+            {
+                "text": segment.text.strip(),
+                "timestamp": [round(float(segment.start), 4), round(float(segment.end), 4)],
+            }
+            for segment in segments
+            if segment.text.strip() and segment.end is not None
+        ]
+        text = "".join(chunk["text"] for chunk in chunks).strip()
         wall_time = time.perf_counter() - started
-        return text, wall_time
+        return text, chunks, wall_time

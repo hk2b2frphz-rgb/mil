@@ -147,6 +147,14 @@ if [[ "$SKIP_FULL_DUPLEX" != "1" ]]; then
         --dtype "$CASCADE_DTYPE" \
         --overwrite
 
+    uv run python eval/align_full_duplex_asr.py \
+        --run-dir "$FDB_OUT_DIR/inference" \
+        --asr-model "$CASCADE_ASR_MODEL" \
+        --device "$CASCADE_ASR_DEVICE" \
+        --compute-type "$CASCADE_ASR_COMPUTE_TYPE" \
+        --overwrite
+    uv run python eval/full_duplex_official_timing.py --run-dir "$FDB_OUT_DIR/inference"
+
     evaluate_args=(
         uv run python eval/evaluate_full_duplex_ja.py
         --run-dir "$FDB_OUT_DIR/inference"

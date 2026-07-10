@@ -23,6 +23,12 @@ FDB_V15_BACKGROUND_PROFILE = {
     "compression_ratio": 4.0,
 }
 FDB_V15_PROTOCOL_NAME = "Full-Duplex-Bench v1.5 static overlap protocol"
+FDB_V15_OVERLAP_TASKS = {
+    "user_interruption",
+    "user_backchannel",
+    "talking_to_other",
+    "background_speech",
+}
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
@@ -503,7 +509,10 @@ def render_scenario(
             start, end = cursor, cursor + len(pcm) / sample_rate
             noisy_parts.append(noisy_pcm)
             clean_parts.append(
-                np.zeros_like(pcm) if kind == "overlap_speech" else noisy_pcm.copy()
+                np.zeros_like(pcm)
+                if kind in {"interrupt", "overlap_speech"}
+                and scenario.get("task") in FDB_V15_OVERLAP_TASKS
+                else noisy_pcm.copy()
             )
             user_segments.append(
                 {
@@ -522,7 +531,8 @@ def render_scenario(
         cursor = end
 
     noisy = np.concatenate(noisy_parts) if noisy_parts else np.zeros(1, np.float32)
-    clean = np.concatenate(clean_parts) if scenario.get("paired") else None
+    paired = bool(scenario.get("paired")) or scenario.get("task") in FDB_V15_OVERLAP_TASKS
+    clean = np.concatenate(clean_parts) if paired else None
     metadata = {
         **{key: value for key, value in scenario.items() if key != "timeline"},
         "language": "ja",
@@ -541,6 +551,7 @@ def render_scenario(
         "duration_sec": round(len(noisy) / sample_rate, 4),
         "user_segments": user_segments,
         "events": events,
+        "paired": paired,
         "opening_greeting": opening_greeting,
         "source_scenario": scenario,
     }
