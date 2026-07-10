@@ -5,6 +5,14 @@ support-window domain.
 
 ## Files
 
+- `full_duplex_ja/scenarios_expanded.jsonl`
+  - Default Full-Duplex-Bench-JA set: 350 fixed cases, 50 per task across
+    seven tasks.
+  - Generated deterministically from `full_duplex_ja/scenarios.jsonl` by
+    `eval/generate_expanded_full_duplex_scenarios.py`.
+- `full_duplex_ja/scenarios.jsonl`
+  - Original 42-case seed fixture; retained for auditing the expansion.
+
 - `loneliness_support.jsonl`
   - Structured evaluation cases.
   - Use this for human review, scoring, and future automatic checks.

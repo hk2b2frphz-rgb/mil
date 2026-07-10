@@ -7,7 +7,8 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from collections.abc import Callable, Iterable
+from typing import Any, TextIO
 
 
 BATCH_ENV_MARKERS = (
@@ -49,6 +50,30 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def completed_ids(path: Path) -> set[str]:
+    """Return durable row IDs from a prior append-only judge output."""
+    if not path.exists():
+        return set()
+    ids: set[str] = set()
+    for row in iter_jsonl(path):
+        value = row.get("id")
+        if value is not None:
+            ids.add(str(value))
+    return ids
+
+
+def open_jsonl_append(path: Path, resume: bool) -> TextIO:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path.open("a" if resume else "w", encoding="utf-8")
+
+
+def append_jsonl_row(handle: TextIO, row: dict[str, Any]) -> None:
+    """Persist each completed API call before requesting the next one."""
+    handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    handle.flush()
+    os.fsync(handle.fileno())
 
 
 def load_client(provider: str, model: str | None):
@@ -97,6 +122,19 @@ def extract_json_object(text: str) -> dict[str, Any]:
     if not match:
         raise ValueError(f"Judge did not return a JSON object: {text[:200]}")
     return json.loads(match.group(0))
+
+
+def _response_format_unsupported(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "response_format",
+            "json_object",
+            "unsupported parameter",
+            "unknown parameter",
+        )
+    )
 
 
 def _usage_dict(response: Any) -> dict[str, int]:
@@ -156,6 +194,7 @@ def chat_json(
     max_tokens: int,
     retry: int = 3,
     retry_sleep: float = 5.0,
+    validator: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[dict[str, Any], dict[str, int]]:
     """Returns (parsed_json, usage) where usage has prompt/completion/cached/total token counts."""
     last_exc: Exception | None = None
@@ -169,7 +208,9 @@ def chat_json(
                     max_tokens=max_tokens,
                     response_format={"type": "json_object"},
                 )
-            except Exception:
+            except Exception as exc:
+                if not _response_format_unsupported(exc):
+                    raise
                 response = client.chat.completions.create(
                     model=model,
                     messages=messages,
@@ -177,7 +218,10 @@ def chat_json(
                     max_tokens=max_tokens,
                 )
             content = response.choices[0].message.content or "{}"
-            return extract_json_object(content), _usage_dict(response)
+            parsed = extract_json_object(content)
+            if validator is not None:
+                validator(parsed)
+            return parsed, _usage_dict(response)
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             if attempt >= retry:

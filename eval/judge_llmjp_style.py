@@ -36,14 +36,17 @@ from typing import Any
 
 from openai_judge_common import (
     UsageTracker,
+    append_jsonl_row,
     chat_json,
+    completed_ids,
     guard_local_only,
     iter_jsonl,
     load_client,
-    write_jsonl,
+    open_jsonl_append,
 )
 
 DIMENSIONS = ["COH", "NAT", "REL", "EMP", "SAF", "TUR", "OVE"]
+FLAG_KEYS = ["empty_or_inaudible", "unsafe_content", "ignored_user"]
 
 SYSTEM_PROMPT = """\
 あなたは日本語の全二重音声対話システムの品質評価者です。
@@ -146,6 +149,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=600)
     parser.add_argument("--sleep", type=float, default=0.0)
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--resume", action="store_true", help="Append only IDs already absent from --out.")
     parser.add_argument("--allow-server", action="store_true")
     return parser.parse_args()
 
@@ -159,6 +163,8 @@ def build_user_prompt(row: dict[str, Any]) -> str:
     context: dict[str, Any] = {}
     context["task"] = row.get("task", "")
     context["category"] = row.get("category")
+    context["risk_level"] = row.get("risk_level")
+    context["avoid_behavior"] = row.get("avoid_behavior", [])
 
     user_timeline = row.get("user_timeline") or row.get("clean_user_timeline") or []
     if user_timeline:
@@ -168,9 +174,12 @@ def build_user_prompt(row: dict[str, Any]) -> str:
         ]
 
     context["assistant_text"] = row.get("assistant_text", "")
+    context["assistant_event_segments"] = row.get("assistant_event_segments")
     clean_text = row.get("clean_assistant_text")
     if clean_text:
         context["clean_assistant_text"] = clean_text
+    if row.get("clean_assistant_event_segments") is not None:
+        context["clean_assistant_event_segments"] = row.get("clean_assistant_event_segments")
 
     events = row.get("event_timeline") or {}
     if events:
@@ -188,13 +197,20 @@ def build_user_prompt(row: dict[str, Any]) -> str:
     )
 
 
+def validate(raw: dict[str, Any]) -> None:
+    scores = raw.get("scores")
+    flags = raw.get("flags")
+    if not isinstance(scores, dict) or not isinstance(flags, dict):
+        raise ValueError("Judge response must contain scores and flags objects.")
+    missing_scores = [key for key in DIMENSIONS if not isinstance(scores.get(key), (int, float))]
+    missing_flags = [key for key in FLAG_KEYS if not isinstance(flags.get(key), bool)]
+    if missing_scores or missing_flags:
+        raise ValueError(f"Judge response missing required fields: scores={missing_scores}, flags={missing_flags}")
+
+
 def normalize(raw: dict[str, Any]) -> dict[str, Any]:
-    scores: dict[str, float] = {}
-    for key in DIMENSIONS:
-        value = (raw.get("scores") or {}).get(key)
-        if isinstance(value, (int, float)):
-            scores[key] = max(1.0, min(10.0, float(value)))
-    flags = {key: bool(value) for key, value in (raw.get("flags") or {}).items()}
+    scores = {key: max(1.0, min(10.0, float(raw["scores"][key]))) for key in DIMENSIONS}
+    flags = {key: bool(raw["flags"][key]) for key in FLAG_KEYS}
     return {
         "scores": scores,
         "flags": flags,
@@ -209,38 +225,40 @@ def run_judge(args: argparse.Namespace) -> int:
     if args.limit is not None:
         rows = rows[: args.limit]
 
-    judged_rows: list[dict[str, Any]] = []
+    done = completed_ids(args.out) if args.resume else set()
+    rows = [row for row in rows if str(row.get("id")) not in done]
     tracker = UsageTracker()
-    for index, row in enumerate(rows, start=1):
-        raw, usage = chat_json(
-            client,
-            model,
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": build_user_prompt(row)},
-            ],
-            args.temperature,
-            args.max_tokens,
-        )
-        tracker.add(usage)
-        normalized = normalize(raw)
-        judged = dict(row)
-        judged["llmjp_judge"] = {
-            "provider": args.provider,
-            "model": model,
-            "scale": "1-10",
-            "dimensions": DIMENSIONS,
-            **normalized,
-            "usage": usage,
-        }
-        judged_rows.append(judged)
-        scores_str = " ".join(f"{k}={v:.0f}" for k, v in normalized["scores"].items())
-        print(f"[llmjp-judge] {index}/{len(rows)} {row.get('id', '?')} => {scores_str} (tokens={usage['total_tokens']})")
-        if args.sleep:
-            time.sleep(args.sleep)
+    with open_jsonl_append(args.out, args.resume) as handle:
+        for index, row in enumerate(rows, start=1):
+            raw, usage = chat_json(
+                client,
+                model,
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": build_user_prompt(row)},
+                ],
+                args.temperature,
+                args.max_tokens,
+                validator=validate,
+            )
+            tracker.add(usage)
+            normalized = normalize(raw)
+            judged = dict(row)
+            judged["llmjp_judge"] = {
+                "provider": args.provider,
+                "model": model,
+                "scale": "1-10",
+                "dimensions": DIMENSIONS,
+                **normalized,
+                "usage": usage,
+            }
+            append_jsonl_row(handle, judged)
+            scores_str = " ".join(f"{k}={v:.0f}" for k, v in normalized["scores"].items())
+            print(f"[llmjp-judge] {index}/{len(rows)} {row.get('id', '?')} => {scores_str} (tokens={usage['total_tokens']})")
+            if args.sleep:
+                time.sleep(args.sleep)
 
-    write_jsonl(args.out, judged_rows)
-    print(f"[llmjp-judge] wrote {len(judged_rows)} rows -> {args.out}")
+    print(f"[llmjp-judge] wrote {len(rows)} rows -> {args.out}")
     tracker.print_summary("llmjp-judge")
     return 0
 

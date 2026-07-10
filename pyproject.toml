@@ -29,6 +29,7 @@ dependencies = [
     "silero-vad",
     "soundfile",
     "uroman",
+    "utmosv2",
 ]
 
 [tool.uv]

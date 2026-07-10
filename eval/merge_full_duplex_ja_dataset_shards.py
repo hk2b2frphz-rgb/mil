@@ -31,12 +31,17 @@ def main() -> int:
     expected_shards = manifests[0].get("shard", {}).get("count")
     if expected_shards != len(manifests):
         raise SystemExit(f"Expected {expected_shards} shard manifests, got {len(manifests)}.")
+    reference_fingerprint = manifests[0].get("input_fingerprint")
+    if not reference_fingerprint:
+        raise SystemExit("Shard manifests must contain input_fingerprint; rebuild shards.")
 
     samples: dict[tuple[str, str], tuple[dict[str, Any], Path]] = {}
     for manifest, directory in zip(manifests, args.shard_dir, strict=True):
         shard = manifest.get("shard", {})
         if shard.get("count") != expected_shards:
             raise SystemExit("Shard manifests disagree on shard count.")
+        if manifest.get("input_fingerprint") != reference_fingerprint:
+            raise SystemExit("Shard manifests disagree on benchmark input fingerprint.")
         for sample in manifest["samples"]:
             key = (sample["task"], sample["id"])
             if key in samples:

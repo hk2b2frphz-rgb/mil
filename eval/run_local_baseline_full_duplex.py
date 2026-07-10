@@ -10,7 +10,7 @@ evaluate_full_duplex_ja.py works unchanged:
     # a cascade/SpeechLLM baseline was never trained to say it, and has no
     # streaming behavior to reserve lead-in time for anyway.
     uv run python eval/build_full_duplex_ja_dataset.py \
-        --scenarios eval_sets/full_duplex_ja/scenarios.jsonl \
+        --scenarios eval_sets/full_duplex_ja/scenarios_expanded.jsonl \
         --out-dir data/full_duplex_ja_v2_nogreeting --no-opening-greeting
 
     uv run python eval/run_local_baseline_full_duplex.py --system cascade \

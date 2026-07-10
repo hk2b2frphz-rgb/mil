@@ -1,5 +1,7 @@
 # Full-Duplex-Bench Japanese evaluation
 
+For reproducibility hardening, acoustic-adaptation artifacts, and durable local judging, see [`evaluation_hardening.md`](evaluation_hardening.md).
+
 This is a Japanese adaptation of the pinned Full-Duplex-Bench v1.5 static
 overlap protocol. The upstream implementation is pinned to commit
 [`3e799c45a045256f47d5f1c9cda90157e2d2ec9e`](https://github.com/DanielLin94144/Full-Duplex-Bench/commit/3e799c45a045256f47d5f1c9cda90157e2d2ec9e).

@@ -1,6 +1,6 @@
 # Japanese full-duplex training data
 
-The 42 fixed cases in `eval_sets/full_duplex_ja/scenarios.jsonl` are evaluation
+The 350 fixed cases in `eval_sets/full_duplex_ja/scenarios_expanded.jsonl` are evaluation
 inputs. They are not used as training text.
 
 Full-duplex training data is generated independently through the repository's

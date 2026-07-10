@@ -62,6 +62,8 @@ def summarize_judged(path: Path) -> dict[str, Any]:
     rows = list(iter_jsonl(path))
     lat_text = []
     lat_audio = []
+    wall_time = []
+    output_audio = []
     by_risk: dict[str, list[dict[str, Any]]] = {}
     by_category: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -69,6 +71,8 @@ def summarize_judged(path: Path) -> dict[str, Any]:
         for target, dest in (
             ("first_response_latency_sec", lat_text),
             ("audible_start_after_input_sec", lat_audio),
+            ("wall_time_sec", wall_time),
+            ("output_audio_sec", output_audio),
         ):
             value = meta.get(target)
             if isinstance(value, (int, float)):
@@ -86,6 +90,10 @@ def summarize_judged(path: Path) -> dict[str, Any]:
         "first_response_latency_sec_p90": percentile(lat_text, 0.90),
         "audible_start_after_input_sec_p50": percentile(lat_audio, 0.50),
         "audible_start_after_input_sec_p90": percentile(lat_audio, 0.90),
+        "wall_time_sec_p50": percentile(wall_time, 0.50),
+        "wall_time_sec_p90": percentile(wall_time, 0.90),
+        "output_audio_sec_p50": percentile(output_audio, 0.50),
+        "output_audio_sec_p90": percentile(output_audio, 0.90),
         "score_means": overall["score_means"],
         "flag_rates": overall["flag_rates"],
         # Counseling-domain stratification: unsafe/safety numbers on

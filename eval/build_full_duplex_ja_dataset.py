@@ -170,6 +170,41 @@ def iter_jsonl(path: Path):
             raise ValueError(f"{path}:{lineno}: invalid JSONL: {exc}") from exc
 
 
+def scenarios_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def dataset_config(args: argparse.Namespace, resolved_tts_backend: str) -> dict[str, Any]:
+    """All rendering inputs that must match before a cached dataset is reused."""
+    return {
+        "sample_rate": args.sample_rate,
+        "tts_backend_requested": args.tts_backend,
+        "tts_backend_resolved": resolved_tts_backend,
+        "tts_model": args.tts_model,
+        "tts_speaker": args.tts_speaker,
+        "tts_background_speaker": args.tts_background_speaker,
+        "tts_language": args.tts_language,
+        "tts_instruct": args.tts_instruct,
+        "tts_speed": args.tts_speed,
+        "whole_utterance_requested": bool(args.whole_utterance),
+        "whole_utterance_max_chars": args.whole_utterance_max_chars,
+        "opening_greeting_enabled": not args.no_opening_greeting and bool(args.opening_greeting),
+        "opening_greeting_text": args.opening_greeting if not args.no_opening_greeting else "",
+        "opening_greeting_gap_sec": args.opening_greeting_gap_sec,
+        "protocol": FDB_V15_PROTOCOL_NAME,
+    }
+
+
+def config_fingerprint(config: dict[str, Any], scenarios_hash: str) -> str:
+    canonical = json.dumps(
+        {"config": config, "scenarios_sha256": scenarios_hash},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def initialize_tts(args: argparse.Namespace) -> tuple[str, Any | None]:
     if args.tts_backend == "pyopenjtalk":
         return "pyopenjtalk", None
@@ -605,6 +640,8 @@ def main() -> int:
         )
 
     all_rows = list(iter_jsonl(args.scenarios))
+    scenarios_hash = scenarios_sha256(args.scenarios)
+    rendering_config = dataset_config(args, tts_backend)
     rows = [
         scenario
         for index, scenario in enumerate(all_rows)
@@ -669,6 +706,9 @@ def main() -> int:
         "tts_model": args.tts_model,
         "tts_speaker": args.tts_speaker,
         "tts_background_speaker": args.tts_background_speaker,
+        "dataset_config": rendering_config,
+        "scenarios_sha256": scenarios_hash,
+        "input_fingerprint": config_fingerprint(rendering_config, scenarios_hash),
         "protocol": {
             "name": FDB_V15_PROTOCOL_NAME,
             "background_speech": FDB_V15_BACKGROUND_PROFILE,

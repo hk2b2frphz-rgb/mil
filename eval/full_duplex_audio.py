@@ -128,7 +128,9 @@ def _load_silero_model():
     return load_silero_vad()
 
 
-def silero_vad(pcm: np.ndarray, sample_rate: int) -> list[list[float]]:
+def silero_vad_with_backend(
+    pcm: np.ndarray, sample_rate: int
+) -> tuple[list[list[float]], str]:
     try:
         import torch
         from silero_vad import get_speech_timestamps
@@ -139,7 +141,7 @@ def silero_vad(pcm: np.ndarray, sample_rate: int) -> list[list[float]]:
             f"[fdb-vad] Silero unavailable ({exc}); using energy VAD fallback.",
             file=sys.stderr,
         )
-        return energy_vad(pcm, sample_rate)
+        return energy_vad(pcm, sample_rate), "energy_fallback"
 
     pcm_16k = resample_linear(np.asarray(pcm, dtype=np.float32), sample_rate, 16000)
     try:
@@ -154,11 +156,17 @@ def silero_vad(pcm: np.ndarray, sample_rate: int) -> list[list[float]]:
             f"[fdb-vad] Silero inference failed ({exc}); using energy VAD fallback.",
             file=sys.stderr,
         )
-        return energy_vad(pcm, sample_rate)
+        return energy_vad(pcm, sample_rate), "energy_fallback"
     return [
         [round(float(item["start"]), 4), round(float(item["end"]), 4)]
         for item in timestamps
-    ]
+    ], "silero"
+
+
+def silero_vad(pcm: np.ndarray, sample_rate: int) -> list[list[float]]:
+    """Compatibility wrapper for callers that only need speech intervals."""
+    segments, _ = silero_vad_with_backend(pcm, sample_rate)
+    return segments
 
 
 def interval_overlap(a: list[float], b: list[float]) -> float:

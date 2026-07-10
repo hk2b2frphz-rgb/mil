@@ -60,7 +60,7 @@ RUN_ID="${RUN_ID:-${MODEL_ID}_$(date +%Y%m%d_%H%M%S)}"
 # Dataset build knobs -- kept identical to scripts/run_full_duplex_eval.sh so a
 # cascade row reuses the exact same cached dataset dir a Moshi row builds
 # (byte-identical input.wav timing), which is the whole point of comparing them.
-FDB_SCENARIOS="${FDB_SCENARIOS:-$REPO_ROOT/eval_sets/full_duplex_ja/scenarios.jsonl}"
+FDB_SCENARIOS="${FDB_SCENARIOS:-$REPO_ROOT/eval_sets/full_duplex_ja/scenarios_expanded.jsonl}"
 FDB_TASKS="${FDB_TASKS:-all}"
 FDB_SEEDS="${FDB_SEEDS:-0}"
 FDB_TTS_BACKEND="${FDB_TTS_BACKEND:-qwen3}"

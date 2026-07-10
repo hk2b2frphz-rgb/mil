@@ -1,5 +1,7 @@
 # Evaluation Plan
 
+For durable judge resumption and the OpenAI-only asynchronous Batch API workflow, see [`evaluation_hardening.md`](evaluation_hardening.md).
+
 This project evaluates Japanese Moshi dialogue models in two separated phases:
 
 1. **Server / GPU phase**

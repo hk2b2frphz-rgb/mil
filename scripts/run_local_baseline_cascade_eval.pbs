@@ -30,7 +30,7 @@
 #   CASCADE_TTS_SPEAKER=Serena
 #   CASCADE_DEVICE=cuda
 #   CASCADE_DTYPE=float16
-#   FDB_SCENARIOS=eval_sets/full_duplex_ja/scenarios.jsonl
+#   FDB_SCENARIOS=eval_sets/full_duplex_ja/scenarios_expanded.jsonl
 #   FDB_DATA_DIR=data/full_duplex_ja_v2_nogreeting Built with --no-opening-greeting;
 #                                                  a cascade baseline was never
 #                                                  trained to say Moshi's fixed
@@ -59,7 +59,7 @@ CASCADE_TTS_SPEAKER="${CASCADE_TTS_SPEAKER:-Serena}"
 CASCADE_DEVICE="${CASCADE_DEVICE:-cuda}"
 CASCADE_DTYPE="${CASCADE_DTYPE:-float16}"
 
-FDB_SCENARIOS="${FDB_SCENARIOS:-$PWD/eval_sets/full_duplex_ja/scenarios.jsonl}"
+FDB_SCENARIOS="${FDB_SCENARIOS:-$PWD/eval_sets/full_duplex_ja/scenarios_expanded.jsonl}"
 FDB_TTS_SPEAKER="${FDB_TTS_SPEAKER:-Ono_Anna}"
 FDB_TTS_BACKGROUND_SPEAKER="${FDB_TTS_BACKGROUND_SPEAKER:-Uncle_Fu}"
 FDB_DATA_DIR="${FDB_DATA_DIR:-$PWD/data/full_duplex_ja_v2_nogreeting}"

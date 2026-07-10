@@ -9,11 +9,13 @@ from typing import Any
 
 from openai_judge_common import (
     UsageTracker,
+    append_jsonl_row,
     chat_json,
+    completed_ids,
     guard_local_only,
     iter_jsonl,
     load_client,
-    write_jsonl,
+    open_jsonl_append,
 )
 
 
@@ -32,6 +34,8 @@ RUBRIC = {
     "response_timing_naturalness": "1=遅すぎ/早すぎ, 3=許容, 5=自然な間",
     "overall": "総合品質。上の観点を総合し1-5で評価",
 }
+SCORE_KEYS = tuple(RUBRIC)
+FLAG_KEYS = ("topic_drift", "contradiction", "unsafe", "empty_or_failed")
 
 SYSTEM_PROMPT = f"""あなたは日本語音声対話システムの評価者です。
 ユーザー発話、モデル応答、期待される振る舞い、避けるべき振る舞いを読み、
@@ -64,6 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=900)
     parser.add_argument("--sleep", type=float, default=0.0, help="Seconds to sleep between API calls.")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--resume", action="store_true", help="Append only IDs already absent from --out.")
     parser.add_argument("--allow-server", action="store_true")
     return parser.parse_args()
 
@@ -90,14 +95,20 @@ def build_user_prompt(row: dict[str, Any]) -> str:
     return f"以下の評価対象を採点してください。\n評価対象: {json.dumps(judge_input, ensure_ascii=False)}"
 
 
+def validate_judge(raw: dict[str, Any]) -> None:
+    scores = raw.get("scores")
+    flags = raw.get("flags")
+    if not isinstance(scores, dict) or not isinstance(flags, dict):
+        raise ValueError("Judge response must contain scores and flags objects.")
+    missing_scores = [key for key in SCORE_KEYS if not isinstance(scores.get(key), (int, float))]
+    missing_flags = [key for key in FLAG_KEYS if not isinstance(flags.get(key), bool)]
+    if missing_scores or missing_flags:
+        raise ValueError(f"Judge response missing required fields: scores={missing_scores}, flags={missing_flags}")
+
+
 def normalize_judge(raw: dict[str, Any]) -> dict[str, Any]:
-    scores = raw.get("scores") or {}
-    flags = raw.get("flags") or {}
-    clean_scores = {}
-    for key, value in scores.items():
-        if isinstance(value, (int, float)):
-            clean_scores[key] = max(1.0, min(5.0, float(value)))
-    clean_flags = {key: bool(value) for key, value in flags.items()}
+    clean_scores = {key: max(1.0, min(5.0, float(raw["scores"][key]))) for key in SCORE_KEYS}
+    clean_flags = {key: bool(raw["flags"][key]) for key in FLAG_KEYS}
     return {
         "scores": clean_scores,
         "flags": clean_flags,
@@ -110,39 +121,41 @@ def main() -> int:
     guard_local_only(args.allow_server)
     client, model = load_client(args.provider, args.model)
 
-    rows = []
     source_rows = list(iter_jsonl(args.input))
     if args.limit is not None:
         source_rows = source_rows[: args.limit]
 
+    done = completed_ids(args.out) if args.resume else set()
+    source_rows = [row for row in source_rows if str(row.get("id")) not in done]
     tracker = UsageTracker()
-    for index, row in enumerate(source_rows, start=1):
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": build_user_prompt(row)},
-        ]
-        raw, usage = chat_json(
-            client=client,
-            model=model,
-            messages=messages,
-            temperature=args.temperature,
-            max_tokens=args.max_tokens,
-        )
-        tracker.add(usage)
-        judged = dict(row)
-        judged["judge"] = {
-            "provider": args.provider,
-            "model": model,
-            **normalize_judge(raw),
-            "usage": usage,
-        }
-        rows.append(judged)
-        print(f"[judge] {index}/{len(source_rows)} {row.get('id')} (tokens={usage['total_tokens']})")
-        if args.sleep:
-            time.sleep(args.sleep)
+    with open_jsonl_append(args.out, args.resume) as handle:
+        for index, row in enumerate(source_rows, start=1):
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": build_user_prompt(row)},
+            ]
+            raw, usage = chat_json(
+                client=client,
+                model=model,
+                messages=messages,
+                temperature=args.temperature,
+                max_tokens=args.max_tokens,
+                validator=validate_judge,
+            )
+            tracker.add(usage)
+            judged = dict(row)
+            judged["judge"] = {
+                "provider": args.provider,
+                "model": model,
+                **normalize_judge(raw),
+                "usage": usage,
+            }
+            append_jsonl_row(handle, judged)
+            print(f"[judge] {index}/{len(source_rows)} {row.get('id')} (tokens={usage['total_tokens']})")
+            if args.sleep:
+                time.sleep(args.sleep)
 
-    write_jsonl(args.out, rows)
-    print(f"[judge] wrote {len(rows)} rows -> {args.out}")
+    print(f"[judge] wrote {len(source_rows)} rows -> {args.out}")
     tracker.print_summary("judge")
     return 0
 

@@ -39,7 +39,7 @@ MODEL_WEIGHT="${MODEL_WEIGHT:-${MOSHI_WEIGHT:-}}"
 MODEL_CONFIG="${MODEL_CONFIG:-}"
 MIMI_WEIGHT="${MIMI_WEIGHT:-}"
 TOKENIZER="${TOKENIZER:-}"
-FDB_SCENARIOS="${FDB_SCENARIOS:-$REPO_ROOT/eval_sets/full_duplex_ja/scenarios.jsonl}"
+FDB_SCENARIOS="${FDB_SCENARIOS:-$REPO_ROOT/eval_sets/full_duplex_ja/scenarios_expanded.jsonl}"
 FDB_TASKS="${FDB_TASKS:-all}"
 FDB_SEEDS="${FDB_SEEDS:-0}"
 FDB_TAIL_SEC="${FDB_TAIL_SEC:-8}"
@@ -70,6 +70,7 @@ FDB_OUT_DIR="${FDB_OUT_DIR:-$REPO_ROOT/eval_runs/full_duplex/$RUN_ID}"
 REFRESH_FDB_DATA="${REFRESH_FDB_DATA:-0}"
 FDB_REQUIRE_OVERLAP="${FDB_REQUIRE_OVERLAP:-1}"
 FDB_ASR_MODEL="${FDB_ASR_MODEL:-nvidia/parakeet-tdt-0.6b-v2}"
+FDB_WITH_UTMOS="${FDB_WITH_UTMOS:-1}"
 # In the 4-GPU batch PBS job this is set to all allocated GPUs. It is used
 # only for the one-time, cache-miss input-TTS build; each model inference
 # process remains pinned to its own single GPU.
@@ -138,11 +139,36 @@ echo "git_commit:   $FDB_GIT_COMMIT"
 echo "started_at:   $(date -Iseconds)"
 echo "================================"
 
-# Parallel batch workers can share this dataset. Serialize only its one-time
-# construction, then recheck the manifest after acquiring the lock so waiting
-# workers reuse exactly the bytes produced by the first worker.
+# Parallel batch workers can share this dataset. Validate every rendering input
+# before reuse; an old manifest or a different TTS/scenario setting must not
+# silently become the comparison input for another checkpoint.
+dataset_matches() {
+    [[ -f "$FDB_DATA_DIR/manifest.json" ]] || return 1
+    uv run python eval/verify_full_duplex_ja_dataset.py \
+        --data-dir "$FDB_DATA_DIR" \
+        --scenarios "$FDB_SCENARIOS" \
+        --tts-backend "$FDB_TTS_BACKEND" \
+        --tts-model "$FDB_TTS_MODEL" \
+        --tts-speaker "$FDB_TTS_SPEAKER" \
+        --tts-background-speaker "$FDB_TTS_BACKGROUND_SPEAKER" \
+        --tts-speed "$FDB_TTS_SPEED" \
+        --whole-utterance "$FDB_WHOLE_UTTERANCE" \
+        --whole-utterance-max-chars "$FDB_WHOLE_UTTERANCE_MAX_CHARS" \
+        --opening-greeting "$FDB_OPENING_GREETING" \
+        --opening-greeting-gap-sec "$FDB_OPENING_GREETING_GAP_SEC"
+}
+
+NEED_FDB_DATA_BUILD=0
+if [[ "$REFRESH_FDB_DATA" == "1" ]] || ! dataset_matches; then
+    NEED_FDB_DATA_BUILD=1
+fi
+
+# Serialize a dataset build and also serialize *different* greeting variants.
+# Their paths differ, so a per-directory lock alone would let both variants
+# start a multi-GPU TTS build at the same time in a mixed baseline batch.
 FDB_DATA_LOCK_FD=""
-if [[ "$REFRESH_FDB_DATA" == "1" || ! -f "$FDB_DATA_DIR/manifest.json" ]]; then
+FDB_GLOBAL_BUILD_LOCK_FD=""
+if [[ "$NEED_FDB_DATA_BUILD" == "1" ]]; then
     if [[ "${FDB_BATCH_PARALLELISM:-1}" -gt 1 ]]; then
         command -v flock >/dev/null 2>&1 || {
             echo "ERROR: flock is required for parallel dataset construction." >&2
@@ -150,12 +176,19 @@ if [[ "$REFRESH_FDB_DATA" == "1" || ! -f "$FDB_DATA_DIR/manifest.json" ]]; then
         }
         mkdir -p "$(dirname "$FDB_DATA_DIR")"
         exec {FDB_DATA_LOCK_FD}>"${FDB_DATA_DIR}.build.lock"
+        exec {FDB_GLOBAL_BUILD_LOCK_FD}>"$(dirname "$FDB_DATA_DIR")/.full_duplex_ja.build.global.lock"
         echo "[fdb] waiting for dataset build lock: ${FDB_DATA_DIR}.build.lock"
         flock "$FDB_DATA_LOCK_FD"
+        echo "[fdb] waiting for global Full-Duplex-Bench dataset build lock"
+        flock "$FDB_GLOBAL_BUILD_LOCK_FD"
     fi
 fi
 
-if [[ "$REFRESH_FDB_DATA" == "1" || ! -f "$FDB_DATA_DIR/manifest.json" ]]; then
+if [[ "$REFRESH_FDB_DATA" != "1" ]] && dataset_matches; then
+    NEED_FDB_DATA_BUILD=0
+fi
+
+if [[ "$NEED_FDB_DATA_BUILD" == "1" ]]; then
     build_args=(
         uv run python eval/build_full_duplex_ja_dataset.py
         --scenarios "$FDB_SCENARIOS"
@@ -227,6 +260,10 @@ if [[ -n "$FDB_DATA_LOCK_FD" ]]; then
     flock -u "$FDB_DATA_LOCK_FD"
     exec {FDB_DATA_LOCK_FD}>&-
 fi
+if [[ -n "$FDB_GLOBAL_BUILD_LOCK_FD" ]]; then
+    flock -u "$FDB_GLOBAL_BUILD_LOCK_FD"
+    exec {FDB_GLOBAL_BUILD_LOCK_FD}>&-
+fi
 
 inference_args=(
     uv run python eval/run_full_duplex_bench.py
@@ -274,6 +311,16 @@ if [[ "$FDB_REQUIRE_OVERLAP" == "1" ]]; then
     evaluate_args+=(--require-overlap)
 fi
 "${evaluate_args[@]}"
+
+adaptation_args=(
+    uv run python eval/evaluate_full_duplex_adaptation.py
+    --run-dir "$FDB_OUT_DIR/inference"
+    --out "$FDB_OUT_DIR/benchmark_results/acoustic_adaptation.json"
+)
+if [[ "$FDB_WITH_UTMOS" == "1" ]]; then
+    adaptation_args+=(--with-utmos)
+fi
+"${adaptation_args[@]}"
 
 uv run python eval/pack_full_duplex_azure.py \
     --per-case "$FDB_OUT_DIR/benchmark_results/per_case.jsonl" \

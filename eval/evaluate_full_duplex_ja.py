@@ -16,6 +16,7 @@ from full_duplex_audio import (
     interval_overlap,
     read_wav_mono,
     silero_vad,
+    silero_vad_with_backend,
     total_duration,
 )
 from greeting_check import chunk_interval, evaluate_opening_greeting
@@ -111,7 +112,9 @@ def first_chunk_start(chunks: list[dict[str, Any]]) -> float | None:
 def occurrence_distribution(
     predictions: list[list[float]], total_audio_sec: float
 ) -> np.ndarray:
-    num_windows = max(1, int(np.ceil(total_audio_sec / window_size)))
+    # The pinned upstream implementation allocates floor(duration/window)+1
+    # buckets, including a final bucket for exact window boundaries.
+    num_windows = max(1, int(total_audio_sec / window_size) + 1)
     distribution = np.full(num_windows, epsilon, dtype=np.float64)
     for start, end in predictions:
         first_window = max(0, int(np.floor(start / window_size)))
@@ -172,7 +175,7 @@ def evaluate_case(
     output_meta = load_json(trial_dir / "output.meta.json")
     output_text = load_json(trial_dir / "output.json")
     pcm, sample_rate = read_wav_mono(trial_dir / "output.wav")
-    segments = silero_vad(pcm, sample_rate)
+    segments, vad_backend = silero_vad_with_backend(pcm, sample_rate)
     task = str(metadata["task"])
     user_segments = metadata.get("user_segments") or []
     user_end = max((float(item["end_sec"]) for item in user_segments), default=0.0)
@@ -186,6 +189,7 @@ def evaluate_case(
         "output_speech_segments": len(segments),
         "output_text_chars": len(text),
         "empty_response": not text.strip() and not segments,
+        "vad_backend": vad_backend,
     }
 
     greeting = evaluate_opening_greeting(metadata, chunks)
@@ -288,6 +292,7 @@ def evaluate_case(
             overlap_sec = sum(
                 interval_overlap(segment, overlap_event) for segment in segments
             )
+            response_start = first_start_after(segments, overlap_event[1])
             metrics.update(
                 # v1.5 timing metrics are meaningful only when the controlled
                 # user-side event truly overlaps model speech. Report coverage
@@ -299,6 +304,11 @@ def evaluate_case(
                 stop_latency_sec=(
                     round(max(0.0, containing[0][1] - overlap_event[0]), 4)
                     if containing
+                    else None
+                ),
+                response_latency_after_overlap_sec=(
+                    round(max(0.0, response_start - overlap_event[1]), 4)
+                    if response_start is not None
                     else None
                 ),
                 overlap_response_sec=round(
@@ -342,12 +352,15 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     for task, task_rows in sorted(by_task.items()):
         numeric: dict[str, list[float]] = {}
         boolean: dict[str, list[bool]] = {}
+        text: dict[str, set[str]] = {}
         for row in task_rows:
             for key, value in row["metrics"].items():
                 if isinstance(value, bool):
                     boolean.setdefault(key, []).append(value)
                 elif isinstance(value, (int, float)):
                     numeric.setdefault(key, []).append(float(value))
+                elif isinstance(value, str):
+                    text.setdefault(key, set()).add(value)
         summary[task] = {
             "n": len(task_rows),
             "means": {
@@ -359,6 +372,15 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 key: sum(values) / len(values)
                 for key, values in sorted(boolean.items())
                 if values
+            },
+            "metric_counts": {
+                key: len(values)
+                for key, values in sorted(numeric.items())
+                if values
+            },
+            "observed_values": {
+                key: sorted(values)
+                for key, values in sorted(text.items())
             },
         }
     return summary

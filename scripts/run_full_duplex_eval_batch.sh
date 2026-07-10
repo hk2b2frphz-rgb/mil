@@ -41,6 +41,7 @@ OUTPUT_NAMES=()
 MODEL_IDS=()
 TOTAL=0
 FAILED=0
+MANIFEST_ERRORS=0
 
 IFS=',' read -r -a GPU_IDS <<< "${CUDA_VISIBLE_DEVICES:-0}"
 PARALLELISM="${FDB_BATCH_PARALLELISM:-${#GPU_IDS[@]}}"
@@ -100,15 +101,18 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
 
     if [[ -z "$model_id" ]]; then
         echo "[batch] WARN: skipping manifest line with empty model_id: $raw_line" >&2
+        MANIFEST_ERRORS=1
         continue
     fi
     if ! [[ "$model_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
         echo "[batch] WARN: skipping invalid model_id (letters/digits/dot/underscore/hyphen only): $model_id" >&2
+        MANIFEST_ERRORS=1
         continue
     fi
     output_name="${output_name:-$model_id}"
     if ! [[ "$output_name" =~ ^[A-Za-z0-9._-]+$ ]]; then
         echo "[batch] WARN: skipping invalid output_name for $model_id (letters/digits/dot/underscore/hyphen only): $output_name" >&2
+        MANIFEST_ERRORS=1
         continue
     fi
     duplicate_output=0
@@ -120,6 +124,7 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
     done
     if [[ "$duplicate_output" == "1" ]]; then
         echo "[batch] WARN: skipping duplicate output_name (would overwrite previous result): $output_name" >&2
+        MANIFEST_ERRORS=1
         continue
     fi
     OUTPUT_NAMES+=("$output_name")
@@ -249,6 +254,11 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
     fi
 done < "$MODELS_FILE"
 
+if [[ "$TOTAL" -eq 0 ]]; then
+    echo "ERROR: manifest contains no valid model rows: $MODELS_FILE" >&2
+    exit 1
+fi
+
 wait_for_wave
 
 for i in "${!OUTPUT_NAMES[@]}"; do
@@ -276,10 +286,12 @@ for line in "${RESULT_LINES[@]}"; do
     printf '%-24s %-24s %-8s %s\n' "$m" "$o" "$s" "$e"
 done
 
-uv run python eval/combine_full_duplex_summaries.py \
+if ! uv run python eval/combine_full_duplex_summaries.py \
     --batch-dir "$BATCH_OUT_DIR" \
-    --out "$BATCH_OUT_DIR/combined_summary.json" \
-    || echo "[batch] WARN: combined_summary.json step failed (see above)" >&2
+    --out "$BATCH_OUT_DIR/combined_summary.json"; then
+    echo "[batch] ERROR: combined_summary.json step failed" >&2
+    FAILED=$((FAILED + 1))
+fi
 
 echo
 echo "[batch] per-model results: $BATCH_OUT_DIR/<output_name>/"
@@ -287,6 +299,6 @@ echo "[batch] combined summary:  $BATCH_OUT_DIR/combined_summary.json"
 echo "[batch] total: $TOTAL failed: $FAILED"
 echo "finished_at: $(date -Iseconds)"
 
-if [[ "$FAILED" -gt 0 ]]; then
+if [[ "$FAILED" -gt 0 || "$MANIFEST_ERRORS" -gt 0 ]]; then
     exit 1
 fi
