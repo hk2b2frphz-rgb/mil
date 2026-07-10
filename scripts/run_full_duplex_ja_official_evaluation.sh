@@ -9,14 +9,23 @@ OUT_DIR="${2:?pass official evaluation output directory}"
 UP="$UPSTREAM_DIR/v1_v1.5"
 [[ -f "$UP/evaluation/evaluate.py" && -f "$UP/get_transcript/asr.py" ]] || { echo "Invalid pinned upstream checkout" >&2; exit 1; }
 python "$REPO_ROOT/eval/prepare_fdb_ja_official_layout.py" --run-dir "$RUN_DIR" --out-dir "$OUT_DIR" --overwrite
+for task in pause_handling smooth_turn_taking backchannel user_interruption user_backchannel talking_to_other background_speech; do
+  [[ -d "$OUT_DIR/$task" ]] || continue
+  asr_task=default
+  [[ "$task" == user_interruption ]] && asr_task=user_interruption
+  for audio_name in input.wav clean_input.wav output.wav clean_output.wav; do
+    python "$UP/get_transcript/asr.py" --root_dir "$OUT_DIR/$task" --task "$asr_task" --audio_name "$audio_name"
+  done
+done
 for task in pause_handling smooth_turn_taking backchannel user_interruption; do
   [[ -d "$OUT_DIR/$task" ]] || continue
   ( cd "$UP/evaluation"; python evaluate.py --task "$task" --root_dir "$OUT_DIR/$task" ) | tee "$OUT_DIR/${task}_official.log"
 done
 for task in user_interruption user_backchannel talking_to_other background_speech; do
   [[ -d "$OUT_DIR/$task" ]] || continue
-  python "$UP/get_transcript/asr.py" --root_dir "$OUT_DIR/$task" --task default --audio_name output.wav
-  python "$UP/get_transcript/asr.py" --root_dir "$OUT_DIR/$task" --task default --audio_name clean_output.wav
   ( cd "$UP/evaluation"; python get_timing.py --root_dir "$OUT_DIR/$task" ) | tee "$OUT_DIR/${task}_timing.log"
+  ( cd "$UP/evaluation"; python evaluate.py --task behavior --root_dir "$OUT_DIR/$task" ) | tee "$OUT_DIR/${task}_behavior.log"
+  ( cd "$UP/evaluation"; python evaluate.py --task general_before_after --root_dir "$OUT_DIR/$task" ) | tee "$OUT_DIR/${task}_general.log"
+  ( cd "$UP/evaluation"; python significance_test.py --root_dir "$OUT_DIR/$task" --metrics utmosv2 wpm mean_pitch std_pitch mean_intensity std_intensity ) | tee "$OUT_DIR/${task}_significance.log"
 done
 echo "[fdb-ja] upstream evaluation complete: $OUT_DIR"
