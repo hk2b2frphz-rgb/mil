@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N clarify_cascade
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=6:00:00
+#PBS -j oe
+#PBS -V
+
+# Cascade (weak-ASR confidence threshold) baseline over the benchmark.
+#
+#   qsub -v BENCH_ID=bench_v1 ICASSP2027/pbs/p5_eval_cascade.pbs
+#
+# Overrides: ASR_MODEL=small, THRESHOLDS="-1.2,-1.0,-0.8,-0.6,-0.4,-0.2"
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+BENCH_ID="${BENCH_ID:?set BENCH_ID}"
+ASR_MODEL="${ASR_MODEL:-small}"
+THRESHOLDS="${THRESHOLDS:--1.2,-1.0,-0.8,-0.6,-0.4,-0.2}"
+
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+
+mkdir -p ICASSP2027/runs/pbs_logs
+exec > >(tee -a "ICASSP2027/runs/pbs_logs/cascade_${JOB_ID_SHORT}.log") 2>&1
+
+echo "job: ${PBS_JOBID:-n/a} host: $(hostname) bench: $BENCH_ID asr: $ASR_MODEL"
+
+uv run python ICASSP2027/scripts/run_cascade_eval.py \
+    --dataset-dir "ICASSP2027/runs/${BENCH_ID}" \
+    --out-dir "ICASSP2027/runs/eval_cascade_${ASR_MODEL}" \
+    --asr-model "$ASR_MODEL" \
+    --thresholds="$THRESHOLDS"
+
+echo "CASCADE OK: ICASSP2027/runs/eval_cascade_${ASR_MODEL}"

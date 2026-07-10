@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N clarify_bench
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# Build the full benchmark: MASSIVE ja-JP test split -> Qwen3-TTS ->
+# MMS_FA slot-span alignment -> corruption grid -> weak-ASR oracle.
+#
+#   qsub -V ICASSP2027/pbs/p1_build_benchmark.pbs
+#
+# Overrides:
+#   BENCH_ID=bench_v1          output: ICASSP2027/runs/<BENCH_ID>
+#   MAX_ITEMS=60               acoustic base items
+#   CONDITIONS=all             or comma-separated subset
+#   MASSIVE_JSONL=path         pre-exported rows for offline nodes
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+BENCH_ID="${BENCH_ID:-bench_v1}"
+MAX_ITEMS="${MAX_ITEMS:-60}"
+CONDITIONS="${CONDITIONS:-all}"
+
+export TORCHINDUCTOR_DISABLE=1
+export NO_TORCH_COMPILE=1
+export TORCH_COMPILE_DISABLE=1
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+
+mkdir -p ICASSP2027/runs/pbs_logs
+exec > >(tee -a "ICASSP2027/runs/pbs_logs/bench_${BENCH_ID}_${JOB_ID_SHORT}.log") 2>&1
+
+echo "job: ${PBS_JOBID:-n/a} host: $(hostname) bench: $BENCH_ID"
+command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi || true
+
+EXTRA_ARGS=()
+if [[ -n "${MASSIVE_JSONL:-}" ]]; then
+    EXTRA_ARGS+=(--massive-jsonl "$MASSIVE_JSONL")
+fi
+
+uv run python ICASSP2027/scripts/build_benchmark.py \
+    --out-dir "ICASSP2027/runs/${BENCH_ID}" \
+    --max-items "$MAX_ITEMS" \
+    --conditions "$CONDITIONS" \
+    --oracle --overwrite \
+    "${EXTRA_ARGS[@]}"
+
+echo "BENCHMARK OK: ICASSP2027/runs/${BENCH_ID}"

@@ -6,6 +6,7 @@ __pycache__/
 data/
 results/
 eval_runs/
+ICASSP2027/runs/
 
 # Per-experiment runtime artifacts (regenerable / heavy).
 # Keep config.yaml / HYPERPARAMS.md / notes.md / args.yaml under VCS,

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N clarify_fdb_reg
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# Interactivity-retention check: run the existing Full-Duplex-Bench-JA
+# pipeline on a clarify fine-tuned model, so the paper can report that
+# turn-taking metrics (TOR, latency, backchannel) did not regress.
+#
+#   qsub -v MODEL_ID=clarify_full,MODEL_WEIGHT=/path/consolidated.safetensors \
+#        ICASSP2027/pbs/p6_fdb_regression.pbs
+#
+# This is a thin wrapper around scripts/run_full_duplex_eval.sh with the
+# opening greeting disabled (clarify models are not counseling models).
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+export RUN_ID="${RUN_ID:-fdbreg_${MODEL_ID:-model}_${JOB_ID_SHORT}}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export HALF="${HALF:-1}"
+export FDB_OPENING_GREETING="${FDB_OPENING_GREETING:-0}"
+
+export TORCHINDUCTOR_DISABLE=1
+export NO_TORCH_COMPILE=1
+export TORCH_COMPILE_DISABLE=1
+
+mkdir -p ICASSP2027/runs/pbs_logs
+exec > >(tee -a "ICASSP2027/runs/pbs_logs/${RUN_ID}.log") 2>&1
+
+echo "job: ${PBS_JOBID:-n/a} host: $(hostname) run: $RUN_ID"
+command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi || true
+
+bash scripts/run_full_duplex_eval.sh
+
+echo "FDB REGRESSION OK: eval_runs/full_duplex/$RUN_ID"
