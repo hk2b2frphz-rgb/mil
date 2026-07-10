@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import socket
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,7 +19,7 @@ for directory in (REPO_ROOT, EVAL_DIR):
         sys.path.insert(0, str(directory))
 
 from eval.build_full_duplex_ja_dataset import render_scenario
-from eval.local_baseline_common import GemmaLLM, validate_spoken_response
+from eval.local_baseline_common import GemmaLLM, validate_spoken_response, worker_environment
 from eval.run_local_baseline_full_duplex import process_sample, seed_local
 from scripts.gemma_dialogue_worker import result_to_text
 
@@ -149,6 +150,15 @@ class CascadeBaselineTests(unittest.TestCase):
         self.assertEqual(text, "応答本文")
         self.assertEqual(payload["seed"], 23)
         self.assertIn("相談内容", payload["prompt"])
+
+    def test_worker_drops_proxy_unresolvable_on_compute_node(self) -> None:
+        with patch.dict("os.environ", {"HTTPS_PROXY": "http://stale-proxy:8080"}, clear=True), patch(
+            "eval.local_baseline_common.socket.getaddrinfo",
+            side_effect=socket.gaierror("not found"),
+        ):
+            environment = worker_environment()
+        self.assertNotIn("HTTPS_PROXY", environment)
+        self.assertNotIn("HTTP_PROXY", environment)
 
 
 if __name__ == "__main__":

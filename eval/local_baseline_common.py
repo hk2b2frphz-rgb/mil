@@ -27,6 +27,7 @@ Pipeline pieces:
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -61,24 +62,41 @@ _PROXY_KEYS = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")
 
 
 def worker_environment() -> dict[str, str]:
-    """Return a subprocess environment with a valid, normalized proxy only."""
+    """Return a subprocess environment with a usable, normalized proxy only.
+
+    Cascade launches an isolated Python runtime for Gemma/SpeechLLM.  Unlike
+    the in-process Moshi path, that runtime eagerly initializes HTTP clients,
+    so a proxy inherited from a PBS submission host can fail the entire run
+    before model loading.  A proxy hostname that does not resolve *on this
+    compute node* is not passed to the child; it gets a direct connection
+    instead.  This does not hide a required-proxy network failure -- the HTTP
+    client will report that directly -- but prevents a stale proxy from being
+    reported as a Cascade/model failure.
+    """
     environment = os.environ.copy()
-    raw_proxy = next((environment.get(key) for key in _PROXY_KEYS if environment.get(key)), None)
-    if not raw_proxy:
+    proxy_setting = next(
+        ((key, environment[key]) for key in _PROXY_KEYS if environment.get(key)),
+        None,
+    )
+    if proxy_setting is None:
         return environment
+    proxy_source, raw_proxy = proxy_setting
     try:
         parsed = urlsplit(
             raw_proxy if "://" in raw_proxy else f"http://{raw_proxy}"
         )
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("missing http(s) scheme or hostname")
-        _ = parsed.port
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
         normalized = parsed.geturl()
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         for key in (*_PROXY_KEYS, "all_proxy", "ALL_PROXY"):
             environment.pop(key, None)
         print(
-            f"[cascade] ignoring invalid inherited proxy configuration: {exc}",
+            "[cascade] proxy from "
+            f"{proxy_source} is unusable on this node ({exc}); "
+            "starting the worker without a proxy.",
             file=sys.stderr,
         )
         return environment
