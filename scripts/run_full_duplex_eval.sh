@@ -69,6 +69,10 @@ FDB_DATA_DIR="${FDB_DATA_DIR:-$FDB_DATA_DIR_DEFAULT}"
 FDB_OUT_DIR="${FDB_OUT_DIR:-$REPO_ROOT/eval_runs/full_duplex/$RUN_ID}"
 REFRESH_FDB_DATA="${REFRESH_FDB_DATA:-0}"
 FDB_REQUIRE_OVERLAP="${FDB_REQUIRE_OVERLAP:-1}"
+# In the 4-GPU batch PBS job this is set to all allocated GPUs. It is used
+# only for the one-time, cache-miss input-TTS build; each model inference
+# process remains pinned to its own single GPU.
+FDB_TTS_BUILD_GPUS="${FDB_TTS_BUILD_GPUS:-}"
 HALF="${HALF:-1}"
 
 # Disable Triton / torch.compile -- V100 lacks support for many Triton kernels.
@@ -171,7 +175,50 @@ if [[ "$REFRESH_FDB_DATA" == "1" || ! -f "$FDB_DATA_DIR/manifest.json" ]]; then
     if [[ -n "${FDB_OPENING_GREETING_CACHE_DIR:-}" ]]; then
         build_args+=(--opening-greeting-cache-dir "$FDB_OPENING_GREETING_CACHE_DIR")
     fi
-    "${build_args[@]}"
+    IFS=',' read -r -a tts_build_gpus <<< "$FDB_TTS_BUILD_GPUS"
+    if [[ -n "$FDB_TTS_BUILD_GPUS" && "${#tts_build_gpus[@]}" -gt 1 ]]; then
+        shard_count="${#tts_build_gpus[@]}"
+        shard_root="${FDB_DATA_DIR}.tts_shards_${RUN_ID}_$$"
+        rm -rf "$shard_root"
+        mkdir -p "$shard_root"
+        echo "[fdb] building input TTS across $shard_count GPUs: ${tts_build_gpus[*]}"
+
+        # Populate the shared greeting cache before shard workers start. This
+        # makes every shard reserve precisely the same lead-in duration.
+        if [[ "$FDB_OPENING_GREETING" == "1" ]]; then
+            CUDA_VISIBLE_DEVICES="${tts_build_gpus[0]}" "${build_args[@]}" \
+                --out-dir "$shard_root/greeting_warmup" --num-shards 999999 --shard-index 0
+            rm -rf "$shard_root/greeting_warmup"
+        fi
+
+        shard_pids=()
+        for shard_index in "${!tts_build_gpus[@]}"; do
+            CUDA_VISIBLE_DEVICES="${tts_build_gpus[$shard_index]}" "${build_args[@]}" \
+                --out-dir "$shard_root/shard_$shard_index" \
+                --num-shards "$shard_count" --shard-index "$shard_index" &
+            shard_pids+=("$!")
+        done
+        shard_failed=0
+        for pid in "${shard_pids[@]}"; do
+            wait "$pid" || shard_failed=1
+        done
+        if [[ "$shard_failed" == "1" ]]; then
+            rm -rf "$shard_root"
+            echo "ERROR: one or more parallel input-TTS shards failed." >&2
+            exit 1
+        fi
+        merge_args=(
+            uv run python eval/merge_full_duplex_ja_dataset_shards.py
+            --scenarios "$FDB_SCENARIOS" --out-dir "$FDB_DATA_DIR" --overwrite
+        )
+        for shard_index in "${!tts_build_gpus[@]}"; do
+            merge_args+=(--shard-dir "$shard_root/shard_$shard_index")
+        done
+        "${merge_args[@]}"
+        rm -rf "$shard_root"
+    else
+        "${build_args[@]}"
+    fi
 else
     echo "[fdb] reusing Japanese dataset: $FDB_DATA_DIR"
 fi

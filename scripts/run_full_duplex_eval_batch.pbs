@@ -59,6 +59,9 @@ export BATCH_ID="${BATCH_ID:-batch_${JOB_ID_SHORT}}"
 # Do not inherit a stale single-GPU CUDA_VISIBLE_DEVICES through #PBS -V.
 # FDB_BATCH_GPUS is the explicit opt-out when fewer allocated GPUs are wanted.
 export CUDA_VISIBLE_DEVICES="${FDB_BATCH_GPUS:-0,1,2,3}"
+# Keep the full allocation available to the one-time shared input-TTS build;
+# run_full_duplex_eval.sh then shards that work before model workers start.
+export FDB_TTS_BUILD_GPUS="${FDB_TTS_BUILD_GPUS:-$CUDA_VISIBLE_DEVICES}"
 if [[ -z "${FDB_BATCH_PARALLELISM:-}" ]]; then
     IFS=',' read -r -a _batch_gpu_ids <<< "$CUDA_VISIBLE_DEVICES"
     export FDB_BATCH_PARALLELISM="${#_batch_gpu_ids[@]}"

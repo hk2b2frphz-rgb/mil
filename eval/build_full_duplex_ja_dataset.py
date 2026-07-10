@@ -76,6 +76,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tts-speed", type=float, default=1.0)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
+        "--shard-index",
+        type=int,
+        default=0,
+        help="Zero-based scenario shard index (used only with --num-shards).",
+    )
+    parser.add_argument(
+        "--num-shards",
+        type=int,
+        default=1,
+        help="Split scenarios deterministically across this many independent builders.",
+    )
+    parser.add_argument(
         "--whole-utterance",
         action="store_true",
         help=(
@@ -537,6 +549,8 @@ def render_scenario(
 
 def main() -> int:
     args = parse_args()
+    if args.num_shards < 1 or not 0 <= args.shard_index < args.num_shards:
+        raise SystemExit("--shard-index must be in [0, --num-shards).")
     tts_backend, tts_engine = initialize_tts(args)
     aligner = initialize_aligner(args.whole_utterance, args.device)
     out_dir = args.out_dir.resolve()
@@ -579,7 +593,12 @@ def main() -> int:
             f"({greeting_duration_sec:.2f}s speech + {args.opening_greeting_gap_sec:.2f}s gap)"
         )
 
-    rows = list(iter_jsonl(args.scenarios))
+    all_rows = list(iter_jsonl(args.scenarios))
+    rows = [
+        scenario
+        for index, scenario in enumerate(all_rows)
+        if index % args.num_shards == args.shard_index
+    ]
     manifest = []
     for index, scenario in enumerate(rows, start=1):
         sample_dir = out_dir / str(scenario["task"]) / str(scenario["id"])
@@ -631,29 +650,32 @@ def main() -> int:
         )
         print(f"[ja-data] {index}/{len(rows)} {scenario['task']}/{scenario['id']}")
 
+    manifest_payload = {
+        "profile": "Full-Duplex-Bench v1/v1.5 Japanese adaptation",
+        "upstream_commit": "3e799c45a045256f47d5f1c9cda90157e2d2ec9e",
+        "language": "ja",
+        "tts_backend": tts_backend,
+        "tts_model": args.tts_model,
+        "tts_speaker": args.tts_speaker,
+        "tts_background_speaker": args.tts_background_speaker,
+        "protocol": {
+            "name": FDB_V15_PROTOCOL_NAME,
+            "background_speech": FDB_V15_BACKGROUND_PROFILE,
+            "paired_clean_input": True,
+        },
+        "whole_utterance": aligner is not None,
+        "opening_greeting": opening_greeting,
+        "count": len(manifest),
+        "samples": manifest,
+    }
+    if args.num_shards > 1:
+        manifest_payload["shard"] = {
+            "index": args.shard_index,
+            "count": args.num_shards,
+            "source_count": len(all_rows),
+        }
     (out_dir / "manifest.json").write_text(
-        json.dumps(
-            {
-                "profile": "Full-Duplex-Bench v1/v1.5 Japanese adaptation",
-                "upstream_commit": "3e799c45a045256f47d5f1c9cda90157e2d2ec9e",
-                "language": "ja",
-                "tts_backend": tts_backend,
-                "tts_model": args.tts_model,
-                "tts_speaker": args.tts_speaker,
-                "tts_background_speaker": args.tts_background_speaker,
-                "protocol": {
-                    "name": FDB_V15_PROTOCOL_NAME,
-                    "background_speech": FDB_V15_BACKGROUND_PROFILE,
-                    "paired_clean_input": True,
-                },
-                "whole_utterance": aligner is not None,
-                "opening_greeting": opening_greeting,
-                "count": len(manifest),
-                "samples": manifest,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+        json.dumps(manifest_payload, ensure_ascii=False, indent=2)
         + "\n",
         encoding="utf-8",
     )
