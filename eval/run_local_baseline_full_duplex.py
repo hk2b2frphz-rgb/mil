@@ -11,10 +11,10 @@ evaluate_full_duplex_ja.py works unchanged:
     # streaming behavior to reserve lead-in time for anyway.
     uv run python eval/build_full_duplex_ja_dataset.py \
         --scenarios eval_sets/full_duplex_ja/scenarios.jsonl \
-        --out-dir data/full_duplex_ja_nogreeting --no-opening-greeting
+        --out-dir data/full_duplex_ja_v2_nogreeting --no-opening-greeting
 
     uv run python eval/run_local_baseline_full_duplex.py --system cascade \
-        --dataset-dir data/full_duplex_ja_nogreeting \
+        --dataset-dir data/full_duplex_ja_v2_nogreeting \
         --out-dir eval_runs/full_duplex/cascade_gemma2b/inference \
         --model-id cascade_gemma2b
 
@@ -41,11 +41,9 @@ been fully processed. There is no way for them to react mid-utterance, so:
   interject multiple times while the user keeps talking), so those two
   metrics stay structurally not meaningful for these systems even with the
   chunk fix; treat `TOR` and latency as the comparable numbers here.
-- `user_backchannel`/`talking_to_other`/`background_speech`: no
-  clean_output.wav is produced (there is no separate "ignore the overlay"
-  processing path), so `clean_post_overlap_speech_sec` /
-  `post_overlap_speech_delta_sec` will be computed against an empty
-  baseline. `stop_latency_sec`/`overlap_response_sec` remain meaningful.
+- `user_backchannel`/`talking_to_other`/`background_speech`: both noisy and
+  clean inputs are processed with the same seed. The resulting paired metrics
+  therefore measure how much the overlay changes the turn-based response.
 
 The Azure/LLM-judge dimensions (contextual_relevance, safety_boundary,
 etc.) via judge_full_duplex_azure.py / judge_llmjp_style.py stay fully
@@ -54,6 +52,8 @@ meaningful regardless -- they judge response content, not turn-taking.
 
 import argparse
 import json
+import os
+import random
 import shutil
 import sys
 import time
@@ -72,10 +72,14 @@ from local_baseline_common import (  # noqa: E402
     LocalASR,
     SpeechLLM,
     init_baseline_tts,
+    validate_spoken_response,
 )
 from build_full_duplex_ja_dataset import synthesize  # noqa: E402
 from full_duplex_audio import read_wav_mono, write_wav_mono, write_wav_stereo  # noqa: E402
 from greeting_check import evaluate_opening_greeting  # noqa: E402
+
+
+FDB_V15_PROTOCOL_NAME = "Full-Duplex-Bench v1.5 static overlap protocol"
 
 
 def parse_args() -> argparse.Namespace:
@@ -89,14 +93,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tasks", default="all", help="Comma-separated tasks or all.")
     parser.add_argument("--seeds", default="0")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--require-v15-profile",
+        action="store_true",
+        help=(
+            "Reject a dataset that does not declare the repository's pinned "
+            "Full-Duplex-Bench v1.5 static-overlap input profile. This checks "
+            "the audio-input protocol only; this turn-based baseline cannot "
+            "meet the full-duplex overlap-timing requirement."
+        ),
+    )
 
     parser.add_argument("--tts-backend", choices=["qwen3", "pyopenjtalk", "auto"], default="auto")
     parser.add_argument("--tts-model", default="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice")
-    parser.add_argument("--tts-speaker", default="Ono_Anna")
+    parser.add_argument("--tts-speaker", default="Serena")
     parser.add_argument("--tts-language", default="Japanese")
     parser.add_argument("--tts-speed", type=float, default=1.0)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--dtype", default="bfloat16")
+    parser.add_argument("--dtype", default="float16")
 
     parser.add_argument("--asr-model", default="large-v3")
     parser.add_argument("--asr-device", default="cuda")
@@ -155,9 +169,23 @@ def build_pseudo_chunks(
     ]
 
 
-def process_sample(
+def seed_local(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    try:
+        import torch
+
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    except ImportError:
+        pass
+
+
+def process_variant(
     sample: dict[str, Any],
     seed: int,
+    variant: str,
     dataset_dir: Path,
     out_dir: Path,
     args: argparse.Namespace,
@@ -174,25 +202,38 @@ def process_sample(
     trial_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_dir / "metadata.json", trial_dir / "metadata.json")
 
-    input_wav = source_dir / "input.wav"
-    shutil.copy2(input_wav, trial_dir / "input.wav")
+    input_wav = source_dir / f"{variant}.wav"
+    shutil.copy2(input_wav, trial_dir / f"{variant}.wav")
     pcm, sample_rate = read_wav_mono(input_wav)
     input_duration_sec = len(pcm) / sample_rate
+    output_stem = "clean_output" if variant == "clean_input" else "output"
 
     asr_text = None
     asr_wall = 0.0
     if args.system == "cascade":
         assert asr is not None and llm is not None
         asr_text, asr_wall = asr.transcribe(pcm, sample_rate)
-        response_text, llm_wall = llm.respond(asr_text, COUNSELOR_SYSTEM_PROMPT)
+        response_text, llm_wall = llm.respond(
+            asr_text, COUNSELOR_SYSTEM_PROMPT, seed=seed
+        )
     else:
         assert speechllm is not None
         response_text, llm_wall = speechllm.respond(pcm, sample_rate, COUNSELOR_SYSTEM_PROMPT)
+    response_text = validate_spoken_response(response_text)
 
     tts_started = time.perf_counter()
+    seed_local(seed)
     has_response = bool(response_text.strip())
     response_pcm = (
-        synthesize(response_text, sample_rate, args.tts_speed, tts_backend, tts_engine, args.tts_speaker)
+        synthesize(
+            response_text,
+            sample_rate,
+            args.tts_speed,
+            tts_backend,
+            tts_engine,
+            args.tts_speaker,
+            speaker_role="moshi",
+        )
         if has_response
         else np.zeros(1, dtype=np.float32)
     )
@@ -208,10 +249,12 @@ def process_sample(
     output_start_sec = input_duration_sec + total_wall
     silence = np.zeros(int(round(output_start_sec * sample_rate)), dtype=np.float32)
     aligned = np.concatenate([silence, response_pcm])
-    write_wav_mono(trial_dir / "output.wav", aligned, sample_rate)
+    write_wav_mono(trial_dir / f"{output_stem}.wav", aligned, sample_rate)
     # Left = input speech, right = model output, for side-by-side listening
     # review; not used by any deterministic/LLM-judge metric.
-    write_wav_stereo(trial_dir / "output_stereo.wav", pcm, aligned, sample_rate)
+    write_wav_stereo(
+        trial_dir / f"{output_stem}_stereo.wav", pcm, aligned, sample_rate
+    )
 
     response_duration_sec = len(response_pcm) / sample_rate
     output_json = {
@@ -224,11 +267,15 @@ def process_sample(
         "source": f"{args.system}_text",
         "language": "ja",
     }
-    (trial_dir / "output.json").write_text(
+    (trial_dir / f"{output_stem}.json").write_text(
         json.dumps(output_json, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
 
-    greeting = evaluate_opening_greeting(metadata, output_json["chunks"])
+    greeting = (
+        evaluate_opening_greeting(metadata, output_json["chunks"])
+        if variant == "input"
+        else None
+    )
     if greeting is not None:
         status = "OK" if greeting["matched"] else "MISMATCH"
         print(
@@ -246,15 +293,54 @@ def process_sample(
         "language": "ja",
         "expected_behavior": metadata.get("expected_behavior"),
         "system": args.system,
+        "variant": variant,
         "asr_transcript": asr_text,
         "asr_wall_time_sec": round(asr_wall, 4),
         "llm_wall_time_sec": round(llm_wall, 4),
         "tts_wall_time_sec": round(tts_wall, 4),
         "audible_response_start_sec": round(output_start_sec, 4),
+        "tts_backend": tts_backend,
+        "tts_model": args.tts_model,
+        "tts_speaker": args.tts_speaker,
+        "tts_dtype": args.dtype,
     }
-    (trial_dir / "output.meta.json").write_text(
+    (trial_dir / f"{output_stem}.meta.json").write_text(
         json.dumps(output_meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+
+
+def process_sample(
+    sample: dict[str, Any],
+    seed: int,
+    dataset_dir: Path,
+    out_dir: Path,
+    args: argparse.Namespace,
+    tts_backend: str,
+    tts_engine: Any | None,
+    asr: LocalASR | None,
+    llm: GemmaLLM | None,
+    speechllm: SpeechLLM | None,
+    model_id: str,
+) -> None:
+    source_dir = dataset_dir / sample["path"]
+    variants = ["input"]
+    if (source_dir / "clean_input.wav").exists():
+        variants.append("clean_input")
+    for variant in variants:
+        process_variant(
+            sample,
+            seed,
+            variant,
+            dataset_dir,
+            out_dir,
+            args,
+            tts_backend,
+            tts_engine,
+            asr,
+            llm,
+            speechllm,
+            model_id,
+        )
 
 
 def main() -> int:
@@ -268,6 +354,16 @@ def main() -> int:
     }
 
     manifest = json.loads((dataset_dir / "manifest.json").read_text(encoding="utf-8-sig"))
+    protocol = manifest.get("protocol")
+    if args.require_v15_profile:
+        actual_protocol = protocol.get("name") if isinstance(protocol, dict) else None
+        if actual_protocol != FDB_V15_PROTOCOL_NAME:
+            raise SystemExit(
+                "Dataset does not declare the required Full-Duplex-Bench v1.5 "
+                f"input profile: expected {FDB_V15_PROTOCOL_NAME!r}, got "
+                f"{actual_protocol!r}. Rebuild with "
+                "eval/build_full_duplex_ja_dataset.py."
+            )
     samples = [
         item
         for item in manifest["samples"]
@@ -298,13 +394,39 @@ def main() -> int:
         default_model_id = f"speechllm_{args.speechllm_model.split('/')[-1]}"
     model_id = args.model_id or default_model_id
 
+    if asr is not None:
+        asr.load()
+    if llm is not None:
+        llm.load()
+
     run_config = {
         "model_id": model_id,
         "system": args.system,
+        "git_commit": os.environ.get("FDB_GIT_COMMIT"),
         "seeds": seeds,
         "tasks": sorted(selected_tasks) if selected_tasks else "all",
         "upstream_full_duplex_bench_commit": manifest.get("upstream_commit"),
         "profile": manifest.get("profile"),
+        "protocol": protocol,
+        "protocol_conformance": {
+            "input_profile": "verified" if args.require_v15_profile else "not_required",
+            "overlap_timing": "not_applicable_turn_based_baseline",
+        },
+        "asr_model": args.asr_model if args.system == "cascade" else None,
+        "asr_compute_type": args.asr_compute_type if args.system == "cascade" else None,
+        "llm_model": args.llm_model if args.system == "cascade" else None,
+        "llm_dtype": args.llm_dtype if args.system == "cascade" else None,
+        "llm_temperature": args.llm_temperature if args.system == "cascade" else None,
+        "llm_top_p": args.llm_top_p if args.system == "cascade" else None,
+        "llm_max_new_tokens": args.llm_max_new_tokens if args.system == "cascade" else None,
+        "llm_startup_wall_time_sec": (
+            round(llm.startup_wall_time_sec, 4) if llm is not None else None
+        ),
+        "tts_backend_requested": args.tts_backend,
+        "tts_backend_effective": tts_backend,
+        "tts_model": args.tts_model,
+        "tts_speaker": args.tts_speaker,
+        "tts_dtype": args.dtype,
         "note": (
             "Turn-based local baseline, not full-duplex. See this script's "
             "module docstring for which metrics are/aren't meaningful."
@@ -316,19 +438,26 @@ def main() -> int:
 
     total = len(samples) * len(seeds)
     completed = 0
-    for sample in samples:
-        for seed in seeds:
-            trial_dir = out_dir / sample["task"] / sample["id"] / f"seed_{seed}"
-            if (trial_dir / "output.meta.json").exists() and not args.overwrite:
-                print(f"[local-fdb] skip existing {trial_dir}")
+    try:
+        for sample in samples:
+            for seed in seeds:
+                trial_dir = out_dir / sample["task"] / sample["id"] / f"seed_{seed}"
+                expected_meta = [trial_dir / "output.meta.json"]
+                if (dataset_dir / sample["path"] / "clean_input.wav").exists():
+                    expected_meta.append(trial_dir / "clean_output.meta.json")
+                if all(path.exists() for path in expected_meta) and not args.overwrite:
+                    print(f"[local-fdb] skip existing {trial_dir}")
+                    completed += 1
+                    continue
+                process_sample(
+                    sample, seed, dataset_dir, out_dir, args, tts_backend, tts_engine,
+                    asr, llm, speechllm, model_id,
+                )
                 completed += 1
-                continue
-            process_sample(
-                sample, seed, dataset_dir, out_dir, args, tts_backend, tts_engine,
-                asr, llm, speechllm, model_id,
-            )
-            completed += 1
-            print(f"[local-fdb] {completed}/{total} {sample['task']}/{sample['id']} seed={seed}")
+                print(f"[local-fdb] {completed}/{total} {sample['task']}/{sample['id']} seed={seed}")
+    finally:
+        if llm is not None:
+            llm.close()
 
     print(f"[local-fdb] inference complete -> {out_dir}")
     return 0

@@ -26,12 +26,12 @@
 #   CASCADE_ASR_COMPUTE_TYPE=float16
 #   CASCADE_LLM_MODEL=google/gemma-2-2b-it
 #   CASCADE_LLM_MAX_NEW_TOKENS=200
-#   CASCADE_TTS_BACKEND=auto
-#   CASCADE_TTS_SPEAKER=Ono_Anna
+#   CASCADE_TTS_BACKEND=qwen3
+#   CASCADE_TTS_SPEAKER=Serena
 #   CASCADE_DEVICE=cuda
-#   CASCADE_DTYPE=bfloat16
+#   CASCADE_DTYPE=float16
 #   FDB_SCENARIOS=eval_sets/full_duplex_ja/scenarios.jsonl
-#   FDB_DATA_DIR=data/full_duplex_ja_nogreeting   Built with --no-opening-greeting;
+#   FDB_DATA_DIR=data/full_duplex_ja_v2_nogreeting Built with --no-opening-greeting;
 #                                                  a cascade baseline was never
 #                                                  trained to say Moshi's fixed
 #                                                  greeting (see docs/local_baselines.md).
@@ -53,14 +53,16 @@ CASCADE_ASR_DEVICE="${CASCADE_ASR_DEVICE:-cuda}"
 CASCADE_ASR_COMPUTE_TYPE="${CASCADE_ASR_COMPUTE_TYPE:-float16}"
 CASCADE_LLM_MODEL="${CASCADE_LLM_MODEL:-google/gemma-2-2b-it}"
 CASCADE_LLM_MAX_NEW_TOKENS="${CASCADE_LLM_MAX_NEW_TOKENS:-200}"
-CASCADE_TTS_BACKEND="${CASCADE_TTS_BACKEND:-auto}"
+CASCADE_TTS_BACKEND="${CASCADE_TTS_BACKEND:-qwen3}"
 CASCADE_TTS_MODEL="${CASCADE_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
-CASCADE_TTS_SPEAKER="${CASCADE_TTS_SPEAKER:-Ono_Anna}"
+CASCADE_TTS_SPEAKER="${CASCADE_TTS_SPEAKER:-Serena}"
 CASCADE_DEVICE="${CASCADE_DEVICE:-cuda}"
-CASCADE_DTYPE="${CASCADE_DTYPE:-bfloat16}"
+CASCADE_DTYPE="${CASCADE_DTYPE:-float16}"
 
 FDB_SCENARIOS="${FDB_SCENARIOS:-$PWD/eval_sets/full_duplex_ja/scenarios.jsonl}"
-FDB_DATA_DIR="${FDB_DATA_DIR:-$PWD/data/full_duplex_ja_nogreeting}"
+FDB_TTS_SPEAKER="${FDB_TTS_SPEAKER:-Ono_Anna}"
+FDB_TTS_BACKGROUND_SPEAKER="${FDB_TTS_BACKGROUND_SPEAKER:-Uncle_Fu}"
+FDB_DATA_DIR="${FDB_DATA_DIR:-$PWD/data/full_duplex_ja_v2_nogreeting}"
 REFRESH_FDB_DATA="${REFRESH_FDB_DATA:-0}"
 FDB_OUT_DIR="${FDB_OUT_DIR:-$PWD/eval_runs/full_duplex/$CASCADE_MODEL_ID}"
 FDB_BACKCHANNEL_GT="${FDB_BACKCHANNEL_GT:-$PWD/eval_sets/full_duplex_ja/backchannel_gt.json}"
@@ -76,6 +78,7 @@ SKIP_LONELINESS="${SKIP_LONELINESS:-0}"
 export TORCHINDUCTOR_DISABLE=1
 export NO_TORCH_COMPILE="${NO_TORCH_COMPILE:-1}"
 export TORCH_COMPILE_DISABLE=1
+export FDB_GIT_COMMIT="${FDB_GIT_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 
 # Unbuffer Python stdout so per-trial progress prints appear in real time
 # through the `tee` pipe below instead of being block-buffered until the
@@ -115,7 +118,8 @@ if [[ "$SKIP_FULL_DUPLEX" != "1" ]]; then
             --out-dir "$FDB_DATA_DIR" \
             --tts-backend "$CASCADE_TTS_BACKEND" \
             --tts-model "$CASCADE_TTS_MODEL" \
-            --tts-speaker "$CASCADE_TTS_SPEAKER" \
+            --tts-speaker "$FDB_TTS_SPEAKER" \
+            --tts-background-speaker "$FDB_TTS_BACKGROUND_SPEAKER" \
             --device "$CASCADE_DEVICE" \
             --dtype "$CASCADE_DTYPE" \
             --no-opening-greeting \

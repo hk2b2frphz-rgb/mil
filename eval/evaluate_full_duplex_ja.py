@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,11 @@ def parse_args() -> argparse.Namespace:
         "--backchannel-gt",
         type=Path,
         help="Optional Japanese backchannel GT distribution JSON.",
+    )
+    parser.add_argument(
+        "--require-overlap",
+        action="store_true",
+        help="Fail instead of writing summary.json when a v1.5 overlap event did not overlap model speech.",
     )
     return parser.parse_args()
 
@@ -279,14 +285,24 @@ def evaluate_case(
             containing = [
                 segment for segment in segments if segment[0] <= overlap_event[0] < segment[1]
             ]
+            overlap_sec = sum(
+                interval_overlap(segment, overlap_event) for segment in segments
+            )
             metrics.update(
+                # v1.5 timing metrics are meaningful only when the controlled
+                # user-side event truly overlaps model speech. Report coverage
+                # explicitly and do not award a zero stop latency to a model
+                # that was silent before the event began.
+                overlap_achieved=bool(overlap_sec > 0.0),
+                model_speaking_at_overlap_start=bool(containing),
+                actual_overlap_sec=round(overlap_sec, 4),
                 stop_latency_sec=(
                     round(max(0.0, containing[0][1] - overlap_event[0]), 4)
                     if containing
-                    else 0.0
+                    else None
                 ),
                 overlap_response_sec=round(
-                    sum(interval_overlap(segment, overlap_event) for segment in segments), 4
+                    overlap_sec, 4
                 ),
                 post_overlap_speech_sec=round(noisy_after, 4),
                 clean_post_overlap_speech_sec=round(clean_after, 4),
@@ -348,6 +364,26 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return summary
 
 
+def overlap_protocol_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    overlap_rows = [row for row in rows if "overlap_achieved" in row["metrics"]]
+    achieved = [row for row in overlap_rows if row["metrics"]["overlap_achieved"]]
+    missing = [
+        f"{row['task']}/{row['case_id']}/seed_{row['seed']}"
+        for row in overlap_rows
+        if not row["metrics"]["overlap_achieved"]
+    ]
+    return {
+        "profile": "Full-Duplex-Bench v1.5 static overlap protocol",
+        "overlap_trials": len(overlap_rows),
+        "overlap_achieved": len(achieved),
+        "overlap_coverage": (
+            len(achieved) / len(overlap_rows) if overlap_rows else None
+        ),
+        "conformant": not missing,
+        "missing_overlap_trials": missing,
+    }
+
+
 def main() -> int:
     args = parse_args()
     run_dir = args.run_dir.resolve()
@@ -360,15 +396,53 @@ def main() -> int:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
     run_config = load_json(run_dir / "run_config.json")
+    protocol = overlap_protocol_report(rows)
+    input_profile_verified = (
+        (run_config.get("protocol") or {}).get("name")
+        == "Full-Duplex-Bench v1.5 static overlap protocol"
+    )
+    full_duplex_timing_conformant = (
+        run_config.get("system") == "moshi"
+        and input_profile_verified
+        and protocol["overlap_trials"] > 0
+        and protocol["conformant"]
+    )
+    protocol["input_profile_verified"] = input_profile_verified
+    protocol["timing_conformance"] = (
+        "conformant"
+        if full_duplex_timing_conformant
+        else "not_applicable_turn_based_baseline"
+        if run_config.get("system") in {"cascade", "speechllm"}
+        else "not_established"
+    )
+    if full_duplex_timing_conformant:
+        benchmark_name = "Full-Duplex-Bench v1/v1.5 protocol-conformant Japanese adaptation"
+    elif run_config.get("system") in {"cascade", "speechllm"}:
+        benchmark_name = "Full-Duplex-Bench v1/v1.5 input-profile-aligned turn-based Japanese baseline"
+    else:
+        benchmark_name = "Full-Duplex-Bench v1/v1.5 Japanese adaptation (protocol conformance not established)"
     result = {
-        "benchmark": "Full-Duplex-Bench v1/v1.5 Japanese adaptation",
+        "benchmark": benchmark_name,
         "upstream_commit": run_config.get("upstream_full_duplex_bench_commit"),
         "model_id": run_config.get("model_id"),
+        "system": run_config.get("system"),
+        "git_commit": run_config.get("git_commit"),
         "language": "ja",
         "n": len(rows),
         "tasks": aggregate(rows),
+        "protocol": protocol,
         "note": "API-dependent semantic/behavior judging is deferred to local Azure OpenAI.",
     }
+    if args.require_overlap and not full_duplex_timing_conformant:
+        (out_dir / "protocol_report.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        print(
+            "[fdb-eval] overlap protocol failed; no summary.json was written: "
+            + ", ".join(protocol["missing_overlap_trials"]),
+            file=sys.stderr,
+        )
+        return 2
     (out_dir / "summary.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )

@@ -31,11 +31,12 @@
 #   FDB_TASKS=pause_handling,smooth_turn_taking,user_interruption
 #   FDB_SEEDS=0,1,2
 #   FDB_TAIL_SEC=8
-#   FDB_TTS_BACKEND=auto
+#   FDB_TTS_BACKEND=qwen3
 #   FDB_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
 #   FDB_TTS_SPEAKER=Ono_Anna
+#   FDB_TTS_BACKGROUND_SPEAKER=Uncle_Fu
 #   FDB_DEVICE=cuda
-#   FDB_DTYPE=bfloat16
+#   FDB_DTYPE=float16
 #   FDB_WHOLE_UTTERANCE=1 (default)
 #   FDB_WHOLE_UTTERANCE_MAX_CHARS=150
 #   FDB_BACKCHANNEL_GT=eval_sets/full_duplex_ja/backchannel_gt.json (default if present)
@@ -63,11 +64,12 @@ if [[ -z "${FDB_BATCH_PARALLELISM:-}" ]]; then
     export FDB_BATCH_PARALLELISM="${#_batch_gpu_ids[@]}"
 fi
 export HALF="${HALF:-1}"
-export FDB_TTS_BACKEND="${FDB_TTS_BACKEND:-auto}"
+export FDB_TTS_BACKEND="${FDB_TTS_BACKEND:-qwen3}"
 export FDB_TTS_MODEL="${FDB_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
 export FDB_TTS_SPEAKER="${FDB_TTS_SPEAKER:-Ono_Anna}"
+export FDB_TTS_BACKGROUND_SPEAKER="${FDB_TTS_BACKGROUND_SPEAKER:-Uncle_Fu}"
 export FDB_DEVICE="${FDB_DEVICE:-cuda}"
-export FDB_DTYPE="${FDB_DTYPE:-bfloat16}"
+export FDB_DTYPE="${FDB_DTYPE:-float16}"
 export FDB_WHOLE_UTTERANCE="${FDB_WHOLE_UTTERANCE:-1}"
 export FDB_WHOLE_UTTERANCE_MAX_CHARS="${FDB_WHOLE_UTTERANCE_MAX_CHARS:-150}"
 export FDB_OPENING_GREETING="${FDB_OPENING_GREETING:-1}"

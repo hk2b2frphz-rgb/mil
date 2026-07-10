@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import time
@@ -42,6 +43,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temp", type=float)
     parser.add_argument("--temp-text", type=float)
     parser.add_argument("--cfg-coef", type=float)
+    parser.add_argument(
+        "--require-v15-profile",
+        action="store_true",
+        help="Reject a dataset not built with the v1.5 overlap protocol profile.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -154,6 +160,13 @@ def main() -> int:
     }
 
     manifest = json.loads((dataset_dir / "manifest.json").read_text(encoding="utf-8"))
+    if args.require_v15_profile:
+        protocol = manifest.get("protocol") or {}
+        if protocol.get("name") != "Full-Duplex-Bench v1.5 static overlap protocol":
+            raise SystemExit(
+                "Dataset is not the v1.5 protocol profile. Rebuild the v2 "
+                "Full-Duplex-Bench-JA dataset instead of reusing legacy audio."
+            )
     samples = [
         item
         for item in manifest["samples"]
@@ -169,6 +182,8 @@ def main() -> int:
     frame_rate = float(mimi.frame_rate)
     run_config = {
         "model_id": args.model_id,
+        "system": "moshi",
+        "git_commit": os.environ.get("FDB_GIT_COMMIT"),
         "hf_repo": args.hf_repo,
         "moshi_weight": str(Path(args.moshi_weight).resolve()) if args.moshi_weight else None,
         "mimi_weight": args.mimi_weight,
@@ -181,6 +196,7 @@ def main() -> int:
         "tail_sec": args.tail_sec,
         "upstream_full_duplex_bench_commit": manifest.get("upstream_commit"),
         "profile": manifest.get("profile"),
+        "protocol": manifest.get("protocol"),
     }
     (out_dir / "run_config.json").write_text(
         json.dumps(run_config, ensure_ascii=False, indent=2) + "\n",

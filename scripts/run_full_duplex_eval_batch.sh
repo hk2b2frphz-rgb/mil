@@ -222,10 +222,18 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
     status_file="$BATCH_OUT_DIR/.${output_name}.batch_status"
     rm -f "$status_file"
     mkdir -p "$BATCH_OUT_DIR/$output_name"
+    # Never let a failed rerun contribute a stale summary from an older run.
+    rm -f "$BATCH_OUT_DIR/$output_name/benchmark_results/summary.json"
     (
         model_start=$(date +%s)
         if env CUDA_VISIBLE_DEVICES="$gpu_id" "${run_env[@]}" bash "$eval_script"; then
-            status="ok"
+            run_config="$BATCH_OUT_DIR/$output_name/inference/run_config.json"
+            if [[ -f "$run_config" ]] && grep -q "\"system\": \"$row_system\"" "$run_config"; then
+                status="ok"
+            else
+                echo "[batch] ERROR: expected system=$row_system in $run_config" >&2
+                status="FAILED"
+            fi
         else
             status="FAILED"
         fi

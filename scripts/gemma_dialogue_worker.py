@@ -29,6 +29,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--max-new-tokens", type=int, default=1400)
     parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help="Load the model once, then process one JSON request per stdin line.",
+    )
     return parser.parse_args()
 
 
@@ -50,6 +55,15 @@ def result_to_text(result: Any) -> str:
     if isinstance(result, list):
         if not result:
             return ""
+        # Chat pipelines may return the complete conversation. Never join the
+        # user prompt into the assistant text that will be sent to TTS.
+        assistant_messages = [
+            item
+            for item in result
+            if isinstance(item, dict) and item.get("role") == "assistant"
+        ]
+        if assistant_messages:
+            return result_to_text(assistant_messages[-1].get("content", ""))
         if len(result) == 1:
             return result_to_text(result[0])
         return "\n".join(result_to_text(item) for item in result)
@@ -65,15 +79,7 @@ def progress(msg: str) -> None:
     print(f"[llm] {msg}", file=sys.stderr, flush=True)
 
 
-def main() -> None:
-    args = parse_args()
-    payload = json.loads(sys.stdin.read())
-    if "prompts" in payload:
-        prompts = [str(prompt) for prompt in payload["prompts"]]
-    else:
-        prompts = [str(payload["prompt"])]
-
-    total = len(prompts)
+def build_pipeline(args: argparse.Namespace) -> Any:
     progress(f"モデルをロード中: {args.model}")
     from transformers import pipeline
 
@@ -98,13 +104,21 @@ def main() -> None:
             return pipeline(task, **fallback_kwargs)
 
     try:
-        pipe = _build_pipeline(args.task)
+        result = _build_pipeline(args.task)
     except Exception:
         if args.task == "text-generation":
             raise
-        pipe = _build_pipeline("text-generation")
+        result = _build_pipeline("text-generation")
+    progress("モデルロード完了")
+    return result
 
-    progress(f"モデルロード完了。{total}件のプロンプトを生成します")
+
+def generate_one(
+    pipe: Any, prompt: str, args: argparse.Namespace, seed: int
+) -> str:
+    from transformers import set_seed
+
+    set_seed(seed)
     generation_kwargs = {
         "max_new_tokens": args.max_new_tokens,
         "temperature": args.temperature,
@@ -112,21 +126,53 @@ def main() -> None:
         "do_sample": True,
         "return_full_text": False,
     }
+    # Gemma is text-only. A plain string content is accepted across both the
+    # v4 and v5 Transformers chat templates.
+    messages = [{"role": "user", "content": prompt}]
+    try:
+        result = pipe(messages, **generation_kwargs)
+    except (TypeError, ValueError):
+        result = pipe(prompt, **generation_kwargs)
+    return result_to_text(result).strip()
+
+
+def main() -> None:
+    args = parse_args()
+    pipe = build_pipeline(args)
+
+    if args.serve:
+        print(json.dumps({"ready": True}), flush=True)
+        for line in sys.stdin:
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+                text = generate_one(
+                    pipe,
+                    str(payload["prompt"]),
+                    args,
+                    int(payload.get("seed", 0)),
+                )
+                response = {"text": text}
+            except Exception as exc:
+                response = {"error": f"{type(exc).__name__}: {exc}"}
+            print(json.dumps(response, ensure_ascii=False), flush=True)
+        return
+
+    payload = json.loads(sys.stdin.read())
+    if "prompts" in payload:
+        prompts = [str(prompt) for prompt in payload["prompts"]]
+    else:
+        prompts = [str(payload["prompt"])]
+    seeds = payload.get("seeds")
+    if seeds is None:
+        seeds = [int(payload.get("seed", 0))] * len(prompts)
+    if len(seeds) != len(prompts):
+        raise ValueError("seeds must have the same length as prompts")
+
     texts: list[str] = []
-    for i, prompt in enumerate(prompts, 1):
-        progress(f"生成中 ({i}/{total})...")
-        messages = [
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": prompt}],
-            }
-        ]
-        try:
-            result = pipe(messages, **generation_kwargs)
-        except TypeError:
-            result = pipe(prompt, **generation_kwargs)
-        texts.append(result_to_text(result))
-        progress(f"完了 ({i}/{total})")
+    for prompt, seed in zip(prompts, seeds):
+        texts.append(generate_one(pipe, prompt, args, int(seed)))
 
     if "prompts" in payload:
         print(json.dumps({"texts": texts}, ensure_ascii=False))

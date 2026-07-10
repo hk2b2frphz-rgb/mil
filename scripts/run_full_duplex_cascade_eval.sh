@@ -22,11 +22,11 @@ set -euo pipefail
 #   CASCADE_ASR_COMPUTE_TYPE=float16
 #   CASCADE_LLM_MODEL=google/gemma-2-2b-it
 #   CASCADE_LLM_MAX_NEW_TOKENS=200
-#   CASCADE_TTS_BACKEND=auto
+#   CASCADE_TTS_BACKEND=qwen3
 #   CASCADE_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
-#   CASCADE_TTS_SPEAKER=Ono_Anna
+#   CASCADE_TTS_SPEAKER=Serena
 #   CASCADE_DEVICE=cuda
-#   CASCADE_DTYPE=bfloat16
+#   CASCADE_DTYPE=float16
 
 # See scripts/run_full_duplex_eval.sh for why this ERR trap exists (a signal
 # kill -- OOM/walltime/CUDA crash -- otherwise stops the log dead with no
@@ -58,11 +58,12 @@ RUN_ID="${RUN_ID:-${MODEL_ID}_$(date +%Y%m%d_%H%M%S)}"
 FDB_SCENARIOS="${FDB_SCENARIOS:-$REPO_ROOT/eval_sets/full_duplex_ja/scenarios.jsonl}"
 FDB_TASKS="${FDB_TASKS:-all}"
 FDB_SEEDS="${FDB_SEEDS:-0}"
-FDB_TTS_BACKEND="${FDB_TTS_BACKEND:-auto}"
+FDB_TTS_BACKEND="${FDB_TTS_BACKEND:-qwen3}"
 FDB_TTS_MODEL="${FDB_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
 FDB_TTS_SPEAKER="${FDB_TTS_SPEAKER:-Ono_Anna}"
+FDB_TTS_BACKGROUND_SPEAKER="${FDB_TTS_BACKGROUND_SPEAKER:-Uncle_Fu}"
 FDB_DEVICE="${FDB_DEVICE:-cuda}"
-FDB_DTYPE="${FDB_DTYPE:-bfloat16}"
+FDB_DTYPE="${FDB_DTYPE:-float16}"
 FDB_TTS_SPEED="${FDB_TTS_SPEED:-1.0}"
 FDB_WHOLE_UTTERANCE="${FDB_WHOLE_UTTERANCE:-1}"
 FDB_WHOLE_UTTERANCE_MAX_CHARS="${FDB_WHOLE_UTTERANCE_MAX_CHARS:-150}"
@@ -74,9 +75,9 @@ FDB_WHOLE_UTTERANCE_MAX_CHARS="${FDB_WHOLE_UTTERANCE_MAX_CHARS:-150}"
 FDB_OPENING_GREETING="${FDB_OPENING_GREETING:-0}"
 FDB_OPENING_GREETING_GAP_SEC="${FDB_OPENING_GREETING_GAP_SEC:-0.4}"
 if [[ "$FDB_OPENING_GREETING" == "1" ]]; then
-    FDB_DATA_DIR_DEFAULT="$REPO_ROOT/data/full_duplex_ja_greeting"
+    FDB_DATA_DIR_DEFAULT="$REPO_ROOT/data/full_duplex_ja_v2_greeting"
 else
-    FDB_DATA_DIR_DEFAULT="$REPO_ROOT/data/full_duplex_ja_nogreeting"
+    FDB_DATA_DIR_DEFAULT="$REPO_ROOT/data/full_duplex_ja_v2_nogreeting"
 fi
 FDB_DATA_DIR="${FDB_DATA_DIR:-$FDB_DATA_DIR_DEFAULT}"
 FDB_OUT_DIR="${FDB_OUT_DIR:-$REPO_ROOT/eval_runs/full_duplex/$RUN_ID}"
@@ -88,11 +89,11 @@ CASCADE_ASR_DEVICE="${CASCADE_ASR_DEVICE:-cuda}"
 CASCADE_ASR_COMPUTE_TYPE="${CASCADE_ASR_COMPUTE_TYPE:-float16}"
 CASCADE_LLM_MODEL="${CASCADE_LLM_MODEL:-google/gemma-2-2b-it}"
 CASCADE_LLM_MAX_NEW_TOKENS="${CASCADE_LLM_MAX_NEW_TOKENS:-200}"
-CASCADE_TTS_BACKEND="${CASCADE_TTS_BACKEND:-auto}"
+CASCADE_TTS_BACKEND="${CASCADE_TTS_BACKEND:-qwen3}"
 CASCADE_TTS_MODEL="${CASCADE_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
-CASCADE_TTS_SPEAKER="${CASCADE_TTS_SPEAKER:-Ono_Anna}"
+CASCADE_TTS_SPEAKER="${CASCADE_TTS_SPEAKER:-Serena}"
 CASCADE_DEVICE="${CASCADE_DEVICE:-cuda}"
-CASCADE_DTYPE="${CASCADE_DTYPE:-bfloat16}"
+CASCADE_DTYPE="${CASCADE_DTYPE:-float16}"
 
 # Disable Triton / torch.compile -- V100 lacks support for many Triton kernels.
 export TORCHINDUCTOR_DISABLE=1
@@ -102,6 +103,7 @@ export TORCH_COMPILE_DISABLE=1
 # Unbuffer Python stdout so per-trial progress prints appear in real time
 # through the `tee` pipe below (see the same note in run_full_duplex_eval.sh).
 export PYTHONUNBUFFERED=1
+export FDB_GIT_COMMIT="${FDB_GIT_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 
 command -v uv >/dev/null 2>&1 || {
     echo "ERROR: uv is not available on PATH." >&2
@@ -123,6 +125,7 @@ echo "data:         $FDB_DATA_DIR"
 echo "output:       $FDB_OUT_DIR"
 echo "greeting:     $FDB_OPENING_GREETING"
 echo "upstream:     Full-Duplex-Bench@3e799c45a045256f47d5f1c9cda90157e2d2ec9e"
+echo "git_commit:   $FDB_GIT_COMMIT"
 echo "started_at:   $(date -Iseconds)"
 echo "=========================================="
 
@@ -150,6 +153,7 @@ if [[ "$REFRESH_FDB_DATA" == "1" || ! -f "$FDB_DATA_DIR/manifest.json" ]]; then
         --tts-backend "$FDB_TTS_BACKEND"
         --tts-model "$FDB_TTS_MODEL"
         --tts-speaker "$FDB_TTS_SPEAKER"
+        --tts-background-speaker "$FDB_TTS_BACKGROUND_SPEAKER"
         --device "$FDB_DEVICE"
         --dtype "$FDB_DTYPE"
         --tts-speed "$FDB_TTS_SPEED"
@@ -178,6 +182,7 @@ uv run python eval/run_local_baseline_full_duplex.py \
     --model-id "$MODEL_ID" \
     --tasks "$FDB_TASKS" \
     --seeds "$FDB_SEEDS" \
+    --require-v15-profile \
     --asr-model "$CASCADE_ASR_MODEL" \
     --asr-device "$CASCADE_ASR_DEVICE" \
     --asr-compute-type "$CASCADE_ASR_COMPUTE_TYPE" \

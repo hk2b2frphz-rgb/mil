@@ -18,6 +18,8 @@
 # from the submission host. Those implicit values are deliberately cleared
 # unless PROXY_USE_ENV=1 is set. Prefer PROXY_URL or PROXY_HOST explicitly.
 
+unset PROXY_CONFIG_VALID
+
 if [[ -n "${PROXY_URL:-}" ]]; then
     proxy_url="$PROXY_URL"
 elif [[ -n "${PROXY_HOST:-}" ]]; then
@@ -66,18 +68,31 @@ for candidate in python3 python; do
 done
 
 if [[ -n "$proxy_python" ]]; then
-    if ! PROXY_CHECK_URL="$proxy_url" "$proxy_python" - <<'PY'
+    if ! normalized_proxy_url=$(PROXY_CHECK_URL="$proxy_url" "$proxy_python" - <<'PY'
 import os
 import socket
 import sys
 from urllib.parse import urlsplit
 
 url = os.environ["PROXY_CHECK_URL"]
+if any(char.isspace() for char in url):
+    print("ERROR: proxy URL contains whitespace.", file=sys.stderr)
+    raise SystemExit(1)
 parsed = urlsplit(url if "://" in url else f"http://{url}")
+if parsed.scheme not in {"http", "https"}:
+    print(f"ERROR: unsupported proxy scheme: {parsed.scheme!r}", file=sys.stderr)
+    raise SystemExit(1)
 host = parsed.hostname
-port = parsed.port or (443 if parsed.scheme == "https" else 80)
+try:
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+except ValueError as exc:
+    print(f"ERROR: invalid proxy port: {exc}", file=sys.stderr)
+    raise SystemExit(1)
 if not host:
     print("ERROR: proxy URL has no hostname.", file=sys.stderr)
+    raise SystemExit(1)
+if not 1 <= port <= 65535:
+    print(f"ERROR: proxy port is out of range: {port}", file=sys.stderr)
     raise SystemExit(1)
 try:
     socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
@@ -87,19 +102,24 @@ except socket.gaierror as exc:
         file=sys.stderr,
     )
     raise SystemExit(1)
-print(f"[proxy] resolver ok: {host}:{port}")
+print(parsed.geturl())
 PY
-    then
+    ); then
         echo "ERROR: invalid/unresolvable proxy configuration." >&2
         echo "Submit with PROXY_URL=http://<host>:<port> or correct PROXY_HOST." >&2
         return 1 2>/dev/null || exit 1
     fi
+    # The validation step also normalizes shorthand such as "proxy:8080" to
+    # a URI with an explicit scheme. requests/httpx reject the shorthand even
+    # though urllib's resolver check can parse it.
+    proxy_url="$normalized_proxy_url"
 fi
 
 export http_proxy="$proxy_url"
 export https_proxy="$proxy_url"
 export HTTP_PROXY="$proxy_url"
 export HTTPS_PROXY="$proxy_url"
+export PROXY_CONFIG_VALID=1
 
 proxy_no_proxy="${NO_PROXY:-${no_proxy:-localhost,127.0.0.1,::1}}"
 export no_proxy="$proxy_no_proxy"

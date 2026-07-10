@@ -1,8 +1,7 @@
 # Local cascade / SpeechLLM comparison baselines
 
-Two local, turn-based baselines exist purely to get comparable numbers
-against the full-duplex Moshi system, on the same eval_sets and through the
-same judge/summarize pipeline:
+Two local, turn-based baselines exist to measure the cost of not being
+full-duplex, using the same input scenarios and judge/summarize pipeline:
 
 | System | Architecture | Scripts |
 |---|---|---|
@@ -15,12 +14,24 @@ starting after the entire input utterance has been synthesized (and, for
 cascade, transcribed). That is the point of the comparison -- it puts a
 number on the latency full-duplex Moshi avoids.
 
+The v2 Full-Duplex-Bench-JA audio uses distinct Qwen3-TTS voices: `Ono_Anna`
+for the user, `Uncle_Fu` for scripted background announcements, and `Serena`
+for the cascade/SpeechLLM assistant response. Paired overlap cases run both
+`input.wav` and `clean_input.wav` with the same seed.
+
+The cascade wrapper requires the v1.5 static-overlap **input** profile, so its
+audio conditions are controlled against Moshi. It must not be described as
+Full-Duplex-Bench timing-conformant: a cascade cannot start speaking during an
+overlap event by design. Its `run_config.json` records
+`overlap_timing: not_applicable_turn_based_baseline`; use it as a negative
+latency/robustness baseline, not in the conformant full-duplex ranking.
+
 ## Why these specific pieces
 
 - **TTS**: reuses `Qwen3TTS`/`initialize_tts`/`synthesize` from
-  `eval/build_full_duplex_ja_dataset.py`, the same voice/backend already
-  used to build eval input audio, so baseline output audio is acoustically
-  comparable and no new TTS integration was needed.
+  `eval/build_full_duplex_ja_dataset.py`, with the same backend and controlled
+  preset voices used by the eval audio, so output is acoustically comparable
+  without conflating the user, assistant, and background speakers.
 - **LLM (cascade)**: reuses `scripts/gemma_dialogue_worker.py` via subprocess
   in the isolated `gemma_runtime/` uv environment -- the same pattern
   `generate_synthetic_moshi_training_data.py` already uses to keep the main
@@ -89,7 +100,7 @@ immediately.
 
 `scripts/run_local_baseline_cascade_eval.pbs` runs `--system cascade` over
 *both* pipelines above in one V100 job (queue `xvn_s`, `res=small`),
-including building `data/full_duplex_ja_nogreeting` if it doesn't exist yet,
+including building `data/full_duplex_ja_v2_nogreeting` if it doesn't exist yet,
 and stops before any judging -- this job never calls OpenAI/Azure, same
 rule as `run_full_duplex_eval.pbs`.
 
@@ -114,10 +125,10 @@ directly with `--system speechllm`.
 # streaming behavior to reserve lead-in time for.
 uv run python eval/build_full_duplex_ja_dataset.py \
     --scenarios eval_sets/full_duplex_ja/scenarios.jsonl \
-    --out-dir data/full_duplex_ja_nogreeting --no-opening-greeting
+    --out-dir data/full_duplex_ja_v2_nogreeting --no-opening-greeting
 
 uv run python eval/run_local_baseline_full_duplex.py --system cascade \
-    --dataset-dir data/full_duplex_ja_nogreeting \
+    --dataset-dir data/full_duplex_ja_v2_nogreeting \
     --out-dir eval_runs/full_duplex/cascade_gemma2b/inference \
     --model-id cascade_gemma2b
 

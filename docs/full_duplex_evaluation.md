@@ -1,8 +1,7 @@
 # Full-Duplex-Bench Japanese evaluation
 
-This evaluation is based on Full-Duplex-Bench v1/v1.5. Only changes required
-for English-to-Japanese adaptation are applied. The upstream implementation is
-pinned to commit
+This is a Japanese adaptation of the pinned Full-Duplex-Bench v1.5 static
+overlap protocol. The upstream implementation is pinned to commit
 [`3e799c45a045256f47d5f1c9cda90157e2d2ec9e`](https://github.com/DanielLin94144/Full-Duplex-Bench/commit/3e799c45a045256f47d5f1c9cda90157e2d2ec9e).
 
 The benchmark covers pause handling, backchannel behavior, smooth turn taking,
@@ -14,7 +13,12 @@ remain delegated to the Azure judge.
 These adapted scores are suitable for controlled comparisons among Japanese
 models evaluated by this repository. They are not directly comparable to the
 English official leaderboard because the language, tokenizer/counting unit,
-input speech, and backchannel ground truth differ.
+input speech, and backchannel ground truth differ. A Moshi run is reported as
+protocol-conformant only when (1) its dataset manifest declares the v1.5
+static-overlap profile and (2) every overlap trial actually begins while the
+model is speaking. `run_full_duplex_eval.sh` enforces both conditions; on a
+failure it leaves no `summary.json` that could be mistaken for a conformant
+result.
 
 ## Deterministic metric definitions
 
@@ -89,6 +93,16 @@ corpus ever becomes available.
 (`Ono_Anna` by default); `build_full_duplex_ja_dataset.py` also records this
 as `speaker` in `metadata.json` for upstream-style compatibility.
 
+`background_speech` announcements use a distinct speaker (`Uncle_Fu` by
+default), are present only in `input.wav`, and are replaced by equal-duration
+silence in `clean_input.wav`. The v2 profile follows the v1.5 paper's stated
+background treatment: -15 dB level, 3 kHz low-pass filtering, and a 100 ms
+echo at -10 dB; it also applies deterministic static compression (4:1 above
+0.1 linear amplitude) to realize the paper's qualitative “dynamic range
+compression” instruction. The paper does not publish compressor coefficients,
+so this local coefficient is recorded in `manifest.json` rather than presented
+as an upstream-exact value.
+
 ## Fixed opening greeting
 
 The model is trained (`scripts/generate_qwen3_tts_data.py`
@@ -140,8 +154,8 @@ Toggle via `run_full_duplex_eval.sh`'s `FDB_OPENING_GREETING=1` (default) /
 evaluating base Moshi or llm-jp baselines** -- they were never trained to say
 this line, so there is nothing to wait for and reserving lead-in time for it
 would just be dead air in front of their real first response. The default
-`FDB_DATA_DIR` encodes this flag (`data/full_duplex_ja_greeting` vs.
-`data/full_duplex_ja_nogreeting`), so toggling it always builds/reuses the
+`FDB_DATA_DIR` encodes this flag (`data/full_duplex_ja_v2_greeting` vs.
+`data/full_duplex_ja_v2_nogreeting`), so toggling it always builds/reuses the
 correct dataset variant instead of silently reusing one built for the other
 setting.
 

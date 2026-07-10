@@ -20,18 +20,21 @@ Pipeline pieces:
 - SpeechLLM: scripts/speechllm_worker.py (Qwen2-Audio), same subprocess
   pattern, taking raw audio instead of an ASR transcript.
 - TTS: reuses Qwen3TTS via eval/build_full_duplex_ja_dataset.py's
-  initialize_tts()/synthesize(), the same voice/backend already used to
-  build the Full-Duplex-Bench-JA and loneliness_support input audio, so
-  baseline output audio is acoustically comparable.
+  initialize_tts()/synthesize(), with the same backend and controlled preset
+  voices used by the benchmark audio.
 """
 
 import json
+import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import numpy as np
 
@@ -53,6 +56,54 @@ COUNSELOR_SYSTEM_PROMPT = (
     "一人で抱えないよう伝えてください。診断や断定は避けてください。"
     "出力は応答本文のみとし、前置きや解説、ロールプレイのカッコ書きは付けないでください。"
 )
+
+_PROXY_KEYS = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")
+
+
+def worker_environment() -> dict[str, str]:
+    """Return a subprocess environment with a valid, normalized proxy only."""
+    environment = os.environ.copy()
+    raw_proxy = next((environment.get(key) for key in _PROXY_KEYS if environment.get(key)), None)
+    if not raw_proxy:
+        return environment
+    try:
+        parsed = urlsplit(
+            raw_proxy if "://" in raw_proxy else f"http://{raw_proxy}"
+        )
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("missing http(s) scheme or hostname")
+        _ = parsed.port
+        normalized = parsed.geturl()
+    except ValueError as exc:
+        for key in (*_PROXY_KEYS, "all_proxy", "ALL_PROXY"):
+            environment.pop(key, None)
+        print(
+            f"[cascade] ignoring invalid inherited proxy configuration: {exc}",
+            file=sys.stderr,
+        )
+        return environment
+    for key in _PROXY_KEYS:
+        environment[key] = normalized
+    environment.pop("all_proxy", None)
+    environment.pop("ALL_PROXY", None)
+    return environment
+
+
+def validate_spoken_response(text: str) -> str:
+    """Return assistant body text safe to pass to TTS, or fail on prompt leak."""
+    cleaned = re.sub(r"<\|[^|>]+\|>", "", text).strip()
+    counselor_parts = re.split(r"(?:相談員|assistant|アシスタント)\s*[:：]", cleaned, flags=re.I)
+    if len(counselor_parts) > 1:
+        cleaned = counselor_parts[-1].strip()
+    cleaned = re.sub(
+        r"^(?:相談員|assistant|アシスタント)\s*[:：]\s*",
+        "",
+        cleaned,
+        flags=re.I,
+    ).strip()
+    if re.search(r"(?:利用者|ユーザー|user)\s*[:：]", cleaned, flags=re.I):
+        raise RuntimeError("LLM response contains leaked user/prompt text; refusing TTS")
+    return cleaned
 
 
 def init_baseline_tts(
@@ -111,6 +162,7 @@ def call_subprocess_worker(
             stderr=None,  # let stderr flow to this process's terminal
             timeout=timeout_sec,
             check=False,
+            env=worker_environment(),
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
@@ -154,29 +206,95 @@ class GemmaLLM:
         self.max_new_tokens = max_new_tokens
         self.timeout_sec = timeout_sec
         self.worker = SCRIPTS_DIR / "gemma_dialogue_worker.py"
+        self._process: subprocess.Popen[str] | None = None
+        self.startup_wall_time_sec = 0.0
+
+    def _readline(self) -> str:
+        assert self._process is not None and self._process.stdout is not None
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self._process.stdout.readline)
+        try:
+            line = future.result(timeout=self.timeout_sec)
+        except FutureTimeoutError as exc:
+            self.close()
+            raise RuntimeError(
+                f"Persistent Gemma worker timed out after {self.timeout_sec}s"
+            ) from exc
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        if not line:
+            return_code = self._process.poll()
+            raise RuntimeError(
+                f"Persistent Gemma worker exited unexpectedly (code={return_code})"
+            )
+        return line
+
+    def load(self) -> None:
+        if self._process is not None:
+            return
+        command = [
+            self.python_exe,
+            str(self.worker),
+            "--model", self.model,
+            "--task", "text-generation",
+            "--device-map", self.device_map,
+            "--dtype", self.dtype,
+            "--temperature", str(self.temperature),
+            "--top-p", str(self.top_p),
+            "--max-new-tokens", str(self.max_new_tokens),
+            "--serve",
+        ]
+        started = time.perf_counter()
+        self._process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=None,
+            text=True,
+            encoding="utf-8",
+            bufsize=1,
+            env=worker_environment(),
+        )
+        ready = json.loads(self._readline())
+        if ready.get("ready") is not True:
+            self.close()
+            raise RuntimeError(f"Gemma worker did not become ready: {ready}")
+        self.startup_wall_time_sec = time.perf_counter() - started
+
+    def close(self) -> None:
+        process, self._process = self._process, None
+        if process is None:
+            return
+        if process.stdin is not None:
+            process.stdin.close()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
 
     def respond(
-        self, user_text: str, system_prompt: str = COUNSELOR_SYSTEM_PROMPT
+        self,
+        user_text: str,
+        system_prompt: str = COUNSELOR_SYSTEM_PROMPT,
+        seed: int = 0,
     ) -> tuple[str, float]:
         prompt = f"{system_prompt}\n\n利用者: {user_text}\n相談員:"
+        self.load()
+        assert self._process is not None and self._process.stdin is not None
         started = time.perf_counter()
-        result = call_subprocess_worker(
-            self.worker,
-            {"prompt": prompt},
-            [
-                "--model", self.model,
-                "--task", "text-generation",
-                "--device-map", self.device_map,
-                "--dtype", self.dtype,
-                "--temperature", str(self.temperature),
-                "--top-p", str(self.top_p),
-                "--max-new-tokens", str(self.max_new_tokens),
-            ],
-            self.python_exe,
-            self.timeout_sec,
+        self._process.stdin.write(
+            json.dumps({"prompt": prompt, "seed": seed}, ensure_ascii=False) + "\n"
         )
+        self._process.stdin.flush()
+        result = json.loads(self._readline())
+        if "error" in result:
+            raise RuntimeError(f"Gemma worker generation failed: {result['error']}")
         wall_time = time.perf_counter() - started
-        return str(result.get("text", "")).strip(), wall_time
+        return validate_spoken_response(str(result.get("text", ""))), wall_time
 
 
 class SpeechLLM:

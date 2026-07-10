@@ -13,6 +13,17 @@ import numpy as np
 
 from full_duplex_audio import read_wav_mono, resample_linear, write_wav_mono
 
+FDB_V15_BACKGROUND_PROFILE = {
+    "speaker": "distinct",
+    "gain_db": -15.0,
+    "lowpass_hz": 3000.0,
+    "echo_delay_sec": 0.1,
+    "echo_gain_db": -10.0,
+    "compression_threshold": 0.1,
+    "compression_ratio": 4.0,
+}
+FDB_V15_PROTOCOL_NAME = "Full-Duplex-Bench v1.5 static overlap protocol"
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
@@ -53,9 +64,14 @@ def parse_args() -> argparse.Namespace:
         default="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
     )
     parser.add_argument("--tts-speaker", default="Ono_Anna")
+    parser.add_argument(
+        "--tts-background-speaker",
+        default="Uncle_Fu",
+        help="Distinct Qwen3-TTS speaker used only for background_speech announcements.",
+    )
     parser.add_argument("--tts-language", default="Japanese")
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--dtype", default="bfloat16")
+    parser.add_argument("--dtype", default="float16")
     parser.add_argument("--tts-instruct", default=None)
     parser.add_argument("--tts-speed", type=float, default=1.0)
     parser.add_argument("--overwrite", action="store_true")
@@ -116,6 +132,11 @@ def parse_args() -> argparse.Namespace:
     if VALID_SPEAKERS and args.tts_speaker not in VALID_SPEAKERS:
         parser.error(
             f"--tts-speaker={args.tts_speaker!r} is invalid. "
+            f"Choose from {sorted(VALID_SPEAKERS)}"
+        )
+    if VALID_SPEAKERS and args.tts_background_speaker not in VALID_SPEAKERS:
+        parser.error(
+            f"--tts-background-speaker={args.tts_background_speaker!r} is invalid. "
             f"Choose from {sorted(VALID_SPEAKERS)}"
         )
     return args
@@ -193,6 +214,7 @@ def synthesize_raw(
     tts_backend: str,
     tts_engine: Any | None,
     tts_speaker: str,
+    speaker_role: str = "user",
 ) -> tuple[np.ndarray, int]:
     """Synthesize *text* with no speed adjustment or resampling applied."""
     if tts_backend == "qwen3":
@@ -200,7 +222,7 @@ def synthesize_raw(
             raise RuntimeError("Qwen3-TTS backend selected without a loaded engine.")
         pcm = tts_engine.synthesize(
             text,
-            speaker_role="user",
+            speaker_role=speaker_role,
             speaker_override=tts_speaker,
         )
         pcm = np.asarray(pcm, dtype=np.float32).squeeze()
@@ -237,6 +259,50 @@ def postprocess_audio(
     return pcm
 
 
+def apply_fdb_v15_background_profile(
+    pcm: np.ndarray, sample_rate: int
+) -> np.ndarray:
+    """Apply the published v1.5 far-field background-speech profile.
+
+    The paper specifies a different speaker, -15 dB attenuation, a 3 kHz
+    low-pass filter, a 100 ms echo at -10 dB, and dynamic-range compression.
+    The source release does not publish compressor coefficients, so we use a
+    deterministic 4:1 static compressor above a 0.1 linear threshold and
+    record every parameter in metadata.
+    """
+    pcm = np.asarray(pcm, dtype=np.float32)
+    if pcm.size == 0:
+        return pcm
+    cutoff = float(FDB_V15_BACKGROUND_PROFILE["lowpass_hz"])
+    # Windowed-sinc low-pass filter: dependency-free and stable on offline PBS
+    # nodes. 101 taps is sufficient at the benchmark's 24 kHz sample rate.
+    taps = 101
+    index = np.arange(taps, dtype=np.float32) - (taps - 1) / 2
+    kernel = 2 * cutoff / sample_rate * np.sinc(2 * cutoff / sample_rate * index)
+    kernel *= np.hamming(taps).astype(np.float32)
+    kernel /= kernel.sum()
+    half = taps // 2
+    filtered = np.convolve(pcm, kernel, mode="full")[half : half + len(pcm)]
+    filtered = filtered.astype(np.float32)
+
+    echo_delay = int(round(float(FDB_V15_BACKGROUND_PROFILE["echo_delay_sec"]) * sample_rate))
+    echo_gain = 10 ** (float(FDB_V15_BACKGROUND_PROFILE["echo_gain_db"]) / 20.0)
+    echoed = filtered.copy()
+    if echo_delay > 0 and echo_delay < len(echoed):
+        echoed[echo_delay:] += filtered[:-echo_delay] * echo_gain
+
+    threshold = float(FDB_V15_BACKGROUND_PROFILE["compression_threshold"])
+    ratio = float(FDB_V15_BACKGROUND_PROFILE["compression_ratio"])
+    magnitude = np.abs(echoed)
+    compressed = np.sign(echoed) * np.where(
+        magnitude <= threshold,
+        magnitude,
+        threshold + (magnitude - threshold) / ratio,
+    )
+    gain = 10 ** (float(FDB_V15_BACKGROUND_PROFILE["gain_db"]) / 20.0)
+    return np.asarray(compressed * gain, dtype=np.float32)
+
+
 def synthesize(
     text: str,
     sample_rate: int,
@@ -244,8 +310,11 @@ def synthesize(
     tts_backend: str,
     tts_engine: Any | None,
     tts_speaker: str,
+    speaker_role: str = "user",
 ) -> np.ndarray:
-    pcm, source_rate = synthesize_raw(text, tts_backend, tts_engine, tts_speaker)
+    pcm, source_rate = synthesize_raw(
+        text, tts_backend, tts_engine, tts_speaker, speaker_role
+    )
     return postprocess_audio(pcm, source_rate, sample_rate, speed)
 
 
@@ -357,6 +426,7 @@ def render_scenario(
     whole_utterance_boundaries: dict[int, tuple[np.ndarray, int, float, float]] | None = None,
     lead_in_sec: float = 0.0,
     opening_greeting: dict[str, Any] | None = None,
+    tts_background_speaker: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray | None, dict[str, Any]]:
     noisy_parts: list[np.ndarray] = []
     clean_parts: list[np.ndarray] = []
@@ -398,15 +468,25 @@ def render_scenario(
                     fragment = np.zeros(1, dtype=np.float32)
                 pcm = postprocess_audio(fragment, raw_rate, sample_rate, speed)
             else:
+                item_speaker = (
+                    tts_background_speaker
+                    if kind == "overlap_speech"
+                    and scenario.get("task") == "background_speech"
+                    and tts_background_speaker
+                    else tts_speaker
+                )
                 pcm = synthesize(
                     text,
                     sample_rate,
                     speed,
                     tts_backend,
                     tts_engine,
-                    tts_speaker,
+                    item_speaker,
                 )
             gain = float(item.get("gain", 1.0))
+            if kind == "overlap_speech" and scenario.get("task") == "background_speech":
+                pcm = apply_fdb_v15_background_profile(pcm, sample_rate)
+                gain = 1.0
             noisy_pcm = np.clip(pcm * gain, -1.0, 1.0)
             start, end = cursor, cursor + len(pcm) / sample_rate
             noisy_parts.append(noisy_pcm)
@@ -438,6 +518,12 @@ def render_scenario(
         "tts_backend": tts_backend,
         "tts_model": tts_model,
         "tts_speaker": tts_speaker,
+        "tts_background_speaker": tts_background_speaker,
+        "background_acoustic_profile": (
+            FDB_V15_BACKGROUND_PROFILE
+            if scenario.get("task") == "background_speech"
+            else None
+        ),
         "speaker": tts_speaker,
         "tts_mode": "whole-utterance" if whole_utterance_boundaries else "per-fragment",
         "duration_sec": round(len(noisy) / sample_rate, 4),
@@ -522,6 +608,7 @@ def main() -> int:
             whole_utterance_boundaries,
             lead_in_sec,
             opening_greeting,
+            args.tts_background_speaker,
         )
         write_wav_mono(sample_dir / "input.wav", noisy, args.sample_rate)
         if clean is not None:
@@ -553,6 +640,12 @@ def main() -> int:
                 "tts_backend": tts_backend,
                 "tts_model": args.tts_model,
                 "tts_speaker": args.tts_speaker,
+                "tts_background_speaker": args.tts_background_speaker,
+                "protocol": {
+                    "name": FDB_V15_PROTOCOL_NAME,
+                    "background_speech": FDB_V15_BACKGROUND_PROFILE,
+                    "paired_clean_input": True,
+                },
                 "whole_utterance": aligner is not None,
                 "opening_greeting": opening_greeting,
                 "count": len(manifest),

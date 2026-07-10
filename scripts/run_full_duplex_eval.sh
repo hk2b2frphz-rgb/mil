@@ -39,11 +39,12 @@ FDB_SCENARIOS="${FDB_SCENARIOS:-$REPO_ROOT/eval_sets/full_duplex_ja/scenarios.js
 FDB_TASKS="${FDB_TASKS:-all}"
 FDB_SEEDS="${FDB_SEEDS:-0}"
 FDB_TAIL_SEC="${FDB_TAIL_SEC:-8}"
-FDB_TTS_BACKEND="${FDB_TTS_BACKEND:-auto}"
+FDB_TTS_BACKEND="${FDB_TTS_BACKEND:-qwen3}"
 FDB_TTS_MODEL="${FDB_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
 FDB_TTS_SPEAKER="${FDB_TTS_SPEAKER:-Ono_Anna}"
+FDB_TTS_BACKGROUND_SPEAKER="${FDB_TTS_BACKGROUND_SPEAKER:-Uncle_Fu}"
 FDB_DEVICE="${FDB_DEVICE:-cuda}"
-FDB_DTYPE="${FDB_DTYPE:-bfloat16}"
+FDB_DTYPE="${FDB_DTYPE:-float16}"
 FDB_TTS_SPEED="${FDB_TTS_SPEED:-1.0}"
 FDB_WHOLE_UTTERANCE="${FDB_WHOLE_UTTERANCE:-1}"
 FDB_WHOLE_UTTERANCE_MAX_CHARS="${FDB_WHOLE_UTTERANCE_MAX_CHARS:-150}"
@@ -56,13 +57,14 @@ FDB_WHOLE_UTTERANCE_MAX_CHARS="${FDB_WHOLE_UTTERANCE_MAX_CHARS:-150}"
 FDB_OPENING_GREETING="${FDB_OPENING_GREETING:-1}"
 FDB_OPENING_GREETING_GAP_SEC="${FDB_OPENING_GREETING_GAP_SEC:-0.4}"
 if [[ "$FDB_OPENING_GREETING" == "1" ]]; then
-    FDB_DATA_DIR_DEFAULT="$REPO_ROOT/data/full_duplex_ja_greeting"
+    FDB_DATA_DIR_DEFAULT="$REPO_ROOT/data/full_duplex_ja_v2_greeting"
 else
-    FDB_DATA_DIR_DEFAULT="$REPO_ROOT/data/full_duplex_ja_nogreeting"
+    FDB_DATA_DIR_DEFAULT="$REPO_ROOT/data/full_duplex_ja_v2_nogreeting"
 fi
 FDB_DATA_DIR="${FDB_DATA_DIR:-$FDB_DATA_DIR_DEFAULT}"
 FDB_OUT_DIR="${FDB_OUT_DIR:-$REPO_ROOT/eval_runs/full_duplex/$RUN_ID}"
 REFRESH_FDB_DATA="${REFRESH_FDB_DATA:-0}"
+FDB_REQUIRE_OVERLAP="${FDB_REQUIRE_OVERLAP:-1}"
 HALF="${HALF:-1}"
 
 # Disable Triton / torch.compile -- V100 lacks support for many Triton kernels.
@@ -78,6 +80,7 @@ export TORCH_COMPILE_DISABLE=1
 # "Loading ..." / "Acoustic delay: N frames" show immediately but progress
 # then appears to stall. Unbuffering makes progress visible in real time.
 export PYTHONUNBUFFERED=1
+export FDB_GIT_COMMIT="${FDB_GIT_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 
 command -v uv >/dev/null 2>&1 || {
     echo "ERROR: uv is not available on PATH." >&2
@@ -122,6 +125,7 @@ echo "data:         $FDB_DATA_DIR"
 echo "output:       $FDB_OUT_DIR"
 echo "dtype:        $([[ "$HALF" == "1" ]] && echo float16 || echo bfloat16)"
 echo "upstream:     Full-Duplex-Bench@3e799c45a045256f47d5f1c9cda90157e2d2ec9e"
+echo "git_commit:   $FDB_GIT_COMMIT"
 echo "started_at:   $(date -Iseconds)"
 echo "================================"
 
@@ -150,6 +154,7 @@ if [[ "$REFRESH_FDB_DATA" == "1" || ! -f "$FDB_DATA_DIR/manifest.json" ]]; then
         --tts-backend "$FDB_TTS_BACKEND"
         --tts-model "$FDB_TTS_MODEL"
         --tts-speaker "$FDB_TTS_SPEAKER"
+        --tts-background-speaker "$FDB_TTS_BACKGROUND_SPEAKER"
         --device "$FDB_DEVICE"
         --dtype "$FDB_DTYPE"
         --tts-speed "$FDB_TTS_SPEED"
@@ -180,6 +185,7 @@ inference_args=(
     --tasks "$FDB_TASKS"
     --seeds "$FDB_SEEDS"
     --tail-sec "$FDB_TAIL_SEC"
+    --require-v15-profile
     --overwrite
 )
 if [[ "$HALF" == "1" ]]; then inference_args+=(--half); fi
@@ -201,6 +207,9 @@ evaluate_args=(
 )
 if [[ -f "$FDB_BACKCHANNEL_GT" ]]; then
     evaluate_args+=(--backchannel-gt "$FDB_BACKCHANNEL_GT")
+fi
+if [[ "$FDB_REQUIRE_OVERLAP" == "1" ]]; then
+    evaluate_args+=(--require-overlap)
 fi
 "${evaluate_args[@]}"
 
