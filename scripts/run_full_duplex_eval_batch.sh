@@ -38,8 +38,40 @@ command -v uv >/dev/null 2>&1 || {
 
 RESULT_LINES=()
 OUTPUT_NAMES=()
+MODEL_IDS=()
 TOTAL=0
 FAILED=0
+
+IFS=',' read -r -a GPU_IDS <<< "${CUDA_VISIBLE_DEVICES:-0}"
+PARALLELISM="${FDB_BATCH_PARALLELISM:-${#GPU_IDS[@]}}"
+if ! [[ "$PARALLELISM" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: FDB_BATCH_PARALLELISM must be a positive integer: $PARALLELISM" >&2
+    exit 1
+fi
+if [[ "$PARALLELISM" -gt "${#GPU_IDS[@]}" ]]; then
+    echo "ERROR: FDB_BATCH_PARALLELISM=$PARALLELISM exceeds visible GPU count ${#GPU_IDS[@]} ($CUDA_VISIBLE_DEVICES)." >&2
+    exit 1
+fi
+# REFRESH_FDB_DATA deliberately rebuilds shared inputs. Keep that exceptional
+# mode serial so no model can read the dataset while another rebuilds it.
+if [[ "${REFRESH_FDB_DATA:-0}" == "1" && "$PARALLELISM" -gt 1 ]]; then
+    echo "[batch] REFRESH_FDB_DATA=1: forcing serial execution for dataset consistency."
+    PARALLELISM=1
+fi
+echo "gpus:         ${GPU_IDS[*]}"
+echo "parallelism:  $PARALLELISM"
+
+WAVE_PIDS=()
+
+wait_for_wave() {
+    local pid
+    for pid in "${WAVE_PIDS[@]}"; do
+        # Workers always record their own status. A missing status file after
+        # an external kill is handled as FAILED in the final collection.
+        wait "$pid" || true
+    done
+    WAVE_PIDS=()
+}
 
 while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
     line="${raw_line%%#*}"
@@ -91,6 +123,7 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
         continue
     fi
     OUTPUT_NAMES+=("$output_name")
+    MODEL_IDS+=("$model_id")
 
     TOTAL=$((TOTAL + 1))
 
@@ -102,12 +135,27 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
     [[ -n "$model_weight" ]] && run_env+=("MODEL_WEIGHT=$model_weight")
     [[ -n "$model_config" ]] && run_env+=("MODEL_CONFIG=$model_config")
     [[ -n "$hf_repo" ]] && run_env+=("HF_REPO=$hf_repo")
+    # Which eval pipeline to run for this row. Default "moshi" runs the Moshi
+    # full-duplex script; "cascade" (set via FDB_SYSTEM=cascade in extra_env)
+    # runs the local ASR->LLM->TTS baseline instead. Both write the same
+    # $FDB_OUT_DIR/benchmark_results/summary.json, so combine_full_duplex_
+    # summaries.py lists them side by side with no special-casing.
+    row_system="moshi"
     if [[ -n "$extra_env" ]]; then
         IFS=';' read -ra pairs <<< "$extra_env"
         for pair in "${pairs[@]}"; do
             pair="$(echo "$pair" | xargs)"
-            [[ -n "$pair" ]] && run_env+=("$pair")
+            [[ -z "$pair" ]] && continue
+            if [[ "$pair" == FDB_SYSTEM=* ]]; then
+                row_system="${pair#FDB_SYSTEM=}"
+                continue
+            fi
+            run_env+=("$pair")
         done
+    fi
+    if [[ "$row_system" != "moshi" && "$row_system" != "cascade" ]]; then
+        echo "[batch] WARN: unknown FDB_SYSTEM='$row_system' for $model_id, treating as moshi" >&2
+        row_system="moshi"
     fi
 
     # Precedence for FDB_OPENING_GREETING, highest first:
@@ -139,26 +187,78 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
         fi
     fi
 
+    if [[ "$row_system" == "cascade" ]]; then
+        eval_script="scripts/run_full_duplex_cascade_eval.sh"
+    else
+        eval_script="scripts/run_full_duplex_eval.sh"
+    fi
+
     echo
     echo "===== [$TOTAL] model_id=$model_id output_name=$output_name ====="
-    echo "model_weight: ${model_weight:-<hf default>}"
-    echo "model_config: ${model_config:-<hf default>}"
+    echo "system:       $row_system"
+    [[ "$row_system" == "moshi" ]] && echo "model_weight: ${model_weight:-<hf default>}"
+    [[ "$row_system" == "moshi" ]] && echo "model_config: ${model_config:-<hf default>}"
     [[ "$output_name" != "$model_id" ]] && echo "output_name:  $output_name"
     [[ -n "$extra_env" ]] && echo "extra_env:    $extra_env"
     [[ -n "$greeting_source" ]] && echo "opening_greeting: $greeting_source"
 
-    model_start=$(date +%s)
-    if env "${run_env[@]}" bash scripts/run_full_duplex_eval.sh; then
-        status="ok"
+    row_requires_serial=0
+    for kv in "${run_env[@]}"; do
+        [[ "$kv" == "REFRESH_FDB_DATA=1" ]] && row_requires_serial=1
+    done
+    if [[ "$row_requires_serial" == "1" ]]; then
+        # A row-level refresh can overwrite a dataset that other rows read.
+        # Drain all workers and run this one alone.
+        wait_for_wave
+    fi
+
+    # Fill one GPU wave at a time. Every worker is a separate process with a
+    # single visible GPU, so model state and random-number streams remain as
+    # isolated as in the former serial execution.
+    if [[ "${#WAVE_PIDS[@]}" -ge "$PARALLELISM" ]]; then
+        wait_for_wave
+    fi
+    gpu_id="${GPU_IDS[${#WAVE_PIDS[@]}]}"
+    status_file="$BATCH_OUT_DIR/.${output_name}.batch_status"
+    rm -f "$status_file"
+    mkdir -p "$BATCH_OUT_DIR/$output_name"
+    (
+        model_start=$(date +%s)
+        if env CUDA_VISIBLE_DEVICES="$gpu_id" "${run_env[@]}" bash "$eval_script"; then
+            status="ok"
+        else
+            status="FAILED"
+        fi
+        model_end=$(date +%s)
+        elapsed=$((model_end - model_start))
+        printf '%s|%s\n' "$status" "$elapsed" > "$status_file"
+        echo "[batch] model_id=$model_id output_name=$output_name system=$row_system gpu=$gpu_id status=$status elapsed_sec=$elapsed"
+    ) > >(tee -a "$BATCH_OUT_DIR/$output_name/batch_worker.log") 2>&1 &
+    WAVE_PIDS+=("$!")
+    echo "[batch] started model_id=$model_id on gpu=$gpu_id pid=$!"
+    if [[ "$row_requires_serial" == "1" ]]; then
+        wait_for_wave
+    fi
+done < "$MODELS_FILE"
+
+wait_for_wave
+
+for i in "${!OUTPUT_NAMES[@]}"; do
+    model_id="${MODEL_IDS[$i]}"
+    output_name="${OUTPUT_NAMES[$i]}"
+    status_file="$BATCH_OUT_DIR/.${output_name}.batch_status"
+    if [[ -f "$status_file" ]]; then
+        IFS='|' read -r status elapsed < "$status_file"
+        rm -f "$status_file"
     else
         status="FAILED"
+        elapsed="unknown"
+    fi
+    if [[ "$status" != "ok" ]]; then
         FAILED=$((FAILED + 1))
     fi
-    model_end=$(date +%s)
-    elapsed=$((model_end - model_start))
-    echo "[batch] model_id=$model_id output_name=$output_name status=$status elapsed_sec=$elapsed"
     RESULT_LINES+=("$model_id|$output_name|$status|$elapsed")
-done < "$MODELS_FILE"
+done
 
 echo
 echo "===== Batch summary ====="

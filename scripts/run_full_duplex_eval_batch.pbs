@@ -2,13 +2,13 @@
 #PBS -S /bin/bash
 #PBS -N fdb_ja_batch
 #PBS -q xvn_s
-#PBS -l select=1:res=small
+#PBS -l select=1:res=middle2
 #PBS -l walltime=04:00:00
 #PBS -j oe
 #PBS -V
 
 # Runs scripts/run_full_duplex_eval.sh once per model listed in MODELS_FILE,
-# one after another in a single job, writing each model's results under
+# in parallel across the four allocated GPUs, writing each model's results under
 # BATCH_OUT_DIR/<output_name>/ plus a combined_summary.json comparing every
 # model side by side (eval/combine_full_duplex_summaries.py). One model's
 # failure does not stop the remaining models -- see the summary table at the
@@ -26,6 +26,8 @@
 # column overrides these for that row only):
 #   BATCH_ID=my_batch_label        Defaults to batch_<PBS job id>.
 #   BATCH_OUT_DIR=...              Defaults to eval_runs/full_duplex_batches/<BATCH_ID>.
+#   FDB_BATCH_GPUS=0,1,2,3         GPU IDs assigned to model workers.
+#   FDB_BATCH_PARALLELISM=4        Number of concurrent models (max: visible GPUs).
 #   FDB_TASKS=pause_handling,smooth_turn_taking,user_interruption
 #   FDB_SEEDS=0,1,2
 #   FDB_TAIL_SEC=8
@@ -53,7 +55,13 @@ MODELS_FILE="${MODELS_FILE:?Set MODELS_FILE to a manifest listing models to eval
 JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
 JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
 export BATCH_ID="${BATCH_ID:-batch_${JOB_ID_SHORT}}"
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+# Do not inherit a stale single-GPU CUDA_VISIBLE_DEVICES through #PBS -V.
+# FDB_BATCH_GPUS is the explicit opt-out when fewer allocated GPUs are wanted.
+export CUDA_VISIBLE_DEVICES="${FDB_BATCH_GPUS:-0,1,2,3}"
+if [[ -z "${FDB_BATCH_PARALLELISM:-}" ]]; then
+    IFS=',' read -r -a _batch_gpu_ids <<< "$CUDA_VISIBLE_DEVICES"
+    export FDB_BATCH_PARALLELISM="${#_batch_gpu_ids[@]}"
+fi
 export HALF="${HALF:-1}"
 export FDB_TTS_BACKEND="${FDB_TTS_BACKEND:-auto}"
 export FDB_TTS_MODEL="${FDB_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
@@ -74,12 +82,13 @@ mkdir -p experiments/pbs_logs
 exec > >(tee -a "experiments/pbs_logs/full_duplex_batch_${BATCH_ID}.log") 2>&1
 
 echo "job_id:      ${PBS_JOBID:-n/a}"
-echo "queue:       xvn_s"
+echo "queue:       xvn_s (middle2 / 4 GPU)"
 echo "host:        $(hostname)"
 echo "workdir:     $(pwd)"
 echo "batch_id:    $BATCH_ID"
 echo "models_file: $MODELS_FILE"
 echo "cuda:        $CUDA_VISIBLE_DEVICES"
+echo "parallelism: $FDB_BATCH_PARALLELISM"
 
 if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi

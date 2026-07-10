@@ -125,6 +125,23 @@ echo "upstream:     Full-Duplex-Bench@3e799c45a045256f47d5f1c9cda90157e2d2ec9e"
 echo "started_at:   $(date -Iseconds)"
 echo "================================"
 
+# Parallel batch workers can share this dataset. Serialize only its one-time
+# construction, then recheck the manifest after acquiring the lock so waiting
+# workers reuse exactly the bytes produced by the first worker.
+FDB_DATA_LOCK_FD=""
+if [[ "$REFRESH_FDB_DATA" == "1" || ! -f "$FDB_DATA_DIR/manifest.json" ]]; then
+    if [[ "${FDB_BATCH_PARALLELISM:-1}" -gt 1 ]]; then
+        command -v flock >/dev/null 2>&1 || {
+            echo "ERROR: flock is required for parallel dataset construction." >&2
+            exit 1
+        }
+        mkdir -p "$(dirname "$FDB_DATA_DIR")"
+        exec {FDB_DATA_LOCK_FD}>"${FDB_DATA_DIR}.build.lock"
+        echo "[fdb] waiting for dataset build lock: ${FDB_DATA_DIR}.build.lock"
+        flock "$FDB_DATA_LOCK_FD"
+    fi
+fi
+
 if [[ "$REFRESH_FDB_DATA" == "1" || ! -f "$FDB_DATA_DIR/manifest.json" ]]; then
     build_args=(
         uv run python eval/build_full_duplex_ja_dataset.py
@@ -148,6 +165,10 @@ if [[ "$REFRESH_FDB_DATA" == "1" || ! -f "$FDB_DATA_DIR/manifest.json" ]]; then
     "${build_args[@]}"
 else
     echo "[fdb] reusing Japanese dataset: $FDB_DATA_DIR"
+fi
+if [[ -n "$FDB_DATA_LOCK_FD" ]]; then
+    flock -u "$FDB_DATA_LOCK_FD"
+    exec {FDB_DATA_LOCK_FD}>&-
 fi
 
 inference_args=(

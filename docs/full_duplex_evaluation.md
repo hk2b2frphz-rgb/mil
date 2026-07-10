@@ -227,13 +227,20 @@ and uses energy VAD.
 
 Re-running `qsub` by hand for every checkpoint after each training update is
 tedious. `scripts/run_full_duplex_eval_batch.pbs` runs the same pipeline once
-per model listed in a manifest file, one after another in a single job:
+per model listed in a manifest file, with up to four independent model workers
+on the four GPUs allocated by `res=middle2`:
 
 ```bash
 cp scripts/models_manifest.example.txt scripts/models_manifest.txt
 # edit scripts/models_manifest.txt to list the checkpoints to compare
 qsub -v MODELS_FILE=scripts/models_manifest.txt scripts/run_full_duplex_eval_batch.pbs
 ```
+
+Set `FDB_BATCH_PARALLELISM=1` to force the former serial behavior. Each worker
+sees exactly one GPU, retains its own seeded model process, and writes to its
+own output directory. Dataset construction is locked and shared; an explicit
+`REFRESH_FDB_DATA=1` automatically forces serial execution so inputs cannot be
+rebuilt while another model reads them.
 
 Manifest format (one model per line, `|`-delimited since `|`-conflicts with
 comma-separated fields like `FDB_SEEDS=0,1,2`; `#` starts a comment):
@@ -273,6 +280,27 @@ stable in run metadata. It has the same allowed characters as `model_id`
 otherwise fine-tuned-model batch). See
 [`scripts/models_manifest.example.txt`](../scripts/models_manifest.example.txt)
 for the full field reference.
+
+To compare a **local cascade (ASR->LLM->TTS) baseline** side by side with the
+Moshi models in the same batch, add `FDB_SYSTEM=cascade` to that row's
+`extra_env`. The batch then runs
+[`scripts/run_full_duplex_cascade_eval.sh`](../scripts/run_full_duplex_cascade_eval.sh)
+instead of the Moshi script (`model_weight`/`model_config`/`hf_repo` are
+ignored for that row), and tunes the cascade via `CASCADE_*` keys in the same
+`extra_env`:
+
+```text
+cascade_gemma2b||||FDB_SYSTEM=cascade;CASCADE_LLM_MODEL=google/gemma-2-2b-it||cascade_gemma2b
+```
+
+The cascade row writes the same `benchmark_results/summary.json` layout, so it
+lands in `combined_summary.json` next to the Moshi models with no extra step.
+Because it has no `model_weight`, it inherits the `FDB_OPENING_GREETING=0`
+auto-default and reuses the shared no-greeting dataset -- exactly what a
+turn-based baseline (never trained to say Moshi's greeting) needs. Which
+cascade metrics are and aren't meaningful is spelled out in the
+[Comparing against local cascade / SpeechLLM baselines](#comparing-against-local-cascade--speechllm-baselines)
+section below.
 
 One model's failure does not stop the rest of the batch -- each model's
 success/failure and elapsed time is printed in a summary table at the end of
