@@ -196,6 +196,15 @@ def main() -> int:
         variants = ["input"]
         if (source_dir / "clean_input.wav").exists():
             variants.append("clean_input")
+        # Audio is identical for every seed.  Decode each WAV once per case
+        # rather than repeating filesystem I/O and PCM conversion inside the
+        # seed loop.
+        variant_pcm = {
+            variant: recorder.load_wav_mono(
+                source_dir / f"{variant}.wav", sample_rate
+            )
+            for variant in variants
+        }
         for seed in seeds:
             trial_dir = out_dir / sample["task"] / sample["id"] / f"seed_{seed}"
             trial_dir.mkdir(parents=True, exist_ok=True)
@@ -216,7 +225,7 @@ def main() -> int:
                     print(f"[fdb] skip existing {output_wav}")
                     continue
                 shutil.copy2(input_wav, trial_dir / f"{variant}.wav")
-                pcm = recorder.load_wav_mono(input_wav, sample_rate)
+                pcm = variant_pcm[variant]
                 started = time.perf_counter()
                 result = recorder.run_trial(
                     pcm=pcm,

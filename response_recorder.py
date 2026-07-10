@@ -509,6 +509,18 @@ def run_trial(
     # ---- Fix seed --------------------------------------------------------
     seed_all(seed)
 
+    # Moving one 80-ms frame to CUDA at a time adds an allocation and a
+    # host-to-device transfer to every streaming step.  The complete trial is
+    # only a few MB, so stage it on the target device once and take views in
+    # the loop.  Padding is done before the transfer to keep the final frame
+    # byte-for-byte equivalent to the former per-frame np.pad path.
+    padded_samples = n_steps * frame_size
+    if len(full_pcm) < padded_samples:
+        full_pcm = np.pad(full_pcm, (0, padded_samples - len(full_pcm)))
+    trial_pcm = torch.from_numpy(
+        np.ascontiguousarray(full_pcm[:padded_samples], dtype=np.float32)
+    ).to(device)
+
     audio_frames: list[torch.Tensor] = []   # each: (num_codebooks, 1) cpu
     text_events: list[dict] = []
     first_audio_step: Optional[int] = None
@@ -520,19 +532,9 @@ def run_trial(
             with mimi.streaming(1):
                 for step in range(n_steps):
                     start = step * frame_size
-                    chunk_np = full_pcm[start: start + frame_size]
-
-                    # Pad last chunk if shorter than frame_size
-                    if len(chunk_np) < frame_size:
-                        chunk_np = np.pad(
-                            chunk_np, (0, frame_size - len(chunk_np))
-                        )
-
                     # (1, 1, frame_size)
                     chunk = (
-                        torch.from_numpy(chunk_np)
-                        .float()
-                        .to(device)
+                        trial_pcm[start: start + frame_size]
                         .unsqueeze(0)
                         .unsqueeze(0)
                     )
@@ -547,8 +549,12 @@ def run_trial(
                         continue
 
                     # Split text token and audio tokens
-                    text_id = int(out[0, 0, 0].item())
-                    audio_tok = out[0, 1:, :].cpu()  # (num_codebooks, 1)
+                    # Transfer the tiny combined text/audio result once.  A
+                    # separate scalar .item() followed by .cpu() causes two
+                    # CUDA synchronizations per generated frame.
+                    out_cpu = out[0].cpu()
+                    text_id = int(out_cpu[0, 0].item())
+                    audio_tok = out_cpu[1:, :]  # (num_codebooks, 1)
                     if _audio_tokens_are_decodable(audio_tok):
                         if first_audio_step is None:
                             first_audio_step = step
