@@ -66,6 +66,7 @@ FDB_DATA_DIR="${FDB_DATA_DIR:-$PWD/data/full_duplex_ja_v2_nogreeting}"
 REFRESH_FDB_DATA="${REFRESH_FDB_DATA:-0}"
 FDB_OUT_DIR="${FDB_OUT_DIR:-$PWD/eval_runs/full_duplex/$CASCADE_MODEL_ID}"
 FDB_BACKCHANNEL_GT="${FDB_BACKCHANNEL_GT:-$PWD/eval_sets/full_duplex_ja/backchannel_gt.json}"
+FDB_ASR_MODEL="${FDB_ASR_MODEL:-nvidia/parakeet-tdt-0.6b-v2}"
 
 LONELINESS_SCENARIOS="${LONELINESS_SCENARIOS:-$PWD/eval_sets/loneliness_support.jsonl}"
 LONELINESS_OUT_DIR="${LONELINESS_OUT_DIR:-$PWD/results/${CASCADE_MODEL_ID}_loneliness}"
@@ -149,9 +150,8 @@ if [[ "$SKIP_FULL_DUPLEX" != "1" ]]; then
 
     uv run python eval/align_full_duplex_asr.py \
         --run-dir "$FDB_OUT_DIR/inference" \
-        --asr-model "$CASCADE_ASR_MODEL" \
+        --asr-model "$FDB_ASR_MODEL" \
         --device "$CASCADE_ASR_DEVICE" \
-        --compute-type "$CASCADE_ASR_COMPUTE_TYPE" \
         --overwrite
     uv run python eval/full_duplex_official_timing.py --run-dir "$FDB_OUT_DIR/inference"
 

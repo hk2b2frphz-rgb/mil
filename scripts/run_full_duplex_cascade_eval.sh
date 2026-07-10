@@ -69,6 +69,7 @@ FDB_TTS_SPEAKER="${FDB_TTS_SPEAKER:-Ono_Anna}"
 FDB_TTS_BACKGROUND_SPEAKER="${FDB_TTS_BACKGROUND_SPEAKER:-Uncle_Fu}"
 FDB_DEVICE="${FDB_DEVICE:-cuda}"
 FDB_DTYPE="${FDB_DTYPE:-float16}"
+FDB_ASR_MODEL="${FDB_ASR_MODEL:-nvidia/parakeet-tdt-0.6b-v2}"
 FDB_TTS_SPEED="${FDB_TTS_SPEED:-1.0}"
 FDB_WHOLE_UTTERANCE="${FDB_WHOLE_UTTERANCE:-1}"
 FDB_WHOLE_UTTERANCE_MAX_CHARS="${FDB_WHOLE_UTTERANCE_MAX_CHARS:-150}"
@@ -202,9 +203,8 @@ uv run python eval/run_local_baseline_full_duplex.py \
 
 uv run python eval/align_full_duplex_asr.py \
     --run-dir "$FDB_OUT_DIR/inference" \
-    --asr-model "$CASCADE_ASR_MODEL" \
+    --asr-model "$FDB_ASR_MODEL" \
     --device "$CASCADE_ASR_DEVICE" \
-    --compute-type "$CASCADE_ASR_COMPUTE_TYPE" \
     --overwrite
 uv run python eval/full_duplex_official_timing.py --run-dir "$FDB_OUT_DIR/inference"
 

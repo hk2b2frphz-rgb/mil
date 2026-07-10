@@ -18,6 +18,7 @@ dependencies = [
     "einops",
     "faster-whisper",
     "librosa",
+    "nemo_toolkit[asr]",
     "orjson",
     "tiktoken",
     "torchcodec",
