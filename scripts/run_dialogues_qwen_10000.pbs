@@ -284,6 +284,7 @@ test -s "$DIALOGUES_FINAL"
 uv run python scripts/report_dialogue_diversity.py \
     --in "$DIALOGUES_FINAL" \
     --out "$OUT_ROOT/diversity_report.txt" \
+    --nearest-jsonl "$OUT_ROOT/diversity_neighbors.jsonl" \
     --samples 8 || echo "WARNING: diversity report failed (dialogues are still saved)." >&2
 
 echo "dialogues: $DIALOGUES_FINAL"

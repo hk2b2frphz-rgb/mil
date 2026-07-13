@@ -268,6 +268,7 @@ test -s "$DIALOGUES_FINAL"
 uv run python scripts/report_dialogue_diversity.py \
     --in "$DIALOGUES_FINAL" \
     --out "$OUT_ROOT/diversity_report.txt" \
+    --nearest-jsonl "$OUT_ROOT/diversity_neighbors.jsonl" \
     --samples 5
 
 echo "dialogues: $DIALOGUES_FINAL"
