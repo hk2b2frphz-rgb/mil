@@ -16,8 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-PROFILE_NAME = "clarify_fd_ja"
-PROFILE_VERSION = 1
+PROFILE_NAME = "clarify_fd"
+PROFILE_VERSION = 2
 
 
 @dataclass
@@ -34,7 +34,9 @@ class BaseItem:
     slot_text: str              #   utterance == pre + slot + post
     post_text: str
     repair_text: str            # scripted user repair if the model asks
-    source: str = "massive_ja"  # provenance
+    source: str = "massive"     # provenance (massive|slurp|template|demo)
+    language: str = "ja"        # "en" | "ja" (drives detection/templates)
+    audio_source: str = "tts"   # "tts" | "real" (real = corpus recording)
     meta: dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
@@ -105,6 +107,9 @@ def write_manifest(
         "n_cases": len(cases),
         "conditions": sorted({c.condition for c in cases}),
         "arms": sorted({c.base.arm for c in cases}),
+        "languages": sorted({c.base.language for c in cases}),
+        "audio_sources": sorted({c.base.audio_source for c in cases}),
+        "corpora": sorted({c.base.source for c in cases}),
     }
     if profile_extra:
         header.update(profile_extra)

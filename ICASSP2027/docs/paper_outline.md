@@ -44,11 +44,13 @@ related_work.md §2 を圧縮。表は入れず1段落×4。
 - 最小ペア設計(音響のみ異なる) + 軽劣化confirm(ショートカット防止)
 
 ### 5. Experiments (1.2p)
-- 表1: 主結果 — 条件×モデル CRR/SSR/HCR (base, jmoshi, task_only,
-  clarify_lexical, clarify_full, cascade)
+- 表1: 主結果 — 条件×モデル CRR/SSR/HCR
+  (moshiko/moshika/llmjp/jmoshi zero-shot, task_only, clarify_lexical,
+  clarify_full, cascade)。コーパス列 = MASSIVE-en / SLURP / MASSIVE-ja
 - 図2: CRR vs SNR(較正曲線; cascadeのROC上に各モデルの動作点)
 - 図3: 選択的リスク-カバレッジ
-- 表2: FDB-JA退行チェック(TOR/latency/backchannel) + judge一致κ
+- 表2: アブレーション(A2最小ペア除去 / A3軽劣化除去 / A6合成→実転移)
+  + FDB-JA退行チェック + judge一致κ
 - 分析: full_snr0 vs 局所劣化(局所性の必要性)、underspecified
   (意味的曖昧)への転移、T-CRRの内訳
 
@@ -58,10 +60,12 @@ related_work.md §2 を圧縮。表は入れず1段落×4。
 
 | 主張 | 証拠 |
 |---|---|
-| E2Eは聞き返せない | base/jmoshi の CRR≈0 + HCR高(表1) |
+| E2Eは聞き返せない(モデル・言語横断) | moshiko/moshika/llmjp/jmoshi の CRR≈0 + HCR高(表1) |
 | タスクFTだけでは尋ねない | task_only の hit低 |
 | 語彙学習は音響に般化しない | clarify_lexical: underspec hit高 / acoustic hit低 |
-| 音響最小ペアで較正された聞き返し | clarify_full: SNR単調なCRR(図2)+FA低 |
+| 音響最小ペアで較正された聞き返し | clarify_full: SNR単調なCRR(図2)+FA低; A2除去で崩れる(表2) |
+| ショートカットでなく情報喪失に応答 | A3除去でclean FA上昇 / full_snr0 vs 局所の対比 |
+| 実音声へ転移 | MASSIVE-TTS学習 → SLURP実音声eval(A6, 表2) |
 | 明示信頼度(カスケード)との差 | cascade ROC と各モデル動作点の距離 |
 | 副作用なし | FDB-JA指標維持(表2) |
 

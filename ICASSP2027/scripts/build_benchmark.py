@@ -2,21 +2,27 @@
 """Build the clarification benchmark dataset (audio + manifest).
 
 Pipeline per acoustic base item:
-  1. TTS-synthesize the full user utterance (Qwen3-TTS; pyopenjtalk
-     fallback) in one call so prosody is natural across the slot.
+  1. Obtain the clean carrier audio: TTS-synthesize the utterance
+     (MASSIVE; Qwen3-TTS, one call so prosody is natural across the slot)
+     or load the real corpus recording (SLURP).
   2. Forced-align (MMS_FA) the pre/slot/post texts to locate the slot span.
   3. Render every corruption condition from the shared registry, writing
-     the corrupted wav, the clean wav, and the pre-synthesized repair turn.
+     the corrupted wav, the clean wav, and the pre-synthesized repair turn
+     (always TTS).
   4. Optionally annotate every case with the weak-ASR recoverability
      oracle (--oracle).
 
-Input source priority: --massive-jsonl (pre-exported rows for offline
-nodes) > HF `AmazonScience/massive` (needs network/proxy) > --demo
-(built-in items, smoke tests only).
+Corpora x languages:
+  --language en --corpus massive       MASSIVE en-US, TTS (primary)
+  --language en --corpus slurp         SLURP real recordings
+                                       (--slurp-jsonl / --slurp-audio-dir)
+  --language ja --corpus massive       MASSIVE ja-JP, TTS (generality)
+  --demo                               built-in items, smoke tests only
 
 Run on a GPU node:
   uv run python ICASSP2027/scripts/build_benchmark.py \
-      --out-dir ICASSP2027/runs/bench_v1 --max-items 60 --oracle
+      --out-dir ICASSP2027/runs/bench_en_massive \
+      --language en --corpus massive --max-items 60 --oracle
 """
 
 from __future__ import annotations
@@ -34,7 +40,8 @@ for p in (REPO_ROOT, REPO_ROOT / "eval", REPO_ROOT / "scripts",
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from clarify import corruptions, slots  # noqa: E402
+from clarify import corpora, corruptions, slots  # noqa: E402
+from clarify.lang import get_pack  # noqa: E402
 from clarify.scenario import (  # noqa: E402
     BaseItem, BenchmarkCase, case_seed, write_manifest,
 )
@@ -43,29 +50,52 @@ from clarify.scenario import (  # noqa: E402
 import build_full_duplex_ja_dataset as fdb  # noqa: E402
 from full_duplex_audio import write_wav_mono  # noqa: E402
 
-DEMO_ITEMS: list[dict] = [
-    {"id": "demo0", "intent": "alarm_set",
-     "annot_utt": "明日の[time : 朝7時]にアラームをかけて",
-     "utt": "明日の朝7時にアラームをかけて"},
-    {"id": "demo1", "intent": "calendar_set",
-     "annot_utt": "[date : 金曜日]に歯医者の予定を入れて",
-     "utt": "金曜日に歯医者の予定を入れて"},
-    {"id": "demo2", "intent": "play_music",
-     "annot_utt": "[artist_name : 米津玄師]の曲をかけて",
-     "utt": "米津玄師の曲をかけて"},
-    {"id": "demo3", "intent": "transport_query",
-     "annot_utt": "[place_name : 横浜駅]までの終電を調べて",
-     "utt": "横浜駅までの終電を調べて"},
-]
+DEMO_ITEMS: dict[str, list[dict]] = {
+    "ja": [
+        {"id": "demo0", "intent": "alarm_set",
+         "annot_utt": "明日の[time : 朝7時]にアラームをかけて",
+         "utt": "明日の朝7時にアラームをかけて"},
+        {"id": "demo1", "intent": "calendar_set",
+         "annot_utt": "[date : 金曜日]に歯医者の予定を入れて",
+         "utt": "金曜日に歯医者の予定を入れて"},
+        {"id": "demo2", "intent": "play_music",
+         "annot_utt": "[artist_name : 米津玄師]の曲をかけて",
+         "utt": "米津玄師の曲をかけて"},
+        {"id": "demo3", "intent": "transport_query",
+         "annot_utt": "[place_name : 横浜駅]までの終電を調べて",
+         "utt": "横浜駅までの終電を調べて"},
+    ],
+    "en": [
+        {"id": "demo0", "intent": "alarm_set",
+         "annot_utt": "wake me up at [time : seven am] tomorrow",
+         "utt": "wake me up at seven am tomorrow"},
+        {"id": "demo1", "intent": "calendar_set",
+         "annot_utt": "add a dentist appointment on [date : friday]",
+         "utt": "add a dentist appointment on friday"},
+        {"id": "demo2", "intent": "play_music",
+         "annot_utt": "play some songs by [artist_name : taylor swift]",
+         "utt": "play some songs by taylor swift"},
+        {"id": "demo3", "intent": "transport_query",
+         "annot_utt": "find the last train to [place_name : central station]",
+         "utt": "find the last train to central station"},
+    ],
+}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-dir", required=True, type=Path)
+    parser.add_argument("--language", default="en", choices=["en", "ja"])
+    parser.add_argument("--corpus", default="massive",
+                        choices=["massive", "slurp"])
     parser.add_argument("--split", default="test",
                         help="MASSIVE split for base items.")
     parser.add_argument("--massive-jsonl", type=Path, default=None,
-                        help="Pre-exported MASSIVE ja-JP rows (offline).")
+                        help="Pre-exported MASSIVE rows (offline).")
+    parser.add_argument("--slurp-jsonl", type=Path, default=None,
+                        help="SLURP metadata jsonl (e.g. dataset/slurp/test.jsonl).")
+    parser.add_argument("--slurp-audio-dir", type=Path, default=None,
+                        help="Directory containing slurp_real audio files.")
     parser.add_argument("--demo", action="store_true",
                         help="Use built-in demo items (smoke test).")
     parser.add_argument("--max-items", type=int, default=60)
@@ -80,8 +110,10 @@ def parse_args() -> argparse.Namespace:
                         choices=["auto", "qwen3", "pyopenjtalk"])
     parser.add_argument("--tts-model",
                         default="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice")
-    parser.add_argument("--tts-speaker", default="Ono_Anna")
-    parser.add_argument("--tts-language", default="ja")
+    parser.add_argument("--tts-speaker", default=None,
+                        help="Default: language pack's speaker.")
+    parser.add_argument("--tts-language", default=None,
+                        help="Default: language pack's TTS language.")
     parser.add_argument("--tts-instruct", default=None)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dtype", default="float16")
@@ -93,26 +125,25 @@ def parse_args() -> argparse.Namespace:
 
 def load_rows(args: argparse.Namespace) -> list[dict]:
     if args.demo:
-        return DEMO_ITEMS
-    if args.massive_jsonl:
-        rows = []
-        with args.massive_jsonl.open(encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if line:
-                    rows.append(json.loads(line))
+        rows = [dict(r) for r in DEMO_ITEMS[args.language]]
+        for row in rows:
+            row["source"] = "demo"
+            row["audio_file"] = None
         return rows
-    from datasets import load_dataset
+    return corpora.load_corpus(
+        args.corpus, args.language, split=args.split,
+        massive_jsonl=args.massive_jsonl,
+        slurp_jsonl=args.slurp_jsonl,
+        slurp_audio_dir=args.slurp_audio_dir,
+    )
 
-    ds = load_dataset("AmazonScience/massive", "ja-JP", split=args.split)
-    intent_names = ds.features["intent"].names
-    rows = []
-    for row in ds:
-        row = dict(row)
-        if isinstance(row.get("intent"), int):
-            row["intent"] = intent_names[row["intent"]]
-        rows.append(row)
-    return rows
+
+def load_real_audio(path: Path, sample_rate: int) -> np.ndarray:
+    """Load a corpus recording (flac/wav) as mono float32 at sample_rate."""
+    import librosa
+
+    pcm, _sr = librosa.load(str(path), sr=sample_rate, mono=True)
+    return np.asarray(pcm, dtype=np.float32)
 
 
 def locate_slot_span(
@@ -151,6 +182,8 @@ def proportional_span(
 
 def main() -> int:
     args = parse_args()
+    pack = get_pack(args.language)
+    tts_speaker = args.tts_speaker or pack.tts_default_speaker
     out_dir: Path = args.out_dir
     audio_dir = out_dir / "audio"
     if out_dir.exists() and any(out_dir.iterdir()) and not args.overwrite:
@@ -158,12 +191,15 @@ def main() -> int:
     audio_dir.mkdir(parents=True, exist_ok=True)
 
     rows = load_rows(args)
-    items = slots.select_base_items(rows, max_items=args.max_items)
+    items = slots.select_base_items(rows, language=args.language,
+                                    max_items=args.max_items)
     if not items:
         raise SystemExit("no acoustic base items selected; check input rows")
-    print(f"[bench] selected {len(items)} acoustic base items")
-    if not args.no_underspecified:
-        under = slots.build_underspecified_items()
+    n_real = sum(1 for i in items if i.audio_source == "real")
+    print(f"[bench] selected {len(items)} acoustic base items "
+          f"({n_real} with real audio) [{args.language}/{args.corpus}]")
+    if not args.no_underspecified and args.corpus == "massive":
+        under = slots.build_underspecified_items(args.language)
         print(f"[bench] plus {len(under)} underspecified items")
     else:
         under = []
@@ -176,13 +212,22 @@ def main() -> int:
             raise SystemExit(f"unknown conditions: {sorted(unknown)}")
         all_conditions = [c for c in all_conditions if c.name in wanted]
 
+    # Fake args namespace for the shared TTS initializer.
+    args.tts_speaker = tts_speaker
+    if args.tts_language is None:
+        args.tts_language = pack.tts_language
     tts_backend, tts_engine = fdb.initialize_tts(args)
+    if args.language == "en" and tts_backend == "pyopenjtalk":
+        raise SystemExit(
+            "pyopenjtalk cannot synthesize English; qwen-tts must be "
+            "available for --language en (use --tts-backend qwen3)."
+        )
     aligner = fdb.initialize_aligner(True, args.device)
     sr = args.sample_rate
 
     def synth(text: str) -> np.ndarray:
         return fdb.synthesize(
-            text, sr, args.speed, tts_backend, tts_engine, args.tts_speaker,
+            text, sr, args.speed, tts_backend, tts_engine, tts_speaker,
             speaker_role="user",
         )
 
@@ -190,7 +235,10 @@ def main() -> int:
     span_fallbacks = 0
     for item in items + under:
         item.validate()
-        clean = synth(item.utterance_text)
+        if item.audio_source == "real":
+            clean = load_real_audio(Path(item.meta["audio_file"]), sr)
+        else:
+            clean = synth(item.utterance_text)
         repair = synth(item.repair_text)
         clean_rel = f"audio/{item.base_id}__clean.wav"
         repair_rel = f"audio/{item.base_id}__repair.wav"
@@ -234,18 +282,22 @@ def main() -> int:
                 span_end_sec=None if span is None else round(span[1], 4),
                 sample_rate=sr,
                 seed_base=seed,
-                tts={"backend": tts_backend, "speaker": args.tts_speaker,
+                tts={"backend": tts_backend, "speaker": tts_speaker,
                      "model": args.tts_model, "speed": args.speed,
-                     "span_source": span_source},
+                     "span_source": span_source,
+                     "carrier": item.audio_source},
             ))
 
     write_manifest(out_dir, cases, profile_extra={
+        "language": args.language,
+        "corpus": args.corpus,
         "tts_backend": tts_backend,
         "n_acoustic_items": len(items),
         "n_underspecified_items": len(under),
         "span_alignment_fallbacks": span_fallbacks,
-        "source": ("demo" if args.demo
-                   else str(args.massive_jsonl or f"massive:{args.split}")),
+        "source": ("demo" if args.demo else
+                   str(args.massive_jsonl or args.slurp_jsonl
+                       or f"{args.corpus}:{args.split}")),
     })
     print(f"[bench] wrote {len(cases)} cases to {out_dir} "
           f"(span fallbacks: {span_fallbacks})")

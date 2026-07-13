@@ -24,8 +24,8 @@ for p in (REPO_ROOT, REPO_ROOT / "ICASSP2027"):
         sys.path.insert(0, str(p))
 
 from clarify.metrics import (  # noqa: E402
-    TrialScore, aggregate_by_condition, decision_quality,
-    paired_bootstrap_delta, read_scores,
+    TrialScore, aggregate_by_condition, aggregate_grouped,
+    decision_quality, paired_bootstrap_delta, read_scores,
 )
 
 KEY_METRICS = {
@@ -94,6 +94,8 @@ def main() -> int:
             "n_trials": len(scores),
             "by_condition": aggregate_by_condition(scores),
             "decision_quality": decision_quality(scores),
+            "by_corpus": aggregate_grouped(scores, lambda s: s.source),
+            "by_language": aggregate_grouped(scores, lambda s: s.language),
         }
         if name != baseline:
             deltas = {}

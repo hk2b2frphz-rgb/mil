@@ -44,6 +44,7 @@ class PolicyConfig:
     slot_type: str
     slot_value: str | None
     utterance_end_sec: float        # when the base user audio ends
+    language: str = "ja"            # detector language pack
     turn_gap_sec: float = 1.2       # silence in text stream that ends a turn
     overlap_slack_sec: float = 0.5  # text this early before utt end counts
     no_response_timeout_sec: float = 8.0
@@ -90,7 +91,8 @@ class ClosedLoopPolicy:
 
     def _classify(self) -> Any:
         return classify_turn(
-            self._turn_text(), self.cfg.slot_type, self.cfg.slot_value
+            self._turn_text(), self.cfg.slot_type, self.cfg.slot_value,
+            lang=self.cfg.language,
         )
 
     def _end_turn(self, time_sec: float) -> str:

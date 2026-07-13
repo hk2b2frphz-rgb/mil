@@ -71,7 +71,9 @@
 - **MASSIVE** (FitzGerald et al., 2022; CC BY 4.0): 51言語・60 intents・
   55 slots、ja-JP完備。SLURPのローカライズなのでintent/slot体系は
   音声アシスタント文脈で標準的。ベンチマークのスロット素材に採用。
-- SLURP (英語・実音声): 英語Moshiへの一般化実験(オプションP2)の候補。
+- **SLURP** (Bastianelli et al., 2020; 英語・実音声・slot注釈): 実収録の
+  close-talk音声を担体に採用(bench_en_slurp)。MASSIVE-TTSで学習した
+  聞き返し行動の合成→実音声転移(A6)を測る評価専用コーパス。
 
 ## 3. 新規性の主張(論文のContribution候補)
 
@@ -93,9 +95,9 @@
 
 | 攻撃 | 防御 |
 |---|---|
-| 「TTS合成音声で音響劣化を語れるのか」 | 弱ASRオラクルで劣化の実効性を独立に検証(操作チェック)。TTS品質はclean条件のSSRで担保を示す。実音声(SLURP)拡張をFuture workまたはP2で。 |
+| 「TTS合成音声で音響劣化を語れるのか」 | 弱ASRオラクルで劣化の実効性を独立に検証(操作チェック)。加えてSLURP実音声ベンチ(bench_en_slurp)で同一プロトコルを実収録に適用し、合成/実の両方で結果を報告。 |
 | 「規則ベースの聞き返し検出は恣意的」 | LLM judgeとの一致率(κ)を報告し、判定はjudge側でも再現。オンライン検出器は修復注入のゲートのみで、主結果はオフライン再計算。 |
-| 「1つのモデル(Moshi系)の話では」 | J-Moshi/llm-jp-moshiの2チェックポイント+FT群+カスケード2種で系統比較。英語Moshi追加はP2。 |
+| 「1つのモデル(Moshi系)の話では」 | 英語2(moshiko/moshika)+日本語2(llm-jp-moshi/j-moshi-ext)のzero-shot、FT群、カスケード群の系統比較。アーキテクチャ多様性の限界はLimitationsに明記(公開フルデュプレックスで閉ループ推論可能なのがMoshi系のみという現状自体を記述)。 |
 | 「FTしたらタスクを暗記しただけ」 | ベンチマークはMASSIVE testスロット値・未知話者条件、trainとの surface 重複なし。さらに clean 条件のFA率で過剰聞き返しを罰する。 |
 | 「聞き返し率が上がっただけでは」 | 主指標は決定品質(hit/FA・balanced acc)と選択的リスク+タスク成功(SSR)。FDB-JA退行チェックでインタラクティビティ維持も報告。 |
 

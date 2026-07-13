@@ -1,12 +1,12 @@
-"""Clarify fine-tuning dialogue generation.
+"""Clarify fine-tuning dialogue generation (language-parameterized).
 
 Emits dialogues in the exact JSONL schema `scripts/generate_qwen3_tts_data.py
 --dialogues-jsonl` consumes ({"id", "turns": [{speaker,text,emotion,...}]}),
-plus a sidecar `corruption_plan.jsonl` that the audio post-processor
-(`ICASSP2027/scripts/corrupt_training_audio.py`) uses to degrade the slot
+plus a sidecar `corruption_plan.jsonl` for the audio post-processor
+(`ICASSP2027/scripts/corrupt_training_audio.py`) that degrades the slot
 span on the *user channel* of the rendered stereo WAVs.
 
-Three training variants (the paper's ablation triangle):
+Training variants (the paper's main ablation triangle):
 
   task_only       Every dialogue: user request (clean) -> assistant
                   confirms. Teaches the task format but never asking.
@@ -14,13 +14,19 @@ Three training variants (the paper's ablation triangle):
                   (underspecified requests). Audio is always clean.
   clarify_full    Adds acoustically-corrupted requests whose target
                   response is a targeted clarification, then repair, then
-                  confirmation. Contains minimal pairs: the same utterance
-                  appears once clean (-> confirm) and once corrupted
-                  (-> ask), differing ONLY in the user-channel audio, so
-                  asking is learnable only from the acoustics.
+                  confirmation.
 
-Slot/value material is sampled from MASSIVE ja-JP *train* split (the
-benchmark uses *test*), so surface forms never leak across the split.
+Data-composition ablations on top of clarify_full:
+
+  minimal_pairs=False       ask dialogues get no clean twin (tests whether
+                            the clean/corrupted contrast on identical text
+                            is what makes acoustic conditioning learnable).
+  mild_noise_confirm_ratio=0  removes audible-but-intelligible noise from
+                            confirm dialogues (tests whether the model
+                            collapses to the "any noise -> ask" shortcut).
+  ask_ratio                 sweeps the ask/confirm class balance.
+
+All templates come from `clarify.lang.LanguagePack` (en/ja).
 """
 
 from __future__ import annotations
@@ -31,8 +37,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .lang import get_pack
 from .scenario import BaseItem
-from .slots import SLOT_WH_WORDS, build_repair_text
 
 VARIANTS = ("task_only", "clarify_lexical", "clarify_full")
 
@@ -45,31 +51,6 @@ ASK_CORRUPTIONS = ("mask_silence", "mask_noise", "babble_snr-10",
 # noise alone must not trigger asking; *information loss* must.
 CONFIRM_MILD_CORRUPTIONS = ("babble_snr+5",)
 
-WH_QUESTION_BY_SLOT: dict[str, str] = {
-    "time": "すみません、少し聞き取れませんでした。何時でしたか？",
-    "date": "すみません、日にちがよく聞こえませんでした。いつでしたか？",
-    "person": "すみません、お名前が聞き取れませんでした。どなたでしたか？",
-    "place_name": "すみません、場所がよく聞こえませんでした。どちらでしたか？",
-    "event_name": "すみません、聞き取れませんでした。何のご予定でしたか？",
-    "business_name": "すみません、お店の名前が聞き取れませんでした。どちらでしたか？",
-    "artist_name": "すみません、聞き取れませんでした。どなたの曲でしたか？",
-    "food_type": "すみません、聞き取れませんでした。何のご注文でしたか？",
-    "timeofday": "すみません、聞き取れませんでした。何時ごろでしたか？",
-}
-
-CONFIRM_BY_INTENT: dict[str, str] = {
-    "alarm_set": "{value}ですね。アラームを設定しておきますね。",
-    "calendar_set": "{value}ですね。カレンダーに登録しておきますね。",
-    "calendar_query": "{value}のご予定ですね。確認しますね。",
-    "play_music": "{value}ですね。かけますね。",
-    "takeaway_order": "{value}ですね。注文しておきますね。",
-    "transport_query": "{value}ですね。調べてみますね。",
-    "recommendation_events": "{value}ですね。探してみますね。",
-    "recommendation_locations": "{value}ですね。探してみますね。",
-    "qa_factoid": "{value}ですね。調べてみますね。",
-}
-CONFIRM_FALLBACK = "{value}ですね。承知しました。"
-
 
 @dataclass
 class TrainDialogue:
@@ -77,6 +58,7 @@ class TrainDialogue:
     variant: str
     behavior: str            # confirm | ask_acoustic | ask_lexical
     pair_id: str | None      # links clean/corrupted minimal pairs
+    language: str
     turns: list[dict[str, Any]]
     corruption: dict[str, Any] | None  # None => leave audio clean
 
@@ -86,14 +68,21 @@ class TrainDialogue:
             "variant": self.variant,
             "behavior": self.behavior,
             "pair_id": self.pair_id,
+            "language": self.language,
             "turns": self.turns,
             "corruption": self.corruption,
         }
 
 
-def _confirm_text(intent: str, value: str) -> str:
-    tpl = CONFIRM_BY_INTENT.get(intent, CONFIRM_FALLBACK)
+def _confirm_text(intent: str, value: str, lang: str) -> str:
+    pack = get_pack(lang)
+    tpl = pack.confirm_by_intent.get(intent, pack.confirm_fallback)
     return tpl.format(value=value)
+
+
+def _ask_text(slot_type: str, lang: str) -> str:
+    pack = get_pack(lang)
+    return pack.ask_by_slot.get(slot_type, pack.ask_fallback)
 
 
 def _user_turns_split(item: BaseItem) -> list[dict[str, Any]]:
@@ -117,56 +106,51 @@ def build_confirm_dialogue(
     ]
     turns.append({
         "speaker": "moshi",
-        "text": _confirm_text(item.intent, item.slot_value),
+        "text": _confirm_text(item.intent, item.slot_value, item.language),
         "emotion": "gentle",
     })
     plan = None
     if corruption:
         plan = {"condition": corruption, "target_text": item.slot_text,
                 "channel": "user"}
-    return TrainDialogue(dialogue_id, variant, "confirm", pair_id, turns, plan)
+    return TrainDialogue(dialogue_id, variant, "confirm", pair_id,
+                         item.language, turns, plan)
 
 
 def build_ask_acoustic_dialogue(
     item: BaseItem, dialogue_id: str, variant: str,
     corruption: str, pair_id: str | None = None,
 ) -> TrainDialogue:
-    ask = WH_QUESTION_BY_SLOT.get(
-        item.slot_type, "すみません、もう一度お願いできますか？"
-    )
     turns = _user_turns_split(item)
     turns += [
-        {"speaker": "moshi", "text": ask, "emotion": "gentle"},
-        {"speaker": "user",
-         "text": build_repair_text(item.slot_type, item.slot_value),
-         "emotion": "neutral"},
+        {"speaker": "moshi", "text": _ask_text(item.slot_type, item.language),
+         "emotion": "gentle"},
+        {"speaker": "user", "text": item.repair_text, "emotion": "neutral"},
         {"speaker": "moshi",
-         "text": _confirm_text(item.intent, item.slot_value),
+         "text": _confirm_text(item.intent, item.slot_value, item.language),
          "emotion": "gentle"},
     ]
     plan = {"condition": corruption, "target_text": item.slot_text,
             "channel": "user"}
     return TrainDialogue(dialogue_id, variant, "ask_acoustic", pair_id,
-                         turns, plan)
+                         item.language, turns, plan)
 
 
 def build_ask_lexical_dialogue(
     item: BaseItem, dialogue_id: str, variant: str
 ) -> TrainDialogue:
     """Underspecified request (no slot in the utterance) -> ask -> repair."""
-    wh = WH_QUESTION_BY_SLOT.get(
-        item.slot_type, "すみません、もう少し詳しく教えていただけますか？"
-    )
     turns = [
         {"speaker": "user", "text": item.utterance_text, "emotion": "neutral"},
-        {"speaker": "moshi", "text": wh, "emotion": "gentle"},
+        {"speaker": "moshi", "text": _ask_text(item.slot_type, item.language),
+         "emotion": "gentle"},
         {"speaker": "user", "text": item.repair_text, "emotion": "neutral"},
         {"speaker": "moshi",
-         "text": _confirm_text(item.intent, item.slot_value),
+         "text": _confirm_text(item.intent, item.slot_value, item.language),
          "emotion": "gentle"},
     ]
-    return TrainDialogue(dialogue_id, variant, "ask_lexical", None, turns,
-                         None)
+    return TrainDialogue(dialogue_id, variant, "ask_lexical", None,
+                         item.language, turns, None)
 
 
 def generate_training_dialogues(
@@ -176,12 +160,14 @@ def generate_training_dialogues(
     rng: random.Random,
     ask_ratio: float = 0.4,
     mild_noise_confirm_ratio: float = 0.25,
+    minimal_pairs: bool = True,
 ) -> list[TrainDialogue]:
     """Assemble the training mix for one variant.
 
     clarify_full assigns each acoustic item to either a minimal pair
-    (clean-confirm + corrupted-ask, sharing pair_id) or a single role, so
-    roughly `ask_ratio` of the acoustic dialogues are asks.
+    (clean-confirm + corrupted-ask, sharing pair_id; disabled by
+    minimal_pairs=False) or a single role, so roughly `ask_ratio` of the
+    acoustic dialogues are asks.
     """
     if variant not in VARIANTS:
         raise ValueError(f"unknown variant {variant!r}")
@@ -196,14 +182,15 @@ def generate_training_dialogues(
     for item in acoustic_items:
         item.validate()
         if variant == "clarify_full" and rng.random() < ask_ratio:
-            pair_id = f"pair_{item.base_id}"
             corruption = rng.choice(ASK_CORRUPTIONS)
+            pair_id = f"pair_{item.base_id}" if minimal_pairs else None
             dialogues.append(build_ask_acoustic_dialogue(
                 item, next_id("ask"), variant, corruption, pair_id
             ))
-            dialogues.append(build_confirm_dialogue(
-                item, next_id("confirm"), variant, None, pair_id
-            ))
+            if minimal_pairs:
+                dialogues.append(build_confirm_dialogue(
+                    item, next_id("confirm"), variant, None, pair_id
+                ))
         else:
             corruption = None
             if variant == "clarify_full" and \
@@ -240,5 +227,6 @@ def write_training_files(
             pfh.write(json.dumps({
                 "id": d.dialogue_id, "corruption": plan,
                 "behavior": d.behavior, "pair_id": d.pair_id,
+                "language": d.language,
             }, ensure_ascii=False) + "\n")
     return dialogues_path, plan_path

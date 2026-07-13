@@ -31,3 +31,12 @@ ICASSP 2027 (締切 2026-09-16) に向け、`ICASSP2027/` 配下に独立した�
 - 設計: `ICASSP2027/docs/design.md` / 先行研究: `docs/related_work.md`
 - 実行: `ICASSP2027/README.md` の p0→p7 (全てPBS、V100/A100以下)
 - ブランチ: `icassp2027-clarification`
+
+## 追記 (2026-07-13): 英語プライマリ・マルチコーパス・マルチモデル化
+
+ユーザー指示により英語を主実験に変更(「英語でいいです」)。
+kyutai moshiko/moshika を主対象、MASSIVE en-US (TTS) を主ベンチ、
+SLURP実音声を合成→実転移評価、日本語(llm-jp-moshi/j-moshi + MASSIVE ja-JP)
+は言語般化軸に降格。言語依存要素は `ICASSP2027/clarify/lang.py` の
+LanguagePack に集約し、アブレーション行列 A1〜A8 を design.md §5 に定義。
+英語LoRAベースconfigは `experiments/lora_moshiko_en_config`。

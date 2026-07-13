@@ -38,7 +38,8 @@ for p in (REPO_ROOT, REPO_ROOT / "eval", REPO_ROOT / "ICASSP2027"):
 from clarify.driver import PolicyConfig, run_closed_loop_trial  # noqa: E402
 from clarify.judge_pack import pack_trial, write_pack  # noqa: E402
 from clarify.metrics import (  # noqa: E402
-    aggregate_by_condition, decision_quality, score_trial, write_scores,
+    aggregate_by_condition, aggregate_grouped, decision_quality,
+    score_trial, write_scores,
 )
 from clarify.scenario import read_manifest  # noqa: E402
 
@@ -48,7 +49,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-dir", required=True, type=Path)
     parser.add_argument("--out-dir", required=True, type=Path)
     parser.add_argument("--model-id", required=True)
-    parser.add_argument("--hf-repo", default="llm-jp/llm-jp-moshi-v1")
+    parser.add_argument("--hf-repo", default="kyutai/moshiko-pytorch-bf16",
+                        help="Moshi-format checkpoint repo (English default; "
+                             "use llm-jp/llm-jp-moshi-v1 or "
+                             "nu-dialogue/j-moshi-ext for Japanese).")
     parser.add_argument("--moshi-weight")
     parser.add_argument("--mimi-weight")
     parser.add_argument("--tokenizer")
@@ -144,6 +148,7 @@ def main() -> int:
             slot_type=case.base.slot_type,
             slot_value=case.base.slot_value or None,
             utterance_end_sec=utt_end_sec,
+            language=case.base.language,
             turn_gap_sec=args.turn_gap_sec,
             no_response_timeout_sec=args.no_response_timeout_sec,
         )
@@ -210,6 +215,7 @@ def main() -> int:
         "n_trials": len(scores),
         "by_condition": aggregate_by_condition(scores),
         "decision_quality": decision_quality(scores),
+        "by_corpus": aggregate_grouped(scores, lambda s: s.source),
     }
     (out_dir / f"summary{shard_tag}.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n",

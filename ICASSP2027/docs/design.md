@@ -1,6 +1,6 @@
 # 実験設計 — "Do Full-Duplex Speech Models Know When to Ask?"
 
-状態: 確定候補 / 更新日: 2026-07-10
+状態: 確定候補 / 更新日: 2026-07-13 (英語プライマリ・マルチコーパス・マルチモデル化)
 
 ## 1. リサーチクエスチョン
 
@@ -12,53 +12,83 @@
   ターンテイキング性能を損なわずに注入できるか。
 - **RQ4 (機構)**: その行動は音響的証拠に条件付くのか、語彙的手掛かりの
   模倣なのか(最小ペア学習 clarify_full vs 語彙のみ clarify_lexical の対照)。
+- **RQ5 (般化)**: 行動は (a) 合成音声→実音声 (MASSIVE-TTS→SLURP)、
+  (b) 言語間 (en→ja は学習せず、両言語で同一処方を並行検証) に般化するか。
 
 ## 2. タスクとプロトコル
 
-音声アシスタントのタスク発話(MASSIVE ja-JP)を1発話+最大1修復交換の
-閉ループで評価する。
+音声アシスタントのタスク発話を1発話+最大1修復交換の閉ループで評価する。
 
 ```
-user:  「明日の【15時】にアラームをかけて」   ← 【】区間のみ劣化
-model: (a)「15時ですね。設定しますね」        = confirm(正解: clean時)
-       (b)「すみません、何時でしたか？」      = clarify(正解: 劣化時)
-       (c)「5時ですね。設定しますね」          = hallucinated confirmation(失敗)
-       (d) 無応答/雑談                          = other(失敗)
+user:  "wake me up at ((5 pm)) tomorrow"      ← (( )) 区間のみ劣化
+model: (a) "5 pm, got it. I'll set the alarm."   = confirm(正解: clean時)
+       (b) "Sorry, what time was it?"             = clarify(正解: 劣化時)
+       (c) "7 pm, got it. Setting the alarm."     = hallucinated confirmation(失敗)
+       (d) 無応答/雑談                             = other(失敗)
 --- (b)の場合のみ、修復発話を注入 ---
-user:  「15時です」
-model: 「15時ですね。設定しますね」            = 回復成功
+user:  "It's 5 pm."
+model: "5 pm, got it."                            = 回復成功
 ```
 
 閉ループドライバ(`clarify/driver.py`)はモデル自身のテキストストリームから
-ターン終端(1.2秒無テキスト)を検出し、規則分類器が聞き返しと判定した場合のみ
-事前合成済み修復発話をフレーム同期で注入する。**評価時の判定はオフラインで
-再計算**し、規則とLLM judgeの一致率も報告する(オンライン判定は注入のゲート)。
+ターン終端(1.2秒無テキスト)を検出し、規則分類器(言語パック
+`clarify/lang.py` の語彙)が聞き返しと判定した場合のみ事前合成済み修復発話を
+フレーム同期で注入する。**評価時の判定はオフラインで再計算**し、規則とLLM
+judgeの一致率(κ)も報告する(オンライン判定は注入のゲート)。
 
-## 3. ベンチマーク構築 (P1)
+## 3. コーパス (3系統)
 
-| 要素 | 設計 |
-|---|---|
-| 素材 | MASSIVE ja-JP **test** split、9 intent × 9 slot型からラウンドロビン60発話 + underspecified 8テンプレート |
-| TTS | Qwen3-TTS (学習と同一; pyopenjtalkフォールバック)。話者は既定 Ono_Anna、話者汎化はseed間でなくTTS話者切替オプションで別途 |
-| スロット区間特定 | MMS_FA強制アライメント(既存 ForcedAligner)。失敗時は文字比例配分(manifestに記録・除外分析可能) |
-| 劣化条件 | clean / babble SNR {+5,0,−5,−10} / mask_silence / mask_noise / lowpass800 / full_snr0 (全9条件) |
-| 対照条件 | full_snr0 = 同エネルギーの雑音を発話全体に分散 → 局所情報喪失と全体品質低下の切り分け |
-| 意味的曖昧arm | underspecified 8件(clean音声・スロット欠落) → 「音響がきれいでも尋ねるべき」ケース |
-| 期待行動ラベル | clean→act / mask_*・underspec→ask / SNR系→graded(オラクルで採点) |
-| オラクル | faster-whisper small (greedy) の転写でスロット回復可否 + avg_logprob。劣化の実効性の操作チェック兼較正軸 |
-| 再現性 | 全劣化はケースID由来の固定seed。データセットはコード+seedから決定的に再構築可能 |
+| ベンチマークID | 言語 | コーパス | 担体音声 | 役割 |
+|---|---|---|---|---|
+| bench_en_massive | en | MASSIVE en-US test | Qwen3-TTS | **主実験** (60発話×9条件+underspec 8) |
+| bench_en_slurp | en | SLURP test (実収録) | 実音声(close-talk) | 合成→実音声般化 (RQ5a)。FTはSLURP非接触 |
+| bench_ja_massive | ja | MASSIVE ja-JP test | Qwen3-TTS | 言語般化 (RQ5b)、llm-jp-moshi/J-Moshi評価 |
 
-規模: 60×8条件 + 60 clean + 8 underspec ≈ **548ケース × 3 seeds ≈ 1,644試行/モデル**。
-1試行 ≈ 実時間20〜40秒(V100) → 1モデルあたり約11〜18 GPU時間 → **4-way
-アレイジョブで1晩** (`p2_eval_moshi.pbs`、`-J 0-3`)。
+- MASSIVE (CC BY 4.0) はSLURPのローカライズなので intent/slot 体系が3系統で
+  同一 → コーパス間比較が指標定義そのままで成立する。
+- スロット区間特定: MMS_FA強制アライメント(実音声にも適用)。失敗時は
+  文字比例配分(manifestに記録、`span_alignment_fallbacks` で監視)。
+- 劣化条件(全コーパス共通): clean / babble SNR {+5,0,−5,−10} /
+  mask_silence / mask_noise / lowpass800 / full_snr0 (=同エネルギーを発話
+  全体に分散する対照)。
+- underspecified arm (意味的曖昧・clean音声) は MASSIVE 系のみ(SLURPは
+  実収録の書き起こしを改変できないため)。
+- 弱ASRオラクル(faster-whisper small, greedy): 劣化の実効性の操作チェック
+  兼、較正分析の難易度軸、カスケードの信頼度信号。
 
-### 検定力の目安
+## 4. モデル (7+系統)
 
-主要対比(モデルA vs B の hit rate、n=180 ask試行、対応あり)で、
-差15pt・基準50%を McNemar 近似で検出する検定力 > 0.9 (α=0.05)。
-条件別 CRR (n=180/条件) の Wilson 95%CI 幅は ±7pt 程度。
+| ID | システム | 言語 | 役割 |
+|---|---|---|---|
+| moshiko | kyutai/moshiko-pytorch-bf16 zero-shot | en | **主対象** (英語Moshi・男声) |
+| moshika | kyutai/moshika-pytorch-bf16 zero-shot | en | モデル汎化(同アーキ別音声) |
+| llmjp | llm-jp/llm-jp-moshi-v1 zero-shot | ja | 言語般化 |
+| jmoshi | nu-dialogue/j-moshi-ext zero-shot | ja | 言語般化(別学習系) |
+| task_only | moshiko + タスクFT(聞き返しなし) | en | タスク形式の交絡除去。**これとclarify系の差だけが聞き返し学習の効果** |
+| clarify_lexical | + 語彙的曖昧のみ聞き返し学習 | en | RQ4: 語彙相関だけで音響劣化に般化するか(仮説: しない) |
+| clarify_full | + 音響劣化最小ペア学習 | en | 提案。音響条件付き聞き返し |
+| cascade_{small,medium} | faster-whisper + 信頼度閾値スイープ | en/ja | 明示的信頼度シグナルの到達点(ROC曲線として対置) |
+| (拡張) clarify_full_ja | llm-jp + 同処方 | ja | 処方の言語不変性(時間があれば) |
 
-## 4. 評価指標 (`clarify/metrics.py`)
+FT基盤: 既存LoRA sweep (`experiments/lora_moshiko_en_config` = moshikoベース /
+`lora_base_config` = llm-jpベース)。
+
+## 5. アブレーション
+
+| ID | 操作 | 検証すること |
+|---|---|---|
+| A1: FT variant三角形 | task_only / clarify_lexical / clarify_full | 聞き返しの学習源(タスク形式 vs 語彙 vs 音響) = RQ4本体 |
+| A2: 最小ペア除去 | clarify_full − clean twin (`--no-minimal-pairs`) | 同一テキストのclean/劣化対照が音響条件付けの学習に必要か |
+| A3: 軽劣化confirm除去 | `--mild-noise-confirm-ratio 0` | 「雑音=尋ねる」ショートカットへの崩壊(clean FA率で観測) |
+| A4: ask比率 | `--ask-ratio {0.2, 0.4, 0.6}` | 聞き返し率のクラスバランス感度(FA/hitのトレードオフ) |
+| A5: 局所 vs 全体劣化 | 評価条件 full_snr0 vs babble_snr0 | 判断が「区間の情報喪失」に応答しているか「全体品質」か |
+| A6: 合成→実音声 | FT(MASSIVE-TTS) → eval(SLURP実音声) | 処方が実音声に転移するか = RQ5a |
+| A7: 検出器 | 規則 vs LLM judge (κ + judge基準の再集計) | 測定の頑健性 |
+| A8: TTS話者 | eval側 `--tts-speaker` 切替 | 話者過適合の感度分析 |
+
+A1は必須(主結果表)、A2/A3/A5/A6/A7は本文、A4/A8は付録想定。
+
+## 6. 評価指標 (`clarify/metrics.py`)
 
 | 指標 | 定義 | 答えるRQ |
 |---|---|---|
@@ -68,76 +98,79 @@ model: 「15時ですね。設定しますね」            = 回復成功
 | CRR-vs-SNR 曲線 + オラクル回復可能性との一致 | 較正 | RQ2 |
 | SSR | 最終確定ターンに正解スロット値(≤1修復) | タスク成功 |
 | 選択的リスク/カバレッジ | 聞き返さなかった試行の誤り率 | RQ2 |
-| 応答レイテンシ、FDB-JA全指標(P6) | インタラクティビティ退行 | RQ3 |
-| 規則 vs LLM judge κ | 測定の妥当性 | 方法論 |
+| 応答レイテンシ、FDB-JA全指標(P6; ja系のみ) | インタラクティビティ退行 | RQ3 |
+| 規則 vs LLM judge κ | 測定の妥当性 | A7 |
 
-統計: 比率は Wilson 95%CI、モデル間比較は base_id 対応ありブートストラップ
-(10k回、`paired_bootstrap_delta`)。
+集計は condition別に加え corpus別 (`by_corpus`)・言語別 (`by_language`) を
+標準出力。統計: 比率は Wilson 95%CI、モデル間比較は base_id 対応あり
+ブートストラップ(10k回、`paired_bootstrap_delta`)。
 
-## 5. 比較システム
+### 検定力の目安
 
-| ID | システム | 役割 |
-|---|---|---|
-| base | llm-jp-moshi-v1 zero-shot | E2Eの現状(仮説: CRR≈0, HCR高) |
-| jmoshi | nu-dialogue/j-moshi-ext zero-shot | モデル汎化(同アーキ別学習) |
-| task_only | base + タスクFT(聞き返しなし学習) | タスク形式の交絡除去。**これとclarify系の差だけが聞き返し学習の効果** |
-| clarify_lexical | + 語彙的曖昧のみ聞き返し学習 | RQ4: 語彙相関だけで音響劣化に般化するか(仮説: しない) |
-| clarify_full | + 音響劣化最小ペア学習 | 提案。音響条件付き聞き返し |
-| cascade_small / (large) | faster-whisper + 信頼度閾値スイープ | 明示的信頼度シグナルの到達点(ROC曲線として対置) |
+主要対比(モデルA vs B の hit rate、n=180 ask試行、対応あり)で、
+差15pt・基準50%を McNemar 近似で検出する検定力 > 0.9 (α=0.05)。
+条件別 CRR (n=180/条件) の Wilson 95%CI 幅は ±7pt 程度。
 
-## 6. FT学習データ (P3, `clarify/train_data.py`)
+## 7. FT学習データ (P3, `clarify/train_data.py`)
 
-- 素材: MASSIVE ja-JP **train** split(testと表層値の重複なし)から1,200発話
-  + underspecifiedテンプレート。
-- 3 variant(上表)。clarify_full は **最小ペア**(同一発話がclean→confirm と
-  劣化→ask の両方で出現、pair_id連結)を含み、劣化はユーザーチャネル音声にのみ
-  適用(テキストストリームは同一)→ 音響を見なければ解けない学習信号。
+- 素材: MASSIVE en-US **train** split(testと表層値の重複なし、SLURPは完全
+  ホールドアウト)から1,200発話 + underspecifiedテンプレート(言語パック)。
+- 3 variant(§4)。clarify_full は **最小ペア**(同一発話がclean→confirm と
+  劣化→ask の両方で出現、pair_id連結)を含み、劣化はユーザーチャネル音声に
+  のみ適用(テキストストリームは同一)→ 音響を見なければ解けない学習信号。
 - confirm側の25%に軽劣化(babble +5dB)を混ぜ、「雑音=尋ねる」という
-  ショートカットを防ぐ(較正の学習信号)。
-- 生成: 決定的テンプレート(Gemma不要・再現性優先)→ 既存
-  `generate_qwen3_tts_data.py`(whole-utterance+強制アライメント)で
-  ステレオ化 → `corrupt_training_audio.py` がスロット区間を後処理劣化。
-- 学習: 既存 LoRA sweep 基盤(kyutai moshi-finetune, A100 1枚, h01パターン)。
-  必要なら full-FT (`fullft_sweep.pbs`) も同一データで可。
+  ショートカットを防ぐ(A3で除去検証)。
+- 生成: 決定的テンプレート(言語パック; 再現性優先)→ 既存
+  `generate_qwen3_tts_data.py`(whole-utterance+強制アライメント、
+  `--language English --speaker-user Ryan`)でステレオ化 →
+  `corrupt_training_audio.py` がスロット区間を後処理劣化。
+- 学習: 既存 LoRA sweep 基盤 (A100 1枚, h01パターン)。必要なら full-FT
+  (`fullft_sweep.pbs`) も同一データで可。
 
-## 7. 実行計画(PBS、全てV100/A100以下)
+## 8. 実行計画(PBS、全てV100/A100以下)
 
 | Job | GPU | 内容 | 目安 |
 |---|---|---|---|
-| p0_smoke | V100×1 | E2E疎通(демо4件) | 〜2h |
-| p1_build_benchmark | V100×1 | ベンチ構築+オラクル | 〜6h |
-| p2_eval_moshi ×モデル | V100×4 (array) | 閉ループ評価 | 〜12h/モデル |
-| p3_build_train_data ×3 variant | V100×1 | FTデータ | 〜10h/variant |
-| p4_train_clarify ×3 | A100×1 | LoRA FT | 〜6h/variant |
-| p5_eval_cascade | V100×1 | カスケード | 〜2h |
-| p6_fdb_regression ×FTモデル | V100×1 | FDB-JA退行 | 〜12h |
+| p0_smoke | V100×1 | E2E疎通(en+jaデモ) | 〜3h |
+| p1_build_benchmark ×3コーパス | V100×1 | ベンチ構築+オラクル | 〜6h/コーパス |
+| p2_eval_moshi ×(4 zero-shot + 3 FT + アブレーションFT) | V100×4 (array) | 閉ループ評価 | 〜12h/モデル/コーパス |
+| p3_build_train_data ×(3 variant + A2 + A3) | V100×1 | FTデータ | 〜10h/variant |
+| p4_train_clarify ×5 | A100×1 | LoRA FT | 〜6h/variant |
+| p5_eval_cascade ×コーパス | V100×1 | カスケード | 〜2h |
+| p6_fdb_regression ×ja FTモデル | V100×1 | FDB-JA退行 | 〜12h |
 | p7_summarize | CPU | 集計・比較 | 分 |
 
-合計 ≈ V100 100〜150 GPU時間 + A100 20 GPU時間。H200不要。
+主要評価マトリクス: {moshiko, moshika, task_only, clarify_lexical,
+clarify_full} × {bench_en_massive, bench_en_slurp} + {llmjp, jmoshi} ×
+bench_ja_massive ≈ 12 モデル×コーパス組 ≈ V100 300〜400 GPU時間(1〜2週間の
+キュー消化で現実的)。優先順位は §10 タイムライン参照。H200不要。
 LLM judge はローカルPC(Azure)で `judge_pack*.jsonl` に対して実行
-(クラスタからの外部API呼び出しなし — リポジトリ方針を踏襲)。
-
-## 8. タイムライン(ICASSP 2027 締切: 2026-09-16)
-
-| 週 | マイルストーン |
-|---|---|
-| 7/13週 | p0疎通 → p1本構築 → base/jmoshi評価(RQ1初期数値) |
-| 7/20週 | p3/p4でFT3種 → p2でFT評価(RQ3/4 主結果) |
-| 7/27週 | cascade・FDB退行・judge・分析、追試(seed/話者感度) |
-| 8月 | 図表確定・執筆・(任意)英語Moshi+MASSIVE en-US一般化実験 |
-| 9月上旬 | 内部レビュー → 提出 |
+(クラスタからの外部API呼び出しなし — リポジトリ方針)。
 
 ## 9. 既知のリスクと緩和
 
 1. **ベースモデルがタスク形式に全く乗らない**(confirmもaskもせず雑談)
    → それ自体がRQ1の知見。task_only FTが「形式は学べる」対照。
-   ベンチマークはFT群の比較で成立する設計。
-2. **強制アライメント失敗率が高い** → manifestに記録、比例フォールバック、
-   `span_alignment_fallbacks` が高ければ手動検査対象(短文なので失敗は稀と予想)。
-3. **オンライン聞き返し検出の誤り** → 注入ゲートのみに影響。judge一致率で
-   定量化し、誤ゲート試行はサブグループ分析で除外可能。
-4. **TTS話者1名への過適合** → 評価TTS話者切替(`--tts-speaker`)での感度分析を
-   追試に含める。
-5. **generate_qwen3_tts_data.py のサイドカーschemaとの不整合**
-   → corrupt_training_audio.py は失敗率>5%でジョブを落とす設計
-   (静かに未劣化データで学習が走ることを防ぐ)。p0/小規模で先に検証。
+2. **英語MoshiのFT基盤未検証** → `lora_moshiko_en_config` はkyutai公式
+   moshi-finetuneの標準構成。p4のsmoke(小max_steps)を最初に回す。
+3. **SLURP実音声のアライメント失敗率** → manifestの
+   `span_alignment_fallbacks` で監視、比例フォールバック分はサブグループ
+   分析から除外可能。close-talk収録を優先選択して失敗率を下げる。
+4. **オンライン聞き返し検出の誤り** → 注入ゲートのみに影響。judge一致率で
+   定量化(A7)。
+5. **TTS話者過適合** → A8話者切替 + SLURP実音声(多話者)が実質の頑健性検証。
+6. **generate_qwen3_tts_data.py サイドカーschema不整合**
+   → corrupt_training_audio.py は失敗率>5%でジョブを落とす。
+7. **英語TTSがpyopenjtalkにフォールバック** → build_benchmark が
+   language=en では即エラーにする(黙って日本語TTSで英文を読む事故防止)。
+
+## 10. タイムライン(ICASSP 2027 締切: 2026-09-16)
+
+| 週 | マイルストーン |
+|---|---|
+| 7/13週 | p0疎通(en+ja) → bench_en_massive構築 → moshiko/moshika評価(RQ1初期数値) |
+| 7/20週 | p3/p4で en FT 3種 → 評価(RQ3/4 主結果)。bench_en_slurp構築 |
+| 7/27週 | SLURP転移(A6)・cascade・A2/A3アブレーション・judge |
+| 8/3週 | ja系(llmjp/jmoshi評価、余力でclarify_full_ja)・FDB退行・追試(A4/A8) |
+| 8月中旬〜 | 図表確定・執筆 |
+| 9月上旬 | 内部レビュー → 提出 |

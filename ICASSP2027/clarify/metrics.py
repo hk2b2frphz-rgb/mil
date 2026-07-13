@@ -59,6 +59,9 @@ class TrialScore:
     hallucinated_confirmation: bool
     no_response: bool
     response_latency_sec: float | None
+    language: str = "ja"
+    source: str = "massive"      # corpus provenance
+    audio_source: str = "tts"    # tts | real
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -78,6 +81,7 @@ def score_trial(
     base = case["base"]
     slot_type = base["slot_type"]
     slot_value = base["slot_value"] or None
+    lang = base.get("language", "ja")
 
     turns = segment_turns(text_events, gap_sec=turn_gap_sec)
     first = first_turn_after(turns, utterance_end_sec)
@@ -91,9 +95,12 @@ def score_trial(
             final_text="", slot_correct=False,
             hallucinated_confirmation=False, no_response=True,
             response_latency_sec=None,
+            language=lang, source=base.get("source", "massive"),
+            audio_source=base.get("audio_source", "tts"),
         )
 
-    first_label_obj = classify_turn(first.text, slot_type, slot_value)
+    first_label_obj = classify_turn(first.text, slot_type, slot_value,
+                                    lang=lang)
     asked = first_label_obj.is_clarification
     targeted = first_label_obj.label == "clarify_targeted"
 
@@ -102,7 +109,7 @@ def score_trial(
     final = _final_turn(turns, first, policy)
     final_text = final.text if final else first.text
     slot_correct = bool(slot_value) and slot_value_in_text(
-        slot_value, final_text
+        slot_value, final_text, lang=lang
     )
     # For the underspecified arm the gold value only exists in the repair,
     # so slot_correct is only achievable by asking - by construction.
@@ -122,6 +129,8 @@ def score_trial(
         final_text=final_text, slot_correct=slot_correct,
         hallucinated_confirmation=hallucinated, no_response=False,
         response_latency_sec=latency,
+        language=lang, source=base.get("source", "massive"),
+        audio_source=base.get("audio_source", "tts"),
         extra={"first_text": first.text,
                "online_turns": policy.get("turns", [])},
     )
@@ -189,6 +198,17 @@ def aggregate_by_condition(scores: list[TrialScore]) -> dict[str, Any]:
             },
         }
     return out
+
+
+def aggregate_grouped(scores: list[TrialScore], key_fn) -> dict[str, Any]:
+    """Per-group condition aggregates, e.g. key_fn=lambda s: s.source for a
+    corpus breakdown or `s.language` for a language breakdown."""
+    groups: dict[str, list[TrialScore]] = defaultdict(list)
+    for s in scores:
+        groups[str(key_fn(s))].append(s)
+    return {key: {"by_condition": aggregate_by_condition(group),
+                  "decision_quality": decision_quality(group)}
+            for key, group in sorted(groups.items())}
 
 
 def decision_quality(scores: list[TrialScore]) -> dict[str, Any]:

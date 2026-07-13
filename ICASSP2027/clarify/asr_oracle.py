@@ -77,15 +77,23 @@ def run_oracle(
     device: str = "cuda",
 ) -> list[OracleResult]:
     """Annotate every case dict with weak-ASR recoverability; write JSONL."""
-    asr = WeakASR(model_size=model_size, device=device)
+    asrs: dict[str, WeakASR] = {}
     results = []
     with out_path.open("w", encoding="utf-8") as fh:
         for case in cases:
+            lang = case["base"].get("language", "ja")
+            if lang not in asrs:
+                from .lang import get_pack
+
+                asrs[lang] = WeakASR(
+                    model_size=model_size, device=device,
+                    language=get_pack(lang).asr_language,
+                )
             slot_value = case["base"]["slot_value"]
             wav = dataset_dir / case["audio_path"]
-            transcript, avg_lp = asr.transcribe(wav)
+            transcript, avg_lp = asrs[lang].transcribe(wav)
             recovered = bool(slot_value) and slot_value_in_text(
-                slot_value, transcript
+                slot_value, transcript, lang=lang
             )
             res = OracleResult(
                 case_id=case["case_id"],

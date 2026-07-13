@@ -9,12 +9,15 @@
 
 # LoRA fine-tune one clarify variant on one A100, reusing the existing
 # sweep infrastructure (scripts/run_sweep_pair.sh, kyutai moshi-finetune).
+# The base checkpoint follows LANGUAGE:
+#   en -> experiments/lora_moshiko_en_config (kyutai/moshiko-pytorch-bf16)
+#   ja -> experiments/lora_base_config       (llm-jp/llm-jp-moshi-v1)
 #
-#   qsub -v SRC_RUN_DIR=ICASSP2027/runs/train_clarify_full \
+#   qsub -v SRC_RUN_DIR=ICASSP2027/runs/train_en_clarify_full,LANGUAGE=en \
 #        ICASSP2027/pbs/p4_train_clarify.pbs
 #
 # Overrides: SWEEP_PATTERNS=h01 (LoRA hyperparameter pattern),
-#            RUN_ID (experiment label).
+#            BASE_EXP (explicit config template), RUN_ID.
 # For full fine-tuning use scripts/fullft_sweep.pbs directly with the same
 # SRC_RUN_DIR (see experiments/README.md).
 
@@ -27,6 +30,16 @@ JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
 source scripts/setup_pbs_distributed.sh
 
 export SRC_RUN_DIR="${SRC_RUN_DIR:?set SRC_RUN_DIR (p3 output dir)}"
+LANGUAGE="${LANGUAGE:-en}"
+if [[ -z "${BASE_EXP:-}" ]]; then
+    if [[ "$LANGUAGE" == "en" ]]; then
+        export BASE_EXP=lora_moshiko_en_config
+    else
+        export BASE_EXP=lora_base_config
+    fi
+else
+    export BASE_EXP
+fi
 export SWEEP_PATTERNS="${SWEEP_PATTERNS:-h01}"
 export RUN_ID="${RUN_ID:-clarify_$(basename "$SRC_RUN_DIR")_${JOB_ID_SHORT}}"
 export MLFLOW_EXPERIMENT_NAME="${MLFLOW_EXPERIMENT_NAME:-icassp2027_clarify}"
@@ -41,7 +54,7 @@ export FDB_OPENING_GREETING="${FDB_OPENING_GREETING:-0}"
 mkdir -p ICASSP2027/runs/pbs_logs
 exec > >(tee -a "ICASSP2027/runs/pbs_logs/${RUN_ID}.log") 2>&1
 
-echo "job: ${PBS_JOBID:-n/a} host: $(hostname) src: $SRC_RUN_DIR patterns: $SWEEP_PATTERNS"
+echo "job: ${PBS_JOBID:-n/a} host: $(hostname) src: $SRC_RUN_DIR base_exp: $BASE_EXP patterns: $SWEEP_PATTERNS"
 command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi || true
 
 if [[ ! -f "$SRC_RUN_DIR/training_set/synthetic_moshi_train.jsonl" ]]; then
@@ -51,5 +64,5 @@ fi
 
 bash scripts/run_sweep_pair.sh
 
-echo "TRAIN OK: patterns=$SWEEP_PATTERNS from $SRC_RUN_DIR"
+echo "TRAIN OK: patterns=$SWEEP_PATTERNS from $SRC_RUN_DIR (base $BASE_EXP)"
 echo "Next: merge LoRA (scripts/merge_lora.pbs), then evaluate with p2 and p6."

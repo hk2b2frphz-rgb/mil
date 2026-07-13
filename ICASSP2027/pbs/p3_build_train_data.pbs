@@ -8,16 +8,23 @@
 #PBS -V
 
 # Build one training-data variant end to end on one V100:
-#   1. clarify dialogues (+ corruption plan) from MASSIVE ja-JP train split
+#   1. clarify dialogues (+ corruption plan) from the MASSIVE train split
 #   2. stereo audio via the existing Qwen3-TTS whole-utterance pipeline
 #   3. slot-span corruption on the user channel (clarify_full only)
 #
-#   qsub -v VARIANT=clarify_full ICASSP2027/pbs/p3_build_train_data.pbs
-#   qsub -v VARIANT=clarify_lexical ICASSP2027/pbs/p3_build_train_data.pbs
-#   qsub -v VARIANT=task_only ICASSP2027/pbs/p3_build_train_data.pbs
+# Main variants (submit one job each):
+#   qsub -v VARIANT=clarify_full,LANGUAGE=en ICASSP2027/pbs/p3_build_train_data.pbs
+#   qsub -v VARIANT=clarify_lexical,LANGUAGE=en ICASSP2027/pbs/p3_build_train_data.pbs
+#   qsub -v VARIANT=task_only,LANGUAGE=en ICASSP2027/pbs/p3_build_train_data.pbs
 #
-# Overrides: NUM_ITEMS=1200, ASK_RATIO=0.4, SEED=7,
-#            RUN_DIR=ICASSP2027/runs/train_<VARIANT>
+# Data-composition ablations (clarify_full only):
+#   qsub -v VARIANT=clarify_full,LANGUAGE=en,NO_MINIMAL_PAIRS=1,\
+#   RUN_DIR=ICASSP2027/runs/train_en_ablate_nopairs ICASSP2027/pbs/p3_build_train_data.pbs
+#   qsub -v VARIANT=clarify_full,LANGUAGE=en,MILD_NOISE_RATIO=0,\
+#   RUN_DIR=ICASSP2027/runs/train_en_ablate_nomild ICASSP2027/pbs/p3_build_train_data.pbs
+#
+# Other overrides: NUM_ITEMS=1200, ASK_RATIO=0.4, SEED=7,
+#                  RUN_DIR=ICASSP2027/runs/train_<LANGUAGE>_<VARIANT>
 # The resulting training_set/ is a drop-in SRC_RUN_DIR for
 # scripts/sweep_lora.pbs / scripts/fullft_sweep.pbs (p4).
 
@@ -28,10 +35,12 @@ source scripts/setup_proxy.sh
 JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
 JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
 VARIANT="${VARIANT:?set VARIANT (task_only|clarify_lexical|clarify_full)}"
+LANGUAGE="${LANGUAGE:-en}"
 NUM_ITEMS="${NUM_ITEMS:-1200}"
 ASK_RATIO="${ASK_RATIO:-0.4}"
+MILD_NOISE_RATIO="${MILD_NOISE_RATIO:-0.25}"
 SEED="${SEED:-7}"
-RUN_DIR="${RUN_DIR:-ICASSP2027/runs/train_${VARIANT}}"
+RUN_DIR="${RUN_DIR:-ICASSP2027/runs/train_${LANGUAGE}_${VARIANT}}"
 
 export TORCHINDUCTOR_DISABLE=1
 export NO_TORCH_COMPILE=1
@@ -39,30 +48,43 @@ export TORCH_COMPILE_DISABLE=1
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 mkdir -p ICASSP2027/runs/pbs_logs
-exec > >(tee -a "ICASSP2027/runs/pbs_logs/traindata_${VARIANT}_${JOB_ID_SHORT}.log") 2>&1
+exec > >(tee -a "ICASSP2027/runs/pbs_logs/traindata_${LANGUAGE}_${VARIANT}_${JOB_ID_SHORT}.log") 2>&1
 
-echo "job: ${PBS_JOBID:-n/a} host: $(hostname) variant: $VARIANT items: $NUM_ITEMS"
+echo "job: ${PBS_JOBID:-n/a} host: $(hostname) variant: $VARIANT lang: $LANGUAGE items: $NUM_ITEMS"
 command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi || true
 
 echo "=== [1/3] dialogues + corruption plan ==="
 EXTRA_ARGS=()
-if [[ -n "${MASSIVE_JSONL:-}" ]]; then
-    EXTRA_ARGS+=(--massive-jsonl "$MASSIVE_JSONL")
-fi
+[[ -n "${MASSIVE_JSONL:-}" ]] && EXTRA_ARGS+=(--massive-jsonl "$MASSIVE_JSONL")
+[[ "${NO_MINIMAL_PAIRS:-0}" == "1" ]] && EXTRA_ARGS+=(--no-minimal-pairs)
 uv run python ICASSP2027/scripts/build_training_data.py \
     --variant "$VARIANT" \
+    --language "$LANGUAGE" \
     --out-dir "$RUN_DIR" \
     --num-items "$NUM_ITEMS" \
     --ask-ratio "$ASK_RATIO" \
+    --mild-noise-confirm-ratio "$MILD_NOISE_RATIO" \
     --seed "$SEED" \
     "${EXTRA_ARGS[@]}"
 
 echo "=== [2/3] TTS synthesis (whole-utterance + forced alignment) ==="
 # No fixed opening greeting: the clarify task frame is a voice-assistant
 # exchange, and evaluation runs with the greeting disabled.
+if [[ "$LANGUAGE" == "en" ]]; then
+    TTS_LANGUAGE="${TTS_LANGUAGE:-English}"
+    SPEAKER_USER="${SPEAKER_USER:-Ryan}"
+    SPEAKER_MOSHI="${SPEAKER_MOSHI:-Serena}"
+else
+    TTS_LANGUAGE="${TTS_LANGUAGE:-Japanese}"
+    SPEAKER_USER="${SPEAKER_USER:-Ono_Anna}"
+    SPEAKER_MOSHI="${SPEAKER_MOSHI:-Serena}"
+fi
 uv run python scripts/generate_qwen3_tts_data.py \
     --out-dir "$RUN_DIR/training_set" \
     --dialogues-jsonl "$RUN_DIR/dialogues.jsonl" \
+    --language "$TTS_LANGUAGE" \
+    --speaker-user "$SPEAKER_USER" \
+    --speaker-moshi "$SPEAKER_MOSHI" \
     --no-opening-greeting
 
 echo "=== [3/3] user-channel slot-span corruption ==="

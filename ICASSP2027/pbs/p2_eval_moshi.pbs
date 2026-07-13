@@ -31,12 +31,19 @@ JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
 SHARD="${PBS_ARRAY_INDEX:-0}"
 NUM_SHARDS="${NUM_SHARDS:-4}"
 
-BENCH_ID="${BENCH_ID:?set BENCH_ID (e.g. bench_v1)}"
-MODEL_ID="${MODEL_ID:?set MODEL_ID (e.g. base)}"
-OUT_ID="${OUT_ID:-$MODEL_ID}"
+BENCH_ID="${BENCH_ID:?set BENCH_ID (e.g. bench_en_massive)}"
+MODEL_ID="${MODEL_ID:?set MODEL_ID (e.g. moshiko)}"
+# Output dir includes the benchmark so one model evaluated on several
+# corpora (e.g. bench_en_massive and bench_en_slurp) never collides.
+OUT_ID="${OUT_ID:-${MODEL_ID}_${BENCH_ID}}"
 SEEDS="${SEEDS:-0,1,2}"
 CONDITIONS="${CONDITIONS:-all}"
-HF_REPO="${HF_REPO:-llm-jp/llm-jp-moshi-v1}"
+# Model matrix (pass HF_REPO per row; MODEL_WEIGHT for FT checkpoints):
+#   EN zero-shot: kyutai/moshiko-pytorch-bf16 (default),
+#                 kyutai/moshika-pytorch-bf16
+#   JA zero-shot: llm-jp/llm-jp-moshi-v1, nu-dialogue/j-moshi-ext
+#   FT:           merged LoRA / exported full-FT safetensors via MODEL_WEIGHT
+HF_REPO="${HF_REPO:-kyutai/moshiko-pytorch-bf16}"
 
 export TORCHINDUCTOR_DISABLE=1
 export NO_TORCH_COMPILE=1

@@ -32,8 +32,8 @@ echo "job: ${PBS_JOBID:-n/a} host: $(hostname) bench: $BENCH_ID asr: $ASR_MODEL"
 
 uv run python ICASSP2027/scripts/run_cascade_eval.py \
     --dataset-dir "ICASSP2027/runs/${BENCH_ID}" \
-    --out-dir "ICASSP2027/runs/eval_cascade_${ASR_MODEL}" \
+    --out-dir "ICASSP2027/runs/eval_cascade_${ASR_MODEL}_${BENCH_ID}" \
     --asr-model "$ASR_MODEL" \
     --thresholds="$THRESHOLDS"
 
-echo "CASCADE OK: ICASSP2027/runs/eval_cascade_${ASR_MODEL}"
+echo "CASCADE OK: ICASSP2027/runs/eval_cascade_${ASR_MODEL}_${BENCH_ID}"
