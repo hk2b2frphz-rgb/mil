@@ -408,16 +408,34 @@ class LocalASR:
         pcm_16k = resample_linear(np.asarray(pcm, dtype=np.float32), sample_rate, 16000)
         started = time.perf_counter()
         segments, _info = self._model.transcribe(
-            pcm_16k, language=self.language, vad_filter=True
+            pcm_16k, language=self.language, vad_filter=True, word_timestamps=True
         )
-        chunks = [
-            {
-                "text": segment.text.strip(),
-                "timestamp": [round(float(segment.start), 4), round(float(segment.end), 4)],
-            }
-            for segment in segments
-            if segment.text.strip() and segment.end is not None
-        ]
+        chunks: list[dict[str, Any]] = []
+        for segment in segments:
+            # Whisper's Japanese word timestamps are the closest available
+            # alignment to the synthesized waveform.  A segment fallback is
+            # retained only for a backend/model version that cannot expose
+            # word timings; callers never manufacture character timestamps.
+            words = getattr(segment, "words", None) or []
+            word_chunks = [
+                {
+                    "text": str(word.word).strip(),
+                    "timestamp": [round(float(word.start), 4), round(float(word.end), 4)],
+                }
+                for word in words
+                if str(getattr(word, "word", "")).strip()
+                and getattr(word, "start", None) is not None
+                and getattr(word, "end", None) is not None
+            ]
+            if word_chunks:
+                chunks.extend(word_chunks)
+            elif segment.text.strip() and segment.end is not None:
+                chunks.append(
+                    {
+                        "text": segment.text.strip(),
+                        "timestamp": [round(float(segment.start), 4), round(float(segment.end), 4)],
+                    }
+                )
         text = "".join(chunk["text"] for chunk in chunks).strip()
         wall_time = time.perf_counter() - started
         return text, chunks, wall_time

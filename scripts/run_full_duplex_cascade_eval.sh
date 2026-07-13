@@ -62,6 +62,7 @@ RUN_ID="${RUN_ID:-${MODEL_ID}_$(date +%Y%m%d_%H%M%S)}"
 # (byte-identical input.wav timing), which is the whole point of comparing them.
 FDB_SCENARIOS="${FDB_SCENARIOS:-$REPO_ROOT/eval_sets/full_duplex_ja/scenarios_expanded.jsonl}"
 FDB_TASKS="${FDB_TASKS:-all}"
+FDB_CASES_PER_TASK="${FDB_CASES_PER_TASK:-}"
 FDB_SEEDS="${FDB_SEEDS:-0}"
 FDB_TTS_BACKEND="${FDB_TTS_BACKEND:-qwen3}"
 FDB_TTS_MODEL="${FDB_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
@@ -101,6 +102,11 @@ CASCADE_TTS_SPEAKER="${CASCADE_TTS_SPEAKER:-Serena}"
 CASCADE_DEVICE="${CASCADE_DEVICE:-cuda}"
 CASCADE_DTYPE="${CASCADE_DTYPE:-float16}"
 
+if [[ -n "$FDB_CASES_PER_TASK" ]] && ! [[ "$FDB_CASES_PER_TASK" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: FDB_CASES_PER_TASK must be a positive integer: $FDB_CASES_PER_TASK" >&2
+    exit 1
+fi
+
 # Disable Triton / torch.compile -- V100 lacks support for many Triton kernels.
 export TORCHINDUCTOR_DISABLE=1
 export NO_TORCH_COMPILE="${NO_TORCH_COMPILE:-1}"
@@ -126,6 +132,7 @@ echo "asr:          $CASCADE_ASR_MODEL ($CASCADE_ASR_COMPUTE_TYPE, $CASCADE_ASR_
 echo "llm:          $CASCADE_LLM_MODEL"
 echo "tts:          $CASCADE_TTS_BACKEND / $CASCADE_TTS_SPEAKER"
 echo "tasks:        $FDB_TASKS"
+echo "cases/task:   ${FDB_CASES_PER_TASK:-all}"
 echo "seeds:        $FDB_SEEDS"
 echo "data:         $FDB_DATA_DIR"
 echo "output:       $FDB_OUT_DIR"
@@ -181,31 +188,33 @@ if [[ -n "$FDB_DATA_LOCK_FD" ]]; then
     exec {FDB_DATA_LOCK_FD}>&-
 fi
 
-uv run python eval/run_local_baseline_full_duplex.py \
-    --system cascade \
-    --dataset-dir "$FDB_DATA_DIR" \
-    --out-dir "$FDB_OUT_DIR/inference" \
-    --model-id "$MODEL_ID" \
-    --tasks "$FDB_TASKS" \
-    --seeds "$FDB_SEEDS" \
-    --require-v15-profile \
-    --asr-model "$CASCADE_ASR_MODEL" \
-    --asr-device "$CASCADE_ASR_DEVICE" \
-    --asr-compute-type "$CASCADE_ASR_COMPUTE_TYPE" \
-    --llm-model "$CASCADE_LLM_MODEL" \
-    --llm-max-new-tokens "$CASCADE_LLM_MAX_NEW_TOKENS" \
-    --tts-backend "$CASCADE_TTS_BACKEND" \
-    --tts-model "$CASCADE_TTS_MODEL" \
-    --tts-speaker "$CASCADE_TTS_SPEAKER" \
-    --device "$CASCADE_DEVICE" \
-    --dtype "$CASCADE_DTYPE" \
+baseline_args=(
+    uv run python eval/run_local_baseline_full_duplex.py
+    --system cascade
+    --dataset-dir "$FDB_DATA_DIR"
+    --out-dir "$FDB_OUT_DIR/inference"
+    --model-id "$MODEL_ID"
+    --tasks "$FDB_TASKS"
+    --seeds "$FDB_SEEDS"
+    --require-v15-profile
+    --asr-model "$CASCADE_ASR_MODEL"
+    --asr-device "$CASCADE_ASR_DEVICE"
+    --asr-compute-type "$CASCADE_ASR_COMPUTE_TYPE"
+    --llm-model "$CASCADE_LLM_MODEL"
+    --llm-max-new-tokens "$CASCADE_LLM_MAX_NEW_TOKENS"
+    --tts-backend "$CASCADE_TTS_BACKEND"
+    --tts-model "$CASCADE_TTS_MODEL"
+    --tts-speaker "$CASCADE_TTS_SPEAKER"
+    --device "$CASCADE_DEVICE"
+    --dtype "$CASCADE_DTYPE"
     --overwrite
+)
+if [[ -n "$FDB_CASES_PER_TASK" ]]; then baseline_args+=(--cases-per-task "$FDB_CASES_PER_TASK"); fi
+"${baseline_args[@]}"
 
-uv run python eval/align_full_duplex_asr.py \
-    --run-dir "$FDB_OUT_DIR/inference" \
-    --asr-model "$FDB_ASR_MODEL" \
-    --device "$CASCADE_ASR_DEVICE" \
-    --overwrite
+# The local baseline runner re-recognizes synthesized Japanese response audio
+# with faster-whisper and writes audio-derived chunks itself. Preserve those
+# artifacts rather than replacing them with English Parakeet-TDT alignment.
 uv run python eval/full_duplex_official_timing.py --run-dir "$FDB_OUT_DIR/inference"
 
 FDB_BACKCHANNEL_GT="${FDB_BACKCHANNEL_GT:-$REPO_ROOT/eval_sets/full_duplex_ja/backchannel_gt.json}"

@@ -41,6 +41,7 @@ MIMI_WEIGHT="${MIMI_WEIGHT:-}"
 TOKENIZER="${TOKENIZER:-}"
 FDB_SCENARIOS="${FDB_SCENARIOS:-$REPO_ROOT/eval_sets/full_duplex_ja/scenarios_expanded.jsonl}"
 FDB_TASKS="${FDB_TASKS:-all}"
+FDB_CASES_PER_TASK="${FDB_CASES_PER_TASK:-}"
 FDB_SEEDS="${FDB_SEEDS:-0}"
 FDB_TAIL_SEC="${FDB_TAIL_SEC:-8}"
 FDB_TTS_BACKEND="${FDB_TTS_BACKEND:-qwen3}"
@@ -76,6 +77,11 @@ FDB_WITH_UTMOS="${FDB_WITH_UTMOS:-1}"
 # process remains pinned to its own single GPU.
 FDB_TTS_BUILD_GPUS="${FDB_TTS_BUILD_GPUS:-}"
 HALF="${HALF:-1}"
+
+if [[ -n "$FDB_CASES_PER_TASK" ]] && ! [[ "$FDB_CASES_PER_TASK" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: FDB_CASES_PER_TASK must be a positive integer: $FDB_CASES_PER_TASK" >&2
+    exit 1
+fi
 
 # Disable Triton / torch.compile -- V100 lacks support for many Triton kernels.
 export TORCHINDUCTOR_DISABLE=1
@@ -130,6 +136,7 @@ echo "hf_repo:      $HF_REPO"
 echo "model_weight: ${MODEL_WEIGHT:-<hf default>}"
 echo "model_config: ${MODEL_CONFIG:-<hf default>}"
 echo "tasks:        $FDB_TASKS"
+echo "cases/task:   ${FDB_CASES_PER_TASK:-all}"
 echo "seeds:        $FDB_SEEDS"
 echo "data:         $FDB_DATA_DIR"
 echo "output:       $FDB_OUT_DIR"
@@ -277,6 +284,7 @@ inference_args=(
     --require-v15-profile
     --overwrite
 )
+if [[ -n "$FDB_CASES_PER_TASK" ]]; then inference_args+=(--cases-per-task "$FDB_CASES_PER_TASK"); fi
 if [[ "$HALF" == "1" ]]; then inference_args+=(--half); fi
 if [[ -n "$MODEL_WEIGHT" ]]; then inference_args+=(--moshi-weight "$MODEL_WEIGHT"); fi
 if [[ -n "$MODEL_CONFIG" ]]; then inference_args+=(--config "$MODEL_CONFIG"); fi
@@ -288,14 +296,11 @@ if [[ -n "${CFG_COEF:-}" ]]; then inference_args+=(--cfg-coef "$CFG_COEF"); fi
 
 "${inference_args[@]}"
 
-# Full-Duplex-Bench evaluates ASR-aligned output/clean-output transcripts,
-# not model-internal text events. Replace the inference-side convenience JSON
-# with this reproducible alignment before deterministic evaluation.
-uv run python eval/align_full_duplex_asr.py \
-    --run-dir "$FDB_OUT_DIR/inference" \
-    --asr-model "$FDB_ASR_MODEL" \
-    --device "$FDB_DEVICE" \
-    --overwrite
+# The Japanese adaptation evaluates the time-aligned Japanese text pieces
+# emitted by Moshi itself.  Do not overwrite output.json/clean_output.json
+# with the English Parakeet-TDT ASR: a silent (valid) model response has no
+# ASR tokens, which makes TDT timestamp extraction fail before metrics can be
+# written.  The inference runner has already written the required JSON files.
 uv run python eval/full_duplex_official_timing.py --run-dir "$FDB_OUT_DIR/inference"
 
 FDB_BACKCHANNEL_GT="${FDB_BACKCHANNEL_GT:-$REPO_ROOT/eval_sets/full_duplex_ja/backchannel_gt.json}"

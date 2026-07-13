@@ -38,9 +38,11 @@ latency/robustness baseline, not in the conformant full-duplex ranking.
   Moshi environment's huggingface-hub/transformers pins untouched. No new
   LLM-calling code was written; `eval/local_baseline_common.py`'s
   `GemmaLLM` just wraps the existing worker.
-- **ASR (cascade only)**: `faster-whisper`, in-process. It has no
-  `transformers` dependency, so it runs in the main project environment
-  without conflicting with Moshi.
+- **ASR (cascade only)**: `faster-whisper`, in-process. It transcribes both
+  the user input and the synthesized Japanese response; the latter supplies
+  audio-derived response chunks and timestamps for evaluation instead of
+  fabricated per-character timing. It has no `transformers` dependency, so
+  it runs in the main project environment without conflicting with Moshi.
 - **SpeechLLM**: `scripts/speechllm_worker.py` (new), same subprocess
   pattern as the Gemma worker, running Qwen2-Audio-7B-Instruct in
   `gemma_runtime/` (now also depends on `numpy`, added to
@@ -139,10 +141,12 @@ uv run python eval/evaluate_full_duplex_ja.py \
 
 `evaluate_full_duplex_ja.py` runs completely unchanged -- the baseline
 driver writes `output.wav`/`output.json`/`output.meta.json` in the exact
-format `run_full_duplex_bench.py` produces for Moshi, with the response
-audio placed at `input_duration_sec + (asr + llm + tts wall time)` so the
-existing latency/TOR metrics automatically reflect real cascade/SpeechLLM
-latency instead of understating it.
+format `run_full_duplex_bench.py` produces for Moshi. For cascade,
+`output.json` is re-recognized from the synthesized Japanese audio and
+therefore contains audio-derived chunks rather than fabricated character
+timestamps. The response audio is placed at `input_duration_sec + (asr +
+llm + tts wall time)`, so the existing latency/TOR metrics automatically
+reflect real cascade/SpeechLLM latency instead of understating it.
 
 **Read the caveats in `eval/run_local_baseline_full_duplex.py`'s module
 docstring before trusting every number.** In short: `pause_handling`,

@@ -18,9 +18,12 @@ English official leaderboard because the language, tokenizer/counting unit,
 input speech, and backchannel ground truth differ. A Moshi run is reported as
 protocol-conformant only when (1) its dataset manifest declares the v1.5
 static-overlap profile and (2) every overlap trial actually begins while the
-model is speaking. `run_full_duplex_eval.sh` enforces both conditions; on a
-failure it leaves no `summary.json` that could be mistaken for a conformant
-result.
+model is speaking. `run_full_duplex_eval.sh` enforces both conditions. On a
+failure it still writes `summary.json`, but aggregates metrics only from
+successful trials and records failed counts, rates, reasons, task breakdowns,
+and trial IDs under `evaluation`. The process remains non-zero and
+`protocol.timing_conformance` remains `not_established`, so the partial result
+cannot be mistaken for a conformant run.
 
 ## Deterministic metric definitions
 
@@ -211,6 +214,19 @@ Base model:
 qsub -v MODEL_ID=base scripts/run_full_duplex_eval.pbs
 ```
 
+The expanded set contains 50 cases for each of the 7 tasks (350 cases total).
+For a fast end-to-end smoke run, select the first case from every task without
+rebuilding the dataset:
+
+```bash
+qsub -v MODEL_ID=base,FDB_CASES_PER_TASK=1 scripts/run_full_duplex_eval.pbs
+```
+
+`FDB_CASES_PER_TASK=N` is applied after `FDB_TASKS` filtering and before seed
+expansion. Thus `FDB_TASKS=all,FDB_CASES_PER_TASK=1,FDB_SEEDS=0` runs 7 trials;
+with `FDB_SEEDS=0,1,2` it runs 21 trials. Selection follows manifest order and
+is deterministic. Leave the variable unset for all 50 cases per task.
+
 Merged LoRA (`MODEL_CONFIG` is optional -- omitted here since a merged LoRA
 model keeps the base architecture, so the HF default config already
 matches):
@@ -325,6 +341,7 @@ the job log. Outputs land under:
 ```text
 eval_runs/full_duplex_batches/<BATCH_ID>/
 |-- batch.log
+|-- batch_status.jsonl
 |-- <output_name>/
 |   |-- inference/
 |   |-- benchmark_results/
@@ -336,13 +353,17 @@ eval_runs/full_duplex_batches/<BATCH_ID>/
 Each `<output_name>/` subdirectory is exactly what a single
 `run_full_duplex_eval.pbs` run produces (see the layout above), so every
 downstream step (Azure/llm-jp judges, `summarize_eval.py`) works unchanged on
-any one of them. `combined_summary.json` additionally reindexes every
-model's `benchmark_results/summary.json` by task and metric
+any one of them. `combined_summary.json` reindexes successful models'
+`benchmark_results/summary.json` files by task and metric
 (`comparison.<task>.means.<metric>.<output_name>`), so a metric like `TOR` or
 `greeting_matched` can be read across every model in the batch without
-opening each `summary.json` separately. Regenerate it standalone with
-`eval/combine_full_duplex_summaries.py --batch-dir <dir> --out
-<dir>/combined_summary.json` if a model was re-run after the batch finished.
+opening each `summary.json` separately. Failed models are counted under
+`failures`; a partial summary that exists for a failed model is retained under
+`partial_models` but excluded from the main comparison. Even an all-failed
+batch gets an empty `models`/`comparison` result with failure counts. Regenerate
+it standalone with `eval/combine_full_duplex_summaries.py --batch-dir <dir>
+--status-file <dir>/batch_status.jsonl --out <dir>/combined_summary.json` if a
+model was re-run after the batch finished.
 
 Outputs:
 

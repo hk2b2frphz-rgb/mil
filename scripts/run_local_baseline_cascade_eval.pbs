@@ -31,6 +31,7 @@
 #   CASCADE_DEVICE=cuda
 #   CASCADE_DTYPE=float16
 #   FDB_SCENARIOS=eval_sets/full_duplex_ja/scenarios_expanded.jsonl
+#   FDB_CASES_PER_TASK=1                  Smoke: first N cases per task.
 #   FDB_DATA_DIR=data/full_duplex_ja_v2_nogreeting Built with --no-opening-greeting;
 #                                                  a cascade baseline was never
 #                                                  trained to say Moshi's fixed
@@ -60,6 +61,7 @@ CASCADE_DEVICE="${CASCADE_DEVICE:-cuda}"
 CASCADE_DTYPE="${CASCADE_DTYPE:-float16}"
 
 FDB_SCENARIOS="${FDB_SCENARIOS:-$PWD/eval_sets/full_duplex_ja/scenarios_expanded.jsonl}"
+FDB_CASES_PER_TASK="${FDB_CASES_PER_TASK:-}"
 FDB_TTS_SPEAKER="${FDB_TTS_SPEAKER:-Ono_Anna}"
 FDB_TTS_BACKGROUND_SPEAKER="${FDB_TTS_BACKGROUND_SPEAKER:-Uncle_Fu}"
 FDB_DATA_DIR="${FDB_DATA_DIR:-$PWD/data/full_duplex_ja_v2_nogreeting}"
@@ -67,6 +69,11 @@ REFRESH_FDB_DATA="${REFRESH_FDB_DATA:-0}"
 FDB_OUT_DIR="${FDB_OUT_DIR:-$PWD/eval_runs/full_duplex/$CASCADE_MODEL_ID}"
 FDB_BACKCHANNEL_GT="${FDB_BACKCHANNEL_GT:-$PWD/eval_sets/full_duplex_ja/backchannel_gt.json}"
 FDB_ASR_MODEL="${FDB_ASR_MODEL:-nvidia/parakeet-tdt-0.6b-v2}"
+
+if [[ -n "$FDB_CASES_PER_TASK" ]] && ! [[ "$FDB_CASES_PER_TASK" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: FDB_CASES_PER_TASK must be a positive integer: $FDB_CASES_PER_TASK" >&2
+    exit 1
+fi
 
 LONELINESS_SCENARIOS="${LONELINESS_SCENARIOS:-$PWD/eval_sets/loneliness_support.jsonl}"
 LONELINESS_OUT_DIR="${LONELINESS_OUT_DIR:-$PWD/results/${CASCADE_MODEL_ID}_loneliness}"
@@ -131,28 +138,30 @@ if [[ "$SKIP_FULL_DUPLEX" != "1" ]]; then
 
     echo
     echo "===== 2/4: cascade inference over Full-Duplex-Bench-JA ====="
-    uv run python eval/run_local_baseline_full_duplex.py \
-        --system cascade \
-        --dataset-dir "$FDB_DATA_DIR" \
-        --out-dir "$FDB_OUT_DIR/inference" \
-        --model-id "$CASCADE_MODEL_ID" \
-        --asr-model "$CASCADE_ASR_MODEL" \
-        --asr-device "$CASCADE_ASR_DEVICE" \
-        --asr-compute-type "$CASCADE_ASR_COMPUTE_TYPE" \
-        --llm-model "$CASCADE_LLM_MODEL" \
-        --llm-max-new-tokens "$CASCADE_LLM_MAX_NEW_TOKENS" \
-        --tts-backend "$CASCADE_TTS_BACKEND" \
-        --tts-model "$CASCADE_TTS_MODEL" \
-        --tts-speaker "$CASCADE_TTS_SPEAKER" \
-        --device "$CASCADE_DEVICE" \
-        --dtype "$CASCADE_DTYPE" \
+    baseline_args=(
+        uv run python eval/run_local_baseline_full_duplex.py
+        --system cascade
+        --dataset-dir "$FDB_DATA_DIR"
+        --out-dir "$FDB_OUT_DIR/inference"
+        --model-id "$CASCADE_MODEL_ID"
+        --asr-model "$CASCADE_ASR_MODEL"
+        --asr-device "$CASCADE_ASR_DEVICE"
+        --asr-compute-type "$CASCADE_ASR_COMPUTE_TYPE"
+        --llm-model "$CASCADE_LLM_MODEL"
+        --llm-max-new-tokens "$CASCADE_LLM_MAX_NEW_TOKENS"
+        --tts-backend "$CASCADE_TTS_BACKEND"
+        --tts-model "$CASCADE_TTS_MODEL"
+        --tts-speaker "$CASCADE_TTS_SPEAKER"
+        --device "$CASCADE_DEVICE"
+        --dtype "$CASCADE_DTYPE"
         --overwrite
+    )
+    if [[ -n "$FDB_CASES_PER_TASK" ]]; then baseline_args+=(--cases-per-task "$FDB_CASES_PER_TASK"); fi
+    "${baseline_args[@]}"
 
-    uv run python eval/align_full_duplex_asr.py \
-        --run-dir "$FDB_OUT_DIR/inference" \
-        --asr-model "$FDB_ASR_MODEL" \
-        --device "$CASCADE_ASR_DEVICE" \
-        --overwrite
+    # The cascade runner has already re-recognized its synthesized Japanese
+    # response and written audio-derived chunks. Keep them instead of
+    # overwriting with English Parakeet-TDT alignment.
     uv run python eval/full_duplex_official_timing.py --run-dir "$FDB_OUT_DIR/inference"
 
     evaluate_args=(

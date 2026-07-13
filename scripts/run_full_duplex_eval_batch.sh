@@ -278,6 +278,17 @@ for i in "${!OUTPUT_NAMES[@]}"; do
     RESULT_LINES+=("$model_id|$output_name|$status|$elapsed")
 done
 
+# Persist machine-readable model statuses before combining summaries. All
+# interpolated identifiers have already passed the strict manifest charset
+# validation above, so writing this JSONL does not require extra escaping.
+BATCH_STATUS_FILE="$BATCH_OUT_DIR/batch_status.jsonl"
+: > "$BATCH_STATUS_FILE"
+for line in "${RESULT_LINES[@]}"; do
+    IFS='|' read -r m o s e <<< "$line"
+    printf '{"model_id":"%s","output_name":"%s","status":"%s","elapsed_sec":"%s"}\n' \
+        "$m" "$o" "$s" "$e" >> "$BATCH_STATUS_FILE"
+done
+
 echo
 echo "===== Batch summary ====="
 printf '%-24s %-24s %-8s %s\n' "model_id" "output_name" "status" "elapsed_sec"
@@ -288,6 +299,7 @@ done
 
 if ! uv run python eval/combine_full_duplex_summaries.py \
     --batch-dir "$BATCH_OUT_DIR" \
+    --status-file "$BATCH_STATUS_FILE" \
     --out "$BATCH_OUT_DIR/combined_summary.json"; then
     echo "[batch] ERROR: combined_summary.json step failed" >&2
     FAILED=$((FAILED + 1))

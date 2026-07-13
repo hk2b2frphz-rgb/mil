@@ -20,6 +20,7 @@
 #                   (default: llm-jp/llm-jp-moshi-v1).
 # - extra_env       optional. ";"-separated KEY=VALUE overrides applied only
 #                   to this row, e.g. FDB_SEEDS=0,1,2;FDB_TTS_SPEAKER=Ono_Anna
+#                   or FDB_CASES_PER_TASK=1 for a one-case-per-task smoke run.
 #                   Special key FDB_SYSTEM=cascade turns this row into a local
 #                   cascade (ASR->LLM->TTS) baseline instead of a Moshi run:
 #                   the batch calls scripts/run_full_duplex_cascade_eval.sh,

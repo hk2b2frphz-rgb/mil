@@ -18,6 +18,7 @@
 #
 # Useful overrides:
 #   FDB_TASKS=pause_handling,smooth_turn_taking,user_interruption
+#   FDB_CASES_PER_TASK=1 (smoke: first N cases from every selected task)
 #   FDB_SEEDS=0,1,2
 #   FDB_TAIL_SEC=8
 #   FDB_TTS_BACKEND=qwen3

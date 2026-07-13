@@ -29,6 +29,7 @@
 #   FDB_BATCH_GPUS=0,1,2,3         GPU IDs assigned to model workers.
 #   FDB_BATCH_PARALLELISM=4        Number of concurrent models (max: visible GPUs).
 #   FDB_TASKS=pause_handling,smooth_turn_taking,user_interruption
+#   FDB_CASES_PER_TASK=1           Smoke: first N cases per selected task.
 #   FDB_SEEDS=0,1,2
 #   FDB_TAIL_SEC=8
 #   FDB_TTS_BACKEND=qwen3

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from argparse import Namespace
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,10 @@ for path in (ROOT, EVAL):
 
 from eval.evaluate_full_duplex_adaptation import holm_adjust, paired_summary
 from eval.evaluate_full_duplex_ja import aggregate, occurrence_distribution
+import eval.evaluate_full_duplex_ja as full_duplex_eval
+import eval.combine_full_duplex_summaries as combine_summaries
 from eval.full_duplex_judge_input import compact_event_segments
+from eval.full_duplex_sample_selection import select_samples
 from eval.judge_full_duplex_azure import validate as validate_full_duplex
 from eval.judge_llmjp_style import validate as validate_llmjp
 from eval.judge_openai import validate_judge
@@ -85,6 +89,113 @@ def test_summary_includes_numeric_metric_denominators() -> None:
     assert summary["observed_values"]["vad_backend"] == ["energy_fallback", "silero"]
 
 
+def test_strict_overlap_writes_partial_summary_from_successes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "inference"
+    out_dir = tmp_path / "benchmark_results"
+    successful_trial = run_dir / "background_speech" / "ok" / "seed_0"
+    failed_trial = run_dir / "background_speech" / "miss" / "seed_0"
+    for trial in (successful_trial, failed_trial):
+        trial.mkdir(parents=True)
+        (trial / "output.meta.json").write_text("{}\n", encoding="utf-8")
+    (run_dir / "run_config.json").write_text(
+        json.dumps(
+            {
+                "model_id": "test-model",
+                "system": "moshi",
+                "protocol": {"name": "Full-Duplex-Bench v1.5 static overlap protocol"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_evaluate_case(trial: Path, _backchannel_gt=None):
+        achieved = trial.name == "seed_0" and trial.parent.name == "ok"
+        return {
+            "model_id": "test-model",
+            "task": "background_speech",
+            "case_id": trial.parent.name,
+            "seed": 0,
+            "metrics": {"overlap_achieved": achieved, "TOR": 1 if achieved else 0},
+        }
+
+    monkeypatch.setattr(
+        full_duplex_eval,
+        "parse_args",
+        lambda: Namespace(
+            run_dir=run_dir,
+            out_dir=out_dir,
+            backchannel_gt=None,
+            require_overlap=True,
+        ),
+    )
+    monkeypatch.setattr(full_duplex_eval, "evaluate_case", fake_evaluate_case)
+
+    assert full_duplex_eval.main() == 2
+    summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["n"] == 1
+    assert summary["n_total"] == 2
+    assert summary["tasks"]["background_speech"]["means"]["TOR"] == 1.0
+    assert summary["evaluation"]["successful_trials"] == 1
+    assert summary["evaluation"]["failed_trials"] == 1
+    assert summary["evaluation"]["failures_by_reason"] == {"overlap_not_achieved": 1}
+    assert summary["evaluation"]["failures"][0]["trial_id"] == "background_speech/miss/seed_0"
+
+
+def test_batch_combiner_compares_successes_and_counts_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    batch_dir = tmp_path / "batch"
+    out = batch_dir / "combined_summary.json"
+    summaries = {
+        "ok": {"tasks": {"x": {"means": {"TOR": 1.0}, "rates": {}}}},
+        "partial": {"tasks": {"x": {"means": {"TOR": 0.5}, "rates": {}}}},
+    }
+    for name, summary in summaries.items():
+        path = batch_dir / name / "benchmark_results" / "summary.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(summary), encoding="utf-8")
+    status_file = batch_dir / "batch_status.jsonl"
+    status_file.write_text(
+        "\n".join(
+            json.dumps(item)
+            for item in (
+                {"model_id": "ok", "output_name": "ok", "status": "ok", "elapsed_sec": "1"},
+                {
+                    "model_id": "partial",
+                    "output_name": "partial",
+                    "status": "FAILED",
+                    "elapsed_sec": "2",
+                },
+                {
+                    "model_id": "missing",
+                    "output_name": "missing",
+                    "status": "FAILED",
+                    "elapsed_sec": "3",
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        combine_summaries,
+        "parse_args",
+        lambda: Namespace(batch_dir=batch_dir, status_file=status_file, out=out),
+    )
+
+    assert combine_summaries.main() == 0
+    combined = json.loads(out.read_text(encoding="utf-8"))
+    assert combined["n_models_requested"] == 3
+    assert combined["n_models"] == 1
+    assert combined["n_models_failed"] == 2
+    assert list(combined["models"]) == ["ok"]
+    assert list(combined["partial_models"]) == ["partial"]
+    assert combined["comparison"]["x"]["means"]["TOR"] == {"ok": 1.0}
+    assert combined["failures"]["missing_summary_output_names"] == ["missing"]
+
+
 def test_jsd_distribution_matches_upstream_boundary_bucket() -> None:
     # Exact 1.0 seconds yields six 0.2-second buckets in upstream v1/v1.5.
     assert len(occurrence_distribution([], 1.0)) == 6
@@ -111,6 +222,19 @@ def test_expanded_full_duplex_set_has_50_cases_per_task() -> None:
     assert len(rows) == 350
     assert set(counts.values()) == {50}
     assert len({row["id"] for row in rows}) == len(rows)
+
+
+def test_cases_per_task_selects_deterministic_smoke_subset() -> None:
+    samples = [
+        {"id": f"{task}_{index}", "task": task}
+        for index in range(3)
+        for task in ("a", "b")
+    ]
+    selected = select_samples(samples, None, 1)
+    assert [item["id"] for item in selected] == ["a_0", "b_0"]
+    assert [item["id"] for item in select_samples(samples, {"b"}, 2)] == ["b_0", "b_1"]
+    with pytest.raises(ValueError, match=">= 1"):
+        select_samples(samples, None, 0)
 
 
 def test_expanded_overlap_cases_have_broad_event_and_timing_variation() -> None:

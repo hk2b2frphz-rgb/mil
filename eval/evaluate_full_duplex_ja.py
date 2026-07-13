@@ -5,6 +5,7 @@ import argparse
 import json
 import statistics
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +44,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--require-overlap",
         action="store_true",
-        help="Fail instead of writing summary.json when a v1.5 overlap event did not overlap model speech.",
+        help=(
+            "Return a failure status when a v1.5 overlap event did not overlap "
+            "model speech. summary.json is still written from successful trials."
+        ),
     )
     return parser.parse_args()
 
@@ -406,6 +410,33 @@ def overlap_protocol_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def trial_id(trial_dir: Path, run_dir: Path) -> str:
+    return trial_dir.relative_to(run_dir).as_posix()
+
+
+def failure_summary(
+    total_trials: int,
+    successful_rows: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+    protocol_gate_passed: bool,
+) -> dict[str, Any]:
+    by_reason = Counter(str(item["reason"]) for item in failures)
+    by_task = Counter(str(item.get("task") or "unknown") for item in failures)
+    successful = len(successful_rows)
+    failed = len(failures)
+    return {
+        "status": "complete" if failed == 0 and protocol_gate_passed else "partial",
+        "total_trials": total_trials,
+        "successful_trials": successful,
+        "failed_trials": failed,
+        "success_rate": successful / total_trials if total_trials else None,
+        "protocol_gate_passed": protocol_gate_passed,
+        "failures_by_reason": dict(sorted(by_reason.items())),
+        "failures_by_task": dict(sorted(by_task.items())),
+        "failures": failures,
+    }
+
+
 def main() -> int:
     args = parse_args()
     run_dir = args.run_dir.resolve()
@@ -413,7 +444,28 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     backchannel_gt = load_json(args.backchannel_gt) if args.backchannel_gt else None
     trials = sorted(path.parent for path in run_dir.glob("**/output.meta.json"))
-    rows = [evaluate_case(trial, backchannel_gt) for trial in trials]
+    rows: list[dict[str, Any]] = []
+    evaluation_errors: list[dict[str, Any]] = []
+    for trial in trials:
+        identifier = trial_id(trial, run_dir)
+        try:
+            row = evaluate_case(trial, backchannel_gt)
+        except Exception as exc:
+            parts = Path(identifier).parts
+            failure = {
+                "trial_id": identifier,
+                "task": parts[0] if parts else "unknown",
+                "reason": "evaluation_error",
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+            }
+            evaluation_errors.append(failure)
+            print(
+                f"[fdb-eval] failed {identifier}: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        rows.append(row)
     with (out_dir / "per_case.jsonl").open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -437,6 +489,25 @@ def main() -> int:
         if run_config.get("system") in {"cascade", "speechllm"}
         else "not_established"
     )
+    protocol_failures: list[dict[str, Any]] = []
+    if args.require_overlap:
+        for row in rows:
+            if row["metrics"].get("overlap_achieved") is False:
+                protocol_failures.append(
+                    {
+                        "trial_id": f"{row['task']}/{row['case_id']}/seed_{row['seed']}",
+                        "task": row["task"],
+                        "reason": "overlap_not_achieved",
+                    }
+                )
+    failed_trial_ids = {item["trial_id"] for item in protocol_failures}
+    successful_rows = [
+        row
+        for row in rows
+        if f"{row['task']}/{row['case_id']}/seed_{row['seed']}" not in failed_trial_ids
+    ]
+    failures = [*evaluation_errors, *protocol_failures]
+    protocol_gate_passed = not args.require_overlap or full_duplex_timing_conformant
     if full_duplex_timing_conformant:
         benchmark_name = "Full-Duplex-Bench v1/v1.5 protocol-conformant Japanese adaptation"
     elif run_config.get("system") in {"cascade", "speechllm"}:
@@ -450,26 +521,34 @@ def main() -> int:
         "system": run_config.get("system"),
         "git_commit": run_config.get("git_commit"),
         "language": "ja",
-        "n": len(rows),
-        "tasks": aggregate(rows),
+        # Backward-compatible `n` now denotes the rows contributing to means
+        # and rates. Total/failure denominators are explicit below.
+        "n": len(successful_rows),
+        "n_total": len(trials),
+        "tasks": aggregate(successful_rows),
         "protocol": protocol,
+        "evaluation": failure_summary(
+            len(trials), successful_rows, failures, protocol_gate_passed
+        ),
         "note": "API-dependent semantic/behavior judging is deferred to local Azure OpenAI.",
     }
+    (out_dir / "summary.json").write_text(
+        json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     if args.require_overlap and not full_duplex_timing_conformant:
         (out_dir / "protocol_report.json").write_text(
             json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
         print(
-            "[fdb-eval] overlap protocol failed; no summary.json was written: "
+            "[fdb-eval] overlap protocol failed; partial summary.json was written: "
             + ", ".join(protocol["missing_overlap_trials"]),
             file=sys.stderr,
         )
-        return 2
-    (out_dir / "summary.json").write_text(
-        json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    print(
+        f"[fdb-eval] evaluated {len(successful_rows)}/{len(trials)} successful trials "
+        f"({len(failures)} failed) -> {out_dir}"
     )
-    print(f"[fdb-eval] evaluated {len(rows)} trials -> {out_dir}")
-    return 0
+    return 2 if failures or not protocol_gate_passed else 0
 
 
 if __name__ == "__main__":

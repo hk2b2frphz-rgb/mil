@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import response_recorder as recorder
 from full_duplex_audio import write_wav_mono, write_wav_stereo
+from full_duplex_sample_selection import select_samples
 from greeting_check import evaluate_opening_greeting
 
 
@@ -38,6 +39,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--half", action="store_true", help="Use fp16; required on V100.")
     parser.add_argument("--seeds", default="0")
     parser.add_argument("--tasks", default="all", help="Comma-separated tasks or all.")
+    parser.add_argument(
+        "--cases-per-task",
+        type=int,
+        default=None,
+        help="Deterministically evaluate only the first N cases of each selected task.",
+    )
     parser.add_argument("--tail-sec", type=float, default=8.0)
     parser.add_argument("--max-gen-sec", type=float, default=180.0)
     parser.add_argument("--temp", type=float)
@@ -167,11 +174,12 @@ def main() -> int:
                 "Dataset is not the v1.5 protocol profile. Rebuild the v2 "
                 "Full-Duplex-Bench-JA dataset instead of reusing legacy audio."
             )
-    samples = [
-        item
-        for item in manifest["samples"]
-        if selected_tasks is None or item["task"] in selected_tasks
-    ]
+    try:
+        samples = select_samples(
+            manifest["samples"], selected_tasks, args.cases_per_task
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     if not samples:
         raise SystemExit("No benchmark samples matched --tasks.")
 
@@ -193,6 +201,8 @@ def main() -> int:
         "device": args.device,
         "seeds": seeds,
         "tasks": sorted(selected_tasks) if selected_tasks else "all",
+        "cases_per_task": args.cases_per_task,
+        "selected_case_count": len(samples),
         "tail_sec": args.tail_sec,
         "upstream_full_duplex_bench_commit": manifest.get("upstream_commit"),
         "profile": manifest.get("profile"),

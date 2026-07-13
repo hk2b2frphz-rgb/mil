@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -18,12 +19,48 @@ for directory in (REPO_ROOT, EVAL_DIR):
         sys.path.insert(0, str(directory))
 
 from eval.build_full_duplex_ja_dataset import render_scenario
-from eval.local_baseline_common import GemmaLLM, validate_spoken_response, worker_environment
+from eval.local_baseline_common import GemmaLLM, LocalASR, validate_spoken_response, worker_environment
 from eval.run_local_baseline_full_duplex import process_sample, seed_local
 from scripts.gemma_dialogue_worker import result_to_text
 
 
 class CascadeBaselineTests(unittest.TestCase):
+    def test_local_asr_prefers_audio_aligned_word_timestamps(self) -> None:
+        class FakeWhisper:
+            def __init__(self) -> None:
+                self.kwargs: dict[str, object] | None = None
+
+            def transcribe(self, _pcm: np.ndarray, **kwargs: object):
+                self.kwargs = kwargs
+                return iter(
+                    [
+                        SimpleNamespace(
+                            text="こんにちは世界",
+                            start=0.2,
+                            end=1.0,
+                            words=[
+                                SimpleNamespace(word="こんにちは", start=0.2, end=0.6),
+                                SimpleNamespace(word="世界", start=0.65, end=1.0),
+                            ],
+                        )
+                    ]
+                ), object()
+
+        model = FakeWhisper()
+        asr = LocalASR(device="cpu", compute_type="int8")
+        asr._model = model
+        text, chunks, _wall_time = asr.transcribe_aligned(np.zeros(16000, dtype=np.float32), 16000)
+
+        self.assertEqual(text, "こんにちは世界")
+        self.assertEqual(
+            chunks,
+            [
+                {"text": "こんにちは", "timestamp": [0.2, 0.6]},
+                {"text": "世界", "timestamp": [0.65, 1.0]},
+            ],
+        )
+        self.assertTrue(model.kwargs["word_timestamps"])
+
     def test_result_to_text_selects_only_final_assistant_message(self) -> None:
         result = [
             {

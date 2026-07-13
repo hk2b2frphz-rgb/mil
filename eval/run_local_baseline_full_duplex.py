@@ -32,15 +32,12 @@ been fully processed. There is no way for them to react mid-utterance, so:
   over early and always respond late by roughly
   asr_wall + llm_wall + tts_wall seconds -- that IS the point of the
   comparison, not a bug.
-- `backchannel`: the completed response is split into one pseudo-chunk per
-  character (proportionally timestamped) so `TOR`'s word-count threshold
-  still classifies real sentences vs. short acks correctly (see
-  build_pseudo_chunks() below) -- but `backchannel_frequency`/`jsd` count
-  *occurrences* of separate backchannel-like segments over time, and a
-  turn-based system only ever produces one segment total (it cannot
-  interject multiple times while the user keeps talking), so those two
-  metrics stay structurally not meaningful for these systems even with the
-  chunk fix; treat `TOR` and latency as the comparable numbers here.
+- `backchannel`: cascade output is re-recognized with Japanese
+  faster-whisper after TTS, so its chunks have audio-derived timestamps.
+  `backchannel_frequency`/`jsd` still count *occurrences* of separate
+  backchannel-like segments over time, and a turn-based system only ever
+  produces one segment total (it cannot interject multiple times while the
+  user keeps talking), so those metrics remain structurally not meaningful.
 - `user_backchannel`/`talking_to_other`/`background_speech`: both noisy and
   clean inputs are processed with the same seed. The resulting paired metrics
   therefore measure how much the overlay changes the turn-based response.
@@ -76,6 +73,7 @@ from local_baseline_common import (  # noqa: E402
 )
 from build_full_duplex_ja_dataset import synthesize  # noqa: E402
 from full_duplex_audio import read_wav_mono, write_wav_mono, write_wav_stereo  # noqa: E402
+from full_duplex_sample_selection import select_samples  # noqa: E402
 from greeting_check import evaluate_opening_greeting  # noqa: E402
 
 
@@ -91,6 +89,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", required=True, type=Path)
     parser.add_argument("--model-id", default=None)
     parser.add_argument("--tasks", default="all", help="Comma-separated tasks or all.")
+    parser.add_argument(
+        "--cases-per-task",
+        type=int,
+        default=None,
+        help="Deterministically evaluate only the first N cases of each selected task.",
+    )
     parser.add_argument("--seeds", default="0")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
@@ -133,40 +137,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--speechllm-timeout-sec", type=float, default=300.0)
 
     return parser.parse_args()
-
-
-def build_pseudo_chunks(
-    text: str, start_sec: float, duration_sec: float
-) -> list[dict[str, Any]]:
-    """Split a completed batch response into one pseudo-chunk per character,
-    proportionally timestamped across duration_sec.
-
-    evaluate_full_duplex_ja.py's take_over()/TOR classification assumes
-    Moshi-style per-token streamed chunks: it treats a response as a genuine
-    turn (not a backchannel-like blip) once it spans >3 counting units. A
-    cascade/SpeechLLM baseline only ever produces ONE completed string, so
-    without this, any response under turn_duration_threshold (1.0s) would
-    universally register as a non-turnover (TOR=0, response_latency_sec
-    dropped) regardless of how much it actually says -- a modeling artifact
-    of "one chunk", not a fact about the baseline. Splitting per character
-    approximates real token-stream granularity closely enough that
-    real-sentence responses correctly count as turns while short ack-like
-    replies still correctly fall under the threshold.
-    """
-    chars = list(text)
-    if not chars or duration_sec <= 0:
-        return []
-    per_char = duration_sec / len(chars)
-    return [
-        {
-            "text": ch,
-            "timestamp": [
-                round(start_sec + index * per_char, 4),
-                round(start_sec + (index + 1) * per_char, 4),
-            ],
-        }
-        for index, ch in enumerate(chars)
-    ]
 
 
 def seed_local(seed: int) -> None:
@@ -256,15 +226,28 @@ def process_variant(
         trial_dir / f"{output_stem}_stereo.wav", pcm, aligned, sample_rate
     )
 
-    response_duration_sec = len(response_pcm) / sample_rate
+    alignment_text = response_text
+    alignment_chunks: list[dict[str, Any]] = []
+    output_asr_wall = 0.0
+    if args.system == "cascade" and has_response:
+        # Align the actual synthesized Japanese audio, not the LLM string.
+        # The alignment input starts at zero, so shift every ASR time into the
+        # full output.wav timeline after recognition.
+        assert asr is not None
+        alignment_text, alignment_chunks, output_asr_wall = asr.transcribe_aligned(
+            response_pcm, sample_rate
+        )
+        for chunk in alignment_chunks:
+            start, end = chunk["timestamp"]
+            chunk["timestamp"] = [
+                round(output_start_sec + float(start), 4),
+                round(output_start_sec + float(end), 4),
+            ]
     output_json = {
-        "text": response_text,
-        "chunks": (
-            build_pseudo_chunks(response_text, output_start_sec, response_duration_sec)
-            if has_response
-            else []
-        ),
-        "source": f"{args.system}_text",
+        "text": alignment_text,
+        "chunks": alignment_chunks,
+        "source": f"{args.system}_asr_alignment" if args.system == "cascade" else f"{args.system}_text",
+        "generated_text": response_text,
         "language": "ja",
     }
     (trial_dir / f"{output_stem}.json").write_text(
@@ -296,6 +279,7 @@ def process_variant(
         "variant": variant,
         "asr_transcript": asr_text,
         "asr_wall_time_sec": round(asr_wall, 4),
+        "output_asr_wall_time_sec": round(output_asr_wall, 4),
         "llm_wall_time_sec": round(llm_wall, 4),
         "tts_wall_time_sec": round(tts_wall, 4),
         "audible_response_start_sec": round(output_start_sec, 4),
@@ -364,11 +348,12 @@ def main() -> int:
                 f"{actual_protocol!r}. Rebuild with "
                 "eval/build_full_duplex_ja_dataset.py."
             )
-    samples = [
-        item
-        for item in manifest["samples"]
-        if selected_tasks is None or item["task"] in selected_tasks
-    ]
+    try:
+        samples = select_samples(
+            manifest["samples"], selected_tasks, args.cases_per_task
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     if not samples:
         raise SystemExit("No benchmark samples matched --tasks.")
 
@@ -405,6 +390,8 @@ def main() -> int:
         "git_commit": os.environ.get("FDB_GIT_COMMIT"),
         "seeds": seeds,
         "tasks": sorted(selected_tasks) if selected_tasks else "all",
+        "cases_per_task": args.cases_per_task,
+        "selected_case_count": len(samples),
         "upstream_full_duplex_bench_commit": manifest.get("upstream_commit"),
         "profile": manifest.get("profile"),
         "protocol": protocol,
