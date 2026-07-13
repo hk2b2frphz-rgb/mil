@@ -6,9 +6,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 usage() {
     cat <<'EOF'
 Usage:
-  bash scripts/report_llm_dialogues_diversity.sh <folder> [output-file]
+  bash scripts/report_llm_dialogues_diversity.sh <jsonl-or-folder> [output-file]
 
-<folder> may be either:
+The first argument may be any of:
+  - a dialogue JSONL file, such as llm_dialogues/dialogues.jsonl
   - a run folder containing llm_dialogues/dialogues.jsonl
   - the llm_dialogues folder itself
 
@@ -31,26 +32,33 @@ if [[ "$1" == "-h" || "$1" == "--help" ]]; then
     exit 0
 fi
 
-TARGET_DIR="${1%/}"
+TARGET="${1%/}"
 SAMPLES="${SAMPLES:-8}"
 if ! [[ "$SAMPLES" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: SAMPLES must be a positive integer: $SAMPLES" >&2
     exit 2
 fi
-if [[ ! -d "$TARGET_DIR" ]]; then
-    echo "ERROR: folder does not exist: $TARGET_DIR" >&2
-    exit 1
-fi
-
-if [[ -f "$TARGET_DIR/llm_dialogues/dialogues.jsonl" ]]; then
-    RUN_DIR="$TARGET_DIR"
-    INPUT_JSONL="$TARGET_DIR/llm_dialogues/dialogues.jsonl"
-elif [[ -f "$TARGET_DIR/dialogues.jsonl" && "$(basename "$TARGET_DIR")" == "llm_dialogues" ]]; then
-    RUN_DIR="$(dirname "$TARGET_DIR")"
-    INPUT_JSONL="$TARGET_DIR/dialogues.jsonl"
+if [[ -f "$TARGET" ]]; then
+    if [[ "$TARGET" != *.jsonl ]]; then
+        echo "ERROR: input file must have a .jsonl extension: $TARGET" >&2
+        exit 1
+    fi
+    INPUT_JSONL="$TARGET"
+    INPUT_DIR="$(dirname "$TARGET")"
+    if [[ "$(basename "$INPUT_DIR")" == "llm_dialogues" ]]; then
+        RUN_DIR="$(dirname "$INPUT_DIR")"
+    else
+        RUN_DIR="$INPUT_DIR"
+    fi
+elif [[ -f "$TARGET/llm_dialogues/dialogues.jsonl" ]]; then
+    RUN_DIR="$TARGET"
+    INPUT_JSONL="$TARGET/llm_dialogues/dialogues.jsonl"
+elif [[ -f "$TARGET/dialogues.jsonl" && "$(basename "$TARGET")" == "llm_dialogues" ]]; then
+    RUN_DIR="$(dirname "$TARGET")"
+    INPUT_JSONL="$TARGET/dialogues.jsonl"
 else
-    echo "ERROR: dialogues.jsonl was not found under: $TARGET_DIR/llm_dialogues" >&2
-    echo "       You may also pass the llm_dialogues folder directly." >&2
+    echo "ERROR: no dialogue JSONL input was found for: $TARGET" >&2
+    echo "       Pass a .jsonl file, a run folder, or an llm_dialogues folder." >&2
     exit 1
 fi
 
