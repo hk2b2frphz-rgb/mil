@@ -42,6 +42,11 @@ from typing import Any
 
 import numpy as np
 
+try:
+    from scripts.alignment_words import get_segmenter_name, split_utterance_alignments
+except ImportError:  # スクリプト直接実行時（scripts/ が sys.path 先頭）
+    from alignment_words import get_segmenter_name, split_utterance_alignments
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -824,10 +829,27 @@ def _resample(pcm: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
 # Forced Alignment (--whole-utterance mode)
 # ---------------------------------------------------------------------------
 
-class ForcedAligner:
-    """CTC forced alignment using torchaudio MMS_FA for segment boundary detection."""
+class ForcedAlignmentError(RuntimeError):
+    """Raised when CTC forced alignment fails and proportional fallback is disabled."""
 
-    def __init__(self, device: str):
+
+class ForcedAligner:
+    """CTC forced alignment using torchaudio MMS_FA for segment boundary detection.
+
+    fallback_mode:
+        "skip" (default): アライメント失敗時に ForcedAlignmentError を送出する。
+            呼び出し側（対話ループ）が対話ごと破棄するので、境界が狂った
+            （＝ターンが単語の途中で切れた）音声が学習データに混入しない。
+        "proportional": 旧挙動。文字数比例の推定境界で続行する。境界品質が
+            大きく落ちるため、デバッグ・スモーク用途のみ推奨。
+    """
+
+    def __init__(self, device: str, fallback_mode: str = "skip"):
+        if fallback_mode not in {"skip", "proportional"}:
+            raise ValueError(
+                f"fallback_mode must be 'skip' or 'proportional', got {fallback_mode!r}"
+            )
+        self.fallback_mode = fallback_mode
         self.device = "cuda:0" if device == "cuda" else device
         self._model: Any = None
         self._tokenizer: Any = None
@@ -947,6 +969,10 @@ class ForcedAligner:
         audio_dur = audio.size / audio_sr
 
         if not full_cleaned or sum(seg_char_counts) == 0:
+            if self.fallback_mode != "proportional":
+                raise ForcedAlignmentError(
+                    "romanization produced no alignable characters"
+                )
             logger.warning("FA: romanization produced no alignable characters, using proportional fallback")
             fb = self._fallback_proportional(audio_dur, seg_char_counts)
             return fb, fb
@@ -959,6 +985,8 @@ class ForcedAligner:
         try:
             token_spans_grouped = self._aligner(emission[0], tokens)
         except Exception as exc:
+            if self.fallback_mode != "proportional":
+                raise ForcedAlignmentError(f"CTC alignment failed: {exc}") from exc
             logger.warning(
                 "FA CTC alignment failed (%s), using proportional fallback",
                 exc,
@@ -970,6 +998,10 @@ class ForcedAligner:
 
         expected_total = sum(seg_char_counts)
         if len(all_spans) != expected_total:
+            if self.fallback_mode != "proportional":
+                raise ForcedAlignmentError(
+                    f"span count mismatch: expected {expected_total}, got {len(all_spans)}"
+                )
             logger.warning(
                 "FA span count mismatch: expected %d, got %d; using proportional fallback",
                 expected_total, len(all_spans),
@@ -1949,6 +1981,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--fa-fallback",
+        choices=["skip", "proportional"],
+        default="skip",
+        help=(
+            "MMS_FA Forced Alignment 失敗時の挙動。skip（既定）は失敗した対話を"
+            "破棄する（境界が狂った音声を学習データに混ぜない）。proportional は"
+            "旧挙動で、文字数比例の推定境界のまま続行する（デバッグ用）。"
+            "--success-target と併用すれば破棄分は予備対話で自動補充される。"
+        ),
+    )
+    parser.add_argument(
         "--success-target",
         type=int,
         default=None,
@@ -2159,11 +2202,14 @@ def main() -> None:
 
     fa_aligner: ForcedAligner | None = None
     if args.whole_utterance:
-        fa_aligner = ForcedAligner(device=args.device)
+        fa_aligner = ForcedAligner(
+            device=args.device, fallback_mode=args.fa_fallback,
+        )
         fa_aligner.load()
 
     success_count = 0
     failed_count = 0
+    fa_failed_count = 0
     for idx, tmpl in enumerate(templates, start=1):
         try:
             turns: list[DialogueTurn] = []
@@ -2315,13 +2361,26 @@ def main() -> None:
 
             write_wav(wav_path, stereo, tts.sample_rate)
 
-            alignments = [
+            # kyutai moshi-finetune の Interleaver は「1 エントリ = 1 単語」を
+            # 前提にエントリ開始フレームへトークンを詰めるため、発話単位の
+            # まま渡すとテキストストリームのペーシングが崩壊する。単語単位に
+            # 分割したものを alignments として書き、発話単位の原本は
+            # alignments_utterance に残す。
+            utterance_alignments = [
                 [seg.text, [round(seg.start_sec, 4), round(seg.end_sec, 4)], seg.label]
                 for seg in segments
             ]
+            alignments, _split_stats = split_utterance_alignments(utterance_alignments)
             write_json(json_path, {
                 "alignments": alignments,
+                "alignments_utterance": utterance_alignments,
                 "metadata": {
+                    "alignments_granularity": "word",
+                    "alignments_word_split": {
+                        "version": 1,
+                        "method": "char-proportional",
+                        "segmenter": get_segmenter_name(),
+                    },
                     "mode": (
                         ("whole-utterance-" + args.tts_backend)
                         if args.whole_utterance
@@ -2414,6 +2473,15 @@ def main() -> None:
                     args.success_target, idx, len(templates), failed_count,
                 )
                 break
+        except ForcedAlignmentError as exc:
+            failed_count += 1
+            fa_failed_count += 1
+            logger.warning(
+                "[%d/%d] 対話 %s: Forced Alignment 失敗のため破棄します"
+                "（境界が狂った音声を学習データに混ぜない）: %s",
+                idx, len(templates), tmpl.get("id", "<unknown>"), exc,
+            )
+            continue
         except Exception as exc:
             failed_count += 1
             logger.warning(
@@ -2424,7 +2492,8 @@ def main() -> None:
             continue
 
     logger.info(
-        "対話合成完了: 成功 %d 件, 失敗 %d 件", success_count, failed_count,
+        "対話合成完了: 成功 %d 件, 失敗 %d 件 (うち FA 失敗による破棄 %d 件)",
+        success_count, failed_count, fa_failed_count,
     )
     if args.success_target is not None and success_count < args.success_target:
         raise SystemExit(
