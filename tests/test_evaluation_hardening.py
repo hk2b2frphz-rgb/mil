@@ -141,6 +141,11 @@ def test_strict_overlap_writes_partial_summary_from_successes(
     assert summary["evaluation"]["failed_trials"] == 1
     assert summary["evaluation"]["failures_by_reason"] == {"overlap_not_achieved": 1}
     assert summary["evaluation"]["failures"][0]["trial_id"] == "background_speech/miss/seed_0"
+    per_case = [
+        json.loads(line)
+        for line in (out_dir / "per_case.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["case_id"] for row in per_case] == ["ok"]
 
 
 def test_batch_combiner_compares_successes_and_counts_failures(

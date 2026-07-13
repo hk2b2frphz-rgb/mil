@@ -127,7 +127,8 @@ if [[ -n "$MODEL_CONFIG" && ! -f "$MODEL_CONFIG" ]]; then
 fi
 
 mkdir -p "$FDB_OUT_DIR"
-exec > >(tee -a "$FDB_OUT_DIR/run.log") 2>&1
+rm -f "$FDB_OUT_DIR/azure_judge_input.jsonl"
+exec > >(tee "$FDB_OUT_DIR/run.log") 2>&1
 
 echo "===== Full-Duplex-Bench-JA ====="
 echo "run_id:       $RUN_ID"
@@ -315,7 +316,20 @@ fi
 if [[ "$FDB_REQUIRE_OVERLAP" == "1" ]]; then
     evaluate_args+=(--require-overlap)
 fi
-"${evaluate_args[@]}"
+evaluation_status=0
+if "${evaluate_args[@]}"; then
+    :
+else
+    evaluation_status=$?
+    echo "[fdb] WARNING: deterministic evaluation was partial (exit $evaluation_status); packing successful trials for Azure." >&2
+fi
+
+# per_case.jsonl contains only trials accepted into summary.json. Pack it even
+# when the evaluator reports a partial result so Azure judging can proceed for
+# the successful subset.
+uv run python eval/pack_full_duplex_azure.py \
+    --per-case "$FDB_OUT_DIR/benchmark_results/per_case.jsonl" \
+    --out "$FDB_OUT_DIR/azure_judge_input.jsonl"
 
 adaptation_args=(
     uv run python eval/evaluate_full_duplex_adaptation.py
@@ -327,11 +341,8 @@ if [[ "$FDB_WITH_UTMOS" == "1" ]]; then
 fi
 "${adaptation_args[@]}"
 
-uv run python eval/pack_full_duplex_azure.py \
-    --per-case "$FDB_OUT_DIR/benchmark_results/per_case.jsonl" \
-    --out "$FDB_OUT_DIR/azure_judge_input.jsonl"
-
 echo "[fdb] benchmark summary: $FDB_OUT_DIR/benchmark_results/summary.json"
 echo "[fdb] Azure input only:  $FDB_OUT_DIR/azure_judge_input.jsonl"
 echo "[fdb] No OpenAI/Azure API was called by this server run."
 echo "finished_at: $(date -Iseconds)"
+exit "$evaluation_status"

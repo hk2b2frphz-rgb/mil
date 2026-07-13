@@ -466,9 +466,6 @@ def main() -> int:
             )
             continue
         rows.append(row)
-    with (out_dir / "per_case.jsonl").open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
     run_config = load_json(run_dir / "run_config.json")
     protocol = overlap_protocol_report(rows)
     input_profile_verified = (
@@ -506,6 +503,13 @@ def main() -> int:
         for row in rows
         if f"{row['task']}/{row['case_id']}/seed_{row['seed']}" not in failed_trial_ids
     ]
+    # Keep every downstream artifact on the same success-only denominator as
+    # summary.json.  In particular, pack_full_duplex_azure.py consumes this
+    # file, so protocol failures must not leak into Azure judging merely
+    # because evaluate_case itself completed.
+    with (out_dir / "per_case.jsonl").open("w", encoding="utf-8") as handle:
+        for row in successful_rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
     failures = [*evaluation_errors, *protocol_failures]
     protocol_gate_passed = not args.require_overlap or full_duplex_timing_conformant
     if full_duplex_timing_conformant:

@@ -123,7 +123,8 @@ command -v uv >/dev/null 2>&1 || {
 }
 
 mkdir -p "$FDB_OUT_DIR"
-exec > >(tee -a "$FDB_OUT_DIR/run.log") 2>&1
+rm -f "$FDB_OUT_DIR/azure_judge_input.jsonl"
+exec > >(tee "$FDB_OUT_DIR/run.log") 2>&1
 
 echo "===== Full-Duplex-Bench-JA (cascade) ====="
 echo "run_id:       $RUN_ID"
@@ -226,7 +227,13 @@ evaluate_args=(
 if [[ -f "$FDB_BACKCHANNEL_GT" ]]; then
     evaluate_args+=(--backchannel-gt "$FDB_BACKCHANNEL_GT")
 fi
-"${evaluate_args[@]}"
+evaluation_status=0
+if "${evaluate_args[@]}"; then
+    :
+else
+    evaluation_status=$?
+    echo "[cascade-fdb] WARNING: deterministic evaluation was partial (exit $evaluation_status); packing successful trials for Azure." >&2
+fi
 
 uv run python eval/pack_full_duplex_azure.py \
     --per-case "$FDB_OUT_DIR/benchmark_results/per_case.jsonl" \
@@ -236,3 +243,4 @@ echo "[cascade-fdb] benchmark summary: $FDB_OUT_DIR/benchmark_results/summary.js
 echo "[cascade-fdb] Azure input only:  $FDB_OUT_DIR/azure_judge_input.jsonl"
 echo "[cascade-fdb] No OpenAI/Azure API was called by this server run."
 echo "finished_at: $(date -Iseconds)"
+exit "$evaluation_status"

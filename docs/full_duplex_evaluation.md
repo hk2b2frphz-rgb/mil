@@ -359,7 +359,9 @@ any one of them. `combined_summary.json` reindexes successful models'
 `greeting_matched` can be read across every model in the batch without
 opening each `summary.json` separately. Failed models are counted under
 `failures`; a partial summary that exists for a failed model is retained under
-`partial_models` but excluded from the main comparison. Even an all-failed
+`partial_models` but excluded from the main comparison. If that partial model
+has successful trials, its `<output_name>/azure_judge_input.jsonl` is still
+written from those trials. Even an all-failed
 batch gets an empty `models`/`comparison` result with failure counts. Regenerate
 it standalone with `eval/combine_full_duplex_summaries.py --batch-dir <dir>
 --status-file <dir>/batch_status.jsonl --out <dir>/combined_summary.json` if a
@@ -398,7 +400,10 @@ Gemma/Qwen3-TTS training pipeline is documented in
 
 ## Local PC: Azure content evaluation
 
-Copy only `azure_judge_input.jsonl` to the local PC, then run:
+Copy only `azure_judge_input.jsonl` to the local PC, then run. When some
+trials fail deterministic evaluation, this file is still written and contains
+only the successful trials included in `benchmark_results/summary.json`;
+failure counts and details remain in that summary's `evaluation` section.
 
 ```powershell
 $env:AZURE_OPENAI_KEY="..."

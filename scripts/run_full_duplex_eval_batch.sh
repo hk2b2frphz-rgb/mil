@@ -22,7 +22,8 @@ fi
 BATCH_ID="${BATCH_ID:-batch_$(date +%Y%m%d_%H%M%S)}"
 BATCH_OUT_DIR="${BATCH_OUT_DIR:-$REPO_ROOT/eval_runs/full_duplex_batches/$BATCH_ID}"
 mkdir -p "$BATCH_OUT_DIR"
-exec > >(tee -a "$BATCH_OUT_DIR/batch.log") 2>&1
+# A reused BATCH_ID must not mix this run with an older batch log.
+exec > >(tee "$BATCH_OUT_DIR/batch.log") 2>&1
 
 echo "===== Full-Duplex-Bench-JA batch eval ====="
 echo "batch_id:    $BATCH_ID"
@@ -229,8 +230,10 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
     mkdir -p "$BATCH_OUT_DIR/$output_name"
     # Never let a failed rerun contribute a stale summary from an older run.
     rm -f "$BATCH_OUT_DIR/$output_name/benchmark_results/summary.json"
+    rm -f "$BATCH_OUT_DIR/$output_name/azure_judge_input.jsonl"
     (
         model_start=$(date +%s)
+        echo "[batch] runner=$eval_script model_id=$model_id output_name=$output_name system=$row_system gpu=$gpu_id"
         if env CUDA_VISIBLE_DEVICES="$gpu_id" "${run_env[@]}" bash "$eval_script"; then
             run_config="$BATCH_OUT_DIR/$output_name/inference/run_config.json"
             if [[ -f "$run_config" ]] && grep -q "\"system\": \"$row_system\"" "$run_config"; then
@@ -246,7 +249,7 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
         elapsed=$((model_end - model_start))
         printf '%s|%s\n' "$status" "$elapsed" > "$status_file"
         echo "[batch] model_id=$model_id output_name=$output_name system=$row_system gpu=$gpu_id status=$status elapsed_sec=$elapsed"
-    ) > >(tee -a "$BATCH_OUT_DIR/$output_name/batch_worker.log") 2>&1 &
+    ) > >(tee "$BATCH_OUT_DIR/$output_name/batch_worker.log") 2>&1 &
     WAVE_PIDS+=("$!")
     echo "[batch] started model_id=$model_id on gpu=$gpu_id pid=$!"
     if [[ "$row_requires_serial" == "1" ]]; then
