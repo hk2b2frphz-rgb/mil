@@ -86,7 +86,7 @@ echo "num_proc:    $NUM_PROC"
 echo "segment_dir: $SEGMENT_DIR"
 
 # Inject segment_dir into config at runtime via env var override.
-# The YAML config may have segment_dir="" — override it here.
+# The YAML config may have segment_dir="" -- override it here.
 export GRPO_SEGMENT_DIR="$SEGMENT_DIR"
 
 uv run accelerate launch \

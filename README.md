@@ -186,9 +186,14 @@ alignments 単語化 + FA失敗破棄（`e540182`,
 FAバグと無関係なので再利用**し、TTS 段だけ再レンダリングする。
 
 ```bash
-# 0. 対話テキストの存在確認（なければ先に run_dialogues_qwen_{1000,3000}.pbs）
-ls data/runs/qwen_dialogues_1000/llm_dialogues/dialogues.jsonl
-ls data/runs/qwen_dialogues_3000/llm_dialogues/dialogues.jsonl
+# 0. 対話テキストの存在と世代を確認（なければ先に run_dialogues_qwen_{1000,3000}.pbs）
+#    FAバグはテキストと無関係だが、v1.2 のプロンプト改定
+#    （「なるほど」生成禁止・復唱・感情ミラーリング, decision 0002）より前に
+#    生成した dialogues.jsonl なら対話テキストごと作り直す。判定は:
+grep -c "なるほど" data/runs/qwen_dialogues_1000/llm_dialogues/dialogues.jsonl
+grep -c "なるほど" data/runs/qwen_dialogues_3000/llm_dialogues/dialogues.jsonl
+#    → 0 に近ければ v1.2 世代（再利用OK）。多数ヒットするなら旧世代なので
+#      qsub -V scripts/run_dialogues_qwen_1000.pbs 等で対話から再生成する
 
 # 1. 30h相当（1000対話）を再レンダリング。BATCH_ID は毎回タイムスタンプ付きなので
 #    旧データと衝突しない

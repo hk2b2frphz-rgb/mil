@@ -35,7 +35,7 @@
 #   NUM_SHARDS=4
 #   CUDA_VISIBLE_DEVICES=0,1,2,3
 #   SOURCE_BATCH_ID=qwen_dialogues_10000
-#   STYLE_PRESET=auto             (auto: dialogues.jsonl の emotional_state から対話ごとに声のトーン・テンポを自動選択)
+#   STYLE_PRESET=auto             (auto: pick voice tone/tempo per dialogue from emotional_state in dialogues.jsonl)
 #   NUM_DIALOGUES=all
 #   FRESH=1     # ignore any existing output and start a new timestamped run
 #   RESUME=0    # force a clean re-render into the same dir (default: auto)
