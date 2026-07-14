@@ -123,6 +123,38 @@ class PromptRedesignTests(unittest.TestCase):
         self.assertEqual(turns[1].timing, "sequential")
         self.assertIsNone(turns[1].event)
 
+    def test_aizuchi_insertions_accept_expanded_vocabulary(self) -> None:
+        text = "先週から眠れなくて、食欲もなくて、仕事にも行けなくて、誰にも言えませんでした。"
+        clauses = split_text_into_clauses(text)
+        self.assertGreaterEqual(len(clauses), 4)
+        insertions = parse_aizuchi_insertions(
+            '{"insertions":['
+            '{"after_clause":1,"text":"あー…。"},'
+            '{"after_clause":3,"text":"そうだったんですね。"}]}',
+            clauses,
+            max_insertions=3,
+        )
+        self.assertEqual(
+            [item["text"] for item in insertions], ["あー…。", "そうだったんですね。"]
+        )
+
+    def test_aizuchi_insertions_reject_naruhodo_and_adjacent_clauses(self) -> None:
+        text = "先週から眠れなくて、食欲もなくて、仕事にも行けなくて、誰にも言えませんでした。"
+        clauses = split_text_into_clauses(text)
+        insertions = parse_aizuchi_insertions(
+            '{"insertions":['
+            '{"after_clause":1,"text":"なるほど。"},'
+            '{"after_clause":1,"text":"ええ。"},'
+            '{"after_clause":2,"text":"はい。"}]}',
+            clauses,
+            max_insertions=3,
+        )
+        # なるほど は破棄、句1 の直後(隣の句2)への連続挿入も間引かれる
+        self.assertEqual(
+            [(item["after_clause"], item["text"]) for item in insertions],
+            [(1, "ええ。")],
+        )
+
     def test_openai_endpoint_urls_support_chat_and_completions(self) -> None:
         self.assertEqual(
             openai_generation_url("http://127.0.0.1:8080/v1", "chat"),
