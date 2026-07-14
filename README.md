@@ -120,9 +120,12 @@ qsub -V scripts/run_qwen_tts_whole_utterance_1000_4gpu.pbs
 STYLE_PRESET=counseling_anxious qsub -V scripts/run_qwen_tts_whole_utterance_1000_4gpu.pbs
 ```
 
-Default `BATCH_ID` values include a timestamp/job suffix, so output goes under
-`data/runs/<printed BATCH_ID>/`. The job log prints `out_root`; use that path
-for merge and fine-tuning. Set `BATCH_ID=...` explicitly only when resuming.
+出力は `data/runs/<printed BATCH_ID>/`。ジョブログの `out_root` をマージ・学習に使う。
+`BATCH_ID` の既定は smoke/1000 ジョブは**タイムスタンプ付き**（毎回新規 run）、
+3000/10000 ジョブは**固定名**（再投入すると同じ dir に resume し、完了済みシャードは
+スキップ）。3000/10000 で**旧データを残したまま作り直す**場合は `FRESH=1` を付けて
+新しいタイムスタンプ付き run に出力する。walltime 内に終わらない場合は同じ
+`BATCH_ID` で再投入すれば途中から再開する（チェーン投入例は各 .pbs のヘッダ参照）。
 
 #### CTC alignment 失敗と対話数の担保
 
@@ -133,7 +136,11 @@ for merge and fine-tuning. Set `BATCH_ID=...` explicitly only when resuming.
 - `generate_qwen3_tts_data.py` は話者ごとの連結テキストを
   `--whole-utterance-max-chars`（既定 150 文字）ごとに分割して合成・alignment
   するため、1回のTTS呼び出しが長くなりすぎて音声が打ち切られる事態を避ける。
-  それでも alignment に失敗した場合は従来どおり比例配分にフォールバックする。
+  それでも alignment に失敗した対話は**既定で破棄**される（`--fa-fallback skip`。
+  比例配分の推定境界で切った破損音声を学習データに混ぜないため。旧挙動は
+  `--fa-fallback proportional` でデバッグ用に残る）。破棄分は `--success-target`
+  併用で予備対話から自動補充され、末尾ログに FA 破棄件数が集計される。
+  詳細は [knowledge/decisions/0003](knowledge/decisions/0003_word_level_alignments.md)。
 - 対話単位の合成・書き出しは例外を捕捉するようになり、1件が失敗しても
   シャード全体は止まらず次の対話へ進む（失敗件数はログの
   `対話合成完了: 成功 N 件, 失敗 N 件` に出る）。
@@ -170,6 +177,47 @@ SWEEP_PATTERNS=h01 qsub -V scripts/sweep_lora.pbs
 SRC_RUN_DIR=./data/runs/$BATCH_ID/merged \
 SWEEP_PATTERNS=f01 qsub -V scripts/fullft_sweep.pbs
 ```
+
+### 実験やり直しランブック（FA修正後の再生成 → 30h/100h 比較）
+
+alignments 単語化 + FA失敗破棄（`e540182`,
+[decision 0003](knowledge/decisions/0003_word_level_alignments.md)）を反映した
+データを作り直し、スケール比較をやり直す手順。**対話テキスト（dialogues.jsonl）は
+FAバグと無関係なので再利用**し、TTS 段だけ再レンダリングする。
+
+```bash
+# 0. 対話テキストの存在確認（なければ先に run_dialogues_qwen_{1000,3000}.pbs）
+ls data/runs/qwen_dialogues_1000/llm_dialogues/dialogues.jsonl
+ls data/runs/qwen_dialogues_3000/llm_dialogues/dialogues.jsonl
+
+# 1. 30h相当（1000対話）を再レンダリング。BATCH_ID は毎回タイムスタンプ付きなので
+#    旧データと衝突しない
+qsub -V scripts/run_qwen_tts_whole_utterance_1000_4gpu.pbs
+
+# 2. ログ末尾で merged_manifest と FA破棄件数を確認。
+#    破棄率が 10% を超えるようなら学習に進む前に原因を調べる
+
+# 3. LoRA h01 を1本（テキスト崩壊が直ったかの検証）
+SRC_RUN_DIR=./data/runs/<BATCH_ID>/merged \
+SWEEP_PATTERNS=h01 qsub -V scripts/sweep_lora.pbs
+
+# 4. 判定: eval loss 曲線 / merge_lora.pbs でマージ後の推論テキストが文として
+#    成立しているか / analyze_backchannels.py の相槌分類。
+#    旧 h01（壊れたデータ）と比較し、直っていなければ 100h に進まない
+
+# 5. 100h相当（3000対話）。BATCH_ID が固定名なので FRESH=1 必須
+#    （付けないと旧データの dir に resume され「完了済み」スキップになる）
+FRESH=1 qsub -V scripts/run_qwen_tts_whole_utterance_3000_4gpu.pbs
+
+# 6. 同じ h01 で学習 → 「きれいな30h vs きれいな100h」で初めてスケール効果を
+#    正しく比較できる（旧30h vs 旧100h はノイズ床で頭打ちのため比較として無効）
+SRC_RUN_DIR=./data/runs/<BATCH_ID_3000>/merged \
+SWEEP_PATTERNS=h01 qsub -V scripts/sweep_lora.pbs
+```
+
+結果（テキスト崩壊の解消・相槌/自然性の変化）は
+[knowledge/decisions/0003](knowledge/decisions/0003_word_level_alignments.md) の
+TODO に追記する。
 
 ### 個別ステップ
 
@@ -251,6 +299,51 @@ qsub -v SRC_RUN_DIR=data/runs/$BATCH_ID/merged scripts/fullft_sweep.pbs
 
 総量は配列サイズ × `DIALOGUES_PER_SHARD`。100h からずらすには `-J 0-N` か
 `DIALOGUES_PER_SHARD` を変更する。
+
+## 実対話データ（1chロールプレイ）の分析とテストデータ作成
+
+1ch のロールプレイ録音（相談員/相談者の2話者）を話者タイムライン化し、
+**耳で確認できる WAV 群**と統計を出す。ダイアライゼーションは
+`nvidia/diar_streaming_sortformer_4spk-v2`（NeMo・非ゲート・CC-BY-4.0、
+HF の同意/トークン不要）、書き起こしは faster-whisper。
+
+```bash
+# 0. テスト分割の凍結（データに触る前に一度だけ）
+#    統計・相槌バンク・学習に使う前に、セッション単位で test 分を切り出して封印する。
+#    目安: test 15–20分 / 開発用 残り。分割リストを git 管理して固定し、
+#    test セッションは評価（実データ参照値・聴取評価アンカー）専用にする。
+
+# 1. 分析を実行（PBS）
+qsub -v WAVS=/path/to/session1.wav scripts/run_real_dialogue_analysis.pbs
+# 複数ファイルやglob:
+#   qsub -v 'WAVS=/path/a.wav,/path/b.wav' scripts/run_real_dialogue_analysis.pbs
+#   qsub -v 'WAVS=/path/sessions/*.wav'    scripts/run_real_dialogue_analysis.pbs
+# 手元やログインノードで直接も可（CPUの場合 whisper は自動で small になる）:
+#   uv run python scripts/analyze_real_dialogue.py <wav> --out-dir data/real_dialogue/pilot
+# 書き起こしを待たず切り出しだけ素早く聴くなら EXTRA_ARGS="--skip-asr"
+```
+
+出力（入力 WAV ごとに `<OUT_DIR>/<wav名>/`）:
+
+| ファイル | 用途 |
+|---|---|
+| `speaker_A_solo.wav` / `speaker_B_solo.wav` | 相手区間を無音化。**相手の声が（重畳区間以外で）混ざっていなければダイアライゼーション合格** |
+| `stereo_diarized.wav` | L=話者A / R=話者B（重畳区間は分離前なので両chに残る） |
+| `segments/A/`, `segments/B/` | 発話ごとの WAV。ファイル名 = `通番_時刻_長さ[_ov][_aizuchi]_テキスト先頭` |
+| `stats.json` / `timeline.jsonl` | 相槌頻度(/分)・語彙別内訳・応答gap分布・重畳長分布 |
+
+話者は総発話時間の多い順に A / B。Sortformer が3話者以上を誤検出した場合は
+上位2名以外の断片を警告付きで自動破棄する（`--num-speakers` で変更可）。
+
+用途:
+
+- **テストデータ**: 封印したセッションを Full-Duplex 評価の実データ参照値・
+  聴取評価のアンカーに使う（学習・統計校正・バンクには使わない）
+- **統計校正**: `stats.json` の実測値で `enrich_dialogue_timing.py` の相槌頻度
+  （`SEC_PER_AIZUCHI` / `AIZUCHI_PROB`）や `GAP_SEC` を勘の値から置き換える
+- **相槌バンク素材**: `segments/` の `_aizuchi` かつ `_ov` なし（非重畳）クリップ
+- **学習混合（ステージ2・未着手）**: 重畳区間の音源分離による完全 2ch 化。
+  ダイアライゼーション品質を耳で確認してから着手する
 
 ## 実験一覧
 
