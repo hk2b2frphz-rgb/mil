@@ -193,7 +193,10 @@ FAバグと無関係なので再利用**し、TTS 段だけ再レンダリング
 grep -c "なるほど" data/runs/qwen_dialogues_1000/llm_dialogues/dialogues.jsonl
 grep -c "なるほど" data/runs/qwen_dialogues_3000/llm_dialogues/dialogues.jsonl
 #    → 0 に近ければ v1.2 世代（再利用OK）。多数ヒットするなら旧世代なので
-#      qsub -V scripts/run_dialogues_qwen_1000.pbs 等で対話から再生成する
+#      qsub -V scripts/run_dialogues_qwen_1000.pbs 等で対話から再生成する。
+#      対話ジョブの BATCH_ID は毎回タイムスタンプ付き（旧データは上書きされない）。
+#      再生成した場合は、TTS ジョブにログへ印字された BATCH_ID を渡して接続する:
+#      SOURCE_BATCH_ID=<printed BATCH_ID> qsub -V scripts/run_qwen_tts_whole_utterance_1000_4gpu.pbs
 
 # 1. 30h相当（1000対話）を再レンダリング。BATCH_ID は毎回タイムスタンプ付きなので
 #    旧データと衝突しない
