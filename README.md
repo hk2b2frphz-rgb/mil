@@ -120,6 +120,13 @@ qsub -V scripts/run_qwen_tts_whole_utterance_1000_4gpu.pbs
 STYLE_PRESET=counseling_anxious qsub -V scripts/run_qwen_tts_whole_utterance_1000_4gpu.pbs
 ```
 
+バックエンドは smoke/1000 が Qwen3-TTS、**3000/10000 は既定で Kokoro**
+（`hexgrad/Kokoro-82M`。Qwen3-TTS ではこの規模は walltime 内に終わらないため）。
+Kokoro は emotion/style instruct 非対応（`STYLE_PRESET` は無視される）。
+moshi=`jf_alpha` 固定、user は日本語4話者（jf_gongitsune/jf_nezumi/jf_tebukuro/jm_kumo）を
+対話ごとにローテーション（`KOKORO_VOICE_MOSHI` / `KOKORO_USER_VOICES` で変更、
+`TTS_BACKEND=qwen3` で旧挙動）。Kokoro の依存は隔離 uv 環境でジョブ内に自動構築される。
+
 出力は `data/runs/<printed BATCH_ID>/`。ジョブログの `out_root` をマージ・学習に使う。
 `BATCH_ID` の既定は smoke/1000 ジョブは**タイムスタンプ付き**（毎回新規 run）、
 3000/10000 ジョブは**固定名**（再投入すると同じ dir に resume し、完了済みシャードは

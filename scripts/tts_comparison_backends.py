@@ -198,12 +198,15 @@ class KokoroTTS:
         speaker_override: str | None = None,
     ) -> np.ndarray:
         self.load()
-        role = (
-            str(speaker_override)
-            if speaker_override in self.voices
-            else speaker_role
-        )
-        voice = self.voices.get(role, self.voices["user"])
+        override = str(speaker_override) if speaker_override else ""
+        if override in self.voices:
+            voice = self.voices[override]
+        elif override.startswith(("jf_", "jm_")):
+            # Kokoro の日本語話者IDを直接指定できる（対話ごとの user 話者
+            # ローテーション用。generate_qwen3_tts_data.py --kokoro-user-voices）。
+            voice = override
+        else:
+            voice = self.voices.get(speaker_role, self.voices["user"])
         if instruct:
             logger.debug("Kokoro ignores instruct=%r", instruct[:48])
 

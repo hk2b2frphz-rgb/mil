@@ -1813,8 +1813,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tts-backend",
         default="qwen3",
-        choices=["qwen3", "moss-ttsd"],
-        help="TTS backend. Default: qwen3.",
+        choices=["qwen3", "moss-ttsd", "kokoro"],
+        help=(
+            "TTS backend. Default: qwen3. kokoro は軽量・高速だが emotion/style "
+            "instruct 非対応（無視される）。"
+        ),
+    )
+    parser.add_argument(
+        "--kokoro-model", default="hexgrad/Kokoro-82M",
+        help="Kokoro の HuggingFace モデル ID",
+    )
+    parser.add_argument(
+        "--kokoro-voice-moshi", default="jf_alpha",
+        help="kokoro backend の moshi（相談員）話者",
+    )
+    parser.add_argument(
+        "--kokoro-user-voices",
+        default="jf_gongitsune,jf_nezumi,jf_tebukuro,jm_kumo",
+        help=(
+            "kokoro backend の user 話者プール（カンマ区切り）。対話ごとに"
+            "ラウンドロビンで切り替える。日本語話者は jf_alpha / jf_gongitsune / "
+            "jf_nezumi / jf_tebukuro / jm_kumo の5種。"
+        ),
+    )
+    parser.add_argument(
+        "--kokoro-voice-other", default="jf_gongitsune",
+        help="kokoro backend の other（第三者）話者",
+    )
+    parser.add_argument(
+        "--kokoro-voice-background", default="jf_tebukuro",
+        help="kokoro backend の background 話者",
     )
     parser.add_argument(
         "--model",
@@ -2060,6 +2088,15 @@ def parse_args() -> argparse.Namespace:
                 f"--user-speaker-pool に無効な話者: {invalid}。候補: {sorted(VALID_SPEAKERS)}"
             )
         args.user_speaker_pool_list = pool
+    elif args.tts_backend == "kokoro":
+        pool = [s.strip() for s in args.kokoro_user_voices.split(",") if s.strip()]
+        invalid = [s for s in pool if not s.startswith(("jf_", "jm_"))]
+        if not pool or invalid:
+            parser.error(
+                f"--kokoro-user-voices に無効な話者: {invalid or '(空)'}。"
+                "日本語話者ID (jf_*/jm_*) をカンマ区切りで指定してください。"
+            )
+        args.user_speaker_pool_list = pool
     else:
         args.user_speaker_pool_list = [args.speaker_user]
 
@@ -2152,15 +2189,31 @@ def main() -> None:
                 "Invalid full-duplex dialogue schema. Regenerate or fix dialogues.jsonl:\n"
                 + details
             )
+    tts: Any
     if args.tts_backend == "moss-ttsd":
         ref_audio_paths, ref_texts = load_moss_references(args)
-        tts: Qwen3TTS | MossTTSD = MossTTSD(
+        tts = MossTTSD(
             model_name=args.moss_model,
             codec_model_name=args.moss_codec_model,
             ref_audio_paths=ref_audio_paths,
             ref_texts=ref_texts,
             device=args.device,
             dtype=args.dtype,
+        )
+    elif args.tts_backend == "kokoro":
+        # 遅延 import: tts_comparison_backends は本モジュールを import している
+        # ため、トップレベルで import すると循環になる。
+        try:
+            from scripts.tts_comparison_backends import KokoroTTS
+        except ImportError:
+            from tts_comparison_backends import KokoroTTS
+        tts = KokoroTTS(
+            device=args.device,
+            voice_moshi=args.kokoro_voice_moshi,
+            voice_user=args.user_speaker_pool_list[0],
+            voice_other=args.kokoro_voice_other,
+            voice_background=args.kokoro_voice_background,
+            model_id=args.kokoro_model,
         )
     else:
         tts = Qwen3TTS(
@@ -2193,10 +2246,14 @@ def main() -> None:
             greeting_cache_dir,
             backend=args.tts_backend,
             model_id=(
-                args.moss_model if args.tts_backend == "moss-ttsd" else args.model
+                args.moss_model if args.tts_backend == "moss-ttsd"
+                else args.kokoro_model if args.tts_backend == "kokoro"
+                else args.model
             ),
             speaker=(
-                "moshi" if args.tts_backend == "moss-ttsd" else args.speaker_moshi
+                "moshi" if args.tts_backend == "moss-ttsd"
+                else args.kokoro_voice_moshi if args.tts_backend == "kokoro"
+                else args.speaker_moshi
             ),
         )
 
@@ -2283,10 +2340,16 @@ def main() -> None:
                 continue
 
             user_voice = args.user_speaker_pool_list[(idx - 1) % len(args.user_speaker_pool_list)]
+            # kokoro: user_voice は jf_*/jm_* の話者IDそのもの（KokoroTTS が
+            # override として直接受理する）。other/background はロール名で渡し、
+            # KokoroTTS 内の固定マップ（--kokoro-voice-other 等）に解決させる。
             user_override = "user" if args.tts_backend == "moss-ttsd" else user_voice
-            other_override = "other" if args.tts_backend == "moss-ttsd" else args.speaker_other
+            other_override = (
+                "other" if args.tts_backend in ("moss-ttsd", "kokoro")
+                else args.speaker_other
+            )
             background_override = (
-                "background" if args.tts_backend == "moss-ttsd"
+                "background" if args.tts_backend in ("moss-ttsd", "kokoro")
                 else args.speaker_background
             )
             # Throttle the per-dialogue progress pair (this + the
