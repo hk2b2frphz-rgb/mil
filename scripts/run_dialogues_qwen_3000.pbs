@@ -27,7 +27,11 @@ fi
 # shellcheck source=/dev/null
 source "$PWD/scripts/run_id_utils.sh"
 
-export BATCH_ID="${BATCH_ID:-$(default_run_id qwen_dialogues_3000)}"
+# Versioned stable batch id so the whole-utterance TTS jobs pick this batch up
+# automatically (their SOURCE_BATCH_ID defaults to the same name). Bump
+# DIALOGUES_VERSION (v2, ...) for a new generation round.
+export DIALOGUES_VERSION="${DIALOGUES_VERSION:-v1}"
+export BATCH_ID="${BATCH_ID:-qwen_dialogues_3000_${DIALOGUES_VERSION}}"
 if ! [[ "$BATCH_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
     echo "ERROR: BATCH_ID may contain only letters, digits, dot, underscore, hyphen." >&2
     exit 1
@@ -90,6 +94,15 @@ export NUM_CASES="${NUM_CASES:-3000}"
 export SEED="${SEED:-0}"
 export RUN_ID="${BATCH_ID}"
 export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/${BATCH_ID}}"
+
+# Refuse to clobber a completed batch: bump DIALOGUES_VERSION for a new round,
+# or pass OVERWRITE=1 to regenerate in place. A partial batch (no final
+# dialogues.jsonl yet) is regenerated without complaint.
+if [[ "${OVERWRITE:-0}" != "1" && -s "$OUT_ROOT/llm_dialogues/dialogues.jsonl" ]]; then
+    echo "ERROR: $OUT_ROOT/llm_dialogues/dialogues.jsonl already exists (complete batch)." >&2
+    echo "       Bump DIALOGUES_VERSION (e.g. v2) or set OVERWRITE=1 to regenerate." >&2
+    exit 1
+fi
 export LLM_TEMPERATURE="${LLM_TEMPERATURE:-0.9}"
 
 if ! [[ "$NUM_CASES" =~ ^[0-9]+$ ]] || [[ "$NUM_CASES" -lt 1 ]]; then

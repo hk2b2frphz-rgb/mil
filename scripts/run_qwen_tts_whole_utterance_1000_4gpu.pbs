@@ -35,7 +35,10 @@ command -v uv >/dev/null 2>&1 || {
     exit 1
 }
 
-export SOURCE_BATCH_ID="${SOURCE_BATCH_ID:-qwen_dialogues_1000}"
+# Matches the versioned default BATCH_ID of run_dialogues_qwen_1000.pbs, so a
+# freshly generated batch is picked up automatically. Bump DIALOGUES_VERSION
+# (or set SOURCE_BATCH_ID) to point at another batch.
+export SOURCE_BATCH_ID="${SOURCE_BATCH_ID:-qwen_dialogues_1000_${DIALOGUES_VERSION:-v1}}"
 export BATCH_ID="${BATCH_ID:-$(default_run_id "${SOURCE_BATCH_ID}_tts_whole_4gpu")}"
 export RUN_ID="$BATCH_ID"
 export DIALOGUES_JSONL="${DIALOGUES_JSONL:-$PWD/data/runs/${SOURCE_BATCH_ID}/llm_dialogues/dialogues.jsonl}"

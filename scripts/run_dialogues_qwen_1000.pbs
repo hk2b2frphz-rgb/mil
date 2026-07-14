@@ -79,12 +79,25 @@ CPU_ARCH="$(uname -m)"
 VLLM_WHEEL_URL="${VLLM_WHEEL_URL:-https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu129-cp38-abi3-manylinux_2_34_${CPU_ARCH}.whl}"
 VLLM_INSTALL_SPEC="${VLLM_INSTALL_SPEC:-$VLLM_WHEEL_URL}"
 
-export BATCH_ID="${BATCH_ID:-$(default_run_id qwen_dialogues_1000)}"
+# Versioned stable batch id so the whole-utterance TTS jobs pick this batch up
+# automatically (their SOURCE_BATCH_ID defaults to the same name). Bump
+# DIALOGUES_VERSION (v2, ...) for a new generation round.
+export DIALOGUES_VERSION="${DIALOGUES_VERSION:-v1}"
+export BATCH_ID="${BATCH_ID:-qwen_dialogues_1000_${DIALOGUES_VERSION}}"
 export NUM_CASES="${NUM_CASES:-1000}"
 export SEED="${SEED:-0}"
 export RUN_ID="${BATCH_ID}"
 export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/${BATCH_ID}}"
 export LLM_TEMPERATURE="${LLM_TEMPERATURE:-0.9}"
+
+# Refuse to clobber a completed batch: bump DIALOGUES_VERSION for a new round,
+# or pass OVERWRITE=1 to regenerate in place. A partial batch (no final
+# dialogues.jsonl yet) is regenerated without complaint.
+if [[ "${OVERWRITE:-0}" != "1" && -s "$OUT_ROOT/llm_dialogues/dialogues.jsonl" ]]; then
+    echo "ERROR: $OUT_ROOT/llm_dialogues/dialogues.jsonl already exists (complete batch)." >&2
+    echo "       Bump DIALOGUES_VERSION (e.g. v2) or set OVERWRITE=1 to regenerate." >&2
+    exit 1
+fi
 
 if ! [[ "$BATCH_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
     echo "ERROR: BATCH_ID may contain only letters, digits, dot, underscore, hyphen." >&2

@@ -55,7 +55,10 @@ command -v uv >/dev/null 2>&1 || {
     exit 1
 }
 
-export SOURCE_BATCH_ID="${SOURCE_BATCH_ID:-qwen_dialogues_10000}"
+# Matches the versioned default BATCH_ID of run_dialogues_qwen_10000.pbs, so a
+# freshly generated batch is picked up automatically. Bump DIALOGUES_VERSION
+# (or set SOURCE_BATCH_ID) to point at another batch.
+export SOURCE_BATCH_ID="${SOURCE_BATCH_ID:-qwen_dialogues_10000_${DIALOGUES_VERSION:-v1}}"
 # Stable (non-timestamped) batch id so re-submitting the same job resumes into
 # the same output dir instead of starting a brand-new run. Pass FRESH=1 to
 # force a clean, uniquely-timestamped run instead.

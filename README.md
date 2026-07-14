@@ -186,17 +186,14 @@ alignments 単語化 + FA失敗破棄（`e540182`,
 FAバグと無関係なので再利用**し、TTS 段だけ再レンダリングする。
 
 ```bash
-# 0. 対話テキストの存在と世代を確認（なければ先に run_dialogues_qwen_{1000,3000}.pbs）
-#    FAバグはテキストと無関係だが、v1.2 のプロンプト改定
-#    （「なるほど」生成禁止・復唱・感情ミラーリング, decision 0002）より前に
-#    生成した dialogues.jsonl なら対話テキストごと作り直す。判定は:
-grep -c "なるほど" data/runs/qwen_dialogues_1000/llm_dialogues/dialogues.jsonl
-grep -c "なるほど" data/runs/qwen_dialogues_3000/llm_dialogues/dialogues.jsonl
-#    → 0 に近ければ v1.2 世代（再利用OK）。多数ヒットするなら旧世代なので
-#      qsub -V scripts/run_dialogues_qwen_1000.pbs 等で対話から再生成する。
-#      対話ジョブの BATCH_ID は毎回タイムスタンプ付き（旧データは上書きされない）。
-#      再生成した場合は、TTS ジョブにログへ印字された BATCH_ID を渡して接続する:
-#      SOURCE_BATCH_ID=<printed BATCH_ID> qsub -V scripts/run_qwen_tts_whole_utterance_1000_4gpu.pbs
+# 0. 対話テキストを再生成する（相槌AIプロンプト改良後の推奨。既存流用なら
+#    「なるほど」を grep して v1.2 世代であることを確認してから使う）
+qsub -V scripts/run_dialogues_qwen_1000.pbs
+qsub -V scripts/run_dialogues_qwen_3000.pbs
+#    出力は固定名 data/runs/qwen_dialogues_{1000,3000}_v1/（DIALOGUES_VERSION 既定 v1）。
+#    後段の TTS ジョブは同じ名前を既定で読むため、受け渡しの指定は不要。
+#    完成済み v1 が既にある場合はジョブが冒頭でエラー停止する（上書き防止）。
+#    次の世代を作るときは両ジョブに DIALOGUES_VERSION=v2 を渡す。
 
 # 1. 30h相当（1000対話）を再レンダリング。BATCH_ID は毎回タイムスタンプ付きなので
 #    旧データと衝突しない
