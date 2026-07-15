@@ -1,0 +1,49 @@
+# fullft_base_config — Full fine-tuning base config
+#
+# lora_base_config (LoRA) との比較用。全パラメータを更新する。
+# scripts/run_fullft_sweep_pair.sh / scripts/fullft_sweep.pbs の BASE_EXP
+# 既定値。データのパス (train_data / eval_data / run_dir) は起動時に
+# 書き換えられる。
+
+data:
+  train_data: ""   # auto-filled
+  eval_data: ""    # auto-filled (9:1 split)
+  shuffle: true
+
+moshi_paths:
+  hf_repo_id: "llm-jp/llm-jp-moshi-v1"
+  config_path: "moshi_lm_kwargs.json"
+
+full_finetuning: true
+lora:
+  enable: false
+
+# moshi-finetune 公式 example と同値
+first_codebook_weight_multiplier: 100.
+text_padding_weight: 0.5
+
+duration_sec: 100
+batch_size: 1           # フル FT は optimizer state が巨大。A100 80GB では per-forward を最小化する。
+num_microbatches: 8     # 実効 batch = 1 × 8 = 8 (lora_base_config と同等の曝露量)
+max_steps: 500          # lora_base_config と同じ step 数で比較
+max_norm: 1.0
+gradient_checkpointing: true
+param_dtype: "bfloat16"
+
+optim:
+  lr: 5e-7              # フル FT は全パラメータが動くので LoRA より低め
+  weight_decay: 0.1
+  pct_start: 0.05
+
+seed: 0
+log_freq: 5
+ckpt_freq: 50
+num_ckpt_keep: 5
+save_adapters: false    # フル FT ではモデル全体を保存
+do_ckpt: true
+
+do_eval: true
+eval_freq: 25
+
+run_dir: ""
+overwrite_run_dir: true

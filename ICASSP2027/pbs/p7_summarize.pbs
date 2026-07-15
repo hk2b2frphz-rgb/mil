@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N clarify_summ
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=1:00:00
+#PBS -j oe
+#PBS -V
+
+# Merge shards and build the model comparison (CPU-only; also runnable
+# directly on a login node with `bash ICASSP2027/pbs/p7_summarize.pbs`).
+#
+#   qsub -v RUNS="base=ICASSP2027/runs/eval_base clarify_full=ICASSP2027/runs/eval_clarify_full",\
+#   OUT_ID=comparison_v1 ICASSP2027/pbs/p7_summarize.pbs
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+RUNS="${RUNS:?set RUNS as space-separated name=path pairs}"
+OUT_ID="${OUT_ID:-comparison_$(date +%Y%m%d_%H%M%S)}"
+
+mkdir -p ICASSP2027/runs/pbs_logs
+exec > >(tee -a "ICASSP2027/runs/pbs_logs/summ_${OUT_ID}.log") 2>&1
+
+# shellcheck disable=SC2086
+uv run python ICASSP2027/scripts/summarize_results.py \
+    --runs $RUNS \
+    --out-dir "ICASSP2027/runs/${OUT_ID}"
+
+echo "SUMMARY OK: ICASSP2027/runs/${OUT_ID}"

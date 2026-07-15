@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N clarify_smoke
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=6:00:00
+#PBS -j oe
+#PBS -V
+
+# End-to-end smoke test on one V100, both languages:
+#   EN: demo benchmark -> closed-loop eval (kyutai/moshiko) -> cascade
+#   JA: demo benchmark -> closed-loop eval (llm-jp-moshi)
+# plus a no-TTS training-data generation check. Verifies TTS, forced
+# alignment, corruption, the closed-loop driver, weak-ASR, and scoring
+# before any full-scale job.
+#
+#   qsub -V ICASSP2027/pbs/p0_smoke.pbs
+#
+# Set SMOKE_LANGS=en (or ja) to run one language only.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+RUN_ID="${RUN_ID:-smoke_${JOB_ID_SHORT}}"
+ROOT="ICASSP2027/runs/${RUN_ID}"
+SMOKE_LANGS="${SMOKE_LANGS:-en ja}"
+
+export TORCHINDUCTOR_DISABLE=1
+export NO_TORCH_COMPILE=1
+export TORCH_COMPILE_DISABLE=1
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+
+mkdir -p ICASSP2027/runs/pbs_logs
+exec > >(tee -a "ICASSP2027/runs/pbs_logs/${RUN_ID}.log") 2>&1
+
+echo "job: ${PBS_JOBID:-n/a} host: $(hostname) run: $RUN_ID langs: $SMOKE_LANGS"
+command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi || true
+
+declare -A SMOKE_REPO=(
+    [en]="kyutai/moshiko-pytorch-bf16"
+    [ja]="llm-jp/llm-jp-moshi-v1"
+)
+
+for lang in $SMOKE_LANGS; do
+    echo "=== [$lang 1/3] build demo benchmark ==="
+    uv run python ICASSP2027/scripts/build_benchmark.py \
+        --out-dir "$ROOT/bench_$lang" --demo --language "$lang" \
+        --conditions clean,mask_silence,babble_snr-10 \
+        --oracle --overwrite
+
+    echo "=== [$lang 2/3] closed-loop eval (${SMOKE_REPO[$lang]}) ==="
+    uv run python ICASSP2027/scripts/run_closed_loop_eval.py \
+        --dataset-dir "$ROOT/bench_$lang" \
+        --out-dir "$ROOT/eval_base_$lang" \
+        --model-id "base_$lang" --hf-repo "${SMOKE_REPO[$lang]}" \
+        --half --seeds 0 --save-audio
+
+    echo "=== [$lang 3/3] cascade baseline ==="
+    uv run python ICASSP2027/scripts/run_cascade_eval.py \
+        --dataset-dir "$ROOT/bench_$lang" \
+        --out-dir "$ROOT/eval_cascade_$lang" \
+        --thresholds="-0.8,-0.4"
+done
+
+echo "=== summarize (first language) ==="
+first_lang="${SMOKE_LANGS%% *}"
+uv run python ICASSP2027/scripts/summarize_results.py \
+    --runs "base=$ROOT/eval_base_$first_lang" \
+    --out-dir "$ROOT/comparison"
+
+echo "=== training-data smoke (no TTS) ==="
+uv run python ICASSP2027/scripts/build_training_data.py \
+    --variant clarify_full --language en \
+    --out-dir "$ROOT/train_data_demo" --demo --num-items 4
+
+echo "SMOKE OK: $ROOT"

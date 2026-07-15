@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N clarify_bench
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# Build one benchmark dataset: corpus rows -> carrier audio (TTS or real
+# recording) -> MMS_FA slot-span alignment -> corruption grid -> weak-ASR
+# oracle. Submit once per (language, corpus):
+#
+#   # EN primary (MASSIVE en-US, TTS)
+#   qsub -v BENCH_ID=bench_en_massive,LANGUAGE=en,CORPUS=massive \
+#        ICASSP2027/pbs/p1_build_benchmark.pbs
+#
+#   # EN real speech (SLURP; run download_slurp.sh first)
+#   qsub -v BENCH_ID=bench_en_slurp,LANGUAGE=en,CORPUS=slurp,\
+#   SLURP_JSONL=ICASSP2027/data/slurp/metadata/test.jsonl,\
+#   SLURP_AUDIO_DIR=ICASSP2027/data/slurp/audio/slurp_real \
+#        ICASSP2027/pbs/p1_build_benchmark.pbs
+#
+#   # JA generality (MASSIVE ja-JP, TTS)
+#   qsub -v BENCH_ID=bench_ja_massive,LANGUAGE=ja,CORPUS=massive \
+#        ICASSP2027/pbs/p1_build_benchmark.pbs
+#
+# Overrides: MAX_ITEMS=60, CONDITIONS=all, MASSIVE_JSONL=path (offline)
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+LANGUAGE="${LANGUAGE:-en}"
+CORPUS="${CORPUS:-massive}"
+BENCH_ID="${BENCH_ID:-bench_${LANGUAGE}_${CORPUS}}"
+MAX_ITEMS="${MAX_ITEMS:-60}"
+CONDITIONS="${CONDITIONS:-all}"
+
+export TORCHINDUCTOR_DISABLE=1
+export NO_TORCH_COMPILE=1
+export TORCH_COMPILE_DISABLE=1
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+
+mkdir -p ICASSP2027/runs/pbs_logs
+exec > >(tee -a "ICASSP2027/runs/pbs_logs/bench_${BENCH_ID}_${JOB_ID_SHORT}.log") 2>&1
+
+echo "job: ${PBS_JOBID:-n/a} host: $(hostname) bench: $BENCH_ID lang: $LANGUAGE corpus: $CORPUS"
+command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi || true
+
+EXTRA_ARGS=()
+[[ -n "${MASSIVE_JSONL:-}" ]] && EXTRA_ARGS+=(--massive-jsonl "$MASSIVE_JSONL")
+[[ -n "${SLURP_JSONL:-}" ]] && EXTRA_ARGS+=(--slurp-jsonl "$SLURP_JSONL")
+[[ -n "${SLURP_AUDIO_DIR:-}" ]] && EXTRA_ARGS+=(--slurp-audio-dir "$SLURP_AUDIO_DIR")
+
+uv run python ICASSP2027/scripts/build_benchmark.py \
+    --out-dir "ICASSP2027/runs/${BENCH_ID}" \
+    --language "$LANGUAGE" \
+    --corpus "$CORPUS" \
+    --max-items "$MAX_ITEMS" \
+    --conditions "$CONDITIONS" \
+    --oracle --overwrite \
+    "${EXTRA_ARGS[@]}"
+
+echo "BENCHMARK OK: ICASSP2027/runs/${BENCH_ID}"

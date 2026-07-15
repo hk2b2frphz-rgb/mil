@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+
+# Pipeline outputs (regenerable)
+data/
+results/
+eval_runs/
+ICASSP2027/runs/
+
+# Per-experiment runtime artifacts (regenerable / heavy).
+# Keep config.yaml / HYPERPARAMS.md / notes.md / args.yaml under VCS,
+# discard everything else.
+experiments/*/data/
+experiments/*/checkpoints/
+experiments/*/run.log
+experiments/*/_resolved.yaml
+
+# editor
+.vscode/
+.idea/
+
+# Reference literature (downloaded PDFs etc.) -- kept out of VCS on request.
+references/

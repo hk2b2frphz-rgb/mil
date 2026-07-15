@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N moss_ttsd_dialogue_pilot
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -V
+
+# MOSS-TTSD native multi-speaker naturalness audition.
+#   qsub -V scripts/run_moss_ttsd_dialogue_pilot.pbs
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+# shellcheck source=/dev/null
+source "$PWD/scripts/run_id_utils.sh"
+
+export BATCH_ID="${BATCH_ID:-$(default_run_id moss_ttsd_dialogue_pilot)}"
+export RUN_ID="$BATCH_ID"
+export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/$BATCH_ID}"
+export DIALOGUES_JSONL="${DIALOGUES_JSONL:-$PWD/tests/fixtures/aizuchi_dialogues.jsonl}"
+export MOSS_REFS_DIR="$OUT_ROOT/moss_refs"
+export DIALOGUE_AUDIO_DIR="$OUT_ROOT/dialogue_audio"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export TTS_DTYPE="${TTS_DTYPE:-float16}"
+export TTS_DEVICE="${TTS_DEVICE:-cuda}"
+export MOSS_TTS_MODEL="${MOSS_TTS_MODEL:-OpenMOSS-Team/MOSS-TTSD-v1.0}"
+export MOSS_CODEC_MODEL="${MOSS_CODEC_MODEL:-OpenMOSS-Team/MOSS-Audio-Tokenizer}"
+
+mkdir -p experiments/pbs_logs
+JOB_LOG="experiments/pbs_logs/${BATCH_ID}.log"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
+echo "===== MOSS-TTSD dialogue pilot ====="
+echo "job_id:      ${PBS_JOBID:-n/a}"
+echo "host:        $(hostname)"
+echo "out_root:    $OUT_ROOT"
+echo "dialogues:   $DIALOGUES_JSONL"
+echo "tts_model:   $MOSS_TTS_MODEL"
+echo "codec_model: $MOSS_CODEC_MODEL"
+echo "started_at:  $(date -Iseconds)"
+echo "===================================="
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH." >&2
+    exit 1
+}
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+fi
+
+echo "===== step 1/2: Qwen3 reference generation (shared env) ====="
+uv run python -c \
+    'import transformers; print("shared transformers:", transformers.__version__)'
+uv run python scripts/build_moss_reference_voices.py \
+    --out-dir "$MOSS_REFS_DIR" \
+    --model "${QWEN_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}" \
+    --device "$TTS_DEVICE" \
+    --dtype "$TTS_DTYPE"
+
+TORCH_VERSION="$(uv run python -c 'import torch; print(torch.__version__)')"
+TORCHAUDIO_VERSION="$(uv run python -c 'import torchaudio; print(torchaudio.__version__)')"
+MOSS_UV=(
+    uv run --isolated --no-project
+    --index "pytorch-cu121=https://download.pytorch.org/whl/cu121"
+    --with "transformers==5.0.0"
+    --with safetensors
+    --with tiktoken
+    --with einops
+    --with soundfile
+    --with numpy
+    --with sphn
+    --with tqdm
+    --with "torch==$TORCH_VERSION"
+    --with "torchaudio==$TORCHAUDIO_VERSION"
+)
+
+echo "===== step 2/2: native MOSS dialogue generation (isolated env) ====="
+"${MOSS_UV[@]}" python -c \
+    'import torch, transformers; print("isolated transformers:", transformers.__version__); print("isolated torch:", torch.__version__)'
+"${MOSS_UV[@]}" python scripts/generate_moss_dialogue_audio.py \
+    --dialogues-jsonl "$DIALOGUES_JSONL" \
+    --moss-refs-json "$MOSS_REFS_DIR/refs.json" \
+    --moss-model "$MOSS_TTS_MODEL" \
+    --moss-codec-model "$MOSS_CODEC_MODEL" \
+    --out-dir "$DIALOGUE_AUDIO_DIR" \
+    --device "$TTS_DEVICE" \
+    --dtype "$TTS_DTYPE"
+
+if ! compgen -G "$DIALOGUE_AUDIO_DIR/*.wav" >/dev/null; then
+    echo "ERROR: no dialogue WAVs were created in $DIALOGUE_AUDIO_DIR" >&2
+    exit 1
+fi
+
+echo "mono_wav_dir: $DIALOGUE_AUDIO_DIR"
+echo "finished_at:  $(date -Iseconds)"

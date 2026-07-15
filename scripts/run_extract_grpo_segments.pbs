@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N grpo_segments
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=4:00:00
+#PBS -j oe
+#PBS -V
+# ---------------------------------------------------------------------------
+# Extract GRPO segments from dialogue stereo WAVs.
+# Run AFTER dialogue data generation (run_dialogues_qwen_1000.pbs) and
+# BEFORE GRPO training (run_grpo.pbs).
+#
+# Submit:
+#   qsub scripts/run_extract_grpo_segments.pbs
+#   qsub -v BATCH_ID=qwen_dialogues_1000 scripts/run_extract_grpo_segments.pbs
+# ---------------------------------------------------------------------------
+set -euo pipefail
+
+if [[ -n "${PBS_O_WORKDIR:-}" ]]; then
+    cd "$PBS_O_WORKDIR"
+else
+    cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+source scripts/setup_proxy.sh
+
+BATCH_ID="${BATCH_ID:-qwen_dialogues_1000}"
+DATA_ROOT="${DATA_ROOT:-data/runs/${BATCH_ID}}"
+MANIFEST="${DATA_ROOT}/training_set/synthetic_moshi_train.jsonl"
+OUT_DIR="${DATA_ROOT}/grpo_segments"
+MAX_PER_AXIS="${MAX_PER_AXIS:-2000}"
+
+echo "===== GRPO segment extraction ====="
+echo "batch_id:      $BATCH_ID"
+echo "manifest:      $MANIFEST"
+echo "out_dir:       $OUT_DIR"
+echo "max_per_axis:  $MAX_PER_AXIS"
+echo "started:       $(date -Iseconds)"
+echo "===================================="
+
+if [[ ! -f "$MANIFEST" ]]; then
+    echo "ERROR: manifest not found: $MANIFEST" >&2
+    echo "Run dialogue generation first (qsub scripts/run_dialogues_qwen_1000.pbs)" >&2
+    exit 1
+fi
+
+uv run python scripts/grpo/segment_extractor.py \
+    --manifest "$MANIFEST" \
+    --out-dir "$OUT_DIR" \
+    --max-per-axis "$MAX_PER_AXIS"
+
+echo "===== done ====="
+echo "segments: $OUT_DIR"
+echo "ended:    $(date -Iseconds)"

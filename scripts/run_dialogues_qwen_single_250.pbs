@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N fd_qwen_single250
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# Single-LLM baseline for the Qwen multi-agent dialogue experiment.
+#
+# One Qwen/Qwen3.6-27B request writes the complete user/moshi transcript for
+# each use case.  The model, use-case distribution, prompt sampling seed, and
+# decoding settings match the Qwen dialogue jobs; only the generation method is
+# fixed to `single`.
+#
+# The vLLM bootstrap is shared with run_dialogues_qwen_smoke.pbs so CUDA/vLLM
+# pins, model identity checks, Qwen thinking controls, and process cleanup do
+# not drift between the two experiments.  When invoked by bash, the inner
+# file's #PBS lines are comments; the resources above remain in effect.
+#
+# Submit:
+#   qsub -V scripts/run_dialogues_qwen_single_250.pbs
+# Optional explicit run label:
+#   qsub -V -v SINGLE_LLM_BATCH_ID=qwen_single_ablation_01 \
+#     scripts/run_dialogues_qwen_single_250.pbs
+#
+# The output is written to:
+#   data/runs/<BATCH_ID>/llm_dialogues/dialogues.jsonl
+#   data/runs/<BATCH_ID>/diversity_report.txt
+#   data/runs/<BATCH_ID>/diversity_neighbors.jsonl
+#   data/runs/<BATCH_ID>/single_llm_quality.json
+#
+# This job intentionally does not permit template fallback.  Any model/API/
+# transcript parse failure stops the job instead of silently producing a
+# low-diversity template dataset.
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+# shellcheck source=/dev/null
+source "$PWD/scripts/run_id_utils.sh"
+
+# Experiment contract.  These are assignments rather than ${VAR:-default}
+# because #PBS -V may import stale multi-agent/fallback settings from the
+# submission shell.
+export NUM_CASES=250
+export SEED=0
+export VLLM_MODEL="Qwen/Qwen3.6-27B"
+export DIALOGUE_GENERATION_MODE="single"
+export ALLOW_TEMPLATE_FALLBACK=0
+export LISTENING_RATIO=1.0
+export LLM_NUM_FEWSHOT=2
+export LLM_OPENAI_ENDPOINT="chat"
+export LLM_TEMPERATURE=0.9
+export LLM_FREQUENCY_PENALTY=0.3
+export LLM_PRESENCE_PENALTY=0.1
+export LLM_REPETITION_PENALTY=1.0
+# Single mode asks for and parses a pipe-delimited transcript.  Explicitly
+# override inherited json_schema/json_object settings, which are incompatible
+# with parse_transcript().  `text` sends no response_format constraint.
+export LLM_RESPONSE_FORMAT="text"
+export LLM_MAX_NEW_TOKENS=4096
+export LLM_TIMEOUT_SEC=7200
+export DUMP_AGENT_PROMPTS=0
+
+# Use dedicated override names so a stale BATCH_ID/OUT_ROOT imported by #PBS -V
+# cannot overwrite a prior multi-agent run.
+export BATCH_ID="${SINGLE_LLM_BATCH_ID:-$(default_run_id qwen_single_llm_250)}"
+export RUN_ID="$BATCH_ID"
+export OUT_ROOT="${SINGLE_LLM_OUT_ROOT:-$PWD/data/runs/$BATCH_ID}"
+# Reuse the same pinned vLLM environment as the existing Qwen smoke runner by
+# default instead of installing another copy solely for this wrapper.
+export VLLM_ENV_DIR="${VLLM_ENV_DIR:-.venv_vllm_qwen_smoke}"
+export HEALTH_RETRIES="${HEALTH_RETRIES:-720}"
+
+echo "===== Qwen single-LLM 250-dialogue baseline ====="
+echo "job_id:          ${PBS_JOBID:-n/a}"
+echo "model:           $VLLM_MODEL"
+echo "generation_mode: $DIALOGUE_GENERATION_MODE"
+echo "num_cases:       $NUM_CASES"
+echo "seed:            $SEED"
+echo "fallback:        disabled"
+echo "out_root:        $OUT_ROOT"
+echo "started_at:      $(date -Iseconds)"
+echo "=================================================="
+
+bash "$PWD/scripts/run_dialogues_qwen_smoke.pbs"
+
+DIALOGUES_FINAL="$OUT_ROOT/llm_dialogues/dialogues.jsonl"
+QUALITY_JSON="$OUT_ROOT/single_llm_quality.json"
+test -s "$DIALOGUES_FINAL"
+
+# Fail closed on partial, fallback, or malformed output.  Unique transcripts
+# are measured with the report's normalization but are not a pass/fail gate.
+uv run python - \
+    "$DIALOGUES_FINAL" \
+    "$QUALITY_JSON" \
+    "$NUM_CASES" \
+    "$VLLM_MODEL" \
+    "$SEED" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+from scripts.report_dialogue_diversity import (
+    iter_dialogues,
+    non_silence_turns,
+    normalized_transcript,
+)
+
+
+input_path = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+expected = int(sys.argv[3])
+model = sys.argv[4]
+seed = int(sys.argv[5])
+
+physical_rows = sum(
+    1 for line in input_path.read_text(encoding="utf-8").splitlines() if line.strip()
+)
+dialogues = list(iter_dialogues(input_path))
+transcripts = [normalized_transcript(dialogue) for dialogue in dialogues]
+unique_transcripts = len(set(transcripts))
+unique_ratio = unique_transcripts / len(dialogues) if dialogues else 0.0
+
+ids = [str(dialogue.get("id", "")) for dialogue in dialogues]
+source_ids = [str(dialogue.get("source_use_case", "")) for dialogue in dialogues]
+fallback_rows = sum(
+    "fallback" in str(dialogue.get("generator_notes", "")).lower()
+    or "template" in str(dialogue.get("generator_notes", "")).lower()
+    for dialogue in dialogues
+)
+empty_transcripts = sum(not transcript for transcript in transcripts)
+short_dialogues = 0
+missing_roles = 0
+for dialogue in dialogues:
+    turns = list(non_silence_turns(dialogue))
+    speakers = {speaker for speaker, _ in turns}
+    short_dialogues += len(turns) < 4
+    missing_roles += not {"user", "moshi"}.issubset(speakers)
+
+summary = {
+    "ok": True,
+    "input": str(input_path.resolve()),
+    "model": model,
+    "generation_mode": "single",
+    "seed": seed,
+    "expected_dialogues": expected,
+    "physical_jsonl_rows": physical_rows,
+    "valid_dialogues": len(dialogues),
+    "unique_dialogue_ids": len(set(ids)),
+    "unique_source_use_cases": len(set(source_ids)),
+    "unique_transcripts": unique_transcripts,
+    "unique_transcript_ratio": unique_ratio,
+    "fallback_or_template_rows": fallback_rows,
+    "empty_transcripts": empty_transcripts,
+    "dialogues_below_four_non_silence_turns": short_dialogues,
+    "dialogues_missing_user_or_moshi": missing_roles,
+    "errors": [],
+}
+
+checks = [
+    (physical_rows == expected, f"physical rows {physical_rows} != expected {expected}"),
+    (len(dialogues) == expected, f"valid dialogues {len(dialogues)} != expected {expected}"),
+    (len(set(ids)) == expected, f"unique dialogue ids {len(set(ids))} != expected {expected}"),
+    (
+        len(set(source_ids)) == expected,
+        f"unique source use cases {len(set(source_ids))} != expected {expected}",
+    ),
+    (fallback_rows == 0, f"found {fallback_rows} fallback/template rows"),
+    (empty_transcripts == 0, f"found {empty_transcripts} empty transcripts"),
+    (short_dialogues == 0, f"found {short_dialogues} dialogues with fewer than four turns"),
+    (missing_roles == 0, f"found {missing_roles} dialogues missing user or moshi"),
+]
+summary["errors"] = [message for passed, message in checks if not passed]
+summary["ok"] = not summary["errors"]
+
+output_path.write_text(
+    json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8",
+)
+print(json.dumps(summary, ensure_ascii=False, indent=2))
+if summary["errors"]:
+    raise SystemExit("single-LLM quality gate failed: " + "; ".join(summary["errors"]))
+PY
+
+echo "quality:    $QUALITY_JSON"
+echo "dialogues:  $DIALOGUES_FINAL"
+echo "report:     $OUT_ROOT/diversity_report.txt"
+echo "neighbors:  $OUT_ROOT/diversity_neighbors.jsonl"
+echo "finished_at: $(date -Iseconds)"

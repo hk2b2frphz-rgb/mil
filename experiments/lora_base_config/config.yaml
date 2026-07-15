@@ -1,0 +1,59 @@
+# lora_base_config — Japanese loneliness counseling LoRA base config
+#
+# scripts/run_sweep_pair.sh / scripts/run_experiment.pbs の BASE_EXP 既定値
+# （各 sweep パターンはこの config.yaml を差分パッチして使う）。
+# 設計意図と参考文献は HYPERPARAMS.md を参照。
+# データのパス (train_data / eval_data / run_dir) は
+# scripts/run_experiment.sh が起動時に書き換える。
+
+data:
+  train_data: ""   # auto-filled
+  eval_data: ""    # auto-filled (9:1 split)
+  shuffle: true
+
+moshi_paths:
+  hf_repo_id: "llm-jp/llm-jp-moshi-v1"
+  # llm-jp は config を `moshi_lm_kwargs.json` という名前で同梱しており、
+  # moshi-finetune がデフォルトで探す `config.json` ではない。
+  # 明示しないと loaders._lm_kwargs (Kyutai 英語 Moshi 用) にフォールバックし、
+  # 重みとアーキテクチャがずれて初期化時に C++ 側 segfault する。
+  config_path: "moshi_lm_kwargs.json"
+
+full_finetuning: false
+lora:
+  enable: true
+  rank: 32          # moshi-finetune 公式 example の 128 を 1/4。データ規模に合わせる。
+  scaling: 2.0      # alpha = rank * scaling = 64。LoRA paper 慣例 (α ≈ 2r)。
+  ft_embed: false
+
+# moshi-finetune 公式 example と同値
+first_codebook_weight_multiplier: 100.
+text_padding_weight: 0.5
+
+duration_sec: 100       # 1 サンプル 100 秒上限。公式 example と同じ。
+batch_size: 8           # A100 80GB 1GPU 想定。公式 16 の半分を安全マージン込みで。
+num_microbatches: 1     # 実 batch_size = 8 × 1 = 8。grad_accum 不要。
+max_steps: 500          # 90 train sample / bs 8 = 11.25 step/epoch → ~44 epoch。
+max_norm: 1.0
+gradient_checkpointing: true   # 80GB あっても安定性のため ON。OFF にすると速いが activations 巨大化。
+param_dtype: "bfloat16"
+
+optim:
+  lr: 2e-6              # 公式 example と同値（OneCycleLR の peak）
+  weight_decay: 0.1     # 公式と同値
+  pct_start: 0.05       # OneCycleLR warmup 比率（全体の 5%）
+
+seed: 0
+log_freq: 5
+ckpt_freq: 50           # step 数を 500 に減らしたので保存頻度も比例して上げる
+num_ckpt_keep: 5
+save_adapters: true
+do_ckpt: true
+
+# 過学習監視
+do_eval: true
+eval_freq: 25           # step 50 ごとに ckpt が出るので、その半分の間隔で eval
+
+# run dir は launcher が埋める
+run_dir: ""
+overwrite_run_dir: true

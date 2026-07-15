@@ -1,0 +1,54 @@
+# lora_moshiko_en_config — English clarify-FT LoRA base config
+#
+# ICASSP2027 track: LoRA on Kyutai English Moshi (moshiko) with the
+# clarify training data (ICASSP2027/pbs/p3 output). Selected via
+# BASE_EXP=lora_moshiko_en_config in scripts/run_sweep_pair.sh
+# (ICASSP2027/pbs/p4_train_clarify.pbs sets this when LANGUAGE=en).
+# Hyperparameters mirror lora_base_config (see its HYPERPARAMS.md);
+# only the base checkpoint differs.
+
+data:
+  train_data: ""   # auto-filled
+  eval_data: ""    # auto-filled (9:1 split)
+  shuffle: true
+
+moshi_paths:
+  hf_repo_id: "kyutai/moshiko-pytorch-bf16"
+  # Kyutai repos ship the standard `config.json`, which moshi-finetune
+  # finds by default -- no config_path override needed (unlike llm-jp).
+
+full_finetuning: false
+lora:
+  enable: true
+  rank: 32
+  scaling: 2.0
+  ft_embed: false
+
+first_codebook_weight_multiplier: 100.
+text_padding_weight: 0.5
+
+duration_sec: 100
+batch_size: 8           # A100 80GB 1GPU
+num_microbatches: 1
+max_steps: 500
+max_norm: 1.0
+gradient_checkpointing: true
+param_dtype: "bfloat16"
+
+optim:
+  lr: 2e-6
+  weight_decay: 0.1
+  pct_start: 0.05
+
+seed: 0
+log_freq: 5
+ckpt_freq: 50
+num_ckpt_keep: 5
+save_adapters: true
+do_ckpt: true
+
+do_eval: true
+eval_freq: 25
+
+run_dir: ""
+overwrite_run_dir: true

@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N export_fullft
+#PBS -q xan_s
+#PBS -l select=1:res=middle
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# Export a nu-dialogue full fine-tuning ZeRO checkpoint for inference.
+#
+# Required:
+#   qsub -v \
+# STEP_DIR=/path/to/checkpoints/nu_<timestamp>/step_120 \
+# scripts/export_fullft_checkpoint.pbs
+#
+# Explicit output:
+#   qsub -v \
+# STEP_DIR=/path/to/step_120,\
+# OUT_DIR=/path/to/exported/step_120_clean \
+# scripts/export_fullft_checkpoint.pbs
+#
+# Optional:
+#   NU_MOSHI_FT_REPO=../moshi-finetune-nu-dialogue
+#   MOSHI_LM_KWARGS=/path/to/moshi_lm_kwargs.json
+#   MODEL_DTYPE=float16
+#   CHECKPOINT_TAG=pytorch_model
+#   KEEP_INTERMEDIATE=0
+#   REMOVE_USER_STREAM=auto  # auto | 1 | 0
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+STEP_DIR="${STEP_DIR:?Set STEP_DIR to a nu-dialogue step_<N> checkpoint directory}"
+NU_MOSHI_FT_REPO="${NU_MOSHI_FT_REPO:-$PWD/../moshi-finetune-nu-dialogue}"
+MODEL_DTYPE="${MODEL_DTYPE:-float16}"
+CHECKPOINT_TAG="${CHECKPOINT_TAG:-pytorch_model}"
+KEEP_INTERMEDIATE="${KEEP_INTERMEDIATE:-0}"
+REMOVE_USER_STREAM="${REMOVE_USER_STREAM:-auto}"
+
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+RUN_ID="${RUN_ID:-export_fullft_${JOB_ID_SHORT}}"
+OUT_DIR="${OUT_DIR:-$PWD/exported_model/$RUN_ID}"
+
+if ! [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "ERROR: RUN_ID may contain only letters, digits, dot, underscore, and hyphen." >&2
+    exit 1
+fi
+
+STEP_DIR="$(realpath -m "$STEP_DIR")"
+NU_MOSHI_FT_REPO="$(realpath -m "$NU_MOSHI_FT_REPO")"
+OUT_DIR="$(realpath -m "$OUT_DIR")"
+
+if [[ ! -d "$STEP_DIR/$CHECKPOINT_TAG" ]]; then
+    echo "ERROR: checkpoint tag directory not found: $STEP_DIR/$CHECKPOINT_TAG" >&2
+    exit 1
+fi
+if [[ ! -f "$NU_MOSHI_FT_REPO/tools/zero_to_fp32.py" ||
+      ! -f "$NU_MOSHI_FT_REPO/tools/clean_moshi.py" ]]; then
+    echo "ERROR: nu-dialogue export tools not found: $NU_MOSHI_FT_REPO/tools" >&2
+    exit 1
+fi
+if [[ -e "$OUT_DIR" ]]; then
+    echo "ERROR: output directory already exists: $OUT_DIR" >&2
+    echo "Choose a new OUT_DIR; existing exports are never overwritten." >&2
+    exit 1
+fi
+case "$MODEL_DTYPE" in
+    float16|bfloat16|float32) ;;
+    *)
+        echo "ERROR: MODEL_DTYPE must be float16, bfloat16, or float32." >&2
+        exit 1
+        ;;
+esac
+case "$REMOVE_USER_STREAM" in
+    auto|0|1) ;;
+    *)
+        echo "ERROR: REMOVE_USER_STREAM must be auto, 0, or 1." >&2
+        exit 1
+        ;;
+esac
+case "$KEEP_INTERMEDIATE" in
+    0|1) ;;
+    *)
+        echo "ERROR: KEEP_INTERMEDIATE must be 0 or 1." >&2
+        exit 1
+        ;;
+esac
+if [[ -n "${MOSHI_LM_KWARGS:-}" && ! -f "$(realpath -m "$MOSHI_LM_KWARGS")" ]]; then
+    echo "ERROR: MOSHI_LM_KWARGS not found: $MOSHI_LM_KWARGS" >&2
+    exit 1
+fi
+
+mkdir -p experiments/pbs_logs "$(dirname "$OUT_DIR")"
+JOB_LOG="experiments/pbs_logs/${RUN_ID}.log"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
+echo "===== Full-FT export PBS job ====="
+echo "job_id:       ${PBS_JOBID:-n/a}"
+echo "host:         $(hostname)"
+echo "workdir:      $(pwd)"
+echo "run_id:       $RUN_ID"
+echo "step_dir:     $STEP_DIR"
+echo "tag:          $CHECKPOINT_TAG"
+echo "nu_repo:      $NU_MOSHI_FT_REPO"
+echo "moshi_kwargs: ${MOSHI_LM_KWARGS:-<auto>}"
+echo "model_dtype:  $MODEL_DTYPE"
+echo "remove_user:  $REMOVE_USER_STREAM"
+echo "keep_inter:   $KEEP_INTERMEDIATE"
+echo "out_dir:      $OUT_DIR"
+echo "job_log:      $JOB_LOG"
+echo "started_at:   $(date -Iseconds)"
+echo "=================================="
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH." >&2
+    exit 1
+}
+
+export_args=(
+    uv run python scripts/export_fullft_checkpoint.py
+    --step-dir "$STEP_DIR"
+    --out-dir "$OUT_DIR"
+    --nu-repo "$NU_MOSHI_FT_REPO"
+    --tag "$CHECKPOINT_TAG"
+    --model-dtype "$MODEL_DTYPE"
+)
+if [[ -n "${MOSHI_LM_KWARGS:-}" ]]; then
+    export_args+=(--moshi-lm-kwargs "$(realpath -m "$MOSHI_LM_KWARGS")")
+fi
+if [[ "$KEEP_INTERMEDIATE" == "1" ]]; then
+    export_args+=(--keep-intermediate)
+fi
+case "$REMOVE_USER_STREAM" in
+    1) export_args+=(--remove-user-stream) ;;
+    0) export_args+=(--no-remove-user-stream) ;;
+esac
+
+"${export_args[@]}"
+
+FINAL_WEIGHT="$OUT_DIR/model.safetensors"
+if [[ ! -s "$FINAL_WEIGHT" ]]; then
+    echo "ERROR: exported weight was not created or is empty: $FINAL_WEIGHT" >&2
+    exit 1
+fi
+
+echo "exported_weight: $FINAL_WEIGHT"
+echo "finished_at:     $(date -Iseconds)"
