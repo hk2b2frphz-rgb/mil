@@ -7,15 +7,15 @@
 #PBS -j oe
 #PBS -V
 
-# Qwen3-TTS voice A/B listening test for the USER side.
+# Qwen3-TTS voice A/B listening test for the MOSHI side (counselor).
 #
-# Renders the SAME first N dialogues once per candidate voice so the user
-# turns are identical text across runs and only the voice differs -- pick the
-# voice you like by ear. The moshi (counselor) side stays fixed at
-# --speaker-moshi (Serena), so the fixed opening greeting
-# "moshi moshi, kochira kodoku-koritsu soudan madoguchi ni narimasu." is
-# synthesized in every sample too: listen to it to verify the "koritsu"
-# (isolation) kanji reading.
+# Renders the SAME first N dialogues once per candidate voice, holding the user
+# (counselee) side fixed at FIXED_USER and varying only --speaker-moshi, so the
+# moshi turns are identical text across runs and only the counselor voice
+# differs -- pick the moshi voice you like by ear. Because the fixed opening
+# greeting "moshi moshi, kochira kodoku-koritsu soudan madoguchi ni narimasu."
+# is a moshi turn, it is re-synthesized in each voice: listen to it to compare
+# how each voice reads the "koritsu" (isolation) kanji.
 #
 # Candidate voices default to ALL nine presets (female + male). Style preset
 # defaults to none (raw tempo) so voice quality is judged without the slow
@@ -25,8 +25,9 @@
 #   qsub -V scripts/run_qwen_tts_voice_compare.pbs
 #
 # Overrides:
-#   VOICES="Dylan,Eric,Aiden" qsub -V scripts/run_qwen_tts_voice_compare.pbs
+#   VOICES="Serena,Vivian,Sohee" qsub -V scripts/run_qwen_tts_voice_compare.pbs
 #   NUM_DIALOGUES=5 qsub -V scripts/run_qwen_tts_voice_compare.pbs
+#   FIXED_USER=Ono_Anna qsub -V scripts/run_qwen_tts_voice_compare.pbs
 #   SOURCE_BATCH_ID=qwen_dialogues_1000_v1 qsub -V scripts/run_qwen_tts_voice_compare.pbs
 #   STYLE_PRESET=auto qsub -V scripts/run_qwen_tts_voice_compare.pbs   # slower counseling tone
 
@@ -49,7 +50,8 @@ export NUM_DIALOGUES="${NUM_DIALOGUES:-3}"
 export LEAD_IN_SEC="${LEAD_IN_SEC:-0.3}"
 export GAP_SEC="${GAP_SEC:-0.2}"
 export STYLE_PRESET="${STYLE_PRESET:-none}"
-export SPEAKER_MOSHI="${SPEAKER_MOSHI:-Serena}"
+# The user (counselee) side is held fixed; only the moshi voice is varied.
+export FIXED_USER="${FIXED_USER:-Ono_Anna}"
 # All preset voices (VALID_SPEAKERS), female + male. Override with VOICES=...
 export VOICES="${VOICES:-Vivian,Serena,Ono_Anna,Sohee,Uncle_Fu,Dylan,Eric,Ryan,Aiden}"
 
@@ -62,15 +64,15 @@ mkdir -p experiments/pbs_logs
 JOB_LOG="experiments/pbs_logs/${BATCH_ID}.log"
 exec > >(tee -a "$JOB_LOG") 2>&1
 
-echo "===== Qwen3-TTS voice compare (user side) ====="
+echo "===== Qwen3-TTS voice compare (moshi side) ====="
 echo "job_id:       ${PBS_JOBID:-n/a}"
 echo "host:         $(hostname)"
 echo "source_batch: $SOURCE_BATCH_ID"
 echo "out_root:     $OUT_ROOT"
 echo "dialogues:    $DIALOGUES_JSONL"
 echo "num_dialogues:$NUM_DIALOGUES (per voice)"
-echo "voices:       $VOICES"
-echo "speaker_moshi:$SPEAKER_MOSHI (fixed)"
+echo "voices:       $VOICES (moshi side)"
+echo "fixed_user:   $FIXED_USER (fixed)"
 echo "style_preset: $STYLE_PRESET"
 echo "cuda_visible: $CUDA_VISIBLE_DEVICES"
 echo "started_at:   $(date -Iseconds)"
@@ -98,7 +100,7 @@ for voice in "${VOICE_ARR[@]}"; do
     voice="$(echo "$voice" | tr -d ' ')"
     [[ -z "$voice" ]] && continue
     voice_out="$OUT_ROOT/$voice"
-    echo "===== rendering voice=$voice -> $voice_out ====="
+    echo "===== rendering moshi voice=$voice -> $voice_out ====="
     uv run python scripts/generate_qwen3_tts_data.py \
         --tts-backend qwen3 \
         --dialogues-jsonl "$DIALOGUES_JSONL" \
@@ -111,25 +113,25 @@ for voice in "${VOICE_ARR[@]}"; do
         --gap-sec "$GAP_SEC" \
         --no-emotion \
         --style-preset "$STYLE_PRESET" \
-        --speaker-moshi "$SPEAKER_MOSHI" \
-        --user-speaker-pool "$voice" \
+        --speaker-moshi "$voice" \
+        --user-speaker-pool "$FIXED_USER" \
         --num-dialogues "$NUM_DIALOGUES"
 
     wav_glob="$voice_out/data_stereo/*.wav"
     if ! compgen -G "$wav_glob" >/dev/null; then
-        echo "ERROR: no stereo WAVs created for voice=$voice in $voice_out/data_stereo" >&2
+        echo "ERROR: no stereo WAVs created for moshi voice=$voice in $voice_out/data_stereo" >&2
         exit 1
     fi
     wav_count="$(compgen -G "$wav_glob" | wc -l | tr -d ' ')"
     echo "[$voice] stereo_wavs: $wav_count in $voice_out/data_stereo"
 done
 
-echo "===== voice compare summary ====="
+echo "===== moshi voice compare summary ====="
 for voice in "${VOICE_ARR[@]}"; do
     voice="$(echo "$voice" | tr -d ' ')"
     [[ -z "$voice" ]] && continue
     echo "  $voice : $OUT_ROOT/$voice/data_stereo/"
 done
-echo "Listen to the same $NUM_DIALOGUES dialogue(s) under each voice dir above."
-echo "The fixed moshi opening greeting in every sample checks the 'koritsu' reading."
+echo "Listen to the same $NUM_DIALOGUES dialogue(s) under each moshi voice dir above."
+echo "Each opening greeting is re-synthesized per voice, so compare the 'koritsu' reading too."
 echo "finished_at:  $(date -Iseconds)"
