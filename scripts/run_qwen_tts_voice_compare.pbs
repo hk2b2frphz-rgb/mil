@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N qwen_tts_voice_compare
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -V
+
+# Qwen3-TTS voice A/B listening test for the USER side.
+#
+# Renders the SAME first N dialogues once per candidate voice so the user
+# turns are identical text across runs and only the voice differs -- pick the
+# voice you like by ear. The moshi (counselor) side stays fixed at
+# --speaker-moshi (Serena), so the fixed opening greeting
+# "moshi moshi, kochira kodoku-koritsu soudan madoguchi ni narimasu." is
+# synthesized in every sample too: listen to it to verify the "koritsu"
+# (isolation) kanji reading.
+#
+# Candidate voices default to ALL nine presets (female + male). Style preset
+# defaults to none (raw tempo) so voice quality is judged without the slow
+# counseling tone. Female: Vivian, Serena, Ono_Anna, Sohee. Male: Uncle_Fu,
+# Dylan, Eric, Ryan, Aiden.
+#
+#   qsub -V scripts/run_qwen_tts_voice_compare.pbs
+#
+# Overrides:
+#   VOICES="Dylan,Eric,Aiden" qsub -V scripts/run_qwen_tts_voice_compare.pbs
+#   NUM_DIALOGUES=5 qsub -V scripts/run_qwen_tts_voice_compare.pbs
+#   SOURCE_BATCH_ID=qwen_dialogues_1000_v1 qsub -V scripts/run_qwen_tts_voice_compare.pbs
+#   STYLE_PRESET=auto qsub -V scripts/run_qwen_tts_voice_compare.pbs   # slower counseling tone
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+# shellcheck source=/dev/null
+source "$PWD/scripts/run_id_utils.sh"
+
+export SOURCE_BATCH_ID="${SOURCE_BATCH_ID:-qwen_dialogues_1000_${DIALOGUES_VERSION:-v1}}"
+export BATCH_ID="${BATCH_ID:-$(default_run_id "${SOURCE_BATCH_ID}_voice_compare")}"
+export RUN_ID="$BATCH_ID"
+export DIALOGUES_JSONL="${DIALOGUES_JSONL:-$PWD/data/runs/${SOURCE_BATCH_ID}/llm_dialogues/dialogues.jsonl}"
+export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/$BATCH_ID}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export TTS_DTYPE="${TTS_DTYPE:-float16}"
+export TTS_DEVICE="${TTS_DEVICE:-cuda}"
+export NUM_DIALOGUES="${NUM_DIALOGUES:-3}"
+export LEAD_IN_SEC="${LEAD_IN_SEC:-0.3}"
+export GAP_SEC="${GAP_SEC:-0.2}"
+export STYLE_PRESET="${STYLE_PRESET:-none}"
+export SPEAKER_MOSHI="${SPEAKER_MOSHI:-Serena}"
+# All preset voices (VALID_SPEAKERS), female + male. Override with VOICES=...
+export VOICES="${VOICES:-Vivian,Serena,Ono_Anna,Sohee,Uncle_Fu,Dylan,Eric,Ryan,Aiden}"
+
+if ! [[ "$NUM_DIALOGUES" =~ ^[0-9]+$ ]] || [[ "$NUM_DIALOGUES" -lt 1 ]]; then
+    echo "ERROR: NUM_DIALOGUES must be a positive integer: $NUM_DIALOGUES" >&2
+    exit 1
+fi
+
+mkdir -p experiments/pbs_logs
+JOB_LOG="experiments/pbs_logs/${BATCH_ID}.log"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
+echo "===== Qwen3-TTS voice compare (user side) ====="
+echo "job_id:       ${PBS_JOBID:-n/a}"
+echo "host:         $(hostname)"
+echo "source_batch: $SOURCE_BATCH_ID"
+echo "out_root:     $OUT_ROOT"
+echo "dialogues:    $DIALOGUES_JSONL"
+echo "num_dialogues:$NUM_DIALOGUES (per voice)"
+echo "voices:       $VOICES"
+echo "speaker_moshi:$SPEAKER_MOSHI (fixed)"
+echo "style_preset: $STYLE_PRESET"
+echo "cuda_visible: $CUDA_VISIBLE_DEVICES"
+echo "started_at:   $(date -Iseconds)"
+echo "==============================================="
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH." >&2
+    exit 1
+}
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+fi
+if [[ ! -s "$DIALOGUES_JSONL" ]]; then
+    echo "ERROR: dialogues JSONL was not found or is empty: $DIALOGUES_JSONL" >&2
+    exit 1
+fi
+
+IFS=',' read -r -a VOICE_ARR <<< "$VOICES"
+if [[ "${#VOICE_ARR[@]}" -lt 1 ]]; then
+    echo "ERROR: VOICES is empty" >&2
+    exit 1
+fi
+
+for voice in "${VOICE_ARR[@]}"; do
+    voice="$(echo "$voice" | tr -d ' ')"
+    [[ -z "$voice" ]] && continue
+    voice_out="$OUT_ROOT/$voice"
+    echo "===== rendering voice=$voice -> $voice_out ====="
+    uv run python scripts/generate_qwen3_tts_data.py \
+        --tts-backend qwen3 \
+        --dialogues-jsonl "$DIALOGUES_JSONL" \
+        --auto-overlap-aizuchi \
+        --whole-utterance \
+        --out-dir "$voice_out" \
+        --device "$TTS_DEVICE" \
+        --dtype "$TTS_DTYPE" \
+        --lead-in-sec "$LEAD_IN_SEC" \
+        --gap-sec "$GAP_SEC" \
+        --no-emotion \
+        --style-preset "$STYLE_PRESET" \
+        --speaker-moshi "$SPEAKER_MOSHI" \
+        --user-speaker-pool "$voice" \
+        --num-dialogues "$NUM_DIALOGUES"
+
+    wav_glob="$voice_out/data_stereo/*.wav"
+    if ! compgen -G "$wav_glob" >/dev/null; then
+        echo "ERROR: no stereo WAVs created for voice=$voice in $voice_out/data_stereo" >&2
+        exit 1
+    fi
+    wav_count="$(compgen -G "$wav_glob" | wc -l | tr -d ' ')"
+    echo "[$voice] stereo_wavs: $wav_count in $voice_out/data_stereo"
+done
+
+echo "===== voice compare summary ====="
+for voice in "${VOICE_ARR[@]}"; do
+    voice="$(echo "$voice" | tr -d ' ')"
+    [[ -z "$voice" ]] && continue
+    echo "  $voice : $OUT_ROOT/$voice/data_stereo/"
+done
+echo "Listen to the same $NUM_DIALOGUES dialogue(s) under each voice dir above."
+echo "The fixed moshi opening greeting in every sample checks the 'koritsu' reading."
+echo "finished_at:  $(date -Iseconds)"
