@@ -122,6 +122,8 @@ STYLE_PRESET=counseling_anxious qsub -V scripts/run_qwen_tts_whole_utterance_100
 
 バックエンドは smoke/1000 が Qwen3-TTS、**3000/10000 は既定で Kokoro**
 （`hexgrad/Kokoro-82M`。Qwen3-TTS ではこの規模は walltime 内に終わらないため）。
+1000 スクリプトも `TTS_BACKEND=kokoro qsub -V scripts/run_qwen_tts_whole_utterance_1000_4gpu.pbs`
+で、3000 と同じ Kokoro バックエンドを選択できる（既定は互換性のため Qwen3-TTS）。
 Kokoro は emotion/style instruct 非対応（`STYLE_PRESET` は無視される）。
 moshi=`jf_alpha` 固定、user は日本語4話者（jf_gongitsune/jf_nezumi/jf_tebukuro/jm_kumo）を
 対話ごとにローテーション（`KOKORO_VOICE_MOSHI` / `KOKORO_USER_VOICES` で変更、

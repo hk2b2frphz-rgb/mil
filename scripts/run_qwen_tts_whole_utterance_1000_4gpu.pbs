@@ -51,6 +51,12 @@ export TTS_DEVICE="${TTS_DEVICE:-cuda}"
 export LEAD_IN_SEC="${LEAD_IN_SEC:-0.3}"
 export GAP_SEC="${GAP_SEC:-0.2}"
 export STYLE_PRESET="${STYLE_PRESET:-auto}"
+# Default to Qwen3-TTS at this scale for backward compatibility. Kokoro ignores
+# emotion/style instructs (STYLE_PRESET becomes a no-op) but is an order of
+# magnitude faster. Set TTS_BACKEND=kokoro to use the faster Kokoro backend.
+export TTS_BACKEND="${TTS_BACKEND:-qwen3}"
+export KOKORO_VOICE_MOSHI="${KOKORO_VOICE_MOSHI:-jf_alpha}"
+export KOKORO_USER_VOICES="${KOKORO_USER_VOICES:-jf_gongitsune,jf_nezumi,jf_tebukuro,jm_kumo}"
 # Throttles generate_qwen3_tts_data.py's per-dialogue progress logging (every
 # LOG_EVERY dialogues instead of every one) to keep shard_*.log from growing
 # unbounded on large runs. Set LOG_EVERY=1 or VERBOSE=1 for full per-call
@@ -91,9 +97,10 @@ JOB_TAG="${JOB_TAG%%.*}"
 JOB_LOG="experiments/pbs_logs/${BATCH_ID}_${JOB_TAG:-local}.log"
 exec > >(tee -a "$JOB_LOG") 2>&1
 
-echo "===== Qwen3-TTS whole-utterance production (4 GPU) ====="
+echo "===== TTS whole-utterance production 1000 (4 GPU, backend=$TTS_BACKEND) ====="
 echo "job_id:        ${PBS_JOBID:-n/a}"
 echo "host:          $(hostname)"
+echo "tts_backend:   $TTS_BACKEND"
 echo "source_batch:  $SOURCE_BATCH_ID"
 echo "out_root:      $OUT_ROOT"
 echo "dialogues:     $DIALOGUES_JSONL"
@@ -115,7 +122,40 @@ if command -v nvidia-smi >/dev/null 2>&1; then
 fi
 
 echo "===== step 0/3: uv environment preflight ====="
-uv run python - <<'PY'
+# Kokoro is not part of the main project env (its misaki[ja]/unidic deps are
+# heavy and conflict-prone), so it runs in an isolated uv env pinned to the
+# main env's torch/torchaudio -- the same pattern as run_tts_comparison.pbs.
+GEN_UV=(uv run)
+if [[ "$TTS_BACKEND" == "kokoro" ]]; then
+    TORCH_VERSION="$(uv run python -c 'import torch; print(torch.__version__)')"
+    TORCHAUDIO_VERSION="$(uv run python -c 'import torchaudio; print(torchaudio.__version__)')"
+    GEN_UV=(
+        uv run --isolated --no-project
+        --index "pytorch-cu121=https://download.pytorch.org/whl/cu121"
+        --with "kokoro>=0.9.4"
+        --with "misaki[ja]"
+        --with unidic
+        --with pyopenjtalk
+        --with numpy
+        --with sphn
+        --with soundfile
+        --with uroman
+        --with "torch==$TORCH_VERSION"
+        --with "torchaudio==$TORCHAUDIO_VERSION"
+    )
+    # fugashi (via misaki[ja]) needs the full unidic dictionary downloaded once;
+    # the identical --with set below reuses this cached env.
+    echo "[kokoro] downloading unidic dictionary..."
+    "${GEN_UV[@]}" python -m unidic download
+    "${GEN_UV[@]}" python - <<'PY'
+import numpy  # noqa: F401
+import sphn  # noqa: F401
+from kokoro import KPipeline  # noqa: F401
+import torchaudio  # noqa: F401
+print("kokoro/torchaudio preflight ok")
+PY
+else
+    uv run python - <<'PY'
 import numpy  # noqa: F401
 import sphn  # noqa: F401
 try:
@@ -128,6 +168,7 @@ except Exception as exc:
     raise SystemExit(f"torchaudio import failed (needed for MMS_FA): {exc}")
 print("uv/qwen_tts/torchaudio preflight ok")
 PY
+fi
 
 echo "===== step 1/3: split dialogues ====="
 uv run python - "$DIALOGUES_JSONL" "$OUT_ROOT" "$NUM_SHARDS" "$NUM_DIALOGUES" "$SPARE_RATIO" <<'PY'
@@ -215,8 +256,8 @@ for ((i = 0; i < NUM_SHARDS; i++)); do
         set -euo pipefail
         echo "[$shard_tag] gpu=$gpu_id dialogues=$shard_dialogues out=$shard_training success_target=$success_target"
         tts_args=(
-            uv run python scripts/generate_qwen3_tts_data.py
-            --tts-backend qwen3
+            "${GEN_UV[@]}" python scripts/generate_qwen3_tts_data.py
+            --tts-backend "$TTS_BACKEND"
             --dialogues-jsonl "$shard_dialogues"
             --auto-overlap-aizuchi
             --whole-utterance
@@ -230,6 +271,12 @@ for ((i = 0; i < NUM_SHARDS; i++)); do
             --style-preset "$STYLE_PRESET"
             --log-every "$LOG_EVERY"
         )
+        if [[ "$TTS_BACKEND" == "kokoro" ]]; then
+            tts_args+=(
+                --kokoro-voice-moshi "$KOKORO_VOICE_MOSHI"
+                --kokoro-user-voices "$KOKORO_USER_VOICES"
+            )
+        fi
         if [[ "$VERBOSE" == "1" ]]; then
             tts_args+=(--verbose)
         fi
