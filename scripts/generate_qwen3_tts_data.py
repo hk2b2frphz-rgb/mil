@@ -1990,7 +1990,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "whole-utterance モード用のスタイルプリセット名。"
-            f"候補: {_preset_names}, random（対話ごとにランダム選択）, "
+            f"候補: {_preset_names}, none（style instructなし、素の話速）, "
+            "random（対話ごとにランダム選択）, "
             "auto（dialogues.jsonl の emotional_state または use case id の"
             "状態トークンから対話ごとに自動選択し、user と moshi の声の"
             "テンポ・感情をミラーリングさせる）。"
@@ -2102,12 +2103,12 @@ def parse_args() -> argparse.Namespace:
 
     if args.style_preset is not None:
         if (
-            args.style_preset not in {"random", "auto"}
+            args.style_preset not in {"none", "random", "auto"}
             and args.style_preset not in WHOLE_UTTERANCE_STYLE_PRESETS
         ):
             parser.error(
                 f"--style-preset={args.style_preset!r} は無効です。"
-                f"候補: {sorted(WHOLE_UTTERANCE_STYLE_PRESETS.keys())}, random, auto"
+                f"候補: {sorted(WHOLE_UTTERANCE_STYLE_PRESETS.keys())}, none, random, auto"
             )
         if not args.whole_utterance:
             parser.error("--style-preset は --whole-utterance と一緒に使ってください")
@@ -2373,7 +2374,7 @@ def main() -> None:
             if args.whole_utterance and fa_aligner is not None:
                 instruct_u = args.instruct_user
                 instruct_m = args.instruct_moshi
-                if args.style_preset is not None:
+                if args.style_preset not in {None, "none"}:
                     preset_key = args.style_preset
                     if preset_key == "random":
                         preset_key = random.choice(list(WHOLE_UTTERANCE_STYLE_PRESETS))

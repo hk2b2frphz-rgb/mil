@@ -34,7 +34,9 @@ export TTS_DEVICE="${TTS_DEVICE:-cuda}"
 export NUM_DIALOGUES="${NUM_DIALOGUES:-3}"
 export LEAD_IN_SEC="${LEAD_IN_SEC:-0.3}"
 export GAP_SEC="${GAP_SEC:-0.2}"
-export STYLE_PRESET="${STYLE_PRESET:-auto}"
+export STYLE_PRESET="${STYLE_PRESET:-none}"
+# Default STYLE_PRESET=none uses raw tempo without a style instruct.
+# Set STYLE_PRESET=auto for the former counseling-style slower tone.
 
 if [[ "$NUM_DIALOGUES" != "all" ]]; then
     if ! [[ "$NUM_DIALOGUES" =~ ^[0-9]+$ ]] || [[ "$NUM_DIALOGUES" -lt 1 ]]; then

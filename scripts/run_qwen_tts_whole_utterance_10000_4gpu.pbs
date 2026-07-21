@@ -96,7 +96,9 @@ export TTS_DTYPE="${TTS_DTYPE:-float16}"
 export TTS_DEVICE="${TTS_DEVICE:-cuda}"
 export LEAD_IN_SEC="${LEAD_IN_SEC:-0.3}"
 export GAP_SEC="${GAP_SEC:-0.2}"
-export STYLE_PRESET="${STYLE_PRESET:-auto}"
+export STYLE_PRESET="${STYLE_PRESET:-none}"
+# Default STYLE_PRESET=none uses raw tempo without a style instruct.
+# Set STYLE_PRESET=auto for the former counseling-style slower tone.
 # Default to Kokoro at this scale: Qwen3-TTS is too slow to finish 10000
 # dialogues within realistic walltimes. Kokoro ignores emotion/style instructs
 # (STYLE_PRESET becomes a no-op) but is an order of magnitude faster.
