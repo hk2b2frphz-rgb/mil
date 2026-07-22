@@ -18,12 +18,12 @@ dependencies = [
     "einops",
     "faster-whisper",
     "librosa",
-    # Streaming Sortformer v2 (diar_streaming_sortformer_4spk-v2, released
-    # 2025-08) passes spkcache_len to SortformerModules; older NeMo builds
-    # reject it with "unexpected keyword argument spkcache_len". Floor the
-    # version so uv cannot silently backtrack to a build without AOSC/speaker
-    # cache support.
-    "nemo_toolkit[asr]>=2.5.0",
+    # Kept unpinned on purpose: this env's NeMo is only for the Full-Duplex-Bench
+    # v1.5 ASR model (eval/align_full_duplex_asr.py) and must stay compatible with
+    # transformers>=4.57 / numpy 2.x. The streaming Sortformer v2 diarizer needs a
+    # newer, mutually-incompatible NeMo, so it runs in an isolated env instead
+    # (see scripts/run_real_dialogue_analysis.pbs).
+    "nemo_toolkit[asr]",
     "orjson",
     "tiktoken",
     "torchcodec",

@@ -24,6 +24,11 @@
 #   OUT_DIR=data/real_dialogue/<name>   (default: data/real_dialogue/<jobid>)
 #   WHISPER_MODEL=large-v3
 #   EXTRA_ARGS="--skip-asr"             (skip transcription for a quick listen)
+#   DIAR_UV_WITH="--with torch==2.5.1"  (extra uv --with args for the isolated
+#                                        env, e.g. a specific torch/CUDA wheel)
+#
+# Diarization runs in an isolated uv env (--no-project) because streaming
+# Sortformer v2 needs a newer NeMo than the main project env can hold.
 
 set -euo pipefail
 
@@ -67,8 +72,23 @@ LOG_FILE="${LOG_FILE:-$OUT_DIR/run.log}"
 # PYTHONUNBUFFERED=1) so `tail -f run.log` follows progress live instead of
 # arriving in large blocks through the pipe.
 export PYTHONUNBUFFERED=1
+
+# Streaming Sortformer v2 needs a newer NeMo that pins transformers/numpy below
+# what the main project env requires (moshi/qwen-tts need transformers>=4.57 and
+# numpy 2.x), so the two cannot share one environment. Run the analysis in an
+# isolated, uv-managed env (--no-project) carrying only the diarization + ASR
+# deps; torch comes in transitively as a CUDA build. If this node needs a
+# specific torch/CUDA wheel, add it via DIAR_UV_WITH, e.g.
+#   qsub -v 'WAVS=...,DIAR_UV_WITH=--with torch==2.5.1' ...
 # shellcheck disable=SC2086
-uv run python -u scripts/analyze_real_dialogue.py \
+uv run --no-project --python 3.11 \
+    --with 'nemo_toolkit[asr]>=2.5.0' \
+    --with faster-whisper \
+    --with librosa \
+    --with soundfile \
+    --with 'numpy<2' \
+    ${DIAR_UV_WITH:-} \
+    python -u scripts/analyze_real_dialogue.py \
     "${wav_files[@]}" \
     --out-dir "$OUT_DIR" \
     ${WHISPER_MODEL:+--whisper-model "$WHISPER_MODEL"} \
