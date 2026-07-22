@@ -35,6 +35,8 @@ import logging
 import re
 import statistics
 import sys
+import threading
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -52,6 +54,38 @@ except ImportError:  # スクリプト直接実行時（scripts/ が sys.path �
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+class Heartbeat:
+    """内部進捗を出さない長い処理(diarize など)の生存確認用。
+
+    with ブロックの間、interval 秒ごとに経過秒をログへ出す。数値が増え続けて
+    いれば実行中、増えなければハングと判別できる。daemon スレッドなので本体の
+    終了を妨げない。
+    """
+
+    def __init__(self, label: str, interval: float = 30.0):
+        self.label = label
+        self.interval = interval
+        self._stop = threading.Event()
+        self._t0 = 0.0
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "Heartbeat":
+        self._t0 = time.monotonic()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            logger.info("%s ... 実行中(%.0f 秒経過)", self.label, time.monotonic() - self._t0)
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        logger.info("%s 完了(%.0f 秒)", self.label, time.monotonic() - self._t0)
 
 COMPILED_AIZUCHI = [(name, re.compile(pat)) for name, pat in AIZUCHI_PATTERNS]
 
@@ -107,13 +141,16 @@ def run_diarization(wav_path: Path, device: str) -> list[tuple[str, float, float
     """Sortformer で (label, start, end) 列を得る。gated でなくトークン不要。"""
     from nemo.collections.asr.models import SortformerEncLabelModel
 
-    logger.info("%s をロード中...", DIARIZATION_MODEL)
-    model = SortformerEncLabelModel.from_pretrained(DIARIZATION_MODEL)
-    model.eval()
-    if device.startswith("cuda"):
-        model = model.to(device)
+    logger.info("%s をロード中(初回はダウンロードあり)...", DIARIZATION_MODEL)
+    with Heartbeat("モデルロード", interval=15.0):
+        model = SortformerEncLabelModel.from_pretrained(DIARIZATION_MODEL)
+        model.eval()
+        if device.startswith("cuda"):
+            model = model.to(device)
 
-    outputs = model.diarize(audio=[str(wav_path)], batch_size=1)
+    logger.info("diarize 実行中(長い音声はここが最も時間を要します)...")
+    with Heartbeat("diarize"):
+        outputs = model.diarize(audio=[str(wav_path)], batch_size=1)
     # 出力は入力ファイルごとの ["<start> <end> speaker_k", ...]。
     lines = outputs[0] if outputs and isinstance(outputs[0], list) else outputs
     return parse_diarization_lines(lines)
@@ -205,7 +242,10 @@ def transcribe_segments(
 
     import librosa
 
-    for seg in segments:
+    total = len(segments)
+    logger.info("書き起こし対象 %d セグメント", total)
+    t0 = time.monotonic()
+    for idx, seg in enumerate(segments, 1):
         lo = max(0, int((seg.start - CLIP_MARGIN_SEC) * sr))
         hi = min(audio.size, int((seg.end + CLIP_MARGIN_SEC) * sr))
         clip = audio[lo:hi]
@@ -215,6 +255,8 @@ def transcribe_segments(
             clip, language="ja", beam_size=5, condition_on_previous_text=False
         )
         seg.text = "".join(r.text for r in results).strip()
+        if idx % 25 == 0 or idx == total:
+            logger.info("書き起こし %d/%d 完了(%.0f 秒経過)", idx, total, time.monotonic() - t0)
 
 
 def mark_aizuchi(segments: list[Segment]) -> None:
