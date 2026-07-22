@@ -257,27 +257,12 @@ def annotate_overlaps(segments: list[Segment]) -> list[tuple[float, float]]:
     return merged
 
 
-# 短い相槌・フィラーは Whisper が既定では無音判定で落とし、孤立クリップでは
-# 文脈が無く正規化して消しがち。よくある相槌/フィラーを initial_prompt で
-# 提示し、拾われやすくバイアスをかける。
-FILLER_PROMPT = (
-    "はい。ええ。うん。うんうん。なるほど。なるほどね。そうですね。そうそう。"
-    "へえ。ふーん。ああ。うーん。えーと。あのー。まあ。その。"
-)
-# この秒数未満の短いセグメントには前後を広めに切り出して文脈を与える
-# (語頭・語尾の欠けと無音誤判定を緩和)。相手の声が少し混じっても、
-# Whisper のエンコーダに文脈を与える利得のほうが大きい。
-SHORT_SEG_SEC = 1.5
-SHORT_SEG_MARGIN_SEC = 0.25
-
-
 def transcribe_segments(
     audio: np.ndarray,
     sr: int,
     segments: list[Segment],
     model_name: str,
     device: str,
-    initial_prompt: str | None = FILLER_PROMPT,
 ) -> None:
     from faster_whisper import WhisperModel
 
@@ -291,29 +276,16 @@ def transcribe_segments(
     import librosa
 
     total = len(segments)
-    logger.info(
-        "書き起こし対象 %d セグメント(filler prompt=%s)",
-        total, "on" if initial_prompt else "off",
-    )
+    logger.info("書き起こし対象 %d セグメント", total)
     t0 = time.monotonic()
     for idx, seg in enumerate(segments, 1):
-        margin = SHORT_SEG_MARGIN_SEC if seg.duration < SHORT_SEG_SEC else CLIP_MARGIN_SEC
-        lo = max(0, int((seg.start - margin) * sr))
-        hi = min(audio.size, int((seg.end + margin) * sr))
+        lo = max(0, int((seg.start - CLIP_MARGIN_SEC) * sr))
+        hi = min(audio.size, int((seg.end + CLIP_MARGIN_SEC) * sr))
         clip = audio[lo:hi]
         if sr != 16000:
             clip = librosa.resample(clip, orig_sr=sr, target_sr=16000)
         results, _ = model.transcribe(
-            clip,
-            language="ja",
-            beam_size=5,
-            condition_on_previous_text=False,
-            initial_prompt=initial_prompt or None,
-            # 既定より緩めて短い相槌/フィラーを無音として捨てないようにする。
-            no_speech_threshold=0.85,
-            log_prob_threshold=-2.0,
-            temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-            vad_filter=False,
+            clip, language="ja", beam_size=5, condition_on_previous_text=False
         )
         seg.text = "".join(r.text for r in results).strip()
         if idx % 25 == 0 or idx == total:
@@ -511,10 +483,7 @@ def process_wav(wav_path: Path, out_root: Path, args: argparse.Namespace) -> Pat
         logger.info("--skip-asr: 書き起こしと相槌判定を省略")
     else:
         logger.info("書き起こし実行中...")
-        transcribe_segments(
-            audio, sr, segments, args.whisper_model, args.device,
-            initial_prompt=args.filler_prompt,
-        )
+        transcribe_segments(audio, sr, segments, args.whisper_model, args.device)
         mark_aizuchi(segments)
         # ASR 結果を反映: 発話 WAV をテキスト付き名にリネームし、timeline/stats を更新。
         rename_segment_wavs(segments, seg_paths)
@@ -538,9 +507,6 @@ def main() -> None:
                         help="これ未満のダイアライゼーション断片は捨てる")
     parser.add_argument("--skip-asr", action="store_true",
                         help="書き起こしを省略して切り出しだけ素早く確認する")
-    parser.add_argument("--filler-prompt", default=FILLER_PROMPT,
-                        help="Whisper initial_prompt。相槌/フィラーを拾わせるバイアス文"
-                             "(既定: よくある相槌+フィラー)。空文字 '' で無効化")
     args = parser.parse_args()
 
     if args.device is None:
