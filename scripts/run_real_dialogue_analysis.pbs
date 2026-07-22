@@ -63,8 +63,11 @@ LOG_FILE="${LOG_FILE:-$OUT_DIR/run.log}"
 } | tee "$LOG_FILE"
 
 # tee でログへ複写しつつ標準出力にも流す。pipefail により python の終了コードが伝播する。
+# PYTHONUNBUFFERED=1 + python -u でバッファリングを無効化し、`tail -f run.log` で
+# リアルタイムに進捗を追えるようにする(パイプ越しだと既定では数十行単位で遅延する)。
+export PYTHONUNBUFFERED=1
 # shellcheck disable=SC2086
-uv run python scripts/analyze_real_dialogue.py \
+uv run python -u scripts/analyze_real_dialogue.py \
     "${wav_files[@]}" \
     --out-dir "$OUT_DIR" \
     ${WHISPER_MODEL:+--whisper-model "$WHISPER_MODEL"} \
