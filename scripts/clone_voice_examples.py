@@ -39,11 +39,44 @@ import json
 import logging
 import shutil
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+class Heartbeat:
+    """内部進捗を出さない長い処理(モデルDL/ロード・合成)の生存確認用。
+
+    with ブロックの間、interval 秒ごとに経過秒をログへ出す。数値が増え続けて
+    いれば実行中、増えなければハングと判別できる。daemon スレッド。
+    """
+
+    def __init__(self, label: str, interval: float = 15.0):
+        self.label = label
+        self.interval = interval
+        self._stop = threading.Event()
+        self._t0 = 0.0
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "Heartbeat":
+        self._t0 = time.monotonic()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            logger.info("%s ... 実行中(%.0f 秒経過)", self.label, time.monotonic() - self._t0)
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        logger.info("%s 完了(%.0f 秒)", self.label, time.monotonic() - self._t0)
 
 CLONE_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 
@@ -171,13 +204,16 @@ def build_model(args: argparse.Namespace):
 
     logger.info("Qwen3-TTS(clone)読み込み中: %s (device=%s dtype=%s attn=%s)",
                 args.model, device_map, args.dtype, args.attn_impl)
+    logger.info("※初回は -Base モデル(数GB)のダウンロードで時間がかかります")
     try:
-        return Qwen3TTSModel.from_pretrained(args.model, **load_kwargs)
+        with Heartbeat("モデルDL/ロード"):
+            return Qwen3TTSModel.from_pretrained(args.model, **load_kwargs)
     except Exception as exc:
         if load_kwargs.pop("attn_implementation", None) is not None:
             logger.warning("attn=%s の読み込みに失敗。既定の attention で再試行: %s",
                            args.attn_impl, exc)
-            return Qwen3TTSModel.from_pretrained(args.model, **load_kwargs)
+            with Heartbeat("モデルDL/ロード(再試行)"):
+                return Qwen3TTSModel.from_pretrained(args.model, **load_kwargs)
         raise
 
 
@@ -213,18 +249,20 @@ def main() -> None:
     model = build_model(args)
 
     logger.info("クローンプロンプト作成中(x_vector_only=%s)...", args.x_vector_only)
-    prompt_items = model.create_voice_clone_prompt(
-        ref_audio=str(ref_wav),
-        ref_text=ref_text,
-        x_vector_only_mode=args.x_vector_only,
-    )
+    with Heartbeat("クローンプロンプト作成"):
+        prompt_items = model.create_voice_clone_prompt(
+            ref_audio=str(ref_wav),
+            ref_text=ref_text,
+            x_vector_only_mode=args.x_vector_only,
+        )
 
     logger.info("例文 %d 文を合成中...", len(examples))
-    wavs, sr = model.generate_voice_clone(
-        text=examples,
-        language=[args.language] * len(examples),
-        voice_clone_prompt=prompt_items,
-    )
+    with Heartbeat("例文合成"):
+        wavs, sr = model.generate_voice_clone(
+            text=examples,
+            language=[args.language] * len(examples),
+            voice_clone_prompt=prompt_items,
+        )
 
     out_files: list[str] = []
     for i, (text, wav) in enumerate(zip(examples, wavs)):
