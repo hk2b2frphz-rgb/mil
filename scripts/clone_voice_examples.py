@@ -353,7 +353,7 @@ def free_model(model) -> None:
 
 def run_customvoice(
     model, examples: list[str], speaker: str, language: str,
-    instruct: str | None, subdir: Path,
+    instruct: str | None, subdir: Path, max_new_tokens: int,
 ) -> list[str]:
     """CustomVoice プリセット話者で例文を合成し、ファイル名一覧を返す。"""
     import numpy as np
@@ -365,11 +365,16 @@ def run_customvoice(
     logger.info("CustomVoice(%s)で %d 文を合成中...", speaker, total)
     with Heartbeat(f"CustomVoice合成 {speaker}"):
         for i, text in enumerate(examples):
-            kwargs: dict[str, Any] = {"text": text, "language": language, "speaker": speaker}
+            kwargs: dict[str, Any] = {
+                "text": text, "language": language, "speaker": speaker,
+                "max_new_tokens": max_new_tokens,
+            }
             if instruct:
                 kwargs["instruct"] = instruct
             with torch.no_grad():
                 wavs, sr = model.generate_custom_voice(**kwargs)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             audio = wavs[0] if isinstance(wavs, (list, tuple)) else wavs
             if hasattr(audio, "cpu"):
                 audio = audio.cpu().numpy()
@@ -378,6 +383,38 @@ def run_customvoice(
             sf.write(str(path), audio, int(sr))
             out_files.append(path.name)
     return out_files
+
+
+def generate_clone_batched(model, texts: list[str], prompt_items,
+                           args: argparse.Namespace) -> tuple[list[Any], int]:
+    """例文を小バッチに分けてクローン合成する。
+
+    max_new_tokens で生成長を上限化して runaway(終了トークンが出ず生成が止まらず
+    KVキャッシュが膨れて OOM)を防ぎ、バッチを小さく切ってピーク VRAM を抑える。
+    バッチ間で CUDA キャッシュを解放する。戻り値: (numpy 波形リスト, sr)。"""
+    import numpy as np
+    import torch
+
+    all_wavs: list[Any] = []
+    sr = 0
+    bs = max(1, int(args.gen_batch_size))
+    for start in range(0, len(texts), bs):
+        chunk = texts[start:start + bs]
+        with torch.no_grad():
+            wavs, s = model.generate_voice_clone(
+                text=chunk,
+                language=[args.language] * len(chunk),
+                voice_clone_prompt=prompt_items,
+                max_new_tokens=args.max_new_tokens,
+            )
+        sr = int(s)
+        for w in wavs:
+            if hasattr(w, "cpu"):
+                w = w.cpu().numpy()
+            all_wavs.append(np.asarray(w, dtype=np.float32).squeeze())
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    return all_wavs, sr
 
 
 def run_clone_combo(model, tag: str, ref, mode: str, examples: list[str],
@@ -395,9 +432,7 @@ def run_clone_combo(model, tag: str, ref, mode: str, examples: list[str],
         prompt_items = model.create_voice_clone_prompt(
             ref_audio=str(ref_wav), ref_text=ref_text, x_vector_only_mode=x_only)
     with Heartbeat(f"合成 {tag}"):
-        wavs, sr = model.generate_voice_clone(
-            text=examples, language=[args.language] * len(examples),
-            voice_clone_prompt=prompt_items)
+        wavs, sr = generate_clone_batched(model, examples, prompt_items, args)
     out_files: list[str] = []
     for i, wav in enumerate(wavs):
         path = subdir / f"example_{i:02d}.wav"
@@ -440,9 +475,7 @@ def run_xvectorall_combo(model, tag: str, examples: list[str],
         prompt_items = model.create_voice_clone_prompt(
             ref_audio=str(agg_path), ref_text=agg_text, x_vector_only_mode=True)
     with Heartbeat(f"合成 {tag}"):
-        wavs, sr = model.generate_voice_clone(
-            text=examples, language=[args.language] * len(examples),
-            voice_clone_prompt=prompt_items)
+        wavs, sr = generate_clone_batched(model, examples, prompt_items, args)
     out_files: list[str] = []
     for i, wav in enumerate(wavs):
         path = subdir / f"example_{i:02d}.wav"
@@ -467,7 +500,7 @@ def run_customvoice_combo(cv_model, tag: str, examples: list[str],
     logger.info("=== %s (プリセット話者) ===", tag)
     cv_files = run_customvoice(
         cv_model, examples, args.customvoice_speaker,
-        args.language, args.customvoice_instruct, subdir)
+        args.language, args.customvoice_instruct, subdir, args.max_new_tokens)
     combo = {
         "tag": tag, "mode": "customvoice",
         "reference": {
@@ -652,6 +685,11 @@ def main() -> None:
                         help="CustomVoice のプリセット話者(既定 Ono_Anna)")
     parser.add_argument("--customvoice-instruct", default=None,
                         help="CustomVoice の instruct(既定なし=素のプリセット)")
+    parser.add_argument("--max-new-tokens", type=int, default=4096,
+                        help="1発話あたりの生成トークン上限。runaway 生成による "
+                             "OOM を防ぐ(既定 4096)。正常発話は EOS で早く止まる")
+    parser.add_argument("--gen-batch-size", type=int, default=8,
+                        help="一度に合成する例文数。小さいほどピーク VRAM が減る(既定 8)")
     parser.add_argument("--num-shards", type=int, default=1,
                         help="並列シャード総数(通常は使用 GPU 数)。PBS が設定")
     parser.add_argument("--shard-index", type=int, default=0,
