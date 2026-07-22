@@ -150,11 +150,11 @@ def _dur(seg: dict[str, Any]) -> float:
     return float(seg["end"]) - float(seg["start"])
 
 
-def select_reference(
-    segs: list[dict[str, Any]], speaker: str, min_sec: float, max_sec: float
-) -> dict[str, Any] | None:
-    """参照に向く区間を選ぶ: 重畳なし・相槌でない・テキストありの中から、
-    推奨長レンジ内で最長のもの(=最も文脈が豊富)。レンジ内が無ければ緩める。"""
+def select_references(
+    segs: list[dict[str, Any]], speaker: str, min_sec: float, max_sec: float, n: int
+) -> list[dict[str, Any]]:
+    """参照に向く区間を上位 n 件返す: 重畳なし・相槌でない・テキストありの中から、
+    推奨長レンジ内を長い順に。レンジ内が足りなければ全 clean から補う。"""
     clean = [
         s for s in segs
         if s.get("speaker") == speaker
@@ -162,11 +162,16 @@ def select_reference(
         and not s.get("is_aizuchi", False)
         and str(s.get("text", "")).strip()
     ]
-    in_range = [s for s in clean if min_sec <= _dur(s) <= max_sec]
-    pool = in_range or clean
-    if not pool:
-        return None
-    return max(pool, key=_dur)
+    in_range = sorted(
+        (s for s in clean if min_sec <= _dur(s) <= max_sec), key=_dur, reverse=True
+    )
+    if len(in_range) >= n:
+        return in_range[:n]
+    # レンジ内が足りない分はレンジ外の clean(長い順)で埋める。
+    rest = sorted(
+        (s for s in clean if s not in in_range), key=_dur, reverse=True
+    )
+    return (in_range + rest)[:n]
 
 
 def load_examples(args: argparse.Namespace) -> list[str]:
@@ -179,37 +184,71 @@ def load_examples(args: argparse.Namespace) -> list[str]:
     return list(DEFAULT_EXAMPLES)
 
 
-def resolve_reference(args: argparse.Namespace) -> tuple[Path, str, dict[str, Any] | None]:
-    """(ref_wav, ref_text, 選ばれた timeline セグメント or None) を返す。"""
+def resolve_references(
+    args: argparse.Namespace,
+) -> list[tuple[Path, str, dict[str, Any] | None]]:
+    """(ref_wav, ref_text, timeline セグメント or None) の一覧を返す。
+
+    --ref-wav 指定時はその1件のみ。未指定なら analysis-dir から上位
+    --num-refs 件を自動選別する。"""
     if args.ref_wav:
         ref_wav = Path(args.ref_wav)
         if not ref_wav.is_file():
             raise SystemExit(f"--ref-wav が存在しません: {ref_wav}")
         if not args.ref_text:
             raise SystemExit("--ref-wav を使うときは --ref-text も必須です")
-        return ref_wav, args.ref_text.strip(), None
+        return [(ref_wav, args.ref_text.strip(), None)]
 
     if not args.analysis_dir:
         raise SystemExit("--analysis-dir か、--ref-wav/--ref-text のどちらかが必要です")
     analysis_dir = Path(args.analysis_dir)
     segs = load_timeline(analysis_dir)
-    chosen = select_reference(segs, args.speaker, args.min_ref_sec, args.max_ref_sec)
-    if chosen is None:
+    chosens = select_references(
+        segs, args.speaker, args.min_ref_sec, args.max_ref_sec, args.num_refs
+    )
+    if not chosens:
         raise SystemExit(
             f"話者 {args.speaker} に参照向きの区間が見つかりません"
             "(重畳なし・相槌でない・テキストありが必要)。--ref-wav/--ref-text で明示指定してください。"
         )
-    ref_wav = find_segment_wav(analysis_dir, args.speaker, chosen["_index"])
-    if ref_wav is None:
-        raise SystemExit(
-            f"選ばれた区間の WAV が見つかりません: "
-            f"segments/{args.speaker}/{chosen['_index']:04d}_*.wav"
+    refs: list[tuple[Path, str, dict[str, Any] | None]] = []
+    for chosen in chosens:
+        ref_wav = find_segment_wav(analysis_dir, args.speaker, chosen["_index"])
+        if ref_wav is None:
+            logger.warning(
+                "区間 %04d の WAV が見つからずスキップ: segments/%s/",
+                chosen["_index"], args.speaker,
+            )
+            continue
+        logger.info(
+            "参照候補: 話者%s idx=%d dur=%.1fs text=%r",
+            args.speaker, chosen["_index"], _dur(chosen), chosen["text"],
         )
-    logger.info(
-        "参照に選択: 話者%s idx=%d dur=%.1fs text=%r",
-        args.speaker, chosen["_index"], _dur(chosen), chosen["text"],
-    )
-    return ref_wav, str(chosen["text"]).strip(), chosen
+        refs.append((ref_wav, str(chosen["text"]).strip(), chosen))
+    if not refs:
+        raise SystemExit("参照候補の WAV が1件も見つかりませんでした")
+    return refs
+
+
+def resolve_modes(args: argparse.Namespace) -> list[str]:
+    """使うクローンモードの一覧。--x-vector-only が優先。"""
+    if args.x_vector_only:
+        return ["x-vector"]
+    alias = {
+        "in-context": "in-context", "incontext": "in-context", "ic": "in-context",
+        "x-vector": "x-vector", "xvector": "x-vector", "xv": "x-vector",
+    }
+    modes: list[str] = []
+    for raw in args.modes.split(","):
+        raw = raw.strip().lower()
+        if not raw:
+            continue
+        if raw not in alias:
+            raise SystemExit(f"未知のモード: {raw!r}(in-context / x-vector)")
+        canonical = alias[raw]
+        if canonical not in modes:
+            modes.append(canonical)
+    return modes or ["in-context"]
 
 
 def build_model(args: argparse.Namespace):
@@ -263,67 +302,96 @@ def main() -> None:
                         help="attention 実装(default / sdpa / flash_attention_2)")
     parser.add_argument("--min-ref-sec", type=float, default=DEFAULT_MIN_REF_SEC)
     parser.add_argument("--max-ref-sec", type=float, default=DEFAULT_MAX_REF_SEC)
+    parser.add_argument("--num-refs", type=int, default=3,
+                        help="自動選別する参照音声の数(既定 3。それぞれで合成し聴き比べ)")
+    parser.add_argument("--modes", default="in-context,x-vector",
+                        help="試すクローンモード(カンマ区切り: in-context,x-vector)")
     parser.add_argument("--x-vector-only", action="store_true",
-                        help="話者埋め込みのみで高速クローン(既定は in-context で韻律保持)")
+                        help="x-vector モードのみに絞る(--modes より優先)")
     args = parser.parse_args()
 
     import soundfile as sf
 
-    ref_wav, ref_text, chosen = resolve_reference(args)
+    refs = resolve_references(args)
+    modes = resolve_modes(args)
     examples = load_examples(args)
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("参照 %d 件 × モード %s = %d 通りを合成します",
+                len(refs), modes, len(refs) * len(modes))
 
     model = build_model(args)
 
-    logger.info("クローンプロンプト作成中(x_vector_only=%s)...", args.x_vector_only)
-    with Heartbeat("クローンプロンプト作成"):
-        prompt_items = model.create_voice_clone_prompt(
-            ref_audio=str(ref_wav),
-            ref_text=ref_text,
-            x_vector_only_mode=args.x_vector_only,
-        )
+    combos: list[dict[str, Any]] = []
+    sample_rate = 0
+    for k, (ref_wav, ref_text, chosen) in enumerate(refs):
+        for mode in modes:
+            x_only = mode == "x-vector"
+            tag = f"ref{k:02d}_{mode}"
+            subdir = args.out_dir / tag
+            subdir.mkdir(parents=True, exist_ok=True)
+            logger.info("=== %s (参照 idx=%s dur=%.1fs) ===",
+                        tag,
+                        chosen["_index"] if chosen else "-",
+                        _dur(chosen) if chosen else -1.0)
 
-    logger.info("例文 %d 文を合成中...", len(examples))
-    with Heartbeat("例文合成"):
-        wavs, sr = model.generate_voice_clone(
-            text=examples,
-            language=[args.language] * len(examples),
-            voice_clone_prompt=prompt_items,
-        )
+            with Heartbeat(f"プロンプト作成 {tag}"):
+                prompt_items = model.create_voice_clone_prompt(
+                    ref_audio=str(ref_wav),
+                    ref_text=ref_text,
+                    x_vector_only_mode=x_only,
+                )
+            with Heartbeat(f"合成 {tag}"):
+                wavs, sr = model.generate_voice_clone(
+                    text=examples,
+                    language=[args.language] * len(examples),
+                    voice_clone_prompt=prompt_items,
+                )
+            sample_rate = int(sr)
 
-    out_files: list[str] = []
-    for i, (text, wav) in enumerate(zip(examples, wavs)):
-        path = args.out_dir / f"example_{i:02d}.wav"
-        sf.write(str(path), wav, sr)
-        out_files.append(path.name)
-        logger.info("  example_%02d.wav <- %r", i, text)
+            out_files: list[str] = []
+            for i, (text, wav) in enumerate(zip(examples, wavs)):
+                path = subdir / f"example_{i:02d}.wav"
+                sf.write(str(path), wav, sr)
+                out_files.append(path.name)
+            shutil.copy(ref_wav, subdir / "reference.wav")
 
-    shutil.copy(ref_wav, args.out_dir / "reference.wav")
+            combo = {
+                "tag": tag,
+                "mode": mode,
+                "reference": {
+                    "wav": str(ref_wav),
+                    "text": ref_text,
+                    "timeline_index": chosen["_index"] if chosen else None,
+                    "duration_sec": round(_dur(chosen), 2) if chosen else None,
+                },
+                "files": out_files,
+            }
+            (subdir / "manifest.json").write_text(
+                json.dumps(combo, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            combos.append(combo)
+            logger.info("  -> %s に %d 文出力", subdir, len(out_files))
 
-    manifest = {
+    index = {
         "model": args.model,
         "language": args.language,
-        "x_vector_only_mode": args.x_vector_only,
-        "sample_rate": int(sr),
         "speaker": args.speaker,
-        "reference": {
-            "wav": str(ref_wav),
-            "text": ref_text,
-            "timeline_index": chosen["_index"] if chosen else None,
-            "duration_sec": round(_dur(chosen), 2) if chosen else None,
-        },
-        "examples": [
-            {"file": f, "text": t} for f, t in zip(out_files, examples)
-        ],
+        "sample_rate": sample_rate,
+        "modes": modes,
+        "num_refs": len(refs),
+        "examples": examples,
+        "combos": combos,
     }
-    (args.out_dir / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    (args.out_dir / "index.json").write_text(
+        json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
     print("\n=== 耳で確認 ===", file=sys.stderr)
     print(f"{args.out_dir.resolve()}", file=sys.stderr)
-    print("  reference.wav   使った参照(本人の声)", file=sys.stderr)
-    print("  example_XX.wav  クローン合成した例文", file=sys.stderr)
+    for combo in combos:
+        print(f"  {combo['tag']}/  reference.wav + example_XX.wav "
+              f"(参照 idx={combo['reference']['timeline_index']})", file=sys.stderr)
+    print("  index.json  全組み合わせの一覧", file=sys.stderr)
 
 
 if __name__ == "__main__":
