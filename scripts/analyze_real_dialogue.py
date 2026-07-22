@@ -137,20 +137,53 @@ def is_aizuchi_text(text: str) -> list[str]:
 DIARIZATION_MODEL = "nvidia/diar_streaming_sortformer_4spk-v2"
 
 
-def run_diarization(wav_path: Path, device: str) -> list[tuple[str, float, float]]:
-    """Sortformer で (label, start, end) 列を得る。gated でなくトークン不要。"""
+DIARIZATION_SR = 16000  # Sortformer(NEST/FastConformer)は 16kHz モノラル入力。
+
+
+def run_diarization(
+    audio: np.ndarray, sr: int, device: str
+) -> list[tuple[str, float, float]]:
+    """Sortformer で (label, start, end) 列を得る。gated でなくトークン不要。
+
+    audio はダウンミックス済みモノラル配列。Sortformer は 16kHz モノラルの
+    (batch, time) を要求するため、16kHz へリサンプルした一時 WAV を書いて
+    diarize に渡す(元ファイルを直接渡すとステレオのまま読まれ、
+    "input shape found (1, T, 2)" で落ちる)。
+    """
+    import os
+    import tempfile
+
     from nemo.collections.asr.models import SortformerEncLabelModel
 
-    logger.info("%s をロード中(初回はダウンロードあり)...", DIARIZATION_MODEL)
-    with Heartbeat("モデルロード", interval=15.0):
-        model = SortformerEncLabelModel.from_pretrained(DIARIZATION_MODEL)
-        model.eval()
-        if device.startswith("cuda"):
-            model = model.to(device)
+    mono = audio
+    if sr != DIARIZATION_SR:
+        import librosa
 
-    logger.info("diarize 実行中(長い音声はここが最も時間を要します)...")
-    with Heartbeat("diarize"):
-        outputs = model.diarize(audio=[str(wav_path)], batch_size=1)
+        logger.info("diarize 用に %d→%d Hz へリサンプル中...", sr, DIARIZATION_SR)
+        mono = librosa.resample(mono, orig_sr=sr, target_sr=DIARIZATION_SR)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+    sf.write(tmp_path, mono, DIARIZATION_SR)
+
+    try:
+        logger.info("%s をロード中(初回はダウンロードあり)...", DIARIZATION_MODEL)
+        with Heartbeat("モデルロード", interval=15.0):
+            model = SortformerEncLabelModel.from_pretrained(DIARIZATION_MODEL)
+            model.eval()
+            if device.startswith("cuda"):
+                model = model.to(device)
+
+        logger.info("diarize 実行中(長い音声はここが最も時間を要します)...")
+        with Heartbeat("diarize"):
+            outputs = model.diarize(audio=[tmp_path], batch_size=1)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
     # 出力は入力ファイルごとの ["<start> <end> speaker_k", ...]。
     lines = outputs[0] if outputs and isinstance(outputs[0], list) else outputs
     return parse_diarization_lines(lines)
@@ -425,7 +458,7 @@ def process_wav(wav_path: Path, out_root: Path, args: argparse.Namespace) -> Pat
     logger.info("%s: %.1f 秒 (%d Hz)", wav_path.name, total_sec, sr)
 
     logger.info("ダイアライゼーション実行中...")
-    raw = run_diarization(wav_path, args.device)
+    raw = run_diarization(audio, sr, args.device)
     segments = diarization_to_segments(raw, args.min_segment_sec, args.num_speakers)
     overlaps = annotate_overlaps(segments)
     logger.info("セグメント %d 件 / 重畳 %d 区間", len(segments), len(overlaps))
