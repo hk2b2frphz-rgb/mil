@@ -20,12 +20,15 @@
 #   OUT_DIR=data/clone_examples/<name>   (default: data/clone_examples/<jobid>)
 #   NUM_REFS=3                           (auto-selected references to compare; default 3)
 #   MODES=in-context,x-vector            (clone modes to sweep; default both)
+#   CV_SPEAKER=Ono_Anna                  (CustomVoice preset speaker; default Ono_Anna)
+#   NO_CUSTOMVOICE=1                     (skip the CustomVoice baseline)
 #   EXAMPLES_FILE=path/to/lines.txt      (one sentence per line; default: built-in)
 #   REF_WAV=... REF_TEXT=...             (override auto-selected reference; forces 1 ref)
 #   EXTRA_ARGS="..."                     (extra flags passed through verbatim)
 #
-# Sweeps NUM_REFS references x MODES modes, one subdir ref{k}_{mode} each,
-# so you can A/B which reference and mode clone the voice best.
+# Sweeps NUM_REFS references x MODES clone modes (one subdir ref{k}_{mode} each)
+# plus a CustomVoice preset baseline (customvoice_<speaker>/), so you can A/B
+# clone vs the original preset voice.
 
 set -euo pipefail
 
@@ -60,6 +63,8 @@ uv run python -u scripts/clone_voice_examples.py \
     --out-dir "$OUT_DIR" \
     ${NUM_REFS:+--num-refs "$NUM_REFS"} \
     ${MODES:+--modes "$MODES"} \
+    ${CV_SPEAKER:+--customvoice-speaker "$CV_SPEAKER"} \
+    ${NO_CUSTOMVOICE:+--no-customvoice} \
     ${EXAMPLES_FILE:+--examples-file "$EXAMPLES_FILE"} \
     ${REF_WAV:+--ref-wav "$REF_WAV"} \
     ${REF_TEXT:+--ref-text "$REF_TEXT"} \

@@ -251,7 +251,7 @@ def resolve_modes(args: argparse.Namespace) -> list[str]:
     return modes or ["in-context"]
 
 
-def build_model(args: argparse.Namespace):
+def load_qwen_model(args: argparse.Namespace, model_id: str):
     import torch
     try:
         from qwen_tts import Qwen3TTSModel  # type: ignore[import]
@@ -268,19 +268,61 @@ def build_model(args: argparse.Namespace):
     if args.attn_impl and args.attn_impl != "default":
         load_kwargs["attn_implementation"] = args.attn_impl
 
-    logger.info("Qwen3-TTS(clone)読み込み中: %s (device=%s dtype=%s attn=%s)",
-                args.model, device_map, args.dtype, args.attn_impl)
-    logger.info("※初回は -Base モデル(数GB)のダウンロードで時間がかかります")
+    logger.info("Qwen3-TTS 読み込み中: %s (device=%s dtype=%s attn=%s)",
+                model_id, device_map, args.dtype, args.attn_impl)
+    logger.info("※初回はモデル(数GB)のダウンロードで時間がかかります")
     try:
         with Heartbeat("モデルDL/ロード"):
-            return Qwen3TTSModel.from_pretrained(args.model, **load_kwargs)
+            return Qwen3TTSModel.from_pretrained(model_id, **load_kwargs)
     except Exception as exc:
         if load_kwargs.pop("attn_implementation", None) is not None:
             logger.warning("attn=%s の読み込みに失敗。既定の attention で再試行: %s",
                            args.attn_impl, exc)
             with Heartbeat("モデルDL/ロード(再試行)"):
-                return Qwen3TTSModel.from_pretrained(args.model, **load_kwargs)
+                return Qwen3TTSModel.from_pretrained(model_id, **load_kwargs)
         raise
+
+
+def free_model(model) -> None:
+    """次のモデルをロードする前に VRAM を解放する。"""
+    try:
+        import gc
+        import torch
+        del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception as exc:  # 解放失敗は致命的ではない
+        logger.warning("モデル解放時の警告: %s", exc)
+
+
+def run_customvoice(
+    model, examples: list[str], speaker: str, language: str,
+    instruct: str | None, subdir: Path,
+) -> list[str]:
+    """CustomVoice プリセット話者で例文を合成し、ファイル名一覧を返す。"""
+    import numpy as np
+    import soundfile as sf
+    import torch
+
+    out_files: list[str] = []
+    total = len(examples)
+    logger.info("CustomVoice(%s)で %d 文を合成中...", speaker, total)
+    with Heartbeat(f"CustomVoice合成 {speaker}"):
+        for i, text in enumerate(examples):
+            kwargs: dict[str, Any] = {"text": text, "language": language, "speaker": speaker}
+            if instruct:
+                kwargs["instruct"] = instruct
+            with torch.no_grad():
+                wavs, sr = model.generate_custom_voice(**kwargs)
+            audio = wavs[0] if isinstance(wavs, (list, tuple)) else wavs
+            if hasattr(audio, "cpu"):
+                audio = audio.cpu().numpy()
+            audio = np.asarray(audio, dtype=np.float32).squeeze()
+            path = subdir / f"example_{i:02d}.wav"
+            sf.write(str(path), audio, int(sr))
+            out_files.append(path.name)
+    return out_files
 
 
 def main() -> None:
@@ -308,6 +350,18 @@ def main() -> None:
                         help="試すクローンモード(カンマ区切り: in-context,x-vector)")
     parser.add_argument("--x-vector-only", action="store_true",
                         help="x-vector モードのみに絞る(--modes より優先)")
+    parser.add_argument("--customvoice", dest="customvoice", action="store_true",
+                        default=True,
+                        help="比較用に CustomVoice プリセットも合成(既定 ON)")
+    parser.add_argument("--no-customvoice", dest="customvoice", action="store_false",
+                        help="CustomVoice ベースラインを合成しない")
+    parser.add_argument("--customvoice-model",
+                        default="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+                        help="CustomVoice モデル ID")
+    parser.add_argument("--customvoice-speaker", default="Ono_Anna",
+                        help="CustomVoice のプリセット話者(既定 Ono_Anna)")
+    parser.add_argument("--customvoice-instruct", default=None,
+                        help="CustomVoice の instruct(既定なし=素のプリセット)")
     args = parser.parse_args()
 
     import soundfile as sf
@@ -316,10 +370,11 @@ def main() -> None:
     modes = resolve_modes(args)
     examples = load_examples(args)
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    logger.info("参照 %d 件 × モード %s = %d 通りを合成します",
-                len(refs), modes, len(refs) * len(modes))
+    logger.info("参照 %d 件 × クローンモード %s = %d 通り%s を合成します",
+                len(refs), modes, len(refs) * len(modes),
+                " + CustomVoice ベースライン" if args.customvoice else "")
 
-    model = build_model(args)
+    model = load_qwen_model(args, args.model)
 
     combos: list[dict[str, Any]] = []
     sample_rate = 0
@@ -372,12 +427,47 @@ def main() -> None:
             combos.append(combo)
             logger.info("  -> %s に %d 文出力", subdir, len(out_files))
 
+    # --- CustomVoice ベースライン(別チェックポイント。Base を解放してから) ---
+    if args.customvoice:
+        logger.info("クローン用モデルを解放し、CustomVoice をロードします")
+        free_model(model)
+        cv_model = load_qwen_model(args, args.customvoice_model)
+        tag = f"customvoice_{args.customvoice_speaker}"
+        subdir = args.out_dir / tag
+        subdir.mkdir(parents=True, exist_ok=True)
+        logger.info("=== %s (プリセット話者) ===", tag)
+        cv_files = run_customvoice(
+            cv_model, examples, args.customvoice_speaker,
+            args.language, args.customvoice_instruct, subdir,
+        )
+        combo = {
+            "tag": tag,
+            "mode": "customvoice",
+            "reference": {
+                "wav": None,
+                "text": None,
+                "preset_speaker": args.customvoice_speaker,
+                "model": args.customvoice_model,
+                "instruct": args.customvoice_instruct,
+            },
+            "files": cv_files,
+        }
+        (subdir / "manifest.json").write_text(
+            json.dumps(combo, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        combos.append(combo)
+        logger.info("  -> %s に %d 文出力", subdir, len(cv_files))
+        free_model(cv_model)
+
     index = {
-        "model": args.model,
+        "clone_model": args.model,
+        "customvoice_model": args.customvoice_model if args.customvoice else None,
         "language": args.language,
         "speaker": args.speaker,
         "sample_rate": sample_rate,
         "modes": modes,
+        "customvoice": args.customvoice,
+        "customvoice_speaker": args.customvoice_speaker if args.customvoice else None,
         "num_refs": len(refs),
         "examples": examples,
         "combos": combos,
