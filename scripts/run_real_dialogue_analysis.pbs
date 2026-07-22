@@ -49,7 +49,7 @@ if [[ ${#wav_files[@]} -eq 0 ]]; then
     exit 1
 fi
 
-# 結果と同じ場所に恒久ログを残す(PBS の .o ファイルとは別に OUT_DIR/run.log)。
+# Keep a durable log next to the results (separate from the PBS .o file).
 mkdir -p "$OUT_DIR"
 LOG_FILE="${LOG_FILE:-$OUT_DIR/run.log}"
 
@@ -62,9 +62,10 @@ LOG_FILE="${LOG_FILE:-$OUT_DIR/run.log}"
     echo "log:     $LOG_FILE"
 } | tee "$LOG_FILE"
 
-# tee でログへ複写しつつ標準出力にも流す。pipefail により python の終了コードが伝播する。
-# PYTHONUNBUFFERED=1 + python -u でバッファリングを無効化し、`tail -f run.log` で
-# リアルタイムに進捗を追えるようにする(パイプ越しだと既定では数十行単位で遅延する)。
+# tee copies to the log while still printing to stdout; pipefail propagates
+# the python exit code through the pipe. Unbuffered output (python -u +
+# PYTHONUNBUFFERED=1) so `tail -f run.log` follows progress live instead of
+# arriving in large blocks through the pipe.
 export PYTHONUNBUFFERED=1
 # shellcheck disable=SC2086
 uv run python -u scripts/analyze_real_dialogue.py \

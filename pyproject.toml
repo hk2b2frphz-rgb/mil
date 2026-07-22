@@ -18,7 +18,12 @@ dependencies = [
     "einops",
     "faster-whisper",
     "librosa",
-    "nemo_toolkit[asr]",
+    # Streaming Sortformer v2 (diar_streaming_sortformer_4spk-v2, released
+    # 2025-08) passes spkcache_len to SortformerModules; older NeMo builds
+    # reject it with "unexpected keyword argument spkcache_len". Floor the
+    # version so uv cannot silently backtrack to a build without AOSC/speaker
+    # cache support.
+    "nemo_toolkit[asr]>=2.5.0",
     "orjson",
     "tiktoken",
     "torchcodec",
