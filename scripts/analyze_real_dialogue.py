@@ -240,35 +240,71 @@ def build_solo_tracks(
     return tracks
 
 
-def export_segment_wavs(
-    audio: np.ndarray, sr: int, segments: list[Segment], out_dir: Path
-) -> int:
-    """発話ごとの WAV を segments/<話者>/ に書き出す。返り値は総ファイル数。
+def segment_filename(index: int, seg: Segment, with_text: bool) -> str:
+    """発話 WAV のファイル名を組み立てる。
 
-    ファイル名: <通し番号>_<開始 mm'm'ss.s's'>_<長さ>s[_ov][_aizuchi]_<テキスト先頭>.wav
+    <通し番号>_<開始 mm'm'ss.s's'>_<長さ>s[_ov][_aizuchi]_<テキスト先頭>.wav
+    with_text=False(ASR 前の先出し保存)では _aizuchi とテキストを省く
+    (どちらも書き起こしが要る)。_ov は diarization だけで確定する。
     """
-    count = 0
+    flags = ""
+    if seg.overlap_sec > 0:
+        flags += "_ov"
+    if with_text and seg.is_aizuchi:
+        flags += "_aizuchi"
+    name = (
+        f"{index:04d}_{int(seg.start // 60):02d}m{seg.start % 60:04.1f}s"
+        f"_{seg.duration:.1f}s{flags}"
+    )
+    if with_text:
+        text = _FNAME_RE.sub("", _STRIP_RE.sub("", seg.text))[:12]
+        if text:
+            name += f"_{text}"
+    return name + ".wav"
+
+
+def export_segment_wavs(
+    audio: np.ndarray, sr: int, segments: list[Segment], out_dir: Path,
+    with_text: bool,
+) -> list[Path]:
+    """発話ごとの WAV を segments/<話者>/ に書き出し、書き出したパス列を返す。"""
+    paths: list[Path] = []
     for i, seg in enumerate(segments):
         seg_dir = out_dir / "segments" / seg.speaker
         seg_dir.mkdir(parents=True, exist_ok=True)
         lo = max(0, int((seg.start - CLIP_MARGIN_SEC) * sr))
         hi = min(audio.size, int((seg.end + CLIP_MARGIN_SEC) * sr))
+        path = seg_dir / segment_filename(i, seg, with_text)
+        sf.write(path, audio[lo:hi], sr)
+        paths.append(path)
+    return paths
 
-        flags = ""
-        if seg.overlap_sec > 0:
-            flags += "_ov"
-        if seg.is_aizuchi:
-            flags += "_aizuchi"
-        text = _FNAME_RE.sub("", _STRIP_RE.sub("", seg.text))[:12]
-        name = (
-            f"{i:04d}_{int(seg.start // 60):02d}m{seg.start % 60:04.1f}s"
-            f"_{seg.duration:.1f}s{flags}"
-            + (f"_{text}" if text else "")
-            + ".wav"
-        )
-        sf.write(seg_dir / name, audio[lo:hi], sr)
-        count += 1
-    return count
+
+def rename_segment_wavs(
+    segments: list[Segment], paths: list[Path]
+) -> None:
+    """ASR 後、テキスト・相槌フラグを含む最終ファイル名へリネームする。"""
+    for i, (seg, old) in enumerate(zip(segments, paths)):
+        new = old.parent / segment_filename(i, seg, with_text=True)
+        if new != old:
+            old.rename(new)
+
+
+def write_timeline(out_dir: Path, segments: list[Segment]) -> None:
+    with (out_dir / "timeline.jsonl").open("w", encoding="utf-8") as f:
+        for seg in segments:
+            f.write(json.dumps(asdict(seg), ensure_ascii=False) + "\n")
+
+
+def write_stats(
+    out_dir: Path, segments: list[Segment],
+    overlaps: list[tuple[float, float]], total_sec: float,
+) -> None:
+    (out_dir / "stats.json").write_text(
+        json.dumps(compute_stats(segments, overlaps, total_sec),
+                   ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def compute_stats(
@@ -352,13 +388,7 @@ def process_wav(wav_path: Path, out_root: Path, args: argparse.Namespace) -> Pat
     overlaps = annotate_overlaps(segments)
     logger.info("セグメント %d 件 / 重畳 %d 区間", len(segments), len(overlaps))
 
-    if args.skip_asr:
-        logger.info("--skip-asr: 書き起こしと相槌判定を省略")
-    else:
-        logger.info("書き起こし実行中...")
-        transcribe_segments(audio, sr, segments, args.whisper_model, args.device)
-        mark_aizuchi(segments)
-
+    # --- 分離結果を ASR より先に保存(遅い書き起こしを待たずに耳チェックできる) ---
     tracks = build_solo_tracks(audio, sr, segments)
     for speaker, track in tracks.items():
         sf.write(out_dir / f"speaker_{speaker}_solo.wav", track, sr)
@@ -366,17 +396,26 @@ def process_wav(wav_path: Path, out_root: Path, args: argparse.Namespace) -> Pat
     right = tracks.get("B", np.zeros_like(audio))
     sf.write(out_dir / "stereo_diarized.wav", np.stack([left, right], axis=1), sr)
 
-    n_files = export_segment_wavs(audio, sr, segments, out_dir)
-    logger.info("発話 WAV %d 件を %s に出力", n_files, out_dir / "segments")
-
-    with (out_dir / "timeline.jsonl").open("w", encoding="utf-8") as f:
-        for seg in segments:
-            f.write(json.dumps(asdict(seg), ensure_ascii=False) + "\n")
-    (out_dir / "stats.json").write_text(
-        json.dumps(compute_stats(segments, overlaps, total_sec),
-                   ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    seg_paths = export_segment_wavs(audio, sr, segments, out_dir, with_text=False)
+    write_timeline(out_dir, segments)
+    write_stats(out_dir, segments, overlaps, total_sec)
+    logger.info(
+        "分離結果を先に保存(発話 WAV %d 件): %s ← ここで耳チェック可能",
+        len(seg_paths), out_dir,
     )
+
+    if args.skip_asr:
+        logger.info("--skip-asr: 書き起こしと相槌判定を省略")
+    else:
+        logger.info("書き起こし実行中...")
+        transcribe_segments(audio, sr, segments, args.whisper_model, args.device)
+        mark_aizuchi(segments)
+        # ASR 結果を反映: 発話 WAV をテキスト付き名にリネームし、timeline/stats を更新。
+        rename_segment_wavs(segments, seg_paths)
+        write_timeline(out_dir, segments)
+        write_stats(out_dir, segments, overlaps, total_sec)
+        logger.info("書き起こし・相槌ラベルを反映して更新完了: %s", out_dir)
+
     return out_dir
 
 
