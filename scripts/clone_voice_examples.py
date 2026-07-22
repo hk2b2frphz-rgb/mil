@@ -150,6 +150,60 @@ def _dur(seg: dict[str, Any]) -> float:
     return float(seg["end"]) - float(seg["start"])
 
 
+def build_aggregate_reference(
+    analysis_dir: Path, speaker: str, segs: list[dict[str, Any]],
+    out_wav: Path, max_sec: float, gap_sec: float,
+) -> tuple[Path, str, float, int] | None:
+    """話者の重畳なし区間を(時系列順に)連結した1本の参照 WAV を作る。
+
+    x-vector は音声全体をプーリングして1ベクトルにするので、長い連結を渡せば
+    実質「全クリップ集約の話者埋め込み」になる。max_sec で頭打ち(収穫逓減+
+    メモリ)。相槌も含め話者の音声はすべて使う(声質推定には情報が多いほど良い)。
+    戻り値: (参照wav, 連結テキスト, 総秒数, 使用クリップ数) or None。
+    """
+    import numpy as np
+    import soundfile as sf
+
+    clips = sorted(
+        (s for s in segs
+         if s.get("speaker") == speaker and float(s.get("overlap_sec", 0.0)) == 0.0),
+        key=lambda s: float(s["start"]),
+    )
+    pieces: list[np.ndarray] = []
+    texts: list[str] = []
+    total = 0.0
+    sr0: int | None = None
+    used = 0
+    for s in clips:
+        wav = find_segment_wav(analysis_dir, speaker, s["_index"])
+        if wav is None:
+            continue
+        audio, sr = sf.read(str(wav), dtype="float32")
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        if sr0 is None:
+            sr0 = int(sr)
+        elif sr != sr0:
+            import librosa
+            audio = librosa.resample(audio, orig_sr=sr, target_sr=sr0)
+        pieces.append(audio)
+        if gap_sec > 0:
+            pieces.append(np.zeros(int(gap_sec * sr0), dtype=np.float32))
+        txt = str(s.get("text", "")).strip()
+        if txt:
+            texts.append(txt)
+        total += len(audio) / sr0
+        used += 1
+        if total >= max_sec:
+            break
+    if not pieces or sr0 is None:
+        return None
+    agg = np.concatenate(pieces).astype(np.float32)
+    sf.write(str(out_wav), agg, sr0)
+    # x_vector_only では ref_text は基本無視されるが、API 都合で連結テキストを渡す。
+    return out_wav, " ".join(texts)[:500], round(total, 1), used
+
+
 def select_references(
     segs: list[dict[str, Any]], speaker: str, min_sec: float, max_sec: float, n: int
 ) -> list[dict[str, Any]]:
@@ -350,6 +404,16 @@ def main() -> None:
                         help="試すクローンモード(カンマ区切り: in-context,x-vector)")
     parser.add_argument("--x-vector-only", action="store_true",
                         help="x-vector モードのみに絞る(--modes より優先)")
+    parser.add_argument("--xvector-all", dest="xvector_all", action="store_true",
+                        default=True,
+                        help="話者の全クリーン区間を連結した1本から x-vector を取る"
+                             "集約モードも試す(既定 ON)")
+    parser.add_argument("--no-xvector-all", dest="xvector_all", action="store_false",
+                        help="集約 x-vector モードを試さない")
+    parser.add_argument("--xvector-max-sec", type=float, default=90.0,
+                        help="集約 x-vector に使う参照の総秒数の上限(既定 90)")
+    parser.add_argument("--xvector-gap-sec", type=float, default=0.1,
+                        help="集約参照でクリップ間に挟む無音秒(既定 0.1)")
     parser.add_argument("--customvoice", dest="customvoice", action="store_true",
                         default=True,
                         help="比較用に CustomVoice プリセットも合成(既定 ON)")
@@ -418,6 +482,58 @@ def main() -> None:
                     "text": ref_text,
                     "timeline_index": chosen["_index"] if chosen else None,
                     "duration_sec": round(_dur(chosen), 2) if chosen else None,
+                },
+                "files": out_files,
+            }
+            (subdir / "manifest.json").write_text(
+                json.dumps(combo, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            combos.append(combo)
+            logger.info("  -> %s に %d 文出力", subdir, len(out_files))
+
+    # --- 集約 x-vector(全クリーン区間を連結した1本から埋め込み) ---
+    if args.xvector_all and not args.ref_wav and args.analysis_dir:
+        analysis_dir = Path(args.analysis_dir)
+        segs = load_timeline(analysis_dir)
+        agg_wav = args.out_dir / "_xvector_all_ref.wav"
+        built = build_aggregate_reference(
+            analysis_dir, args.speaker, segs, agg_wav,
+            args.xvector_max_sec, args.xvector_gap_sec,
+        )
+        if built is None:
+            logger.warning("集約 x-vector: 連結できる区間がなくスキップ")
+        else:
+            agg_path, agg_text, agg_sec, n_clips = built
+            tag = f"xvectorall_{args.speaker}"
+            subdir = args.out_dir / tag
+            subdir.mkdir(parents=True, exist_ok=True)
+            logger.info("=== %s (%d 区間 / %.1f 秒を集約) ===", tag, n_clips, agg_sec)
+            with Heartbeat(f"プロンプト作成 {tag}"):
+                prompt_items = model.create_voice_clone_prompt(
+                    ref_audio=str(agg_path),
+                    ref_text=agg_text,
+                    x_vector_only_mode=True,
+                )
+            with Heartbeat(f"合成 {tag}"):
+                wavs, sr = model.generate_voice_clone(
+                    text=examples,
+                    language=[args.language] * len(examples),
+                    voice_clone_prompt=prompt_items,
+                )
+            sample_rate = int(sr)
+            out_files = []
+            for i, (text, wav) in enumerate(zip(examples, wavs)):
+                path = subdir / f"example_{i:02d}.wav"
+                sf.write(str(path), wav, sr)
+                out_files.append(path.name)
+            shutil.copy(agg_path, subdir / "reference.wav")
+            combo = {
+                "tag": tag,
+                "mode": "x-vector-all",
+                "reference": {
+                    "wav": str(agg_path),
+                    "aggregated_sec": agg_sec,
+                    "n_clips": n_clips,
                 },
                 "files": out_files,
             }

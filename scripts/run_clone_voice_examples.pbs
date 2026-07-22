@@ -22,6 +22,8 @@
 #   MODES=in-context,x-vector            (clone modes to sweep; default both)
 #   CV_SPEAKER=Ono_Anna                  (CustomVoice preset speaker; default Ono_Anna)
 #   NO_CUSTOMVOICE=1                     (skip the CustomVoice baseline)
+#   NO_XVECTOR_ALL=1                     (skip the aggregated-x-vector combo)
+#   XVECTOR_MAX_SEC=90                   (cap on concatenated reference seconds)
 #   EXAMPLES_FILE=path/to/lines.txt      (one sentence per line; default: built-in)
 #   REF_WAV=... REF_TEXT=...             (override auto-selected reference; forces 1 ref)
 #   EXTRA_ARGS="..."                     (extra flags passed through verbatim)
@@ -65,6 +67,8 @@ uv run python -u scripts/clone_voice_examples.py \
     ${MODES:+--modes "$MODES"} \
     ${CV_SPEAKER:+--customvoice-speaker "$CV_SPEAKER"} \
     ${NO_CUSTOMVOICE:+--no-customvoice} \
+    ${NO_XVECTOR_ALL:+--no-xvector-all} \
+    ${XVECTOR_MAX_SEC:+--xvector-max-sec "$XVECTOR_MAX_SEC"} \
     ${EXAMPLES_FILE:+--examples-file "$EXAMPLES_FILE"} \
     ${REF_WAV:+--ref-wav "$REF_WAV"} \
     ${REF_TEXT:+--ref-text "$REF_TEXT"} \
