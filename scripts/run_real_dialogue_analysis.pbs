@@ -77,11 +77,23 @@ export PYTHONUNBUFFERED=1
 # what the main project env requires (moshi/qwen-tts need transformers>=4.57 and
 # numpy 2.x), so the two cannot share one environment. Run the analysis in an
 # isolated, uv-managed env (--no-project) carrying only the diarization + ASR
-# deps; torch comes in transitively as a CUDA build. If this node needs a
-# specific torch/CUDA wheel, add it via DIAR_UV_WITH, e.g.
-#   qsub -v 'WAVS=...,DIAR_UV_WITH=--with torch==2.5.1' ...
+# deps.
+#
+# torch/torchvision/torchaudio MUST be a matched set from the same CUDA build,
+# otherwise NeMo's torchvision import fails at runtime with
+#   "operator torchvision::nms does not exist"
+# (version/ABI skew from uv resolving them independently). Pin a matched cu121
+# trio from the pytorch index -- same CUDA as the main env, known good on this
+# node. If this pin forces an older, non-streaming NeMo (the spkcache_len error
+# returns), bump the whole trio to a newer torch/CUDA via DIAR_UV_WITH, e.g.
+#   qsub -v 'WAVS=...,DIAR_UV_WITH=--with torch==2.6.0 --with torchvision==0.21.0 --with torchaudio==2.6.0' ...
 # shellcheck disable=SC2086
 uv run --no-project --python 3.11 \
+    --index-url https://download.pytorch.org/whl/cu121 \
+    --extra-index-url https://pypi.org/simple \
+    --with 'torch==2.5.1' \
+    --with 'torchvision==0.20.1' \
+    --with 'torchaudio==2.5.1' \
     --with 'nemo_toolkit[asr]>=2.5.0' \
     --with faster-whisper \
     --with librosa \
