@@ -2,22 +2,28 @@
 #PBS -S /bin/bash
 #PBS -N clone_voice
 #PBS -q xvn_s
-#PBS -l select=1:res=small
-#PBS -l walltime=02:00:00
+#PBS -l select=1:res=middle2
+#PBS -l walltime=04:00:00
 #PBS -j oe
 #PBS -V
 
-# Zero-shot voice-clone a few example sentences with Qwen3-TTS, using a
-# reference segment cut by analyze_real_dialogue.py (scripts/clone_voice_examples.py).
-# Clone uses Qwen/Qwen3-TTS-12Hz-1.7B-Base (ungated) in-context mode, so the
+# Zero-shot voice-clone a few example sentences with Qwen3-TTS, using references
+# cut by analyze_real_dialogue.py (scripts/clone_voice_examples.py). Clone uses
+# Qwen/Qwen3-TTS-12Hz-1.7B-Base (ungated) in-context / x-vector modes, so the
 # real speaker's own prosody/tension is preserved. Runs in the MAIN uv env
-# (qwen-tts already lives there); no isolated env needed.
+# (qwen-tts already lives there).
+#
+# Speed: the combo plan (NUM_REFS refs x modes + aggregated x-vector + a
+# CustomVoice baseline) is sharded across GPUs -- one process per GPU, each
+# handling every Nth combo. After all shards finish, a single --aggregate pass
+# verifies every combo is complete and writes index.json.
 #
 # Required:
 #   qsub -v 'ANALYSIS_DIR=data/real_dialogue/<jobid>/<wav_stem>,SPEAKER=A' scripts/run_clone_voice_examples.pbs
 #
 # Optional:
 #   OUT_DIR=data/clone_examples/<name>   (default: data/clone_examples/<jobid>)
+#   NUM_SHARDS=4  CUDA_VISIBLE_DEVICES=0,1,2,3   (parallel GPUs; default 4)
 #   NUM_REFS=3                           (auto-selected references to compare; default 3)
 #   MODES=in-context,x-vector            (clone modes to sweep; default both)
 #   CV_SPEAKER=Ono_Anna                  (CustomVoice preset speaker; default Ono_Anna)
@@ -27,51 +33,109 @@
 #   EXAMPLES_FILE=path/to/lines.txt      (one sentence per line; default: built-in)
 #   REF_WAV=... REF_TEXT=...             (override auto-selected reference; forces 1 ref)
 #   EXTRA_ARGS="..."                     (extra flags passed through verbatim)
-#
-# Sweeps NUM_REFS references x MODES clone modes (one subdir ref{k}_{mode} each)
-# plus a CustomVoice preset baseline (customvoice_<speaker>/), so you can A/B
-# clone vs the original preset voice.
 
 set -euo pipefail
 
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 source scripts/setup_proxy.sh
 
-SPEAKER="${SPEAKER:-A}"
+command -v uv >/dev/null 2>&1 || { echo "ERROR: uv not on PATH" >&2; exit 1; }
 
+SPEAKER="${SPEAKER:-A}"
 JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
 JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
 OUT_DIR="${OUT_DIR:-data/clone_examples/${JOB_ID_SHORT}}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+NUM_SHARDS="${NUM_SHARDS:-4}"
 
-mkdir -p "$OUT_DIR"
+if ! [[ "$NUM_SHARDS" =~ ^[0-9]+$ ]] || [[ "$NUM_SHARDS" -lt 1 ]]; then
+    echo "ERROR: NUM_SHARDS must be a positive integer: $NUM_SHARDS" >&2
+    exit 1
+fi
+IFS=',' read -r -a GPU_IDS <<< "$CUDA_VISIBLE_DEVICES"
+if [[ "${#GPU_IDS[@]}" -lt "$NUM_SHARDS" ]]; then
+    echo "ERROR: CUDA_VISIBLE_DEVICES has ${#GPU_IDS[@]} GPU(s) but NUM_SHARDS=$NUM_SHARDS" >&2
+    exit 1
+fi
+
+mkdir -p "$OUT_DIR" "$OUT_DIR/logs"
 LOG_FILE="${LOG_FILE:-$OUT_DIR/run.log}"
+export PYTHONUNBUFFERED=1
 
 {
-    echo "===== clone voice examples ====="
-    echo "job:      ${JOB_ID_RAW}"
-    echo "started:  $(date -Is)"
-    echo "speaker:  $SPEAKER"
-    echo "analysis: ${ANALYSIS_DIR:-<none>}"
-    echo "out_dir:  $OUT_DIR"
-    echo "log:      $LOG_FILE"
+    echo "===== clone voice examples (parallel) ====="
+    echo "job:       ${JOB_ID_RAW}"
+    echo "started:   $(date -Is)"
+    echo "speaker:   $SPEAKER"
+    echo "analysis:  ${ANALYSIS_DIR:-<none>}"
+    echo "out_dir:   $OUT_DIR"
+    echo "gpus:      $CUDA_VISIBLE_DEVICES"
+    echo "shards:    $NUM_SHARDS"
+    echo "log:       $LOG_FILE"
 } | tee "$LOG_FILE"
 
-# Unbuffered so `tail -f run.log` follows model load / synthesis progress live.
-export PYTHONUNBUFFERED=1
-# shellcheck disable=SC2086
-uv run python -u scripts/clone_voice_examples.py \
-    ${ANALYSIS_DIR:+--analysis-dir "$ANALYSIS_DIR"} \
-    --speaker "$SPEAKER" \
-    --out-dir "$OUT_DIR" \
-    ${NUM_REFS:+--num-refs "$NUM_REFS"} \
-    ${MODES:+--modes "$MODES"} \
-    ${CV_SPEAKER:+--customvoice-speaker "$CV_SPEAKER"} \
-    ${NO_CUSTOMVOICE:+--no-customvoice} \
-    ${NO_XVECTOR_ALL:+--no-xvector-all} \
-    ${XVECTOR_MAX_SEC:+--xvector-max-sec "$XVECTOR_MAX_SEC"} \
-    ${EXAMPLES_FILE:+--examples-file "$EXAMPLES_FILE"} \
-    ${REF_WAV:+--ref-wav "$REF_WAV"} \
-    ${REF_TEXT:+--ref-text "$REF_TEXT"} \
-    ${EXTRA_ARGS:-} 2>&1 | tee -a "$LOG_FILE"
+# Common python args shared by every shard and the aggregate pass.
+COMMON_ARGS=( scripts/clone_voice_examples.py
+    --speaker "$SPEAKER" --out-dir "$OUT_DIR" --num-shards "$NUM_SHARDS" )
+[[ -n "${ANALYSIS_DIR:-}" ]]   && COMMON_ARGS+=( --analysis-dir "$ANALYSIS_DIR" )
+[[ -n "${NUM_REFS:-}" ]]       && COMMON_ARGS+=( --num-refs "$NUM_REFS" )
+[[ -n "${MODES:-}" ]]          && COMMON_ARGS+=( --modes "$MODES" )
+[[ -n "${CV_SPEAKER:-}" ]]     && COMMON_ARGS+=( --customvoice-speaker "$CV_SPEAKER" )
+[[ -n "${NO_CUSTOMVOICE:-}" ]] && COMMON_ARGS+=( --no-customvoice )
+[[ -n "${NO_XVECTOR_ALL:-}" ]] && COMMON_ARGS+=( --no-xvector-all )
+[[ -n "${XVECTOR_MAX_SEC:-}" ]] && COMMON_ARGS+=( --xvector-max-sec "$XVECTOR_MAX_SEC" )
+[[ -n "${EXAMPLES_FILE:-}" ]]  && COMMON_ARGS+=( --examples-file "$EXAMPLES_FILE" )
+[[ -n "${REF_WAV:-}" ]]        && COMMON_ARGS+=( --ref-wav "$REF_WAV" )
+[[ -n "${REF_TEXT:-}" ]]       && COMMON_ARGS+=( --ref-text "$REF_TEXT" )
+# shellcheck disable=SC2206
+[[ -n "${EXTRA_ARGS:-}" ]]     && COMMON_ARGS+=( $EXTRA_ARGS )
+
+# Preflight: import qwen_tts and prefetch model weights ONCE so the parallel
+# shards read from the shared HF cache instead of racing on first download.
+echo "===== preflight: import + prefetch models =====" | tee -a "$LOG_FILE"
+CV_FETCH=1; [[ -n "${NO_CUSTOMVOICE:-}" ]] && CV_FETCH=0
+uv run python - "$CV_FETCH" <<'PY' 2>&1 | tee -a "$LOG_FILE"
+import sys
+try:
+    import qwen_tts  # noqa: F401
+except Exception as exc:
+    raise SystemExit(f"qwen_tts import failed before launch: {exc}")
+from huggingface_hub import snapshot_download
+repos = ["Qwen/Qwen3-TTS-12Hz-1.7B-Base"]
+if sys.argv[1] == "1":
+    repos.append("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice")
+for r in repos:
+    print(f"prefetch {r} ...", flush=True)
+    snapshot_download(r)
+print("preflight ok", flush=True)
+PY
+
+# Launch one shard per GPU.
+echo "===== render $NUM_SHARDS shards in parallel =====" | tee -a "$LOG_FILE"
+pids=()
+for ((i = 0; i < NUM_SHARDS; i++)); do
+    gpu_id="${GPU_IDS[$i]}"
+    shard_log="$OUT_DIR/logs/shard_$(printf '%02d' "$i").log"
+    (
+        set -euo pipefail
+        echo "[shard $i] gpu=$gpu_id"
+        CUDA_VISIBLE_DEVICES="$gpu_id" uv run python -u "${COMMON_ARGS[@]}" --shard-index "$i"
+    ) > "$shard_log" 2>&1 &
+    pids+=("$!")
+    echo "started shard $i on gpu $gpu_id (log=$shard_log)" | tee -a "$LOG_FILE"
+done
+
+failed=0
+for pid in "${pids[@]}"; do
+    if ! wait "$pid"; then failed=1; fi
+done
+if [[ "$failed" != "0" ]]; then
+    echo "WARNING: a shard exited non-zero; see $OUT_DIR/logs/shard_*.log" | tee -a "$LOG_FILE"
+fi
+
+# Aggregate + verify: writes index.json and exits non-zero if any combo is
+# incomplete (this is the source of truth, so it also catches shard failures).
+echo "===== aggregate + verify =====" | tee -a "$LOG_FILE"
+uv run python -u "${COMMON_ARGS[@]}" --aggregate 2>&1 | tee -a "$LOG_FILE"
 
 echo "done: $OUT_DIR (log: $LOG_FILE)" | tee -a "$LOG_FILE"

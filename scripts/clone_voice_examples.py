@@ -379,6 +379,231 @@ def run_customvoice(
     return out_files
 
 
+def run_clone_combo(model, tag: str, ref, mode: str, examples: list[str],
+                    args: argparse.Namespace) -> dict[str, Any]:
+    import soundfile as sf
+
+    ref_wav, ref_text, chosen = ref
+    x_only = mode == "x-vector"
+    subdir = args.out_dir / tag
+    subdir.mkdir(parents=True, exist_ok=True)
+    logger.info("=== %s (参照 idx=%s dur=%.1fs) ===", tag,
+                chosen["_index"] if chosen else "-",
+                _dur(chosen) if chosen else -1.0)
+    with Heartbeat(f"プロンプト作成 {tag}"):
+        prompt_items = model.create_voice_clone_prompt(
+            ref_audio=str(ref_wav), ref_text=ref_text, x_vector_only_mode=x_only)
+    with Heartbeat(f"合成 {tag}"):
+        wavs, sr = model.generate_voice_clone(
+            text=examples, language=[args.language] * len(examples),
+            voice_clone_prompt=prompt_items)
+    out_files: list[str] = []
+    for i, wav in enumerate(wavs):
+        path = subdir / f"example_{i:02d}.wav"
+        sf.write(str(path), wav, sr)
+        out_files.append(path.name)
+    shutil.copy(ref_wav, subdir / "reference.wav")
+    combo = {
+        "tag": tag, "mode": mode, "sample_rate": int(sr),
+        "reference": {
+            "wav": str(ref_wav), "text": ref_text,
+            "timeline_index": chosen["_index"] if chosen else None,
+            "duration_sec": round(_dur(chosen), 2) if chosen else None,
+        },
+        "files": out_files,
+    }
+    (subdir / "manifest.json").write_text(
+        json.dumps(combo, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info("  -> %s に %d 文出力", subdir, len(out_files))
+    return combo
+
+
+def run_xvectorall_combo(model, tag: str, examples: list[str],
+                         args: argparse.Namespace) -> dict[str, Any] | None:
+    import soundfile as sf
+
+    analysis_dir = Path(args.analysis_dir)
+    segs = load_timeline(analysis_dir)
+    agg_wav = args.out_dir / "_xvector_all_ref.wav"
+    built = build_aggregate_reference(
+        analysis_dir, args.speaker, segs, agg_wav,
+        args.xvector_max_sec, args.xvector_gap_sec)
+    if built is None:
+        logger.warning("集約 x-vector: 連結できる区間がなくスキップ")
+        return None
+    agg_path, agg_text, agg_sec, n_clips = built
+    subdir = args.out_dir / tag
+    subdir.mkdir(parents=True, exist_ok=True)
+    logger.info("=== %s (%d 区間 / %.1f 秒を集約) ===", tag, n_clips, agg_sec)
+    with Heartbeat(f"プロンプト作成 {tag}"):
+        prompt_items = model.create_voice_clone_prompt(
+            ref_audio=str(agg_path), ref_text=agg_text, x_vector_only_mode=True)
+    with Heartbeat(f"合成 {tag}"):
+        wavs, sr = model.generate_voice_clone(
+            text=examples, language=[args.language] * len(examples),
+            voice_clone_prompt=prompt_items)
+    out_files: list[str] = []
+    for i, wav in enumerate(wavs):
+        path = subdir / f"example_{i:02d}.wav"
+        sf.write(str(path), wav, sr)
+        out_files.append(path.name)
+    shutil.copy(agg_path, subdir / "reference.wav")
+    combo = {
+        "tag": tag, "mode": "x-vector-all", "sample_rate": int(sr),
+        "reference": {"wav": str(agg_path), "aggregated_sec": agg_sec, "n_clips": n_clips},
+        "files": out_files,
+    }
+    (subdir / "manifest.json").write_text(
+        json.dumps(combo, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info("  -> %s に %d 文出力", subdir, len(out_files))
+    return combo
+
+
+def run_customvoice_combo(cv_model, tag: str, examples: list[str],
+                          args: argparse.Namespace) -> dict[str, Any]:
+    subdir = args.out_dir / tag
+    subdir.mkdir(parents=True, exist_ok=True)
+    logger.info("=== %s (プリセット話者) ===", tag)
+    cv_files = run_customvoice(
+        cv_model, examples, args.customvoice_speaker,
+        args.language, args.customvoice_instruct, subdir)
+    combo = {
+        "tag": tag, "mode": "customvoice",
+        "reference": {
+            "wav": None, "text": None,
+            "preset_speaker": args.customvoice_speaker,
+            "model": args.customvoice_model,
+            "instruct": args.customvoice_instruct,
+        },
+        "files": cv_files,
+    }
+    (subdir / "manifest.json").write_text(
+        json.dumps(combo, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info("  -> %s に %d 文出力", subdir, len(cv_files))
+    return combo
+
+
+def build_plan(refs, modes: list[str], args: argparse.Namespace) -> list[dict[str, Any]]:
+    """決定的なコンボ計画。全シャード・aggregate で同じ計画を再構成できる。
+
+    順序は Base モデルのタスク(clone → xvectorall)を先に、CustomVoice を最後に
+    置く。%num_shards で分配したとき、1シャードが両モデルを持つ場合でも順に処理
+    すればモデル切替が1回で済む。"""
+    plan: list[dict[str, Any]] = []
+    for k in range(len(refs)):
+        for mode in modes:
+            plan.append({"kind": "clone", "tag": f"ref{k:02d}_{mode}", "k": k, "mode": mode})
+    if args.xvector_all and not args.ref_wav and args.analysis_dir:
+        segs = load_timeline(Path(args.analysis_dir))
+        has_clean = any(
+            s.get("speaker") == args.speaker and float(s.get("overlap_sec", 0.0)) == 0.0
+            for s in segs
+        )
+        if has_clean:
+            plan.append({"kind": "xvectorall", "tag": f"xvectorall_{args.speaker}"})
+        else:
+            logger.warning("集約 x-vector: 話者%s にクリーン区間がなく plan から除外", args.speaker)
+    if args.customvoice:
+        plan.append({"kind": "customvoice", "tag": f"customvoice_{args.customvoice_speaker}"})
+    return plan
+
+
+def run_shard(args: argparse.Namespace, plan: list[dict[str, Any]], refs,
+              examples: list[str], shard_index: int, num_shards: int) -> None:
+    """plan を num_shards で分配し、このシャード担当分だけ合成する。
+
+    モデルは遅延ロード: clone/xvectorall で Base、customvoice で CustomVoice。
+    両方を担当する場合は切替時に前のモデルを解放して VRAM を空ける。"""
+    my_tasks = [t for i, t in enumerate(plan) if i % num_shards == shard_index]
+    if not my_tasks:
+        logger.info("shard %d/%d: 担当タスクなし", shard_index, num_shards)
+        return
+    logger.info("shard %d/%d: %d タスク %s",
+                shard_index, num_shards, len(my_tasks), [t["tag"] for t in my_tasks])
+
+    base_model = None
+    cv_model = None
+    try:
+        for t in my_tasks:
+            if t["kind"] in ("clone", "xvectorall"):
+                if base_model is None:
+                    if cv_model is not None:
+                        free_model(cv_model)
+                        cv_model = None
+                    base_model = load_qwen_model(args, args.model)
+                if t["kind"] == "clone":
+                    run_clone_combo(base_model, t["tag"], refs[t["k"]], t["mode"], examples, args)
+                else:
+                    run_xvectorall_combo(base_model, t["tag"], examples, args)
+            elif t["kind"] == "customvoice":
+                if cv_model is None:
+                    if base_model is not None:
+                        free_model(base_model)
+                        base_model = None
+                    cv_model = load_qwen_model(args, args.customvoice_model)
+                run_customvoice_combo(cv_model, t["tag"], examples, args)
+    finally:
+        if base_model is not None:
+            free_model(base_model)
+        if cv_model is not None:
+            free_model(cv_model)
+
+
+def aggregate_and_verify(args: argparse.Namespace, plan: list[dict[str, Any]],
+                         examples: list[str]) -> None:
+    """全シャード完了後: 各コンボの完全性を検証し、index.json を書く。
+
+    期待コンボ数 = len(plan)。各コンボは manifest.json と len(examples) 本の
+    example_*.wav が揃って初めて OK。1つでも欠ければ非ゼロ終了(ジョブ側で検知)。"""
+    expected = len(examples)
+    combos: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+    sample_rate = 0
+    for t in plan:
+        subdir = args.out_dir / t["tag"]
+        mani = subdir / "manifest.json"
+        wavs = sorted(subdir.glob("example_*.wav"))
+        if mani.is_file():
+            combo = json.loads(mani.read_text(encoding="utf-8"))
+            combos.append(combo)
+            sample_rate = combo.get("sample_rate", sample_rate) or sample_rate
+        if not mani.is_file() or len(wavs) != expected:
+            missing.append({"tag": t["tag"], "found": len(wavs),
+                            "expected": expected, "manifest": mani.is_file()})
+
+    index = {
+        "clone_model": args.model,
+        "customvoice_model": args.customvoice_model if args.customvoice else None,
+        "language": args.language,
+        "speaker": args.speaker,
+        "sample_rate": sample_rate,
+        "num_refs": args.num_refs,
+        "examples": examples,
+        "combos": combos,
+        "verification": {
+            "expected_combos": len(plan),
+            "complete_combos": len(plan) - len(missing),
+            "missing": missing,
+        },
+    }
+    (args.out_dir / "index.json").write_text(
+        json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print("\n=== 耳で確認 ===", file=sys.stderr)
+    print(f"{args.out_dir.resolve()}", file=sys.stderr)
+    for combo in combos:
+        print(f"  {combo['tag']}/  ({combo.get('mode')})", file=sys.stderr)
+    print("  index.json  全組み合わせの一覧+検証結果", file=sys.stderr)
+
+    if missing:
+        logger.error("検証失敗: %d/%d コンボが不完全", len(missing), len(plan))
+        for m in missing:
+            logger.error("  %s: %d/%d files, manifest=%s",
+                         m["tag"], m["found"], m["expected"], m["manifest"])
+        raise SystemExit(1)
+    logger.info("検証OK: %d コンボすべて %d 文そろっています", len(plan), expected)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--analysis-dir", type=str, default=None,
@@ -426,178 +651,38 @@ def main() -> None:
                         help="CustomVoice のプリセット話者(既定 Ono_Anna)")
     parser.add_argument("--customvoice-instruct", default=None,
                         help="CustomVoice の instruct(既定なし=素のプリセット)")
+    parser.add_argument("--num-shards", type=int, default=1,
+                        help="並列シャード総数(通常は使用 GPU 数)。PBS が設定")
+    parser.add_argument("--shard-index", type=int, default=0,
+                        help="このプロセスのシャード番号(0 始まり)")
+    parser.add_argument("--aggregate", action="store_true",
+                        help="合成せず、各コンボの完全性を検証して index.json を書く")
     args = parser.parse_args()
 
-    import soundfile as sf
+    if args.num_shards < 1:
+        raise SystemExit("--num-shards は 1 以上")
+    if not (0 <= args.shard_index < args.num_shards):
+        raise SystemExit("--shard-index は 0..num_shards-1 の範囲")
 
     refs = resolve_references(args)
     modes = resolve_modes(args)
     examples = load_examples(args)
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    logger.info("参照 %d 件 × クローンモード %s = %d 通り%s を合成します",
-                len(refs), modes, len(refs) * len(modes),
-                " + CustomVoice ベースライン" if args.customvoice else "")
+    plan = build_plan(refs, modes, args)
+    logger.info("コンボ計画: %d 通り %s", len(plan), [t["tag"] for t in plan])
 
-    model = load_qwen_model(args, args.model)
+    # 検証のみ(全シャード完了後に呼ばれる)。
+    if args.aggregate:
+        aggregate_and_verify(args, plan, examples)
+        return
 
-    combos: list[dict[str, Any]] = []
-    sample_rate = 0
-    for k, (ref_wav, ref_text, chosen) in enumerate(refs):
-        for mode in modes:
-            x_only = mode == "x-vector"
-            tag = f"ref{k:02d}_{mode}"
-            subdir = args.out_dir / tag
-            subdir.mkdir(parents=True, exist_ok=True)
-            logger.info("=== %s (参照 idx=%s dur=%.1fs) ===",
-                        tag,
-                        chosen["_index"] if chosen else "-",
-                        _dur(chosen) if chosen else -1.0)
+    # このシャード担当分を合成。
+    run_shard(args, plan, refs, examples, args.shard_index, args.num_shards)
 
-            with Heartbeat(f"プロンプト作成 {tag}"):
-                prompt_items = model.create_voice_clone_prompt(
-                    ref_audio=str(ref_wav),
-                    ref_text=ref_text,
-                    x_vector_only_mode=x_only,
-                )
-            with Heartbeat(f"合成 {tag}"):
-                wavs, sr = model.generate_voice_clone(
-                    text=examples,
-                    language=[args.language] * len(examples),
-                    voice_clone_prompt=prompt_items,
-                )
-            sample_rate = int(sr)
-
-            out_files: list[str] = []
-            for i, (text, wav) in enumerate(zip(examples, wavs)):
-                path = subdir / f"example_{i:02d}.wav"
-                sf.write(str(path), wav, sr)
-                out_files.append(path.name)
-            shutil.copy(ref_wav, subdir / "reference.wav")
-
-            combo = {
-                "tag": tag,
-                "mode": mode,
-                "reference": {
-                    "wav": str(ref_wav),
-                    "text": ref_text,
-                    "timeline_index": chosen["_index"] if chosen else None,
-                    "duration_sec": round(_dur(chosen), 2) if chosen else None,
-                },
-                "files": out_files,
-            }
-            (subdir / "manifest.json").write_text(
-                json.dumps(combo, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            combos.append(combo)
-            logger.info("  -> %s に %d 文出力", subdir, len(out_files))
-
-    # --- 集約 x-vector(全クリーン区間を連結した1本から埋め込み) ---
-    if args.xvector_all and not args.ref_wav and args.analysis_dir:
-        analysis_dir = Path(args.analysis_dir)
-        segs = load_timeline(analysis_dir)
-        agg_wav = args.out_dir / "_xvector_all_ref.wav"
-        built = build_aggregate_reference(
-            analysis_dir, args.speaker, segs, agg_wav,
-            args.xvector_max_sec, args.xvector_gap_sec,
-        )
-        if built is None:
-            logger.warning("集約 x-vector: 連結できる区間がなくスキップ")
-        else:
-            agg_path, agg_text, agg_sec, n_clips = built
-            tag = f"xvectorall_{args.speaker}"
-            subdir = args.out_dir / tag
-            subdir.mkdir(parents=True, exist_ok=True)
-            logger.info("=== %s (%d 区間 / %.1f 秒を集約) ===", tag, n_clips, agg_sec)
-            with Heartbeat(f"プロンプト作成 {tag}"):
-                prompt_items = model.create_voice_clone_prompt(
-                    ref_audio=str(agg_path),
-                    ref_text=agg_text,
-                    x_vector_only_mode=True,
-                )
-            with Heartbeat(f"合成 {tag}"):
-                wavs, sr = model.generate_voice_clone(
-                    text=examples,
-                    language=[args.language] * len(examples),
-                    voice_clone_prompt=prompt_items,
-                )
-            sample_rate = int(sr)
-            out_files = []
-            for i, (text, wav) in enumerate(zip(examples, wavs)):
-                path = subdir / f"example_{i:02d}.wav"
-                sf.write(str(path), wav, sr)
-                out_files.append(path.name)
-            shutil.copy(agg_path, subdir / "reference.wav")
-            combo = {
-                "tag": tag,
-                "mode": "x-vector-all",
-                "reference": {
-                    "wav": str(agg_path),
-                    "aggregated_sec": agg_sec,
-                    "n_clips": n_clips,
-                },
-                "files": out_files,
-            }
-            (subdir / "manifest.json").write_text(
-                json.dumps(combo, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            combos.append(combo)
-            logger.info("  -> %s に %d 文出力", subdir, len(out_files))
-
-    # --- CustomVoice ベースライン(別チェックポイント。Base を解放してから) ---
-    if args.customvoice:
-        logger.info("クローン用モデルを解放し、CustomVoice をロードします")
-        free_model(model)
-        cv_model = load_qwen_model(args, args.customvoice_model)
-        tag = f"customvoice_{args.customvoice_speaker}"
-        subdir = args.out_dir / tag
-        subdir.mkdir(parents=True, exist_ok=True)
-        logger.info("=== %s (プリセット話者) ===", tag)
-        cv_files = run_customvoice(
-            cv_model, examples, args.customvoice_speaker,
-            args.language, args.customvoice_instruct, subdir,
-        )
-        combo = {
-            "tag": tag,
-            "mode": "customvoice",
-            "reference": {
-                "wav": None,
-                "text": None,
-                "preset_speaker": args.customvoice_speaker,
-                "model": args.customvoice_model,
-                "instruct": args.customvoice_instruct,
-            },
-            "files": cv_files,
-        }
-        (subdir / "manifest.json").write_text(
-            json.dumps(combo, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        combos.append(combo)
-        logger.info("  -> %s に %d 文出力", subdir, len(cv_files))
-        free_model(cv_model)
-
-    index = {
-        "clone_model": args.model,
-        "customvoice_model": args.customvoice_model if args.customvoice else None,
-        "language": args.language,
-        "speaker": args.speaker,
-        "sample_rate": sample_rate,
-        "modes": modes,
-        "customvoice": args.customvoice,
-        "customvoice_speaker": args.customvoice_speaker if args.customvoice else None,
-        "num_refs": len(refs),
-        "examples": examples,
-        "combos": combos,
-    }
-    (args.out_dir / "index.json").write_text(
-        json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-    print("\n=== 耳で確認 ===", file=sys.stderr)
-    print(f"{args.out_dir.resolve()}", file=sys.stderr)
-    for combo in combos:
-        print(f"  {combo['tag']}/  reference.wav + example_XX.wav "
-              f"(参照 idx={combo['reference']['timeline_index']})", file=sys.stderr)
-    print("  index.json  全組み合わせの一覧", file=sys.stderr)
+    # 単一プロセス実行(num_shards=1)ならそのまま検証+index も書く。
+    # 複数シャード時は各シャードは合成のみ行い、検証は別途 --aggregate で行う。
+    if args.num_shards == 1:
+        aggregate_and_verify(args, plan, examples)
 
 
 if __name__ == "__main__":
