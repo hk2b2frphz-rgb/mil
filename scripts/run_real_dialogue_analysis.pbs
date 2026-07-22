@@ -49,15 +49,25 @@ if [[ ${#wav_files[@]} -eq 0 ]]; then
     exit 1
 fi
 
-echo "===== real dialogue analysis ====="
-echo "inputs:  ${wav_files[*]}"
-echo "out_dir: $OUT_DIR"
+# 結果と同じ場所に恒久ログを残す(PBS の .o ファイルとは別に OUT_DIR/run.log)。
+mkdir -p "$OUT_DIR"
+LOG_FILE="${LOG_FILE:-$OUT_DIR/run.log}"
 
+{
+    echo "===== real dialogue analysis ====="
+    echo "job:     ${JOB_ID_RAW}"
+    echo "started: $(date -Is)"
+    echo "inputs:  ${wav_files[*]}"
+    echo "out_dir: $OUT_DIR"
+    echo "log:     $LOG_FILE"
+} | tee "$LOG_FILE"
+
+# tee でログへ複写しつつ標準出力にも流す。pipefail により python の終了コードが伝播する。
 # shellcheck disable=SC2086
 uv run python scripts/analyze_real_dialogue.py \
     "${wav_files[@]}" \
     --out-dir "$OUT_DIR" \
     ${WHISPER_MODEL:+--whisper-model "$WHISPER_MODEL"} \
-    ${EXTRA_ARGS:-}
+    ${EXTRA_ARGS:-} 2>&1 | tee -a "$LOG_FILE"
 
-echo "done: $OUT_DIR"
+echo "done: $OUT_DIR (log: $LOG_FILE)" | tee -a "$LOG_FILE"
