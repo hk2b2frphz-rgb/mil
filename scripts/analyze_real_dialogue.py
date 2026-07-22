@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-from __future__ import annotations
-
 """
 1ch ロールプレイ実対話 WAV の聴取確認用分析(ステージ1: 分離なし)。
 
@@ -28,6 +26,8 @@ pyannote ダイアライゼーション + faster-whisper 書き起こしで話�
 gated ではないので HF の同意・トークンは不要。ライセンスは CC-BY-4.0(商用可)。
 NeMo は既存依存 (nemo_toolkit[asr]) に含まれるため追加インストールも不要。
 """
+
+from __future__ import annotations
 
 import argparse
 import json
