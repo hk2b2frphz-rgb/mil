@@ -1,14 +1,21 @@
-# Smoke config for the experiment pipeline: fake, instant stages that only
-# exercise the orchestration + output wiring (no GPU, no qsub).
+# Smoke config for the experiment pipeline: fake, instant stages that exercise
+# the orchestration, output wiring, AND the real qsub self-chaining -- without
+# GPU or heavy work. Each stage checks its INPUT, creates its OUTPUT, prints OK.
 #
-# Each stage checks its INPUT (the previous stage's declared output exists),
-# creates its OUTPUT, and prints OK. Run it locally:
-#   uv run python scripts/run_experiment_dag.py configs/experiment.smoke.yaml --start --local
-# or via the smoke script:
-#   bash scripts/smoke_experiment_dag.sh
+# Local (no qsub, one process):
+#   bash scripts/smoke_experiment_dag.sh          # or: --start --local
+# Real PBS self-chain (tiny jobs; verifies compute-node qsub works):
+#   bash scripts/smoke_experiment_dag.sh pbs      # kicks off --start, waits, --check
+#
+# default_resources are intentionally tiny/short so the PBS smoke is cheap.
 
 experiment: smoke
 out_root: data/runs/_smoke
+
+default_resources:
+  queue: xvn_s
+  select: "1:res=small"
+  walltime: "00:10:00"
 
 paths:
   dialogue_out: "${out_root}/dialogue"
@@ -23,6 +30,7 @@ stages:
     cmd: 'mkdir -p "$DIALOGUE_OUT" && echo "{}" > "$DIALOGUE_OUT/dialogues.jsonl" && echo "[dialogue] wrote $DIALOGUE_OUT/dialogues.jsonl"'
     env:
       DIALOGUE_OUT: "${dialogue_out}"
+    expect: ["${dialogue_out}/dialogues.jsonl"]
     next: tts
 
   - name: tts
@@ -30,6 +38,7 @@ stages:
     env:
       DIALOGUE_OUT: "${dialogue_out}"
       TTS_OUT: "${tts_out}"
+    expect: ["${tts_out}/synthetic_moshi_train.jsonl"]
     next: train
 
   - name: train
@@ -37,6 +46,7 @@ stages:
     env:
       TTS_OUT: "${tts_out}"
       TRAIN_OUT: "${train_out}"
+    expect: ["${train_out}/consolidated.safetensors"]
     next: eval
 
   - name: eval
@@ -44,3 +54,4 @@ stages:
     env:
       TRAIN_OUT: "${train_out}"
       EVAL_OUT: "${eval_out}"
+    expect: ["${eval_out}/summary.txt"]

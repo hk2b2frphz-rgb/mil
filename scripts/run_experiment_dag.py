@@ -211,6 +211,37 @@ def print_chain(cfg: dict[str, Any], config_path: Path, start: str) -> None:
         name = stage.get("next")
 
 
+def check_chain(cfg: dict[str, Any], ctx: dict[str, str], start: str) -> int:
+    """連鎖に沿って各ステージの expect: ファイルの存在を検証する。
+
+    ステージ完了後(特に PBS 自己連鎖の後)に「各ステージが通ったか」を確認する。
+    全て揃えば 0、欠けがあれば 1。"""
+    by_name = stages_by_name(cfg)
+    name: str | None = start
+    seen: set[str] = set()
+    ok = 0
+    miss = 0
+    while name and name not in seen:
+        seen.add(name)
+        stage = by_name.get(name)
+        if stage is None:
+            raise SystemExit(f"未定義のステージ: {name}")
+        expects = stage.get("expect") or []
+        if not expects:
+            print(f"  [skip] {name}: expect 未定義")
+        for raw in expects:
+            path = interp(str(raw), ctx)
+            if Path(path).exists():
+                print(f"  [ok]   {name}: {path}")
+                ok += 1
+            else:
+                print(f"  [MISS] {name}: {path}")
+                miss += 1
+        name = stage.get("next")
+    print(f"\n{'[CHECK OK]' if miss == 0 else '[CHECK FAILED]'} ok={ok} missing={miss}")
+    return 0 if miss == 0 else 1
+
+
 def run_stage(cfg: dict[str, Any], config_path: Path, name: str,
               ctx: dict[str, str], no_chain: bool, local: bool = False) -> int:
     """ステージ本体を実行し、成功したら next を進める。
@@ -271,6 +302,8 @@ def main() -> None:
                     help="qsub を使わず、連鎖を同一プロセスで inline 実行(smoke/単一ノード)")
     ap.add_argument("--dry-run", action="store_true",
                     help="start 時: 連鎖内容を表示するだけ(投入しない)")
+    ap.add_argument("--check", action="store_true",
+                    help="各ステージの expect: 成果物が揃っているか検証(連鎖後の確認用)")
     args = ap.parse_args()
 
     config_path = discover_config(args.config or args.config_opt).resolve()
@@ -284,6 +317,11 @@ def main() -> None:
 
     # start / start-at
     start = start_stage_name(cfg, args.start_at)
+
+    if args.check:
+        print(f"check from: {start}\n")
+        sys.exit(check_chain(cfg, ctx, start))
+
     mode = "DRY-RUN" if args.dry_run else ("LOCAL" if args.local else "SUBMIT")
     print(f"experiment: {cfg.get('experiment', '<none>')}")
     print(f"start: {start}   mode: {mode}\n")

@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Smoke test for the experiment DAG: run the whole pipeline locally (no GPU,
-# no qsub) with fake instant stages, and confirm each stage clears with its
-# output wired to the next. Also checks starting mid-chain (from tts, reusing
-# the already-created dialogue folder).
+# Smoke test for the experiment DAG. Two modes:
 #
-#   bash scripts/smoke_experiment_dag.sh
+#   bash scripts/smoke_experiment_dag.sh          # local: inline, no qsub
+#   bash scripts/smoke_experiment_dag.sh pbs      # real qsub self-chain (tiny jobs)
 #
-# PYTHON can override how the driver is invoked (default: uv run python).
+# local: runs the whole chain in one process (--local) and verifies outputs.
+#        Fast, no scheduler; checks orchestration + output wiring.
+# pbs:   kicks off --start (real qsub), so each tiny stage job submits the next
+#        from the compute node. This is what verifies the self-chaining actually
+#        works on this cluster. Waits for the final stage's output, then --check.
+#
+# PYTHON overrides how the driver is invoked (default: uv run python).
 
 set -euo pipefail
 
@@ -14,54 +18,58 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
+MODE="${1:-local}"
 CFG="configs/experiment.smoke.yaml"
 OUT="data/runs/_smoke"
+FINAL_MARKER="$OUT/eval/summary.txt"
 PYTHON="${PYTHON:-uv run python}"
 DRIVER="scripts/run_experiment_dag.py"
+WAIT_SECS="${WAIT_SECS:-1800}"   # pbs mode: max seconds to wait for the chain
 
-pass=0
-fail=0
-check() {  # check <label> <path-that-must-exist>
-    if [[ -e "$2" ]]; then
-        echo "  [ok]   $1: $2"
-        pass=$((pass + 1))
-    else
-        echo "  [MISS] $1: MISSING $2"
-        fail=$((fail + 1))
-    fi
-}
-
-echo "========================================================"
-echo "SMOKE 1/2: full chain (dialogue -> tts -> train -> eval), --local"
-echo "========================================================"
-rm -rf "$OUT"
-$PYTHON "$DRIVER" "$CFG" --start --local
-
-echo
-echo "-- verify stage outputs --"
-check dialogue "$OUT/dialogue/dialogues.jsonl"
-check tts      "$OUT/tts/synthetic_moshi_train.jsonl"
-check train    "$OUT/checkpoints/consolidated.safetensors"
-check eval     "$OUT/eval/summary.txt"
-
-echo
-echo "========================================================"
-echo "SMOKE 2/2: start mid-chain from tts (reuse existing dialogue folder)"
-echo "========================================================"
-# Keep dialogue output, wipe downstream, then start at tts.
-rm -rf "$OUT/tts" "$OUT/checkpoints" "$OUT/eval"
-$PYTHON "$DRIVER" "$CFG" --start-at tts --local
-check tts-from-mid "$OUT/tts/synthetic_moshi_train.jsonl"
-check eval-from-mid "$OUT/eval/summary.txt"
-
-echo
-echo "========================================================"
-if [[ "$fail" -eq 0 ]]; then
-    echo "[SMOKE OK] 全ステージ通過 ($pass checks)"
+if [[ "$MODE" == "local" ]]; then
+    echo "== SMOKE (local, --local): full chain =="
     rm -rf "$OUT"
-    exit 0
+    $PYTHON "$DRIVER" "$CFG" --start --local
+    echo
+    echo "== SMOKE (local): start mid-chain from tts =="
+    rm -rf "$OUT/tts" "$OUT/checkpoints" "$OUT/eval"
+    $PYTHON "$DRIVER" "$CFG" --start-at tts --local
+    echo
+    echo "== verify =="
+    $PYTHON "$DRIVER" "$CFG" --check
+    rc=$?
+    if [[ "$rc" -eq 0 ]]; then rm -rf "$OUT"; echo "[SMOKE OK] local"; fi
+    exit "$rc"
+
+elif [[ "$MODE" == "pbs" ]]; then
+    command -v qsub >/dev/null 2>&1 || { echo "ERROR: qsub not on PATH" >&2; exit 1; }
+    echo "== SMOKE (pbs): real qsub self-chain =="
+    rm -rf "$OUT"
+    $PYTHON "$DRIVER" "$CFG" --start
+    echo
+    echo "waiting up to ${WAIT_SECS}s for the chain to reach eval ($FINAL_MARKER)..."
+    waited=0
+    while [[ ! -f "$FINAL_MARKER" ]]; do
+        sleep 15
+        waited=$((waited + 15))
+        if [[ "$waited" -ge "$WAIT_SECS" ]]; then
+            echo "[SMOKE TIMEOUT] chain did not finish in ${WAIT_SECS}s." >&2
+            echo "  Check: qstat -u \$USER  and the dag_* job logs." >&2
+            $PYTHON "$DRIVER" "$CFG" --check || true
+            exit 1
+        fi
+        echo "  ... ${waited}s (qstat -u \$USER to watch)"
+    done
+    echo "chain reached eval. verifying all stages:"
+    $PYTHON "$DRIVER" "$CFG" --check
+    rc=$?
+    if [[ "$rc" -eq 0 ]]; then
+        rm -rf "$OUT"
+        echo "[SMOKE OK] pbs self-chaining works (compute-node qsub confirmed)"
+    fi
+    exit "$rc"
+
 else
-    echo "[SMOKE FAILED] $fail 件の欠落 ($pass ok)"
-    echo "   出力は $OUT に残しています(調査用)"
-    exit 1
+    echo "usage: $0 [local|pbs]" >&2
+    exit 2
 fi
