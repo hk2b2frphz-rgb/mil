@@ -1,0 +1,64 @@
+# Master experiment config: one YAML for the whole run.
+#
+# Defines stages (training-data generation, training, evaluation) and, via
+# `run:`, which of them to actually submit. Each stage is a separate PBS job;
+# `depends_on` chains them with `-W depend=afterok:<jobid>`.
+#
+# Copy this to a working file (gitignored) and edit it, then submit from the
+# login node:
+#   cp configs/experiment.example.yaml experiments/exp01.yaml
+#   uv run python scripts/run_experiment_dag.py experiments/exp01.yaml --dry-run
+#   uv run python scripts/run_experiment_dag.py experiments/exp01.yaml
+#
+# Notes:
+#   - This driver only calls qsub; it uses no GPU. Run it where qsub works.
+#   - Each PBS below has `#PBS -V`, so the env vars set here (passed via the
+#     driver's environment) reach the job. Stage outputs are wired between
+#     stages through shared paths built from ${out_root}.
+#   - Judge steps (Azure / llm-jp LLM-as-judge) run on a local PC, not on the
+#     cluster, so they are NOT a qsub stage here -- run them by hand after eval
+#     (see docs/full_duplex_evaluation.md).
+
+experiment: exp01
+out_root: data/runs/exp01          # shared root; stages read/write under here
+
+# Proxy exported into every stage's job env (blank = skip).
+proxy:
+  http_proxy: ""
+  https_proxy: ""
+  no_proxy: ""
+
+# Extra ${name} variables usable in any env value below.
+vars:
+  base_exp: lora_base_config
+  source_batch_id: qwen_dialogues_1000_v1
+
+# Which stages to submit this time (subset ok). Comment out to run all defined.
+run: [traindata, train, eval]
+
+stages:
+  # 1) Synthetic training-data generation (whole-utterance Qwen3-TTS, 4 GPU).
+  - name: traindata
+    pbs: scripts/run_qwen_tts_whole_utterance_1000_4gpu.pbs
+    env:
+      SOURCE_BATCH_ID: "${source_batch_id}"
+      OUT_ROOT: "${out_root}/traindata"
+
+  # 2) Moshi fine-tuning. Reuses the generated data via SRC_RUN_DIR.
+  - name: train
+    pbs: scripts/run_experiment.pbs
+    depends_on: [traindata]
+    env:
+      SRC_RUN_DIR: "${out_root}/traindata"
+      BASE_EXP: "${base_exp}"
+      HP_LR: 2e-6
+      HP_LORA_RANK: 32
+      HP_MAX_STEPS: 500
+
+  # 3) Full-Duplex-Bench evaluation of the trained checkpoint.
+  - name: eval
+    pbs: scripts/run_full_duplex_eval.pbs
+    depends_on: [train]
+    env:
+      MODEL_ID: lora_h01
+      MODEL_WEIGHT: "${out_root}/checkpoints/consolidated.safetensors"

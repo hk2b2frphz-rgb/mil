@@ -21,6 +21,13 @@ configs/voice_synth.yaml
 configs/voice_synth.*.yaml
 !configs/voice_synth.example.yaml
 
+# Master experiment configs: copy the tracked .example, keep the copy local.
+configs/experiment.yaml
+configs/experiment.*.yaml
+!configs/experiment.example.yaml
+experiments/*.yaml
+experiments/_submitted_*.json
+
 # editor
 .vscode/
 .idea/
