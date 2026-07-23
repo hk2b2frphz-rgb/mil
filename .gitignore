@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.pyc
+.venv-vllm-omni/
 
 # Pipeline outputs (regenerable)
 data/
@@ -14,6 +15,11 @@ experiments/*/data/
 experiments/*/checkpoints/
 experiments/*/run.log
 experiments/*/_resolved.yaml
+
+# Voice-synth working configs: copy the tracked .example, keep the copy local.
+configs/voice_synth.yaml
+configs/voice_synth.*.yaml
+!configs/voice_synth.example.yaml
 
 # editor
 .vscode/

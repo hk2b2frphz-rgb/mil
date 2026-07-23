@@ -44,6 +44,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from scripts.voice_synth_config import arg_defaults, load_config
+except ImportError:  # スクリプト直接実行時(scripts/ が sys.path 先頭)
+    from voice_synth_config import arg_defaults, load_config
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -524,19 +529,20 @@ def build_plan(refs, modes: list[str], args: argparse.Namespace) -> list[dict[st
     置く。%num_shards で分配したとき、1シャードが両モデルを持つ場合でも順に処理
     すればモデル切替が1回で済む。"""
     plan: list[dict[str, Any]] = []
-    for k in range(len(refs)):
-        for mode in modes:
-            plan.append({"kind": "clone", "tag": f"ref{k:02d}_{mode}", "k": k, "mode": mode})
-    if args.xvector_all and not args.ref_wav and args.analysis_dir:
-        segs = load_timeline(Path(args.analysis_dir))
-        has_clean = any(
-            s.get("speaker") == args.speaker and float(s.get("overlap_sec", 0.0)) == 0.0
-            for s in segs
-        )
-        if has_clean:
-            plan.append({"kind": "xvectorall", "tag": f"xvectorall_{args.speaker}"})
-        else:
-            logger.warning("集約 x-vector: 話者%s にクリーン区間がなく plan から除外", args.speaker)
+    if args.clone_enabled:
+        for k in range(len(refs)):
+            for mode in modes:
+                plan.append({"kind": "clone", "tag": f"ref{k:02d}_{mode}", "k": k, "mode": mode})
+        if args.xvector_all and not args.ref_wav and args.analysis_dir:
+            segs = load_timeline(Path(args.analysis_dir))
+            has_clean = any(
+                s.get("speaker") == args.speaker and float(s.get("overlap_sec", 0.0)) == 0.0
+                for s in segs
+            )
+            if has_clean:
+                plan.append({"kind": "xvectorall", "tag": f"xvectorall_{args.speaker}"})
+            else:
+                logger.warning("集約 x-vector: 話者%s にクリーン区間がなく plan から除外", args.speaker)
     if args.customvoice:
         plan.append({"kind": "customvoice", "tag": f"customvoice_{args.customvoice_speaker}"})
     return plan
@@ -639,13 +645,22 @@ def aggregate_and_verify(args: argparse.Namespace, plan: list[dict[str, Any]],
 
 
 def main() -> None:
+    # 二段パース: 先に --config だけ読み、その値を各引数の既定値に流し込む。
+    # 優先順位: CLI フラグ > config > ハードコード既定。
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", default=None)
+    pre_args, _ = pre.parse_known_args()
+    cfg_defaults = arg_defaults(load_config(pre_args.config)) if pre_args.config else {}
+
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--config", default=None,
+                        help="YAML 設定ファイル。CLI フラグが優先")
     parser.add_argument("--analysis-dir", type=str, default=None,
                         help="analyze_real_dialogue.py の出力(<wav_stem>/)。参照を自動選別")
     parser.add_argument("--speaker", default="A", help="参照にする話者 A / B(既定 A)")
     parser.add_argument("--ref-wav", default=None, help="参照音声を明示指定(--ref-text 必須)")
     parser.add_argument("--ref-text", default=None, help="--ref-wav の書き起こし")
-    parser.add_argument("--out-dir", type=Path, required=True, help="出力先")
+    parser.add_argument("--out-dir", type=Path, default=None, help="出力先")
     parser.add_argument("--examples-file", default=None,
                         help="例文ファイル(1 行 1 文)。未指定なら既定の相談ドメイン例文")
     parser.add_argument("--language", default="Japanese", help="合成言語(既定 Japanese)")
@@ -673,6 +688,10 @@ def main() -> None:
                         help="集約 x-vector に使う参照の総秒数の上限(既定 90)")
     parser.add_argument("--xvector-gap-sec", type=float, default=0.1,
                         help="集約参照でクリップ間に挟む無音秒(既定 0.1)")
+    parser.add_argument("--clone", dest="clone_enabled", action="store_true",
+                        default=True, help="クローン(Base)合成を行う(既定 ON)")
+    parser.add_argument("--no-clone", dest="clone_enabled", action="store_false",
+                        help="クローンを行わず CustomVoice だけにする")
     parser.add_argument("--customvoice", dest="customvoice", action="store_true",
                         default=True,
                         help="比較用に CustomVoice プリセットも合成(既定 ON)")
@@ -696,14 +715,19 @@ def main() -> None:
                         help="このプロセスのシャード番号(0 始まり)")
     parser.add_argument("--aggregate", action="store_true",
                         help="合成せず、各コンボの完全性を検証して index.json を書く")
+    # config の値を各引数の既定にする(CLI 明示指定があればそちらが優先)。
+    parser.set_defaults(**cfg_defaults)
     args = parser.parse_args()
 
+    if args.out_dir is None:
+        raise SystemExit("--out-dir(または config の out_dir)が必要です")
+    args.out_dir = Path(args.out_dir)  # config 由来だと str のことがある
     if args.num_shards < 1:
         raise SystemExit("--num-shards は 1 以上")
     if not (0 <= args.shard_index < args.num_shards):
         raise SystemExit("--shard-index は 0..num_shards-1 の範囲")
 
-    refs = resolve_references(args)
+    refs = resolve_references(args) if args.clone_enabled else []
     modes = resolve_modes(args)
     examples = load_examples(args)
     args.out_dir.mkdir(parents=True, exist_ok=True)
