@@ -163,6 +163,11 @@ V100はbfloat16非対応なので変更しない。OOM時は両方を8に下げ�
 cu128/cu129 wheelはV100のsm70 kernelを含まないため使わない。セットアップは
 PyTorchのsm70対応とCUDA実行を先に検査し、そのPyTorchに対してvLLM 0.21.0を
 `TORCH_CUDA_ARCH_LIST=7.0` でソースビルドする。初回ビルドには時間がかかる。
+ビルドは ninja 進捗を流しつつ `vllm_build.log`（共有FS）へ tee するので、計算
+ノードに入れなくても、ログインノードから `tail -f vllm_build.log` で進捗を追える。
+`[N/M] Building CUDA object ...` が進めば健全、`Fetching`/configure で停止したまま
+なら FetchContent のネットワーク固着を疑う。`MAX_JOBS` は既定でノードのコア数
+（`nproc`）に連動する。メモリ不足なら明示的に下げる。
 実行ジョブも同じCUDA moduleを自動loadする。変更が必要なら
 `VLLM_CUDA_MODULE`、`VLLM_VERSION`、`VLLM_OMNI_VERSION` を明示する。
 出力形式、MMS_FA alignment、resume、4シャードのマージは従来ジョブと同じ。

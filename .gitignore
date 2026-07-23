@@ -36,3 +36,4 @@ experiments/_submitted_*.json
 
 # Reference literature (downloaded PDFs etc.) -- kept out of VCS on request.
 references/
+vllm_build.log

@@ -24,9 +24,17 @@ TORCH_VERSION="${TORCH_VERSION:-2.11.0}"
 TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-2.11.0}"
 TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.26.0}"
 TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-7.0}"
-MAX_JOBS="${MAX_JOBS:-4}"
+# Default the compile parallelism to the node's core count. The old fixed
+# default of 4 made a healthy build look stalled for hours under uv's silent
+# "Preparing packages (0/1)" line. Override MAX_JOBS to cap it if memory-bound.
+DEFAULT_MAX_JOBS="$( { command -v nproc >/dev/null 2>&1 && nproc; } || echo 4 )"
+MAX_JOBS="${MAX_JOBS:-$DEFAULT_MAX_JOBS}"
 NVCC_THREADS="${NVCC_THREADS:-2}"
 VLLM_PYTHON="$VLLM_ENV_DIR/bin/python"
+# Stream the vLLM source-build progress here. On the compute node this file
+# lives on the shared filesystem, so `tail -f` from a login node shows the
+# ninja/cmake progress even when you cannot open a second shell on the node.
+VLLM_BUILD_LOG="${VLLM_BUILD_LOG:-$PWD/vllm_build.log}"
 
 if ! command -v module >/dev/null 2>&1; then
     for init in /etc/profile.d/modules.sh /usr/share/Modules/init/bash; do
@@ -73,6 +81,8 @@ echo "nvcc: $(command -v nvcc) (release $NVCC_RELEASE)"
 echo "PyTorch index: $PYTORCH_INDEX_URL"
 echo "vLLM source: $VLLM_SRC_DIR (v$VLLM_VERSION)"
 echo "CUDA architectures: $TORCH_CUDA_ARCH_LIST"
+echo "Build parallelism: MAX_JOBS=$MAX_JOBS NVCC_THREADS=$NVCC_THREADS"
+echo "Build log: $VLLM_BUILD_LOG (tail -f from a login node to watch progress)"
 
 uv venv --python 3.12 --seed "$VLLM_ENV_DIR"
 
@@ -124,7 +134,14 @@ fi
     "$VLLM_PYTHON" use_existing_torch.py --prefix
     uv pip install --python "$VLLM_PYTHON" -r requirements/build/cuda.txt
     uv pip uninstall --python "$VLLM_PYTHON" vllm >/dev/null 2>&1 || true
-    uv pip install --python "$VLLM_PYTHON" --no-build-isolation -e .
+    # Build vLLM from source. uv hides the build backend's output, so the long
+    # CUDA compile looks like a hang at "Preparing packages (0/1)". Use pip -v
+    # (the venv is --seeded so pip exists) to stream the ninja "[N/M]" progress,
+    # and tee it to the shared-filesystem log so it can be tailed remotely.
+    # pipefail (set -o) keeps a build failure fatal despite the tee.
+    echo "Building vLLM from source with streaming progress (MAX_JOBS=$MAX_JOBS)."
+    echo "Follow along: tail -f $VLLM_BUILD_LOG"
+    "$VLLM_PYTHON" -m pip install --no-build-isolation -v -e . 2>&1 | tee "$VLLM_BUILD_LOG"
 )
 
 uv pip install --python "$VLLM_PYTHON" \
