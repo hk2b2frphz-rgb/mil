@@ -84,7 +84,10 @@ echo "CUDA architectures: $TORCH_CUDA_ARCH_LIST"
 echo "Build parallelism: MAX_JOBS=$MAX_JOBS NVCC_THREADS=$NVCC_THREADS"
 echo "Build log: $VLLM_BUILD_LOG (tail -f from a login node to watch progress)"
 
-uv venv --python 3.12 --seed "$VLLM_ENV_DIR"
+# --clear recreates the env even if the directory already exists. A stale env
+# from an aborted run must not be reused: it may hold CPU-only or cu129 PyTorch,
+# or a half-built vLLM, which would silently defeat the sm70/cu126 pins below.
+uv venv --python 3.12 --seed --clear "$VLLM_ENV_DIR"
 
 # Reinstalling is intentional: an earlier setup may have left CPU-only or
 # cu129 PyTorch in this same environment.
