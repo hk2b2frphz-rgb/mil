@@ -14,8 +14,10 @@ if [[ -f "$PWD/scripts/setup_proxy.sh" ]]; then
 fi
 
 VLLM_ENV_DIR="${VLLM_ENV_DIR:-$PWD/.venv-vllm-omni}"
-VLLM_VERSION="${VLLM_VERSION:-0.25.0}"
-VLLM_OMNI_VERSION="${VLLM_OMNI_VERSION:-0.25.0}"
+# 0.25.0 is currently only an Omni release candidate; use the newest matching
+# stable pair published on PyPI by default.
+VLLM_VERSION="${VLLM_VERSION:-0.24.0}"
+VLLM_OMNI_VERSION="${VLLM_OMNI_VERSION:-0.24.0}"
 
 command -v uv >/dev/null 2>&1 || {
     echo "ERROR: uv is required" >&2
