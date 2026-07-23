@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N setup_vllm_omni
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# One-shot builder for the isolated Python 3.12 / vLLM-Omni runtime used by the
+# V100 Qwen3-TTS jobs. The vLLM source build (CMake configure + CUDA compile
+# for sm70) is slow, so run it under a 24h walltime instead of an interactive
+# session. res=small allocates one V100, which the setup script's runtime
+# checks (torch.cuda.is_available + CUDA smoke) require.
+#
+# Submit (carry the proxy through with -V so pip and git can reach the net):
+#   PROXY_URL=http://<proxy-host>:<port> qsub -V scripts/setup_vllm_omni_v100_env.pbs
+#
+# Watch progress from a login node (shared filesystem):
+#   tail -f <repo>/vllm_build.log
+#
+# Optional overrides (exported before qsub, carried by -V):
+#   MAX_JOBS=32           cap/raise build parallelism (default: node core count)
+#   VLLM_VERSION=0.21.0   vLLM source tag to build
+#   VLLM_OMNI_VERSION=0.21.0rc1
+#   VLLM_CUDA_MODULE=cuda12.6_cudnn9.7.1_nccl2.24.3
+#
+# The build is idempotent enough to re-submit: an existing correct venv/torch is
+# reinstalled deterministically and an existing vLLM checkout at the right tag
+# is reused. The setup script loads the CUDA module and sources setup_proxy.sh
+# itself, so this wrapper only needs to enter the work directory and hand off.
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+exec bash scripts/setup_vllm_omni_v100_env.sh

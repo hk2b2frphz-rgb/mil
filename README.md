@@ -150,6 +150,12 @@ vLLM-Omni専用ジョブを使う。各V100に1.7Bモデルを1つずつ複製�
 PROXY_URL=http://<proxy-host>:<port> \
   bash scripts/setup_vllm_omni_v100_env.sh
 
+# CMake configure + CUDA コンパイルが長いので、インタラクティブではなく
+# 24h の PBS ジョブ（xvn_s / res=small = V100 1枚）で回す場合はこちら。
+# ログインノードから tail -f <repo>/vllm_build.log で進捗を追える。
+PROXY_URL=http://<proxy-host>:<port> \
+  qsub -V scripts/setup_vllm_omni_v100_env.pbs
+
 # まず100対話で速度・VRAM・音質を確認
 NUM_DIALOGUES=100 FRESH=1 qsub -V scripts/run_qwen_tts_vllm_10000_4gpu.pbs
 
