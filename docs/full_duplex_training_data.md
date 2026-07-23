@@ -19,7 +19,7 @@ existing pipeline:
    month"). 1-2 are sampled into each card so the actual spoken content varies
    instead of collapsing onto a few stock phrases.
 3. `generate_synthetic_moshi_training_data.py` asks Gemma to write Japanese
-   counselor dialogues and timing events. The prompt now carries the persona's
+   domain-C dialogues and timing events. The prompt now carries the persona's
    personality, today's emotional state, and the sampled talking points, tells
    Gemma to vary the opening/phrasing, and to keep emotion gradual rather than
    swinging every turn (no forced positive resolution). Sampling uses
@@ -41,7 +41,7 @@ existing pipeline:
    `"もしもし、こちら孤独孤立相談窓口になります。"`, override with
    `--opening-greeting TEXT`). Moshi generating this line itself every time --
    rather than some external layer playing a canned clip -- is the point:
-   emitting it seeds "loneliness/isolation counseling window" as grounding
+   emitting it seeds "domain-C window" as grounding
    context in the model's own generation history before anything else in the
    session happens. The greeting *audio* is synthesized exactly once per run
    with a fixed voice and fixed style instruct

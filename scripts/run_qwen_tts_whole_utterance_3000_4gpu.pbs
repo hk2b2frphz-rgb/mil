@@ -87,7 +87,7 @@ export LEAD_IN_SEC="${LEAD_IN_SEC:-0.3}"
 export GAP_SEC="${GAP_SEC:-0.2}"
 export STYLE_PRESET="${STYLE_PRESET:-none}"
 # Default STYLE_PRESET=none uses raw tempo without a style instruct.
-# Set STYLE_PRESET=auto for the former counseling-style slower tone.
+# Set STYLE_PRESET=auto for the former domain-C-style slower tone.
 # Default to Kokoro at this scale: Qwen3-TTS is too slow to finish 3000+
 # dialogues within realistic walltimes. Kokoro ignores emotion/style instructs
 # (STYLE_PRESET becomes a no-op) but is an order of magnitude faster.

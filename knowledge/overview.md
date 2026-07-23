@@ -3,19 +3,19 @@
 状態: 下書き / 更新日: 2026-07-01
 
 ## 一言で
-日本語の**孤独・孤立相談窓口**向けに、全二重音声対話モデル **Moshi**
+日本語の**分野C窓口**向けに、全二重音声対話モデル **Moshi**
 (`llm-jp/llm-jp-moshi-v1`) をドメイン適応し、**インタラクティビティ（相槌・
 ターンテイキング等の対話の掛け合い）**を GRPO で整えるパイプライン。合成データ
 生成から fine-tune、評価まで一気通貫。
 
 ## リサーチクエスチョン（例。実態に合わせて更新）
-- RQ1: 合成対話＋合成音声だけで、日本語の全二重相談対話にドメイン適応できるか。
+- RQ1: 合成対話＋合成音声だけで、日本語の全二重対話にドメイン適応できるか。
 - RQ2: GRPO で「相槌/割り込み/沈黙」のインタラクティビティを、破綻なく強化できるか。
 - RQ3: end-to-end（Moshi）は cascade（ASR→LLM→TTS）や SpeechLLM に対しどの観点で優位か。
 
 ## パイプライン地図（実装対応）
 ```
-1. use_cases.jsonl      軸の組合せで相談ケース生成    scripts/build_use_cases.py
+1. use_cases.jsonl      軸の組合せで対話ケース生成    scripts/build_use_cases.py
        ↓
 2. dialogues.jsonl      Gemma が感情・沈黙付き対話     scripts/generate_synthetic_moshi_training_data.py
        ↓                                              scripts/gemma_dialogue_worker.py
@@ -36,7 +36,7 @@
 - 合成データ: Qwen3-TTS/VALL-E系, MMS強制アライメント
 - 学習基盤: LoRA, DeepSpeed ZeRO
 - 比較系: Whisper(cascade ASR), Qwen2-Audio(SpeechLLM)
-- 応用: 孤独支援 / 共感対話(EmpatheticDialogues)
+- 応用: 分野C支援 / 共感対話(EmpatheticDialogues)
 
 ## 関連する運用ドキュメント（how-to側）
 - [docs/full_duplex_evaluation.md](../docs/full_duplex_evaluation.md)

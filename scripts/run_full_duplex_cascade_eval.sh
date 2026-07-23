@@ -8,7 +8,7 @@ set -euo pipefail
 # dropped straight into scripts/run_full_duplex_eval_batch.sh and land in the
 # same combined_summary.json side by side with Moshi models. Unlike
 # scripts/run_local_baseline_cascade_eval.pbs this runs ONLY the Full-Duplex
-# pipeline (no loneliness_support) -- the batch is a full-duplex comparison.
+# pipeline (no domain-C support) -- the batch is a full-duplex comparison.
 #
 # This job never calls OpenAI/Azure APIs (same rule as the Moshi eval script) --
 # it only produces the deterministic summary and the azure_judge_input.jsonl to

@@ -29,7 +29,7 @@ PDFは `references/<cat>/<file>.pdf`（git外）。詳細メモがあれば `pap
 | **QLoRA** (2023) | 背景 📄 | 量子化+LoRA。将来のメモリ削減候補 | 現状未使用 |
 | **Mixed Precision** (2017) | 背景 📄 | fp16学習の背景（deepspeed configの`fp16`） | — |
 | **LLM-jp** (2024) | 基盤 📄 | ベースモデルllm-jp-moshi-v1の出自 | 日本語LLMの基盤 |
-| **EmpatheticDialogues** (2019) | 背景 📄 | 応用ドメイン（孤独・孤立支援）の共感対話の参考 | 対話生成([build_use_cases.py](../scripts/build_use_cases.py)等)の観点 |
+| **EmpatheticDialogues** (2019) | 背景 📄 | 応用ドメイン（分野C）の共感対話の参考 | 対話生成([build_use_cases.py](../scripts/build_use_cases.py)等)の観点 |
 
 ## 未取得だが対応が強い（要選定）
 | テーマ | 本repoでの繋がり | 状態 |

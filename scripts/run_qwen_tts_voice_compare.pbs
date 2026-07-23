@@ -7,19 +7,19 @@
 #PBS -j oe
 #PBS -V
 
-# Qwen3-TTS voice A/B listening test for the MOSHI side (counselor).
+# Qwen3-TTS voice A/B listening test for the MOSHI side (responder).
 #
 # Renders the SAME first N dialogues once per candidate voice, holding the user
-# (counselee) side fixed at FIXED_USER and varying only --speaker-moshi, so the
-# moshi turns are identical text across runs and only the counselor voice
+# (user) side fixed at FIXED_USER and varying only --speaker-moshi, so the
+# moshi turns are identical text across runs and only the responder voice
 # differs -- pick the moshi voice you like by ear. Because the fixed opening
-# greeting "moshi moshi, kochira kodoku-koritsu soudan madoguchi ni narimasu."
-# is a moshi turn, it is re-synthesized in each voice: listen to it to compare
-# how each voice reads the "koritsu" (isolation) kanji.
+# greeting is a moshi turn, it is re-synthesized in each voice: listen to it
+# to compare how each voice reads the opening line.
+#
 #
 # Candidate voices default to ALL nine presets (female + male). Style preset
 # defaults to none (raw tempo) so voice quality is judged without the slow
-# counseling tone. Female: Vivian, Serena, Ono_Anna, Sohee. Male: Uncle_Fu,
+# domain-C tone. Female: Vivian, Serena, Ono_Anna, Sohee. Male: Uncle_Fu,
 # Dylan, Eric, Ryan, Aiden.
 #
 #   qsub -V scripts/run_qwen_tts_voice_compare.pbs
@@ -29,7 +29,7 @@
 #   NUM_DIALOGUES=5 qsub -V scripts/run_qwen_tts_voice_compare.pbs
 #   FIXED_USER=Ono_Anna qsub -V scripts/run_qwen_tts_voice_compare.pbs
 #   SOURCE_BATCH_ID=qwen_dialogues_1000_v1 qsub -V scripts/run_qwen_tts_voice_compare.pbs
-#   STYLE_PRESET=auto qsub -V scripts/run_qwen_tts_voice_compare.pbs   # slower counseling tone
+#   STYLE_PRESET=auto qsub -V scripts/run_qwen_tts_voice_compare.pbs   # slower domain-C tone
 
 set -euo pipefail
 
@@ -50,7 +50,7 @@ export NUM_DIALOGUES="${NUM_DIALOGUES:-3}"
 export LEAD_IN_SEC="${LEAD_IN_SEC:-0.3}"
 export GAP_SEC="${GAP_SEC:-0.2}"
 export STYLE_PRESET="${STYLE_PRESET:-none}"
-# The user (counselee) side is held fixed; only the moshi voice is varied.
+# The user side is held fixed; only the moshi voice is varied.
 export FIXED_USER="${FIXED_USER:-Ono_Anna}"
 # All preset voices (VALID_SPEAKERS), female + male. Override with VOICES=...
 export VOICES="${VOICES:-Vivian,Serena,Ono_Anna,Sohee,Uncle_Fu,Dylan,Eric,Ryan,Aiden}"

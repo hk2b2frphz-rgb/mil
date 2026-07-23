@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end pipeline: ~1h of synthetic Japanese counseling audio → Moshi LoRA FT
+# End-to-end pipeline: ~1h of synthetic Japanese domain-C audio → Moshi LoRA FT
 #
 # 想定環境: Linux GPU サーバー、リポジトリのルートで実行。
 # Moshi 用と LLM 用の uv 環境が既に sync 済みであること。

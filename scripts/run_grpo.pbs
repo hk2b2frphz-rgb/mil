@@ -10,7 +10,7 @@
 # GRPO interactivity alignment training for Moshi on 2x A100 80GB.
 #
 # Reproduces the Kyutai Multi-Faceted Interactivity Alignment paper
-# (arxiv 2606.11167) adapted for the loneliness counseling domain.
+# (arxiv 2606.11167) adapted for domain-C.
 #
 # Submit:
 #   qsub scripts/run_grpo.pbs

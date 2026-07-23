@@ -3,6 +3,7 @@
 #
 #   bash scripts/smoke_experiment_dag.sh          # local: inline, no qsub
 #   bash scripts/smoke_experiment_dag.sh pbs      # real qsub self-chain (tiny jobs)
+#   PROXY_URL=http://<proxy-host>:<port> bash scripts/smoke_experiment_dag.sh pbs
 #
 # local: runs the whole chain in one process (--local). The final `verify`
 #        stage checks outputs and prints [SMOKE OK]. Fast, no scheduler.
@@ -10,6 +11,7 @@
 #        from the compute node -- this is what verifies self-chaining works on
 #        this cluster. There is NO login-node polling: the final `verify` stage
 #        (dag_verify job) does the checking and its log ends with [SMOKE OK].
+#        PROXY_URL is inherited via qsub -V and normalized in _dag_stage.pbs.
 #
 # PYTHON overrides how the driver is invoked (default: uv run python).
 

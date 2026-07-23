@@ -39,7 +39,7 @@
 #   REFRESH_FDB_DATA=1                    Rebuild FDB_DATA_DIR even if it exists.
 #   LONELINESS_SCENARIOS=eval_sets/loneliness_support.jsonl
 #   SKIP_FULL_DUPLEX=1                    Skip the Full-Duplex-Bench-JA pipeline.
-#   SKIP_LONELINESS=1                     Skip the loneliness_support pipeline.
+#   SKIP_LONELINESS=1                     Skip the domain-C pipeline.
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"

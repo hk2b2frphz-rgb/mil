@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N qwen_tts_vllm_10000
+#PBS -q xvn_s
+#PBS -l select=1:res=middle2
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# V100 32GB x4 throughput preset for Qwen3-TTS 1.7B.
+# Each shard sees one GPU and hosts one complete vLLM-Omni pipeline.  Re-submit
+# this same job after walltime; the underlying production script resumes.
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export SOURCE_BATCH_ID="${SOURCE_BATCH_ID:-qwen_dialogues_10000_${DIALOGUES_VERSION:-v1}}"
+export BATCH_ID="${BATCH_ID:-${SOURCE_BATCH_ID}_tts_vllm_4gpu}"
+export TTS_BACKEND=qwen3
+export QWEN_ENGINE=vllm-omni
+export TTS_DTYPE=float16
+export TTS_BATCH_SIZE="${TTS_BATCH_SIZE:-16}"
+export DIALOGUE_BATCH_SIZE="${DIALOGUE_BATCH_SIZE:-16}"
+export VLLM_STAGE_CONFIG="${VLLM_STAGE_CONFIG:-$PWD/configs/qwen3_tts_v100_batch16.yaml}"
+export VLLM_PYTHON="${VLLM_PYTHON:-$PWD/.venv-vllm-omni/bin/python}"
+
+exec bash scripts/run_qwen_tts_whole_utterance_10000_4gpu.pbs

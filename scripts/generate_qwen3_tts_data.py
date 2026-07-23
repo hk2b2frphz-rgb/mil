@@ -47,6 +47,11 @@ try:
 except ImportError:  # スクリプト直接実行時（scripts/ が sys.path 先頭）
     from alignment_words import get_segmenter_name, split_utterance_alignments
 
+try:
+    from scripts.qwen3_tts_vllm_backend import SynthesisRequest, VLLMQwen3TTS
+except ImportError:
+    from qwen3_tts_vllm_backend import SynthesisRequest, VLLMQwen3TTS
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -55,7 +60,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# 対話テンプレート（孤独・孤立相談窓口想定の短い日本語対話）
+# 対話テンプレート（分野C想定の短い日本語対話）
 # ---------------------------------------------------------------------------
 
 # 感情ラベル → Qwen3-TTS の instruct 文字列。
@@ -63,14 +68,14 @@ logger = logging.getLogger(__name__)
 EMOTION_PRESETS: dict[str, str] = {
     # 中立
     "neutral":      "自然で落ち着いたトーンで話して",
-    # 相談者 (user) 側でよく使う感情
+    # 利用者 (user) 側でよく使う感情
     "hesitant":     "少し言い淀みながら、ためらうように話して",
     "sad":          "声を少し落として、沈んだトーンで静かに話して",
     "lonely":       "寂しさが滲むような、低めの静かなトーンで話して",
     "anxious":      "不安が伝わるように、声を少し震わせ気味に話して",
     "relieved":     "少しほっとした、肩の力が抜けたような穏やかなトーンで話して",
     "grateful":     "感謝の気持ちを込めて、柔らかいトーンで話して",
-    # 相談者 (user) 側の強い感情・声の状態
+    # 利用者 (user) 側の強い感情・声の状態
     "tearful":      "涙ぐんで、声を震わせながら話して",
     "sobbing":      "声を詰まらせ、すすり泣きながら、途切れ途切れに話して",
     "high_tension": "やや早口で、テンション高く勢いよく話して",
@@ -79,7 +84,7 @@ EMOTION_PRESETS: dict[str, str] = {
     "weary":        "疲れて気だるそうに、ゆっくり力なく話して",
     "irritable":    "苛立ちを抑えきれない、とげのあるトーンで話して",
     "laughing":     "軽く笑いながら、明るいトーンで話して",
-    # 相談員 (moshi) 側でよく使う感情
+    # 応答者 (moshi) 側でよく使う感情
     "warm":         "温かく、相手に寄り添うような穏やかなトーンで話して",
     "gentle":       "やさしく語りかけるように、ゆっくり丁寧に話して",
     "empathetic":   "共感を込めて、相手の気持ちを受け止めるように話して",
@@ -223,7 +228,7 @@ VALID_SPEAKERS = {
 # Fixed opening line every training dialogue's moshi turns begin with (unless
 # --no-opening-greeting). Moshi actually generating this itself -- rather
 # than a canned clip played by some external layer -- is the point: emitting
-# it establishes "loneliness/isolation counseling window" as grounding
+# it establishes "domain-C window" as grounding
 # context in its own generation history before anything else happens.
 # Time-of-day-neutral by design (this is a fixed, always-on line, not a
 # templated greeting picked per time of day).
@@ -280,6 +285,22 @@ class AudioSegment:
     pcm: np.ndarray
     event: str | None = None
     voice_role: str | None = None
+
+
+@dataclass
+class DialogueRenderJob:
+    index: int
+    template: dict[str, Any]
+    dialogue: Dialogue
+    stem: str
+    user_voice: str
+    user_override: str | None
+    other_override: str | None
+    background_override: str | None
+    instruct_user: str | None
+    instruct_moshi: str | None
+    resolved_preset_key: str | None
+    log_progress: bool
 
 
 WHOLE_UTTERANCE_STYLE_PRESETS: dict[str, dict[str, str]] = {
@@ -1243,6 +1264,131 @@ def _chunk_indices_by_chars(
     return chunks
 
 
+def plan_whole_utterance_synthesis(
+    dialogue: Dialogue,
+    *,
+    user_speaker_override: str | None = None,
+    other_speaker_override: str | None = None,
+    background_speaker_override: str | None = None,
+    instruct_user: str | None = None,
+    instruct_moshi: str | None = None,
+    max_chars_per_synthesis: int = 150,
+    opening_greeting_pcm: np.ndarray | None = None,
+) -> list[SynthesisRequest]:
+    """Return TTS calls in exactly the order used by whole-utterance rendering.
+
+    vLLM-Omni evaluates these calls across several dialogues as a batch.  The
+    resulting audio is replayed through ``build_segments_whole_utterance`` so
+    all existing alignment, overlap, and metadata behavior stays unchanged.
+    """
+    concat_groups: dict[str, list[int]] = {"user": [], "moshi": []}
+    per_segment_indices: list[int] = []
+    greeting_indices: set[int] = set()
+
+    for i, turn in enumerate(dialogue.turns):
+        if turn.speaker == "silence":
+            continue
+        if turn.event == "opening_greeting":
+            greeting_indices.add(i)
+            per_segment_indices.append(i)
+        elif turn.speaker in ("user", "moshi") and not turn.voice_role:
+            concat_groups[turn.speaker].append(i)
+        else:
+            per_segment_indices.append(i)
+
+    requests: list[SynthesisRequest] = []
+    for speaker, indices in concat_groups.items():
+        if not indices:
+            continue
+        all_texts = [dialogue.turns[i].text for i in indices]
+        override = user_speaker_override if speaker == "user" else None
+        instruct = instruct_user if speaker == "user" else instruct_moshi
+        for chunk_indices in _chunk_indices_by_chars(
+            indices, all_texts, max_chars_per_synthesis
+        ):
+            requests.append(
+                SynthesisRequest(
+                    text="".join(dialogue.turns[i].text for i in chunk_indices),
+                    speaker_role=speaker,
+                    instruct=instruct,
+                    speaker_override=override,
+                )
+            )
+
+    for i in per_segment_indices:
+        turn = dialogue.turns[i]
+        if i in greeting_indices:
+            if opening_greeting_pcm is None:
+                requests.append(
+                    SynthesisRequest(
+                        text=turn.text,
+                        speaker_role="moshi",
+                        instruct=OPENING_GREETING_INSTRUCT,
+                    )
+                )
+            continue
+        override = None
+        if turn.speaker == "user":
+            if turn.voice_role == "background":
+                override = background_speaker_override or user_speaker_override
+            elif turn.voice_role == "other":
+                override = other_speaker_override or user_speaker_override
+            else:
+                override = user_speaker_override
+        requests.append(
+            SynthesisRequest(
+                text=turn.text,
+                speaker_role=turn.speaker,
+                instruct=turn.instruct,
+                speaker_override=override,
+            )
+        )
+    return requests
+
+
+class ReplayTTS:
+    """TTS facade that replays an already-generated dialogue request list."""
+
+    def __init__(
+        self,
+        requests: list[SynthesisRequest],
+        audio: list[np.ndarray],
+        sample_rate: int,
+    ) -> None:
+        if len(requests) != len(audio):
+            raise ValueError("request/audio count mismatch in batched TTS replay")
+        self._requests = requests
+        self._audio = audio
+        self._position = 0
+        self.sample_rate = sample_rate
+
+    def synthesize(
+        self,
+        text: str,
+        speaker_role: str,
+        instruct: str | None = None,
+        speaker_override: str | None = None,
+    ) -> np.ndarray:
+        if self._position >= len(self._requests):
+            raise RuntimeError("whole-utterance render requested more audio than planned")
+        actual = SynthesisRequest(text, speaker_role, instruct, speaker_override)
+        expected = self._requests[self._position]
+        if actual != expected:
+            raise RuntimeError(
+                "whole-utterance synthesis plan diverged during replay: "
+                f"expected={expected!r}, actual={actual!r}"
+            )
+        audio = self._audio[self._position]
+        self._position += 1
+        return audio.copy()
+
+    def assert_consumed(self) -> None:
+        if self._position != len(self._requests):
+            raise RuntimeError(
+                f"whole-utterance replay left {len(self._requests) - self._position} audio item(s) unused"
+            )
+
+
 def build_segments_whole_utterance(
     dialogue: Dialogue,
     tts: Qwen3TTS | MossTTSD,
@@ -1850,6 +1996,36 @@ def parse_args() -> argparse.Namespace:
         help="Qwen3-TTS の HuggingFace モデル ID（CustomVoice 系を推奨）",
     )
     parser.add_argument(
+        "--qwen-engine",
+        default="transformers",
+        choices=["transformers", "vllm-omni"],
+        help="Qwen3-TTS inference engine. vllm-omni enables cross-dialogue batching.",
+    )
+    parser.add_argument(
+        "--tts-batch-size",
+        type=int,
+        default=16,
+        help="vLLM-Omni requests per GPU batch; must be a power of two.",
+    )
+    parser.add_argument(
+        "--dialogue-batch-size",
+        type=int,
+        default=16,
+        help="Dialogues planned together so their TTS calls can share vLLM batches.",
+    )
+    parser.add_argument(
+        "--vllm-stage-config",
+        type=Path,
+        default=Path("configs/qwen3_tts_v100_batch16.yaml"),
+        help="vLLM-Omni stage/deploy YAML (resolved from the current working directory).",
+    )
+    parser.add_argument(
+        "--vllm-max-new-tokens",
+        type=int,
+        default=2048,
+        help="Maximum Qwen3-TTS talker tokens per request.",
+    )
+    parser.add_argument(
         "--moss-model",
         default="OpenMOSS-Team/MOSS-TTSD-v1.0",
         help="MOSS-TTSD Hugging Face model ID.",
@@ -2068,6 +2244,20 @@ def parse_args() -> argparse.Namespace:
     if args.verbose:
         logging.getLogger(__name__).setLevel(logging.DEBUG)
 
+    if args.qwen_engine == "vllm-omni":
+        if args.tts_backend != "qwen3":
+            parser.error("--qwen-engine vllm-omni requires --tts-backend qwen3")
+        if not args.whole_utterance:
+            parser.error("--qwen-engine vllm-omni currently requires --whole-utterance")
+        if args.device != "cuda":
+            parser.error("--qwen-engine vllm-omni requires --device cuda")
+        if args.dtype != "float16":
+            parser.error("V100 vLLM-Omni jobs require --dtype float16")
+        if args.tts_batch_size < 1 or args.tts_batch_size & (args.tts_batch_size - 1):
+            parser.error("--tts-batch-size must be a positive power of two")
+        if args.dialogue_batch_size < 1:
+            parser.error("--dialogue-batch-size must be positive")
+
     if args.tts_backend == "qwen3":
         for role, name in [
             ("--speaker-user", args.speaker_user),
@@ -2136,6 +2326,187 @@ def parse_args() -> argparse.Namespace:
                     f"--moss-ref-text-{role} is required when --moss-ref-{role} is set"
                 )
     return args
+
+
+def prepare_dialogue_render_job(
+    index: int,
+    template: dict[str, Any],
+    args: argparse.Namespace,
+    emotion_map: dict[str, str],
+    total_dialogues: int,
+) -> DialogueRenderJob:
+    turns: list[DialogueTurn] = []
+    for raw_turn in template["turns"]:
+        speaker = raw_turn["speaker"]
+        if speaker == "silence":
+            turns.append(
+                DialogueTurn(
+                    speaker="silence",
+                    text="",
+                    duration_sec=float(raw_turn.get("duration_sec", 2.0)),
+                    note=raw_turn.get("note"),
+                )
+            )
+            continue
+        emotion = None if args.no_emotion else raw_turn.get("emotion")
+        turns.append(
+            DialogueTurn(
+                speaker=speaker,
+                text=raw_turn["text"],
+                emotion=emotion,
+                instruct=resolve_emotion(emotion, emotion_map),
+                timing=str(raw_turn.get("timing") or "sequential"),
+                start_after_previous_start_sec=optional_float(
+                    raw_turn.get("start_after_previous_start_sec")
+                ),
+                truncate_previous_after_sec=optional_float(
+                    raw_turn.get("truncate_previous_after_sec")
+                ),
+                gain=max(0.0, float(optional_float(raw_turn.get("gain"), 1.0) or 0.0)),
+                voice_role=str(raw_turn.get("voice_role") or "") or None,
+                event=str(raw_turn.get("event") or "") or None,
+            )
+        )
+
+    if not args.no_opening_greeting and args.opening_greeting:
+        turns = [
+            DialogueTurn(
+                speaker="moshi",
+                text=args.opening_greeting,
+                timing="sequential",
+                event="opening_greeting",
+            ),
+            *turns,
+        ]
+
+    dialogue = Dialogue(
+        id=safe_stem(template["id"], f"dialogue_{index:03d}"),
+        category=template["category"],
+        risk_level=template["risk_level"],
+        title=template["title"],
+        turns=turns,
+        duplex_task=str(template.get("duplex_task") or "") or None,
+    )
+    user_voice = args.user_speaker_pool_list[
+        (index - 1) % len(args.user_speaker_pool_list)
+    ]
+    user_override = "user" if args.tts_backend == "moss-ttsd" else user_voice
+    other_override = (
+        "other" if args.tts_backend in ("moss-ttsd", "kokoro") else args.speaker_other
+    )
+    background_override = (
+        "background"
+        if args.tts_backend in ("moss-ttsd", "kokoro")
+        else args.speaker_background
+    )
+    log_progress = (
+        args.log_every <= 1
+        or index == 1
+        or index == total_dialogues
+        or index % args.log_every == 0
+    )
+
+    instruct_user = args.instruct_user
+    instruct_moshi = args.instruct_moshi
+    resolved_preset_key: str | None = None
+    if args.whole_utterance and args.style_preset not in {None, "none"}:
+        preset_key = args.style_preset
+        if preset_key == "random":
+            preset_key = random.choice(list(WHOLE_UTTERANCE_STYLE_PRESETS))
+        elif preset_key == "auto":
+            preset_key = resolve_auto_style_preset(
+                dialogue.id, template.get("emotional_state")
+            )
+        resolved_preset_key = preset_key
+        preset = WHOLE_UTTERANCE_STYLE_PRESETS[preset_key]
+        instruct_user = preset["user"]
+        instruct_moshi = preset["moshi"]
+
+    return DialogueRenderJob(
+        index=index,
+        template=template,
+        dialogue=dialogue,
+        stem=f"sample_{index:03d}_{dialogue.id}",
+        user_voice=user_voice,
+        user_override=user_override,
+        other_override=other_override,
+        background_override=background_override,
+        instruct_user=instruct_user,
+        instruct_moshi=instruct_moshi,
+        resolved_preset_key=resolved_preset_key,
+        log_progress=log_progress,
+    )
+
+
+def iter_dialogue_render_jobs(
+    templates: list[dict[str, Any]],
+    args: argparse.Namespace,
+    emotion_map: dict[str, str],
+    tts: Any,
+    greeting_pcm: np.ndarray | None,
+    done_stems: set[str],
+):
+    """Yield jobs with either the live backend or per-dialogue batched replay."""
+    pending: list[DialogueRenderJob] = []
+
+    def flush():
+        if not pending:
+            return []
+        if args.qwen_engine != "vllm-omni":
+            return [(job, tts) for job in pending]
+
+        request_groups = [
+            plan_whole_utterance_synthesis(
+                job.dialogue,
+                user_speaker_override=job.user_override,
+                other_speaker_override=job.other_override,
+                background_speaker_override=job.background_override,
+                instruct_user=job.instruct_user,
+                instruct_moshi=job.instruct_moshi,
+                max_chars_per_synthesis=args.whole_utterance_max_chars,
+                opening_greeting_pcm=greeting_pcm,
+            )
+            for job in pending
+        ]
+        flat_requests = [request for group in request_groups for request in group]
+        logger.info(
+            "vLLM-Omni planning batch: dialogues=%d requests=%d batch_size=%d",
+            len(pending),
+            len(flat_requests),
+            args.tts_batch_size,
+        )
+        flat_audio = tts.synthesize_many(flat_requests)
+        rendered: list[tuple[DialogueRenderJob, ReplayTTS]] = []
+        offset = 0
+        for job, requests in zip(pending, request_groups):
+            count = len(requests)
+            replay = ReplayTTS(
+                requests,
+                flat_audio[offset : offset + count],
+                sample_rate=tts.sample_rate,
+            )
+            rendered.append((job, replay))
+            offset += count
+        if offset != len(flat_audio):
+            raise RuntimeError("batched TTS output count did not match the synthesis plan")
+        return rendered
+
+    for index, template in enumerate(templates, start=1):
+        stem = f"sample_{index:03d}_{safe_stem(template['id'], f'dialogue_{index:03d}')}"
+        if args.resume and stem in done_stems:
+            continue
+        pending.append(
+            prepare_dialogue_render_job(
+                index, template, args, emotion_map, len(templates)
+            )
+        )
+        if len(pending) >= (
+            args.dialogue_batch_size if args.qwen_engine == "vllm-omni" else 1
+        ):
+            yield from flush()
+            pending.clear()
+    if pending:
+        yield from flush()
 
 
 def main() -> None:
@@ -2216,6 +2587,19 @@ def main() -> None:
             voice_background=args.kokoro_voice_background,
             model_id=args.kokoro_model,
         )
+    elif args.qwen_engine == "vllm-omni":
+        tts = VLLMQwen3TTS(
+            model_id=args.model,
+            dtype_str=args.dtype,
+            speaker_user=args.speaker_user,
+            speaker_moshi=args.speaker_moshi,
+            language=args.language,
+            instruct_user=args.instruct_user,
+            instruct_moshi=args.instruct_moshi,
+            batch_size=args.tts_batch_size,
+            stage_configs_path=args.vllm_stage_config,
+            max_new_tokens=args.vllm_max_new_tokens,
+        )
     else:
         tts = Qwen3TTS(
             model_id=args.model,
@@ -2265,142 +2649,69 @@ def main() -> None:
         )
         fa_aligner.load()
 
-    success_count = 0
+    completed_stems = {
+        f"sample_{idx:03d}_{safe_stem(tmpl['id'], f'dialogue_{idx:03d}')}"
+        for idx, tmpl in enumerate(templates, start=1)
+    } & done_stems
+    success_count = len(completed_stems) if args.resume else 0
     failed_count = 0
     fa_failed_count = 0
-    for idx, tmpl in enumerate(templates, start=1):
+    if success_count:
+        logger.info("resume: %d/%d dialogue(s) already complete", success_count, len(templates))
+
+    if args.success_target is not None and success_count >= args.success_target:
+        render_jobs = iter(())
+        logger.info(
+            "success-target %d is already satisfied; no TTS batches will run",
+            args.success_target,
+        )
+    else:
+        render_jobs = iter_dialogue_render_jobs(
+            templates, args, emotion_map, tts, greeting_pcm, done_stems
+        )
+
+    for job, render_tts in render_jobs:
+        idx = job.index
+        tmpl = job.template
+        dialogue = job.dialogue
+        stem = job.stem
+        user_voice = job.user_voice
+        user_override = job.user_override
+        other_override = job.other_override
+        background_override = job.background_override
+        log_progress = job.log_progress
+        resolved_preset_key = job.resolved_preset_key
         try:
-            turns: list[DialogueTurn] = []
-            for t in tmpl["turns"]:
-                speaker = t["speaker"]
-                if speaker == "silence":
-                    turns.append(DialogueTurn(
-                        speaker="silence",
-                        text="",
-                        duration_sec=float(t.get("duration_sec", 2.0)),
-                        note=t.get("note"),
-                    ))
-                    continue
-                emotion = None if args.no_emotion else t.get("emotion")
-                instruct = resolve_emotion(emotion, emotion_map)
-                turns.append(DialogueTurn(
-                    speaker=speaker,
-                    text=t["text"],
-                    emotion=emotion,
-                    instruct=instruct,
-                    timing=str(t.get("timing") or "sequential"),
-                    start_after_previous_start_sec=optional_float(
-                        t.get("start_after_previous_start_sec")
-                    ),
-                    truncate_previous_after_sec=optional_float(
-                        t.get("truncate_previous_after_sec")
-                    ),
-                    gain=max(0.0, float(optional_float(t.get("gain"), 1.0) or 0.0)),
-                    voice_role=str(t.get("voice_role") or "") or None,
-                    event=str(t.get("event") or "") or None,
-                ))
-            # Prepended after validate_duplex_dialogue() has already run on
-            # tmpl["turns"] (see the validation loop above main's dialogue
-            # loop), so index-based duplex-task checks (e.g. "turn 0 must be
-            # X") stay correct -- this greeting only ever affects the
-            # synthesis-time turn list, never the validated template.
-            if not args.no_opening_greeting and args.opening_greeting:
-                turns = [
-                    DialogueTurn(speaker="moshi", text=args.opening_greeting,
-                                 timing="sequential", event="opening_greeting"),
-                    *turns,
-                ]
-            dialogue = Dialogue(
-                id=safe_stem(tmpl["id"], f"dialogue_{idx:03d}"),
-                category=tmpl["category"],
-                risk_level=tmpl["risk_level"],
-                title=tmpl["title"],
-                turns=turns,
-                duplex_task=str(tmpl.get("duplex_task") or "") or None,
-            )
-
-            # Resume fast-path: if this sample was already rendered in a prior
-            # run (WAV+JSON on disk, captured in done_stems at startup), count
-            # it as a success and skip the expensive synthesis. Its manifest /
-            # dialogues rows were already restored by rebuild_from_completed(),
-            # so we must not re-append them here.
-            stem = f"sample_{idx:03d}_{dialogue.id}"
-            if args.resume and stem in done_stems:
-                success_count += 1
-                if args.log_every <= 1 or idx == 1 or idx % args.log_every == 0:
-                    logger.info(
-                        "[%d/%d] %s は完了済みのためスキップします",
-                        idx, len(templates), stem,
-                    )
-                if args.success_target is not None and success_count >= args.success_target:
-                    logger.info(
-                        "success-target %d に到達（完了済み含む）したため打ち切ります",
-                        args.success_target,
-                    )
-                    break
-                continue
-
-            user_voice = args.user_speaker_pool_list[(idx - 1) % len(args.user_speaker_pool_list)]
-            # kokoro: user_voice は jf_*/jm_* の話者IDそのもの（KokoroTTS が
-            # override として直接受理する）。other/background はロール名で渡し、
-            # KokoroTTS 内の固定マップ（--kokoro-voice-other 等）に解決させる。
-            user_override = "user" if args.tts_backend == "moss-ttsd" else user_voice
-            other_override = (
-                "other" if args.tts_backend in ("moss-ttsd", "kokoro")
-                else args.speaker_other
-            )
-            background_override = (
-                "background" if args.tts_backend in ("moss-ttsd", "kokoro")
-                else args.speaker_background
-            )
-            # Throttle the per-dialogue progress pair (this + the
-            # "保存完了" log below) so large runs (thousands of dialogues)
-            # don't produce a shard log with two lines per dialogue on top
-            # of the per-chunk debug logs. Failures are always logged
-            # regardless (see the except block below).
-            log_progress = (
-                args.log_every <= 1
-                or idx == 1
-                or idx == len(templates)
-                or idx % args.log_every == 0
-            )
+            if args.success_target is not None and success_count >= args.success_target:
+                logger.info(
+                    "success-target %d に到達（完了済み含む）したため打ち切ります",
+                    args.success_target,
+                )
+                break
             if log_progress:
                 logger.info(
                     "[%d/%d] 対話 %s を合成中 (moshi=%s, user=%s) ...",
                     idx, len(templates), dialogue.id, args.speaker_moshi, user_voice,
                 )
+                if resolved_preset_key is not None:
+                    logger.info("style-preset: %s", resolved_preset_key)
             t0 = time.time()
-            resolved_preset_key: str | None = None
             if args.whole_utterance and fa_aligner is not None:
-                instruct_u = args.instruct_user
-                instruct_m = args.instruct_moshi
-                if args.style_preset not in {None, "none"}:
-                    preset_key = args.style_preset
-                    if preset_key == "random":
-                        preset_key = random.choice(list(WHOLE_UTTERANCE_STYLE_PRESETS))
-                    elif preset_key == "auto":
-                        preset_key = resolve_auto_style_preset(
-                            dialogue.id, tmpl.get("emotional_state")
-                        )
-                    resolved_preset_key = preset_key
-                    preset = WHOLE_UTTERANCE_STYLE_PRESETS[preset_key]
-                    instruct_u = preset["user"]
-                    instruct_m = preset["moshi"]
-                    if log_progress:
-                        logger.info("style-preset: %s", preset_key)
                 segments, silences = build_segments_whole_utterance(
-                    dialogue, tts, fa_aligner, args.lead_in_sec, args.gap_sec,
+                    dialogue, render_tts, fa_aligner, args.lead_in_sec, args.gap_sec,
                     user_speaker_override=user_override,
                     other_speaker_override=other_override,
                     background_speaker_override=background_override,
-                    instruct_user=instruct_u,
-                    instruct_moshi=instruct_m,
+                    instruct_user=job.instruct_user,
+                    instruct_moshi=job.instruct_moshi,
                     max_chars_per_synthesis=args.whole_utterance_max_chars,
                     opening_greeting_pcm=greeting_pcm,
                 )
+                if isinstance(render_tts, ReplayTTS):
+                    render_tts.assert_consumed()
             else:
                 segments, silences = build_segments(
-                    dialogue, tts, args.lead_in_sec, args.gap_sec,
+                    dialogue, render_tts, args.lead_in_sec, args.gap_sec,
                     user_speaker_override=user_override,
                     other_speaker_override=other_override,
                     background_speaker_override=background_override,
@@ -2457,6 +2768,14 @@ def main() -> None:
                     "sample_rate": tts.sample_rate,
                     "duration_sec": round(duration, 4),
                     "tts_backend": args.tts_backend,
+                    "qwen_engine": (
+                        args.qwen_engine if args.tts_backend == "qwen3" else None
+                    ),
+                    "tts_batch_size": (
+                        args.tts_batch_size
+                        if args.qwen_engine == "vllm-omni"
+                        else 1
+                    ),
                     "tts_model": (
                         args.moss_model if args.tts_backend == "moss-ttsd"
                         else args.model
@@ -2559,6 +2878,9 @@ def main() -> None:
         "対話合成完了: 成功 %d 件, 失敗 %d 件 (うち FA 失敗による破棄 %d 件)",
         success_count, failed_count, fa_failed_count,
     )
+    close_tts = getattr(tts, "close", None)
+    if callable(close_tts):
+        close_tts()
     if args.success_target is not None and success_count < args.success_target:
         raise SystemExit(
             f"success-target {args.success_target} に届きませんでした "

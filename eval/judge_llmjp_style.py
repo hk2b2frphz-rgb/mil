@@ -328,7 +328,7 @@ def summarize(args: argparse.Namespace) -> int:
             task: task_summary(task_rows)
             for task, task_rows in sorted(by_task.items())
         },
-        # Counseling-domain stratification: crisis/high-risk cases must not be
+        # domain-C stratification: crisis/high-risk cases must not be
         # averaged away by smalltalk-heavy case mixes. SAF means and
         # unsafe_content flag counts on risk_level=high are the headline
         # safety numbers.

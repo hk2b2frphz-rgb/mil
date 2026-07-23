@@ -4,13 +4,13 @@ The Japanese Full-Duplex-Bench v1/v1.5 evaluation follows upstream commit
 `3e799c45a045256f47d5f1c9cda90157e2d2ec9e` with only documented English-to-Japanese adaptations. See [docs/full_duplex_evaluation.md](docs/full_duplex_evaluation.md).
 Evaluation input audio uses Qwen3-TTS, with automatic `pyopenjtalk` fallback when Qwen3-TTS is unavailable.
 
-日本語孤独・孤立相談窓口向けに Moshi (llm-jp/llm-jp-moshi-v1) を LoRA で
+日本語分野C窓口向けに Moshi (llm-jp/llm-jp-moshi-v1) を LoRA で
 ドメイン適応するためのパイプライン。合成データの生成から fine-tune まで一気通貫で回せる。
 
 ## パイプライン概要
 
 ```
-1. use_cases.jsonl          ← 軸の組み合わせで多様な相談ケースを生成
+1. use_cases.jsonl          ← 軸の組み合わせで多様な対話ケースを生成
        ↓ build_use_cases.py
 2. dialogues.jsonl          ← Gemma 4 が感情・沈黙付き対話スクリプトを生成
        ↓ generate_synthetic_moshi_training_data.py
@@ -42,6 +42,15 @@ qsub -v PROXY_URL=http://<proxy-host>:<port>,MODEL_ID=base \
 
 `socket.getaddrinfo: Name or service not known`が出る場合は、指定した
 プロキシホストが計算ノードから名前解決できるか確認する。
+
+実験DAGの自己連結 smoke も同じ方法で渡せる。最初の `qsub` と、各計算
+ノードから投入される次段の `qsub -V` に引き継がれ、各段の
+`scripts/setup_proxy.sh` が `HTTP_PROXY` / `HTTPS_PROXY` を設定する。
+
+```bash
+PROXY_URL=http://<proxy-host>:<port> \
+  bash scripts/smoke_experiment_dag.sh pbs
+```
 
 ## 使い方
 
@@ -128,6 +137,29 @@ Kokoro は emotion/style instruct 非対応（`STYLE_PRESET` は無視される�
 moshi=`jf_alpha` 固定、user は日本語4話者（jf_gongitsune/jf_nezumi/jf_tebukuro/jm_kumo）を
 対話ごとにローテーション（`KOKORO_VOICE_MOSHI` / `KOKORO_USER_VOICES` で変更、
 `TTS_BACKEND=qwen3` で旧挙動）。Kokoro の依存は隔離 uv 環境でジョブ内に自動構築される。
+
+#### Qwen3-TTS 1.7B / vLLM-Omni（V100 32GB × 4）
+
+Qwen3-TTSの音質とstyle instructを維持して10,000対話を生成する場合は、
+vLLM-Omni専用ジョブを使う。各V100に1.7Bモデルを1つずつ複製し、各シャードで
+複数対話の発話を長さ順にまとめてbatch 16で生成する。tensor parallelは使わない。
+
+```bash
+# 初回のみ。V100が見える計算ノード上でPython 3.12環境を作成する
+bash scripts/setup_vllm_omni_v100_env.sh
+
+# まず100対話で速度・VRAM・音質を確認
+NUM_DIALOGUES=100 FRESH=1 qsub -V scripts/run_qwen_tts_vllm_10000_4gpu.pbs
+
+# 10,000対話本番。同じBATCH_IDで再投入すると途中から再開する
+qsub -V scripts/run_qwen_tts_vllm_10000_4gpu.pbs
+```
+
+既定は `TTS_BATCH_SIZE=16`、`DIALOGUE_BATCH_SIZE=16`、`float16`。
+V100はbfloat16非対応なので変更しない。OOM時は両方を8に下げる。
+vLLM-Omniは更新が速いため、クラスタのCUDA/driverに合わせて
+`VLLM_VERSION` と `VLLM_OMNI_VERSION` を同じ版に指定できる。
+出力形式、MMS_FA alignment、resume、4シャードのマージは従来ジョブと同じ。
 
 出力は `data/runs/<printed BATCH_ID>/`。ジョブログの `out_root` をマージ・学習に使う。
 `BATCH_ID` の既定は smoke/1000 ジョブは**タイムスタンプ付き**（毎回新規 run）、
@@ -316,7 +348,7 @@ qsub -v SRC_RUN_DIR=data/runs/$BATCH_ID/merged scripts/fullft_sweep.pbs
 
 ## 実対話データ（1chロールプレイ）の分析とテストデータ作成
 
-1ch のロールプレイ録音（相談員/相談者の2話者）を話者タイムライン化し、
+1ch のロールプレイ録音（応答者/利用者の2話者）を話者タイムライン化し、
 **耳で確認できる WAV 群**と統計を出す。ダイアライゼーションは
 `nvidia/diar_streaming_sortformer_4spk-v2`（NeMo・非ゲート・CC-BY-4.0、
 HF の同意/トークン不要）、書き起こしは faster-whisper。
@@ -557,7 +589,7 @@ nu-dialogue runner. The important curves are `train.loss`, `train.loss.text`,
 `scripts/generate_qwen3_tts_data.py` also supports
 `--tts-backend moss-ttsd`. It uses MOSS-TTSD once per utterance with a single
 `[S1]` speaker and a role-specific voice-cloning reference. Stereo assembly is
-unchanged: left is `moshi` (相談員), right is `user` (相談者).
+unchanged: left is `moshi` (応答者), right is `user` (利用者).
 
 MOSS jobs use two environments because `qwen-tts`/Moshi require Transformers 4
 while MOSS-TTSD-v1.0 requires Transformers 5. First, the shared project

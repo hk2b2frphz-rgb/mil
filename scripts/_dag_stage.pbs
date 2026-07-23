@@ -17,6 +17,13 @@ set -euo pipefail
 
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 
+# qsub -V carries PROXY_URL (or the PROXY_HOST/PORT form) from the submitter
+# into every self-chained job. Normalize it here so the stage body and its
+# child qsub both receive the conventional HTTP(S)_PROXY variables.
+# Credentials stay in the submit environment, never in the DAG YAML.
+# shellcheck source=/dev/null
+source "$PWD/scripts/setup_proxy.sh"
+
 : "${STAGE:?STAGE not set (this wrapper is meant to be submitted by run_experiment_dag.py)}"
 : "${CONFIG:?CONFIG not set}"
 

@@ -9,7 +9,7 @@
   対話スクリプトを生成し、そのまま以下のいずれかのモードで音声化する:
   - `scripted-moshi-tts`（既定）: Kyutai/Moshi TTS でスクリプトをステレオWAV化
   - `moshi-selfplay`: ローカルTTSで user 音声を作り、llm-jp-moshi-v1 に
-    それを聞かせて相談員側の応答をモデル自身に生成させる
+    それを聞かせて応答側の応答をモデル自身に生成させる
   - `scripted-local-tts` / `scripted-stereo`: pyopenjtalk/pyttsx3 で両話者を
     ローカルTTSレンダリング（フォーマット確認用の軽量モード）
 - `gemma_dialogue_worker.py` — `--llm-backend transformers-subprocess` 用の

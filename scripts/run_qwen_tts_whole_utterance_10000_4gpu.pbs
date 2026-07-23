@@ -98,12 +98,17 @@ export LEAD_IN_SEC="${LEAD_IN_SEC:-0.3}"
 export GAP_SEC="${GAP_SEC:-0.2}"
 export STYLE_PRESET="${STYLE_PRESET:-none}"
 # Default STYLE_PRESET=none uses raw tempo without a style instruct.
-# Set STYLE_PRESET=auto for the former counseling-style slower tone.
+# Set STYLE_PRESET=auto for the former domain-C-style slower tone.
 # Default to Kokoro at this scale: Qwen3-TTS is too slow to finish 10000
 # dialogues within realistic walltimes. Kokoro ignores emotion/style instructs
 # (STYLE_PRESET becomes a no-op) but is an order of magnitude faster.
 # Set TTS_BACKEND=qwen3 to restore the old behavior.
 export TTS_BACKEND="${TTS_BACKEND:-kokoro}"
+export QWEN_ENGINE="${QWEN_ENGINE:-transformers}"
+export TTS_BATCH_SIZE="${TTS_BATCH_SIZE:-16}"
+export DIALOGUE_BATCH_SIZE="${DIALOGUE_BATCH_SIZE:-16}"
+export VLLM_STAGE_CONFIG="${VLLM_STAGE_CONFIG:-$PWD/configs/qwen3_tts_v100_batch16.yaml}"
+export VLLM_PYTHON="${VLLM_PYTHON:-$PWD/.venv-vllm-omni/bin/python}"
 export KOKORO_VOICE_MOSHI="${KOKORO_VOICE_MOSHI:-jf_alpha}"
 export KOKORO_USER_VOICES="${KOKORO_USER_VOICES:-jf_gongitsune,jf_nezumi,jf_tebukuro,jm_kumo}"
 # Throttles generate_qwen3_tts_data.py's per-dialogue progress logging (every
@@ -150,6 +155,8 @@ echo "===== TTS whole-utterance production 10000 (4 GPU, backend=$TTS_BACKEND) =
 echo "job_id:        ${PBS_JOBID:-n/a}"
 echo "host:          $(hostname)"
 echo "tts_backend:   $TTS_BACKEND"
+echo "qwen_engine:   $QWEN_ENGINE"
+echo "tts_batch:     $TTS_BATCH_SIZE (dialogues=$DIALOGUE_BATCH_SIZE)"
 echo "source_batch:  $SOURCE_BATCH_ID"
 echo "out_root:      $OUT_ROOT"
 echo "resume:        $RESUME"
@@ -175,7 +182,7 @@ echo "===== step 0/3: uv environment preflight ====="
 # Kokoro is not part of the main project env (its misaki[ja]/unidic deps are
 # heavy and conflict-prone), so it runs in an isolated uv env pinned to the
 # main env's torch/torchaudio -- the same pattern as run_tts_comparison.pbs.
-GEN_UV=(uv run)
+GEN_CMD=(uv run python)
 if [[ "$TTS_BACKEND" == "kokoro" ]]; then
     TORCH_VERSION="$(uv run python -c 'import torch; print(torch.__version__)')"
     TORCHAUDIO_VERSION="$(uv run python -c 'import torchaudio; print(torchaudio.__version__)')"
@@ -204,6 +211,37 @@ from kokoro import KPipeline  # noqa: F401
 import torchaudio  # noqa: F401
 print("kokoro/torchaudio preflight ok")
 PY
+    GEN_CMD=("${GEN_UV[@]}" python)
+elif [[ "$QWEN_ENGINE" == "vllm-omni" ]]; then
+    if [[ "$TTS_BACKEND" != "qwen3" ]]; then
+        echo "ERROR: QWEN_ENGINE=vllm-omni requires TTS_BACKEND=qwen3" >&2
+        exit 1
+    fi
+    if [[ ! -x "$VLLM_PYTHON" ]]; then
+        echo "ERROR: vLLM Python not found: $VLLM_PYTHON" >&2
+        echo "Run scripts/setup_vllm_omni_v100_env.sh first." >&2
+        exit 1
+    fi
+    if [[ ! -s "$VLLM_STAGE_CONFIG" ]]; then
+        echo "ERROR: vLLM stage config not found: $VLLM_STAGE_CONFIG" >&2
+        exit 1
+    fi
+    "$VLLM_PYTHON" - <<'PY'
+import numpy  # noqa: F401
+import soundfile  # noqa: F401
+import sphn  # noqa: F401
+import torch
+import torchaudio  # noqa: F401
+import vllm  # noqa: F401
+import vllm_omni  # noqa: F401
+if not torch.cuda.is_available():
+    raise SystemExit("CUDA is unavailable in the vLLM-Omni environment")
+major, minor = torch.cuda.get_device_capability()
+if (major, minor) != (7, 0):
+    print(f"warning: expected V100 sm70, found sm{major}{minor}")
+print("vllm-omni/V100/torchaudio preflight ok")
+PY
+    GEN_CMD=("$VLLM_PYTHON")
 else
     uv run python - <<'PY'
 import numpy  # noqa: F401
@@ -319,8 +357,9 @@ for ((i = 0; i < NUM_SHARDS; i++)); do
         set -euo pipefail
         echo "[$shard_tag] gpu=$gpu_id dialogues=$shard_dialogues out=$shard_training success_target=$success_target resume=$RESUME"
         tts_args=(
-            "${GEN_UV[@]}" python scripts/generate_qwen3_tts_data.py
+            "${GEN_CMD[@]}" scripts/generate_qwen3_tts_data.py
             --tts-backend "$TTS_BACKEND"
+            --qwen-engine "$QWEN_ENGINE"
             --dialogues-jsonl "$shard_dialogues"
             --auto-overlap-aizuchi
             --whole-utterance
@@ -328,6 +367,9 @@ for ((i = 0; i < NUM_SHARDS; i++)); do
             --out-dir "$shard_training"
             --device "$TTS_DEVICE"
             --dtype "$TTS_DTYPE"
+            --tts-batch-size "$TTS_BATCH_SIZE"
+            --dialogue-batch-size "$DIALOGUE_BATCH_SIZE"
+            --vllm-stage-config "$VLLM_STAGE_CONFIG"
             --lead-in-sec "$LEAD_IN_SEC"
             --gap-sec "$GAP_SEC"
             --no-emotion

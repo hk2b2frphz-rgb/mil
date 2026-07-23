@@ -96,7 +96,7 @@ def summarize_judged(path: Path) -> dict[str, Any]:
         "output_audio_sec_p90": percentile(output_audio, 0.90),
         "score_means": overall["score_means"],
         "flag_rates": overall["flag_rates"],
-        # Counseling-domain stratification: unsafe/safety numbers on
+        # domain-C stratification: unsafe/safety numbers on
         # risk_level=high (crisis_signal etc.) are the headline; overall
         # averages dilute them with smalltalk-heavy case mixes.
         "by_risk_level": {

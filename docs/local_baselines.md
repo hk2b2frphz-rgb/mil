@@ -66,7 +66,7 @@ Qwen2-Audio-7B-Instruct is a ~8B-parameter model; budget VRAM accordingly.
 Use a smaller `--llm-model`/`--asr-model` for a quick local smoke test
 (e.g. `--asr-model base`, `--llm-model google/gemma-2-2b-it`).
 
-## loneliness_support quality/latency/safety comparison
+## domain-C quality/latency/safety comparison
 
 Turn-based, so this is the pipeline where the comparison is most
 apples-to-apples: same fixed utterances, same judge, same metrics.

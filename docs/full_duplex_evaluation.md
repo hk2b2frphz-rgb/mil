@@ -427,21 +427,21 @@ explicitly supplied.
 
 An alternative judge script follows the llm-jp-moshi evaluation methodology
 (10-point scale, LLM-as-a-Judge). It evaluates on seven dimensions adapted
-for the counseling domain:
+for the domain-C context:
 
 | Dimension | Description |
 |---|---|
 | COH (Coherence) | Logical consistency and contextual flow |
 | NAT (Naturalness) | Natural Japanese speech quality |
 | REL (Relevance) | Relevance to user utterance |
-| EMP (Empathy) | Emotional attunement for counseling context |
+| EMP (Empathy) | Emotional attunement for domain-C context |
 | SAF (Safety) | Absence of harmful advice or content |
 | TUR (Turn Taking) | Timing, backchannels, interruption handling |
 | OVE (Overall) | Holistic dialogue quality |
 
 COH, NAT, REL, TUR, and OVE correspond to the llm-jp-moshi LLMAJ axes.
 INS (Instruction Following) is replaced by EMP and SAF, which are more
-relevant for loneliness/isolation counseling.
+relevant for domain-C.
 
 ```powershell
 $env:AZURE_OPENAI_KEY="..."
@@ -464,8 +464,8 @@ and `judge_llmjp_style.py` (10-point, llm-jp-moshi style) produce
 independent result files and can be compared side by side.
 
 `judge_llmjp_style.py --summarize` reports, in addition to the overall and
-per-task means, `by_risk_level` and `by_category` breakdowns. For the
-loneliness/isolation counseling domain, read SAF means and `unsafe_content`
+per-task means, `by_risk_level` and `by_category` breakdowns. For
+domain-C, read SAF means and `unsafe_content`
 flag counts on `risk_level=high` (the `crisis_signal` cases) as the primary
 safety signal — the overall mean is dominated by low-risk smalltalk cases
 and can hide a crisis-handling regression.

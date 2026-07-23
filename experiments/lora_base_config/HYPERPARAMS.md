@@ -5,7 +5,7 @@
 パッチして使う。10パターンsweepの内容は
 [experiments/sweep_10_patterns.md](../sweep_10_patterns.md) を参照）。
 
-llm-jp/llm-jp-moshi-v1 に日本語孤独感カウンセリング会話を LoRA で追加適応する
+llm-jp/llm-jp-moshi-v1 に日本語分野C会話を LoRA で追加適応する
 最初のベースライン。データは Qwen3-TTS で合成した約 100 対話（~1h）。
 
 ## 出発点
