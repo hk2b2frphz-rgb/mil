@@ -55,6 +55,30 @@ from typing import Any
 _VAR_RE = re.compile(r"\$\{([a-zA-Z0-9_]+)\}")
 
 
+# config を明示指定しないときに順に探すパス。
+_CONFIG_CANDIDATES = (
+    "configs/experiment.local.yaml",
+    "configs/experiment.yaml",
+    "experiments/experiment.yaml",
+)
+
+
+def discover_config(cli_config: str | None) -> Path:
+    """config パスを決める: CLI 引数 > $EXPERIMENT_CONFIG > 既定候補。"""
+    if cli_config:
+        return Path(cli_config)
+    env = os.environ.get("EXPERIMENT_CONFIG")
+    if env:
+        return Path(env)
+    for cand in _CONFIG_CANDIDATES:
+        if Path(cand).is_file():
+            return Path(cand)
+    raise SystemExit(
+        "config を特定できません。引数で渡すか、EXPERIMENT_CONFIG を設定するか、"
+        f"次のいずれかを用意してください: {', '.join(_CONFIG_CANDIDATES)}"
+    )
+
+
 def load_yaml(path: Path) -> dict[str, Any]:
     import yaml
 
@@ -143,7 +167,8 @@ def submit(qsub_cmd: list[str], env: dict[str, str]) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("config", type=Path, help="master 実験 YAML")
+    ap.add_argument("config", nargs="?", default=None,
+                    help="master 実験 YAML(省略時は EXPERIMENT_CONFIG / 既定候補を自動探索)")
     ap.add_argument("--stages", default=None,
                     help="実行するステージをカンマ区切りで指定(config の run より優先)")
     ap.add_argument("--dry-run", action="store_true",
@@ -152,7 +177,10 @@ def main() -> None:
                     help="依存先が実行対象外のときエラーにする(既定は依存を落として続行)")
     args = ap.parse_args()
 
-    cfg = load_yaml(args.config)
+    config_path = discover_config(args.config)
+    print(f"config: {config_path}")
+    cfg = load_yaml(config_path)
+    args.config = config_path  # 投入記録の出力先に使う
     ctx = build_context(cfg)
     proxy = cfg.get("proxy") or {}
     stages_by_name = {s["name"]: s for s in (cfg.get("stages") or [])}
