@@ -156,7 +156,9 @@ qsub -V scripts/run_qwen_tts_vllm_10000_4gpu.pbs
 ```
 
 既定は `TTS_BATCH_SIZE=16`、`DIALOGUE_BATCH_SIZE=16`、`float16`。
-V100はbfloat16非対応なので変更しない。OOM時は両方を8に下げる。
+V100はbfloat16非対応なので変更しない。OOM時は両方を8に下げる。専用環境は
+CUDA 12.9（`cu129`）PyTorch wheel と vLLM 0.21 系を明示的に導入し、CPU版
+PyTorch が入った場合はセットアップを失敗として終了する。
 vLLM-Omniは更新が速いため、クラスタのCUDA/driverに合わせて
 `VLLM_VERSION` と `VLLM_OMNI_VERSION` を同じ版に指定できる。
 出力形式、MMS_FA alignment、resume、4シャードのマージは従来ジョブと同じ。
