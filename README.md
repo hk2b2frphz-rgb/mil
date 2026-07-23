@@ -145,8 +145,10 @@ vLLM-Omni専用ジョブを使う。各V100に1.7Bモデルを1つずつ複製�
 複数対話の発話を長さ順にまとめてbatch 16で生成する。tensor parallelは使わない。
 
 ```bash
-# 初回のみ。V100が見える計算ノード上でPython 3.12環境を作成する
-bash scripts/setup_vllm_omni_v100_env.sh
+# 初回のみ。V100が見える計算ノード上でPython 3.12環境を作成する。
+# PROXY_URL は setup_proxy.sh により pip と git の両方へ反映される。
+PROXY_URL=http://<proxy-host>:<port> \
+  bash scripts/setup_vllm_omni_v100_env.sh
 
 # まず100対話で速度・VRAM・音質を確認
 NUM_DIALOGUES=100 FRESH=1 qsub -V scripts/run_qwen_tts_vllm_10000_4gpu.pbs
@@ -157,10 +159,12 @@ qsub -V scripts/run_qwen_tts_vllm_10000_4gpu.pbs
 
 既定は `TTS_BATCH_SIZE=16`、`DIALOGUE_BATCH_SIZE=16`、`float16`。
 V100はbfloat16非対応なので変更しない。OOM時は両方を8に下げる。専用環境は
-CUDA 12.9（`cu129`）PyTorch wheel と vLLM 0.21 系を明示的に導入し、CPU版
-PyTorch が入った場合はセットアップを失敗として終了する。
-vLLM-Omniは更新が速いため、クラスタのCUDA/driverに合わせて
-`VLLM_VERSION` と `VLLM_OMNI_VERSION` を同じ版に指定できる。
+`cuda12.6_cudnn9.7.1_nccl2.24.3` module と PyTorch 2.11の `cu126` wheelを使う。
+cu128/cu129 wheelはV100のsm70 kernelを含まないため使わない。セットアップは
+PyTorchのsm70対応とCUDA実行を先に検査し、そのPyTorchに対してvLLM 0.21.0を
+`TORCH_CUDA_ARCH_LIST=7.0` でソースビルドする。初回ビルドには時間がかかる。
+実行ジョブも同じCUDA moduleを自動loadする。変更が必要なら
+`VLLM_CUDA_MODULE`、`VLLM_VERSION`、`VLLM_OMNI_VERSION` を明示する。
 出力形式、MMS_FA alignment、resume、4シャードのマージは従来ジョブと同じ。
 
 #### 100対話の新規速度テスト

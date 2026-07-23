@@ -15,6 +15,22 @@ set -euo pipefail
 
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 
+export VLLM_CUDA_MODULE="${VLLM_CUDA_MODULE:-cuda12.6_cudnn9.7.1_nccl2.24.3}"
+if ! command -v module >/dev/null 2>&1; then
+    for module_init in /etc/profile.d/modules.sh /usr/share/Modules/init/bash; do
+        if [[ -r "$module_init" ]]; then
+            # shellcheck source=/dev/null
+            source "$module_init"
+            break
+        fi
+    done
+fi
+command -v module >/dev/null 2>&1 || {
+    echo "ERROR: environment modules are unavailable; cannot load $VLLM_CUDA_MODULE" >&2
+    exit 1
+}
+module load "$VLLM_CUDA_MODULE"
+
 export SOURCE_BATCH_ID="${SOURCE_BATCH_ID:-qwen_dialogues_10000_${DIALOGUES_VERSION:-v1}}"
 export BATCH_ID="${BATCH_ID:-${SOURCE_BATCH_ID}_tts_vllm_4gpu}"
 export TTS_BACKEND=qwen3
@@ -24,5 +40,6 @@ export TTS_BATCH_SIZE="${TTS_BATCH_SIZE:-16}"
 export DIALOGUE_BATCH_SIZE="${DIALOGUE_BATCH_SIZE:-16}"
 export VLLM_STAGE_CONFIG="${VLLM_STAGE_CONFIG:-$PWD/configs/qwen3_tts_v100_batch16.yaml}"
 export VLLM_PYTHON="${VLLM_PYTHON:-$PWD/.venv-vllm-omni/bin/python}"
+export PATH="$(dirname "$VLLM_PYTHON"):$PATH"
 
 exec bash scripts/run_qwen_tts_whole_utterance_10000_4gpu.pbs

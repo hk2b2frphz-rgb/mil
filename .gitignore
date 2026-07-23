@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .venv-vllm-omni/
+.vendor/
 
 # Pipeline outputs (regenerable)
 data/
