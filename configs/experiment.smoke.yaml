@@ -55,3 +55,16 @@ stages:
       TRAIN_OUT: "${train_out}"
       EVAL_OUT: "${eval_out}"
     expect: ["${eval_out}/summary.txt"]
+    next: verify
+
+  # Final self-verify link: checks every stage's output and prints the verdict.
+  # Because it runs as the last job in the self-chain, the smoke result lives in
+  # this job's log (dag_verify) -- no login-node polling needed.
+  - name: verify
+    cmd: 'ok=1; for f in "$DIALOGUE_OUT/dialogues.jsonl" "$TTS_OUT/synthetic_moshi_train.jsonl" "$TRAIN_OUT/consolidated.safetensors" "$EVAL_OUT/summary.txt"; do if [ -f "$f" ]; then echo "[verify] ok:   $f"; else echo "[verify] MISS: $f"; ok=0; fi; done; if [ "$ok" = 1 ]; then echo "[SMOKE OK] all stages passed"; else echo "[SMOKE FAILED]"; exit 1; fi'
+    env:
+      DIALOGUE_OUT: "${dialogue_out}"
+      TTS_OUT: "${tts_out}"
+      TRAIN_OUT: "${train_out}"
+      EVAL_OUT: "${eval_out}"
+    expect: ["${eval_out}/summary.txt"]
