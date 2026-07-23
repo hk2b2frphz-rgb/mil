@@ -25,6 +25,7 @@ configs/voice_synth.*.yaml
 configs/experiment.yaml
 configs/experiment.*.yaml
 !configs/experiment.example.yaml
+!configs/experiment.smoke.yaml
 experiments/*.yaml
 experiments/_submitted_*.json
 

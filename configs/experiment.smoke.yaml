@@ -1,0 +1,46 @@
+# Smoke config for the experiment pipeline: fake, instant stages that only
+# exercise the orchestration + output wiring (no GPU, no qsub).
+#
+# Each stage checks its INPUT (the previous stage's declared output exists),
+# creates its OUTPUT, and prints OK. Run it locally:
+#   uv run python scripts/run_experiment_dag.py configs/experiment.smoke.yaml --start --local
+# or via the smoke script:
+#   bash scripts/smoke_experiment_dag.sh
+
+experiment: smoke
+out_root: data/runs/_smoke
+
+paths:
+  dialogue_out: "${out_root}/dialogue"
+  tts_out: "${out_root}/tts"
+  train_out: "${out_root}/checkpoints"
+  eval_out: "${out_root}/eval"
+
+start: dialogue
+
+stages:
+  - name: dialogue
+    cmd: 'mkdir -p "$DIALOGUE_OUT" && echo "{}" > "$DIALOGUE_OUT/dialogues.jsonl" && echo "[dialogue] wrote $DIALOGUE_OUT/dialogues.jsonl"'
+    env:
+      DIALOGUE_OUT: "${dialogue_out}"
+    next: tts
+
+  - name: tts
+    cmd: 'test -f "$DIALOGUE_OUT/dialogues.jsonl" && mkdir -p "$TTS_OUT" && touch "$TTS_OUT/synthetic_moshi_train.jsonl" && echo "[tts] read $DIALOGUE_OUT, wrote $TTS_OUT"'
+    env:
+      DIALOGUE_OUT: "${dialogue_out}"
+      TTS_OUT: "${tts_out}"
+    next: train
+
+  - name: train
+    cmd: 'test -f "$TTS_OUT/synthetic_moshi_train.jsonl" && mkdir -p "$TRAIN_OUT" && touch "$TRAIN_OUT/consolidated.safetensors" && echo "[train] read $TTS_OUT, wrote $TRAIN_OUT"'
+    env:
+      TTS_OUT: "${tts_out}"
+      TRAIN_OUT: "${train_out}"
+    next: eval
+
+  - name: eval
+    cmd: 'test -f "$TRAIN_OUT/consolidated.safetensors" && mkdir -p "$EVAL_OUT" && echo "[eval] read $TRAIN_OUT, ok" > "$EVAL_OUT/summary.txt" && echo "[eval] read $TRAIN_OUT"'
+    env:
+      TRAIN_OUT: "${train_out}"
+      EVAL_OUT: "${eval_out}"

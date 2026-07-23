@@ -97,6 +97,12 @@ def build_context(cfg: dict[str, Any]) -> dict[str, str]:
     for key, value in (cfg.get("vars") or {}).items():
         if isinstance(value, (str, int, float)):
             ctx[key] = str(value)
+    # paths: 各ステージの入出力先。${out_root} 等を先に展開して ctx に足す。
+    # これにより env で ${dialogue_out} のように参照でき、途中ステージから
+    # 開始しても前段の出力先を config から解決できる。
+    for key, value in (cfg.get("paths") or {}).items():
+        if isinstance(value, (str, int, float)):
+            ctx[key] = interp(str(value), ctx)
     return ctx
 
 
@@ -206,38 +212,46 @@ def print_chain(cfg: dict[str, Any], config_path: Path, start: str) -> None:
 
 
 def run_stage(cfg: dict[str, Any], config_path: Path, name: str,
-              ctx: dict[str, str], no_chain: bool) -> int:
-    """ステージjob の中身。本体を実行し、成功したら next を qsub する。"""
+              ctx: dict[str, str], no_chain: bool, local: bool = False) -> int:
+    """ステージ本体を実行し、成功したら next を進める。
+
+    local=False: next を qsub(自己連鎖・本番)。
+    local=True : next を同一プロセスで inline 実行(qsub 不要・smoke/単一ノード用)。
+    """
     by_name = stages_by_name(cfg)
     stage = by_name.get(name)
     if stage is None:
         raise SystemExit(f"未定義のステージ: {name}")
 
     env = {**os.environ, **stage_env(cfg, stage, ctx)}
+    shell = os.environ.get("DAG_SHELL", "bash")  # クラスタ/OS 差異用の逃げ道
     if stage.get("cmd"):
-        cmd = ["bash", "-c", interp(str(stage["cmd"]), ctx)]
+        cmd = [shell, "-c", interp(str(stage["cmd"]), ctx)]
     else:
         pbs = interp(str(stage["pbs"]), ctx)
         if not Path(pbs).is_file():
             raise SystemExit(f"ステージ {name} の PBS が見つかりません: {pbs}")
-        cmd = ["bash", pbs]
+        cmd = [shell, pbs]
 
     print(f"===== stage {name}: 実行開始 =====", flush=True)
     print(f"  cmd: {' '.join(cmd)}", flush=True)
     rc = subprocess.run(cmd, env=env).returncode
-    print(f"===== stage {name}: 終了 (exit {rc}) =====", flush=True)
     if rc != 0:
-        print(f"[{name}] 失敗のため next は投入しません", flush=True)
+        print(f"[{name}] FAIL (exit {rc}) -- next は進めません", flush=True)
         return rc
+    print(f"[{name}] OK", flush=True)
 
     nxt = stage.get("next")
-    if nxt and not no_chain:
-        print(f"[{name}] 成功 → next '{nxt}' を投入します", flush=True)
-        submit_stage(cfg, config_path, nxt, dry=False)
-    elif nxt and no_chain:
-        print(f"[{name}] 成功(--no-chain のため next '{nxt}' は投入しません)", flush=True)
-    else:
-        print(f"[{name}] 成功(連鎖の終端)", flush=True)
+    if not nxt:
+        print(f"[{name}] 連鎖の終端", flush=True)
+        return 0
+    if no_chain:
+        print(f"[{name}] --no-chain のため next '{nxt}' は進めません", flush=True)
+        return 0
+    if local:
+        return run_stage(cfg, config_path, nxt, ctx, no_chain, local=True)
+    print(f"[{name}] 成功 → next '{nxt}' を投入します", flush=True)
+    submit_stage(cfg, config_path, nxt, dry=False)
     return 0
 
 
@@ -252,7 +266,9 @@ def main() -> None:
     ap.add_argument("--run-stage", default=None,
                     help="(内部用)ステージjob から本体を実行し next を投入")
     ap.add_argument("--no-chain", action="store_true",
-                    help="run-stage 時に next を投入しない(単発実行)")
+                    help="next を進めない(単発実行)")
+    ap.add_argument("--local", action="store_true",
+                    help="qsub を使わず、連鎖を同一プロセスで inline 実行(smoke/単一ノード)")
     ap.add_argument("--dry-run", action="store_true",
                     help="start 時: 連鎖内容を表示するだけ(投入しない)")
     args = ap.parse_args()
@@ -263,18 +279,27 @@ def main() -> None:
     print(f"config: {config_path}")
 
     if args.run_stage:
-        rc = run_stage(cfg, config_path, args.run_stage, ctx, args.no_chain)
+        rc = run_stage(cfg, config_path, args.run_stage, ctx, args.no_chain, args.local)
         sys.exit(rc)
 
     # start / start-at
     start = start_stage_name(cfg, args.start_at)
+    mode = "DRY-RUN" if args.dry_run else ("LOCAL" if args.local else "SUBMIT")
     print(f"experiment: {cfg.get('experiment', '<none>')}")
-    print(f"start: {start}   mode: {'DRY-RUN' if args.dry_run else 'SUBMIT'}\n")
+    print(f"start: {start}   mode: {mode}\n")
 
     if args.dry_run:
         print("chain:")
         print_chain(cfg, config_path, start)
         return
+
+    if args.local:
+        rc = run_stage(cfg, config_path, start, ctx, args.no_chain, local=True)
+        if rc == 0:
+            print("\n[SMOKE/LOCAL OK] 全ステージ通過")
+        else:
+            print(f"\n[FAILED] exit {rc}")
+        sys.exit(rc)
 
     if shutil.which("qsub") is None:
         raise SystemExit("qsub が PATH にありません。投入ノードで実行してください "

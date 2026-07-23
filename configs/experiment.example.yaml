@@ -31,6 +31,16 @@ vars:
   base_exp: lora_base_config
   source_batch_id: qwen_dialogues_1000_v1
 
+# Per-stage output directories. Because these are ${name}-usable below, you can
+# start mid-chain and still point a stage at an earlier stage's output, e.g.
+# start at `tts` and it reads ${dialogue_out}:
+#   uv run python scripts/run_experiment_dag.py --start-at tts
+paths:
+  dialogue_out: "${out_root}/dialogue"
+  tts_out: "${out_root}/tts"
+  train_out: "${out_root}/checkpoints"
+  eval_out: "${out_root}/eval"
+
 # Where the chain starts (omit to start at the first stage).
 start: dialogue
 
@@ -41,39 +51,41 @@ default_resources:
   walltime: "24:00:00"
 
 stages:
-  # 1) LLM dialogue generation -> dialogues.jsonl
+  # 1) LLM dialogue generation -> ${dialogue_out}/dialogues.jsonl
   - name: dialogue
     pbs: scripts/run_dialogues_qwen_1000.pbs
     resources: {queue: xvn_s, select: "1:res=small", walltime: "24:00:00"}
     env:
       BATCH_ID: "${source_batch_id}"
+      OUT_DIR: "${dialogue_out}"          # adjust to the dialogue script's output var
     next: tts
 
-  # 2) Whole-utterance Qwen3-TTS synthesis (4 GPU) -> training_set
+  # 2) Whole-utterance Qwen3-TTS synthesis (4 GPU): reads ${dialogue_out}, writes ${tts_out}
   - name: tts
     pbs: scripts/run_qwen_tts_whole_utterance_1000_4gpu.pbs
     resources: {queue: xvn_s, select: "1:res=middle2", walltime: "24:00:00"}
     env:
       SOURCE_BATCH_ID: "${source_batch_id}"
-      OUT_ROOT: "${out_root}/tts"
+      DIALOGUES_JSONL: "${dialogue_out}/dialogues.jsonl"
+      OUT_ROOT: "${tts_out}"
     next: train
 
-  # 3) Moshi fine-tuning (reuses the generated data)
+  # 3) Moshi fine-tuning: reads ${tts_out}, writes ${train_out}
   - name: train
     pbs: scripts/run_experiment.pbs
     resources: {queue: xan_s, select: "1:res=small", walltime: "24:00:00"}
     env:
-      SRC_RUN_DIR: "${out_root}/tts"
+      SRC_RUN_DIR: "${tts_out}"
       BASE_EXP: "${base_exp}"
       HP_LR: 2e-6
       HP_LORA_RANK: 32
       HP_MAX_STEPS: 500
     next: eval
 
-  # 4) Full-Duplex-Bench evaluation of the trained checkpoint (no next = end)
+  # 4) Full-Duplex-Bench evaluation: reads ${train_out} (no next = end)
   - name: eval
     pbs: scripts/run_full_duplex_eval.pbs
     resources: {queue: xvn_s, select: "1:res=small", walltime: "12:00:00"}
     env:
       MODEL_ID: lora_h01
-      MODEL_WEIGHT: "${out_root}/checkpoints/consolidated.safetensors"
+      MODEL_WEIGHT: "${train_out}/consolidated.safetensors"
