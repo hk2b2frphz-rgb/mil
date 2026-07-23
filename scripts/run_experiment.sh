@@ -563,7 +563,7 @@ PY
         --output-json "$BEST_JSON"; then
 
         BEST_CKPT="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['checkpoint_path'])" "$BEST_JSON")"
-        MERGED_OUT="$EXP_DIR/merged/${RUN_TS}/consolidated.safetensors"
+        MERGED_OUT="${MERGED_OUT:-$EXP_DIR/merged/${RUN_TS}/consolidated.safetensors}"
         mkdir -p "$(dirname "$MERGED_OUT")"
 
         if [[ "$SAVE_ADAPTERS" == "false" ]]; then

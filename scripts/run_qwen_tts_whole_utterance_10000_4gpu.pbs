@@ -149,6 +149,7 @@ mkdir -p "$OUT_ROOT" "$OUT_ROOT/logs" experiments/pbs_logs
 JOB_TAG="${PBS_JOBID:-local}"
 JOB_TAG="${JOB_TAG%%.*}"
 JOB_LOG="experiments/pbs_logs/${BATCH_ID}_${JOB_TAG:-local}.log"
+JOB_STARTED_EPOCH="$(date +%s)"
 exec > >(tee -a "$JOB_LOG") 2>&1
 
 echo "===== TTS whole-utterance production 10000 (4 GPU, backend=$TTS_BACKEND) ====="
@@ -419,4 +420,26 @@ test -s "$MERGED_MANIFEST"
 MERGED_ROWS="$(grep -c . "$MERGED_MANIFEST" || true)"
 echo "merged_manifest: $MERGED_MANIFEST"
 echo "merged_rows:     $MERGED_ROWS"
+uv run python - "$MERGED_MANIFEST" "$JOB_STARTED_EPOCH" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+manifest = Path(sys.argv[1])
+started = float(sys.argv[2])
+rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
+dialogues = len(rows)
+audio_sec = sum(float(row.get("duration") or 0.0) for row in rows)
+wall_sec = max(time.time() - started, 1e-9)
+dialogues_per_sec = dialogues / wall_sec
+audio_x = audio_sec / wall_sec
+rtf = wall_sec / audio_sec if audio_sec > 0 else 0.0
+print(
+    "performance: "
+    f"dialogues={dialogues} audio_sec={audio_sec:.2f} wall_sec={wall_sec:.2f} "
+    f"dialogues_per_sec={dialogues_per_sec:.4f} "
+    f"aggregate_audio_x={audio_x:.3f} aggregate_rtf={rtf:.3f}"
+)
+PY
 echo "finished_at:     $(date -Iseconds)"

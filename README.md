@@ -199,6 +199,15 @@ grep -E 'merged_rows|merged_manifest|finished_at' \
   "experiments/pbs_logs/${BATCH_ID}_"*.log
 ```
 
+速度はGPUごとの `shard_*.log` にvLLM batch単位の `audio_x` / `rtf` と
+シャード合計を、ジョブ全体ログに4 GPU合計の `performance:` を出す。
+
+```bash
+grep -E 'batch complete|performance summary|^performance:' \
+  data/runs/${BATCH_ID}/logs/shard_*.log \
+  "experiments/pbs_logs/${BATCH_ID}_"*.log
+```
+
 出力は `data/runs/<printed BATCH_ID>/`。ジョブログの `out_root` をマージ・学習に使う。
 `BATCH_ID` の既定は smoke/1000 ジョブは**タイムスタンプ付き**（毎回新規 run）、
 3000/10000 ジョブは**固定名**（再投入すると同じ dir に resume し、完了済みシャードは

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -69,6 +70,10 @@ class VLLMQwen3TTS:
         self._omni: Any = None
         self._tokenizer: Any = None
         self._talker_config: Any = None
+        self._perf_batches = 0
+        self._perf_requests = 0
+        self._perf_audio_sec = 0.0
+        self._perf_inference_sec = 0.0
 
     def load(self) -> None:
         if self._omni is not None:
@@ -198,6 +203,7 @@ class VLLMQwen3TTS:
     def _generate_batch(self, requests: Sequence[SynthesisRequest]) -> list[np.ndarray]:
         assert self._omni is not None
         prompts = [self._to_prompt(request) for request in requests]
+        started = time.perf_counter()
         stage_outputs = self._omni.generate(prompts, use_tqdm=False)
         ordered: list[np.ndarray | None] = [None] * len(requests)
 
@@ -220,7 +226,46 @@ class VLLMQwen3TTS:
         missing = [i for i, audio in enumerate(ordered) if audio is None]
         if missing:
             raise RuntimeError(f"vLLM-Omni produced no final audio for request(s): {missing}")
-        return [audio for audio in ordered if audio is not None]
+        result = [audio for audio in ordered if audio is not None]
+        inference_sec = time.perf_counter() - started
+        audio_sec = sum(audio.size for audio in result) / self.sample_rate
+        self._perf_batches += 1
+        self._perf_requests += len(result)
+        self._perf_audio_sec += audio_sec
+        self._perf_inference_sec += inference_sec
+        audio_x = audio_sec / inference_sec if inference_sec > 0 else 0.0
+        rtf = inference_sec / audio_sec if audio_sec > 0 else 0.0
+        logger.info(
+            "vLLM-Omni batch complete: requests=%d audio_sec=%.2f "
+            "wall_sec=%.2f audio_x=%.3f rtf=%.3f",
+            len(result),
+            audio_sec,
+            inference_sec,
+            audio_x,
+            rtf,
+        )
+        return result
+
+    def performance_stats(self) -> dict[str, float | int]:
+        """Return cumulative engine-only generation metrics for this process."""
+        audio_x = (
+            self._perf_audio_sec / self._perf_inference_sec
+            if self._perf_inference_sec > 0
+            else 0.0
+        )
+        rtf = (
+            self._perf_inference_sec / self._perf_audio_sec
+            if self._perf_audio_sec > 0
+            else 0.0
+        )
+        return {
+            "batches": self._perf_batches,
+            "requests": self._perf_requests,
+            "audio_sec": self._perf_audio_sec,
+            "inference_wall_sec": self._perf_inference_sec,
+            "audio_x": audio_x,
+            "rtf": rtf,
+        }
 
     def synthesize_many(self, requests: Sequence[SynthesisRequest]) -> list[np.ndarray]:
         self.load()

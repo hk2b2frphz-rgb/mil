@@ -2878,6 +2878,19 @@ def main() -> None:
         "対話合成完了: 成功 %d 件, 失敗 %d 件 (うち FA 失敗による破棄 %d 件)",
         success_count, failed_count, fa_failed_count,
     )
+    performance_stats = getattr(tts, "performance_stats", None)
+    if callable(performance_stats):
+        perf = performance_stats()
+        logger.info(
+            "vLLM-Omni performance summary: batches=%d requests=%d "
+            "audio_sec=%.2f inference_wall_sec=%.2f audio_x=%.3f rtf=%.3f",
+            perf["batches"],
+            perf["requests"],
+            perf["audio_sec"],
+            perf["inference_wall_sec"],
+            perf["audio_x"],
+            perf["rtf"],
+        )
     close_tts = getattr(tts, "close", None)
     if callable(close_tts):
         close_tts()

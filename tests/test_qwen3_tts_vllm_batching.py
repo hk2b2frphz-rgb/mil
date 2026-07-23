@@ -187,3 +187,8 @@ def test_vllm_backend_batches_and_restores_original_order(tmp_path) -> None:
     assert fake_omni.batch_sizes == [2, 1]
     assert [float(item[0]) for item in audio] == [5.0, 1.0, 3.0]
     assert backend.sample_rate == 24_000
+    stats = backend.performance_stats()
+    assert stats["batches"] == 2
+    assert stats["requests"] == 3
+    assert stats["audio_sec"] == 9 / 24_000
+    assert stats["inference_wall_sec"] >= 0
