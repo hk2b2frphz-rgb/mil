@@ -1,61 +1,61 @@
 #!/usr/bin/env python3
 """
-実験全体を1つの YAML で管理し、ステージごとに qsub を依存付きで投入するドライバ。
+実験パイプラインを1つの YAML で管理し、ステージを「自己連鎖」で回すドライバ。
 
-master YAML でステージ(学習データ生成 / 学習 / 評価 …)を定義し、`run:` で
-「どれを実行するか」を選ぶ。各ステージは別々の PBS ジョブとして qsub され、
-`depends_on` に応じて `-W depend=afterok:<jobid>` で連鎖する。
+各ステージは独立した PBS ジョブとして走り、**自分の処理が成功したら末尾で次段を
+qsub する**(`next:`)。中央の司令塔ジョブを持たないので、常に走っているのは
+「今のステージ」だけ = 無駄な待機リソースが無い。依存(-W depend)も使わない。
 
-このスクリプトは**投入ノード(ログインノード)で実行**する。qsub を呼ぶだけで
-GPU は使わない。
+このスクリプトの2つの顔:
+  - `--start` / `--start-at <stage>` : 最初(または指定)のステージを qsub して
+    連鎖を開始する。一瞬で終わるのでログインノードで実行してよい。
+  - `--run-stage <stage>`            : ステージjob(_dag_stage.pbs)の中から呼ばれ、
+    本体を実行し、成功したら `next:` を qsub する。
 
 使い方:
-    # 何が投入されるか確認(投入しない)
-    uv run python scripts/run_experiment_dag.py experiments/exp01.yaml --dry-run
-    # 実際に投入
-    uv run python scripts/run_experiment_dag.py experiments/exp01.yaml
-    # 一部ステージだけ
-    uv run python scripts/run_experiment_dag.py experiments/exp01.yaml --stages eval
+    # 連鎖の中身を確認(投入しない)
+    uv run python scripts/run_experiment_dag.py --start --dry-run
+    # dialogue から連鎖開始
+    uv run python scripts/run_experiment_dag.py --start
+    # eval だけ(次段を撃たない)
+    uv run python scripts/run_experiment_dag.py --start-at eval --no-chain
+
+config は引数 > $EXPERIMENT_CONFIG > 既定候補 から自動で読む。
 
 YAML 概略:
     experiment: exp01
     out_root: data/runs/exp01
-    proxy: {http_proxy: "", https_proxy: "", no_proxy: ""}
-    run: [traindata, train, eval]          # 実行するステージ(省略時は全部)
+    proxy: {http_proxy: "", ...}
+    start: dialogue                    # --start の起点(省略時は最初の stage)
+    default_resources: {queue: xvn_s, select: "1:res=small", walltime: "24:00:00"}
     stages:
-      - name: traindata
+      - name: dialogue
+        pbs: scripts/run_dialogues_qwen_1000.pbs
+        resources: {queue: xvn_s, select: "1:res=small", walltime: "24:00:00"}
+        env: {BATCH_ID: "${source_batch_id}"}
+        next: tts
+      - name: tts
         pbs: scripts/run_qwen_tts_whole_utterance_1000_4gpu.pbs
-        env: {OUT_ROOT: "${out_root}"}
-      - name: train
-        pbs: scripts/run_experiment.pbs
-        depends_on: [traindata]
-        env: {SRC_RUN_DIR: "${out_root}", BASE_EXP: lora_base_config}
-      - name: eval
-        pbs: scripts/run_full_duplex_eval.pbs
-        depends_on: [train]
-        env: {MODEL_ID: lora_h01, MODEL_WEIGHT: "${out_root}/checkpoints/consolidated.safetensors"}
-
-env 値の型: 文字列/数値はそのまま文字列化。true は "1"、false/空は「その変数を渡さない」。
-${name} は out_root / experiment / vars ブロックのスカラーを展開する。
+        resources: {select: "1:res=middle2", walltime: "24:00:00"}
+        next: train
+      - name: train  { ... next: eval }
+      - name: eval   { ... }            # next 無し = 連鎖の終端
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import shutil
 import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 _VAR_RE = re.compile(r"\$\{([a-zA-Z0-9_]+)\}")
+_WRAPPER_PBS = "scripts/_dag_stage.pbs"
 
-
-# config を明示指定しないときに順に探すパス。
 _CONFIG_CANDIDATES = (
     "configs/experiment.local.yaml",
     "configs/experiment.yaml",
@@ -64,7 +64,6 @@ _CONFIG_CANDIDATES = (
 
 
 def discover_config(cli_config: str | None) -> Path:
-    """config パスを決める: CLI 引数 > $EXPERIMENT_CONFIG > 既定候補。"""
     if cli_config:
         return Path(cli_config)
     env = os.environ.get("EXPERIMENT_CONFIG")
@@ -91,7 +90,6 @@ def load_yaml(path: Path) -> dict[str, Any]:
 
 
 def build_context(cfg: dict[str, Any]) -> dict[str, str]:
-    """${...} 展開に使うスカラー辞書。experiment / out_root / vars: を集める。"""
     ctx: dict[str, str] = {}
     for key in ("experiment", "out_root"):
         if cfg.get(key) not in (None, ""):
@@ -112,11 +110,31 @@ def interp(value: str, ctx: dict[str, str]) -> str:
     return _VAR_RE.sub(repl, value)
 
 
-def stage_env(stage: dict[str, Any], proxy: dict[str, Any],
+def stages_by_name(cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {s["name"]: s for s in (cfg.get("stages") or [])}
+
+
+def start_stage_name(cfg: dict[str, Any], cli_start_at: str | None) -> str:
+    if cli_start_at:
+        return cli_start_at
+    if cfg.get("start"):
+        return str(cfg["start"])
+    stages = cfg.get("stages") or []
+    if not stages:
+        raise SystemExit("stages が空です")
+    return stages[0]["name"]
+
+
+def resources_for(cfg: dict[str, Any], stage: dict[str, Any]) -> dict[str, str]:
+    res = dict(cfg.get("default_resources") or {})
+    res.update(stage.get("resources") or {})
+    return {k: str(v) for k, v in res.items() if v not in (None, "")}
+
+
+def stage_env(cfg: dict[str, Any], stage: dict[str, Any],
               ctx: dict[str, str]) -> dict[str, str]:
-    """このステージの qsub に渡す環境変数を組み立てる。"""
     env: dict[str, str] = {}
-    # proxy を先に(ステージ env で上書き可能)。
+    proxy = cfg.get("proxy") or {}
     for key in ("http_proxy", "https_proxy", "no_proxy"):
         val = proxy.get(key) if isinstance(proxy, dict) else None
         if val:
@@ -124,137 +142,147 @@ def stage_env(stage: dict[str, Any], proxy: dict[str, Any],
             env[key.upper()] = str(val)
     for key, value in (stage.get("env") or {}).items():
         if value is False or value is None:
-            continue  # 渡さない = 未設定扱い
-        if value is True:
-            env[key] = "1"
-        else:
-            env[key] = interp(str(value), ctx)
+            continue
+        env[key] = "1" if value is True else interp(str(value), ctx)
     return env
 
 
-def resolve_run_order(cfg: dict[str, Any], cli_stages: list[str] | None) -> list[str]:
-    stages = cfg.get("stages") or []
-    defined = [s["name"] for s in stages]
-    if cli_stages:
-        unknown = [s for s in cli_stages if s not in defined]
-        if unknown:
-            raise SystemExit(f"未定義のステージ: {unknown}(定義: {defined})")
-        want = set(cli_stages)
-    elif cfg.get("run"):
-        unknown = [s for s in cfg["run"] if s not in defined]
-        if unknown:
-            raise SystemExit(f"run に未定義のステージ: {unknown}")
-        want = set(cfg["run"])
-    else:
-        want = set(defined)
-    # 定義順を維持して選択。
-    return [name for name in defined if name in want]
+def qsub_command(config_path: Path, name: str, res: dict[str, str]) -> list[str]:
+    cmd = ["qsub", "-N", f"dag_{name}"]
+    if res.get("queue"):
+        cmd += ["-q", res["queue"]]
+    if res.get("select"):
+        cmd += ["-l", f"select={res['select']}"]
+    if res.get("walltime"):
+        cmd += ["-l", f"walltime={res['walltime']}"]
+    cmd += ["-j", "oe", "-V",
+            "-v", f"STAGE={name},CONFIG={config_path}",
+            _WRAPPER_PBS]
+    return cmd
 
 
-def submit(qsub_cmd: list[str], env: dict[str, str]) -> str:
-    full_env = {**os.environ, **env}
-    proc = subprocess.run(qsub_cmd, env=full_env, capture_output=True, text=True)
+def submit_stage(cfg: dict[str, Any], config_path: Path, name: str,
+                 dry: bool) -> str:
+    stage = stages_by_name(cfg).get(name)
+    if stage is None:
+        raise SystemExit(f"未定義のステージ: {name}")
+    if not (stage.get("pbs") or stage.get("cmd")):
+        raise SystemExit(f"ステージ {name} に pbs: も cmd: もありません")
+    res = resources_for(cfg, stage)
+    cmd = qsub_command(config_path, name, res)
+    if dry:
+        print(f"  qsub: {' '.join(cmd)}")
+        return f"<dry:{name}>"
+    proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
-        raise SystemExit(
-            f"qsub 失敗 (exit {proc.returncode}):\n"
-            f"  cmd: {' '.join(qsub_cmd)}\n  stderr: {proc.stderr.strip()}"
-        )
+        raise SystemExit(f"qsub 失敗 (exit {proc.returncode}): {proc.stderr.strip()}")
     job_id = proc.stdout.strip().splitlines()[-1].strip() if proc.stdout.strip() else ""
     if not job_id:
         raise SystemExit(f"qsub が job id を返しませんでした: {proc.stdout!r}")
+    print(f"  submitted {name}: {job_id}")
     return job_id
+
+
+def print_chain(cfg: dict[str, Any], config_path: Path, start: str) -> None:
+    by_name = stages_by_name(cfg)
+    seen: set[str] = set()
+    name: str | None = start
+    n = 0
+    while name:
+        if name in seen:
+            print(f"  [warn] 循環検出: {name} で停止")
+            break
+        seen.add(name)
+        stage = by_name.get(name)
+        if stage is None:
+            raise SystemExit(f"未定義のステージ: {name}")
+        n += 1
+        res = resources_for(cfg, stage)
+        target = stage.get("pbs") or f"cmd: {stage.get('cmd')}"
+        print(f"  {n}. {name}  [{res.get('queue', '?')} {res.get('select', '?')} "
+              f"{res.get('walltime', '?')}]  -> {target}")
+        submit_stage(cfg, config_path, name, dry=True)
+        name = stage.get("next")
+
+
+def run_stage(cfg: dict[str, Any], config_path: Path, name: str,
+              ctx: dict[str, str], no_chain: bool) -> int:
+    """ステージjob の中身。本体を実行し、成功したら next を qsub する。"""
+    by_name = stages_by_name(cfg)
+    stage = by_name.get(name)
+    if stage is None:
+        raise SystemExit(f"未定義のステージ: {name}")
+
+    env = {**os.environ, **stage_env(cfg, stage, ctx)}
+    if stage.get("cmd"):
+        cmd = ["bash", "-c", interp(str(stage["cmd"]), ctx)]
+    else:
+        pbs = interp(str(stage["pbs"]), ctx)
+        if not Path(pbs).is_file():
+            raise SystemExit(f"ステージ {name} の PBS が見つかりません: {pbs}")
+        cmd = ["bash", pbs]
+
+    print(f"===== stage {name}: 実行開始 =====", flush=True)
+    print(f"  cmd: {' '.join(cmd)}", flush=True)
+    rc = subprocess.run(cmd, env=env).returncode
+    print(f"===== stage {name}: 終了 (exit {rc}) =====", flush=True)
+    if rc != 0:
+        print(f"[{name}] 失敗のため next は投入しません", flush=True)
+        return rc
+
+    nxt = stage.get("next")
+    if nxt and not no_chain:
+        print(f"[{name}] 成功 → next '{nxt}' を投入します", flush=True)
+        submit_stage(cfg, config_path, nxt, dry=False)
+    elif nxt and no_chain:
+        print(f"[{name}] 成功(--no-chain のため next '{nxt}' は投入しません)", flush=True)
+    else:
+        print(f"[{name}] 成功(連鎖の終端)", flush=True)
+    return 0
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("config", nargs="?", default=None,
                     help="master 実験 YAML(省略時は EXPERIMENT_CONFIG / 既定候補を自動探索)")
-    ap.add_argument("--stages", default=None,
-                    help="実行するステージをカンマ区切りで指定(config の run より優先)")
+    ap.add_argument("--config", dest="config_opt", default=None,
+                    help="config を明示指定(位置引数と同義)")
+    ap.add_argument("--start", action="store_true", help="連鎖を先頭から開始")
+    ap.add_argument("--start-at", default=None, help="指定ステージから連鎖開始")
+    ap.add_argument("--run-stage", default=None,
+                    help="(内部用)ステージjob から本体を実行し next を投入")
+    ap.add_argument("--no-chain", action="store_true",
+                    help="run-stage 時に next を投入しない(単発実行)")
     ap.add_argument("--dry-run", action="store_true",
-                    help="qsub を実行せず、投入内容だけ表示")
-    ap.add_argument("--strict", action="store_true",
-                    help="依存先が実行対象外のときエラーにする(既定は依存を落として続行)")
+                    help="start 時: 連鎖内容を表示するだけ(投入しない)")
     args = ap.parse_args()
 
-    config_path = discover_config(args.config)
-    print(f"config: {config_path}")
+    config_path = discover_config(args.config or args.config_opt).resolve()
     cfg = load_yaml(config_path)
-    args.config = config_path  # 投入記録の出力先に使う
     ctx = build_context(cfg)
-    proxy = cfg.get("proxy") or {}
-    stages_by_name = {s["name"]: s for s in (cfg.get("stages") or [])}
-    cli_stages = [s.strip() for s in args.stages.split(",")] if args.stages else None
-    order = resolve_run_order(cfg, cli_stages)
-    if not order:
-        raise SystemExit("実行対象のステージがありません(run / --stages を確認)")
+    print(f"config: {config_path}")
 
-    if not args.dry_run and shutil.which("qsub") is None:
+    if args.run_stage:
+        rc = run_stage(cfg, config_path, args.run_stage, ctx, args.no_chain)
+        sys.exit(rc)
+
+    # start / start-at
+    start = start_stage_name(cfg, args.start_at)
+    print(f"experiment: {cfg.get('experiment', '<none>')}")
+    print(f"start: {start}   mode: {'DRY-RUN' if args.dry_run else 'SUBMIT'}\n")
+
+    if args.dry_run:
+        print("chain:")
+        print_chain(cfg, config_path, start)
+        return
+
+    if shutil.which("qsub") is None:
         raise SystemExit("qsub が PATH にありません。投入ノードで実行してください "
                          "(--dry-run なら qsub 不要)。")
-
-    print(f"experiment: {cfg.get('experiment', '<none>')}")
-    print(f"stages to run: {order}")
-    print(f"mode: {'DRY-RUN' if args.dry_run else 'SUBMIT'}\n")
-
-    submitted: dict[str, str] = {}
-    for name in order:
-        stage = stages_by_name[name]
-        pbs = stage.get("pbs")
-        if not pbs:
-            raise SystemExit(f"ステージ {name} に pbs: がありません")
-        pbs = interp(str(pbs), ctx)
-        if not Path(pbs).is_file():
-            raise SystemExit(f"ステージ {name} の PBS が見つかりません: {pbs}")
-
-        # 依存: 今回の実行に含まれる依存先のみを afterok に入れる。
-        dep_names = stage.get("depends_on") or []
-        dep_ids: list[str] = []
-        for dep in dep_names:
-            if dep in submitted:
-                dep_ids.append(submitted[dep])
-            elif dep in order:
-                # 実行対象だが未投入 = 定義順の矛盾。
-                raise SystemExit(f"ステージ {name} の依存 {dep} が先に投入されていません")
-            else:
-                msg = f"ステージ {name} の依存 {dep} は実行対象外"
-                if args.strict:
-                    raise SystemExit(msg + "(--strict)")
-                print(f"  [warn] {msg} → 依存を無視して投入します")
-
-        env = stage_env(stage, proxy, ctx)
-        qsub_cmd = ["qsub"]
-        if dep_ids:
-            qsub_cmd += ["-W", "depend=afterok:" + ":".join(dep_ids)]
-        qsub_cmd.append(pbs)
-
-        print(f"=== stage: {name} ===")
-        print(f"  pbs:   {pbs}")
-        if dep_ids:
-            print(f"  after: {dep_ids}")
-        if env:
-            print("  env:")
-            for k in sorted(env):
-                print(f"    {k}={env[k]}")
-
-        if args.dry_run:
-            print(f"  cmd:   {' '.join(qsub_cmd)}   (dry-run, not submitted)\n")
-            submitted[name] = f"<dry:{name}>"
-        else:
-            job_id = submit(qsub_cmd, env)
-            submitted[name] = job_id
-            print(f"  submitted: {job_id}\n")
-
-    if not args.dry_run:
-        out = {
-            "experiment": cfg.get("experiment"),
-            "submitted_at": datetime.now().isoformat(timespec="seconds"),
-            "stages": submitted,
-        }
-        rec = args.config.parent / f"_submitted_{datetime.now():%Y%m%d_%H%M%S}.json"
-        rec.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"投入記録: {rec}")
-        print("進捗確認: qstat -u $USER")
+    print("投入:")
+    submit_stage(cfg, config_path, start, dry=False)
+    print("\n以降は各ステージが成功するたびに次段を自動投入します。")
+    print("進捗確認: qstat -u $USER")
 
 
 if __name__ == "__main__":
