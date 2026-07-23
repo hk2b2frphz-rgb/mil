@@ -161,6 +161,38 @@ vLLM-Omniは更新が速いため、クラスタのCUDA/driverに合わせて
 `VLLM_VERSION` と `VLLM_OMNI_VERSION` を同じ版に指定できる。
 出力形式、MMS_FA alignment、resume、4シャードのマージは従来ジョブと同じ。
 
+#### 100対話の新規速度テスト
+
+本番前の速度・VRAM・出力整合性確認は、既存の対話バッチから先頭100件を
+4 GPU に分割して行う。`BATCH_ID` に当日の日付と時刻を含め、既存の結果へ
+resume せず毎回新しい出力ディレクトリを作る。
+
+```bash
+cd <repo>
+
+# 100件以上の dialogues.jsonl を持つ既存バッチ名に置き換える
+export SOURCE_BATCH_ID=qwen_dialogues_10000_v1
+test -s "data/runs/$SOURCE_BATCH_ID/llm_dialogues/dialogues.jsonl"
+wc -l "data/runs/$SOURCE_BATCH_ID/llm_dialogues/dialogues.jsonl"
+
+# 例: qwen_tts_vllm_smoke_100_20260723_153045 のような新規出力を作る
+export BATCH_ID="qwen_tts_vllm_smoke_100_$(date +%Y%m%d_%H%M%S)"
+export NUM_DIALOGUES=100
+export FRESH=1
+export PROXY_URL=http://<proxy-host>:<port>
+JOB_ID="$(qsub -V scripts/run_qwen_tts_vllm_10000_4gpu.pbs)"
+echo "submitted: $JOB_ID  batch: $BATCH_ID"
+```
+
+完了後、`merged_rows: 100` が出れば成功である。ジョブ全体のログは
+`experiments/pbs_logs/${BATCH_ID}_*.log`、GPUごとの詳細は
+`data/runs/${BATCH_ID}/logs/shard_*.log` に残る。
+
+```bash
+grep -E 'merged_rows|merged_manifest|finished_at' \
+  "experiments/pbs_logs/${BATCH_ID}_"*.log
+```
+
 出力は `data/runs/<printed BATCH_ID>/`。ジョブログの `out_root` をマージ・学習に使う。
 `BATCH_ID` の既定は smoke/1000 ジョブは**タイムスタンプ付き**（毎回新規 run）、
 3000/10000 ジョブは**固定名**（再投入すると同じ dir に resume し、完了済みシャードは
