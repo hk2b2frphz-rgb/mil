@@ -134,6 +134,14 @@ fi
     "$VLLM_PYTHON" use_existing_torch.py --prefix
     uv pip install --python "$VLLM_PYTHON" -r requirements/build/cuda.txt
     uv pip uninstall --python "$VLLM_PYTHON" vllm >/dev/null 2>&1 || true
+    # vLLM needs CMake >= 3.26, but the node's system CMake is older (e.g.
+    # 3.22.1) and the build picks it up off PATH. Install a modern CMake (and
+    # ninja) into the venv and put the venv's bin first on PATH so the build
+    # uses them instead of the system CMake. Cap below 4.0 to stay on a range
+    # this vLLM version is known to configure with.
+    uv pip install --python "$VLLM_PYTHON" "cmake>=3.26,<4" ninja
+    export PATH="$VLLM_ENV_DIR/bin:$PATH"
+    echo "Using CMake: $(command -v cmake) ($(cmake --version | head -n1))"
     # Build vLLM from source. uv hides the build backend's output, so the long
     # CUDA compile looks like a hang at "Preparing packages (0/1)". Use pip -v
     # (the venv is --seeded so pip exists) to stream the ninja "[N/M]" progress,

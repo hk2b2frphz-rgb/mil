@@ -167,7 +167,9 @@ PyTorchのsm70対応とCUDA実行を先に検査し、そのPyTorchに対してv
 ノードに入れなくても、ログインノードから `tail -f vllm_build.log` で進捗を追える。
 `[N/M] Building CUDA object ...` が進めば健全、`Fetching`/configure で停止したまま
 なら FetchContent のネットワーク固着を疑う。`MAX_JOBS` は既定でノードのコア数
-（`nproc`）に連動する。メモリ不足なら明示的に下げる。
+（`nproc`）に連動する。メモリ不足なら明示的に下げる。ノードのシステム CMake が
+古い（3.26 未満、例: 3.22.1）とビルドが落ちるため、モダンな CMake と ninja を
+venv に入れ、venv の `bin` を PATH 先頭に置いてそちらを使う。
 実行ジョブも同じCUDA moduleを自動loadする。変更が必要なら
 `VLLM_CUDA_MODULE`、`VLLM_VERSION`、`VLLM_OMNI_VERSION` を明示する。
 出力形式、MMS_FA alignment、resume、4シャードのマージは従来ジョブと同じ。
