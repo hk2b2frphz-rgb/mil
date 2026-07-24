@@ -39,3 +39,4 @@ references/
 vllm_build.log
 .vllm-build/
 vllm_omni_diag.txt
+vllm_omni_transformers_fix.txt
