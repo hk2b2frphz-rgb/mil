@@ -40,3 +40,4 @@ vllm_build.log
 .vllm-build/
 qwen3_tts_compat.txt
 qwen3_tts_revisions.txt
+vllm_omni_expected_model.txt
