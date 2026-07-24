@@ -12,7 +12,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -25,6 +25,19 @@ class SynthesisRequest:
     speaker_role: str
     instruct: str | None = None
     speaker_override: str | None = None
+
+
+@dataclass(frozen=True)
+class CloneReference:
+    """One speaker's voice-clone reference for the Base task.
+
+    ref_audio is a WAV path readable from the vLLM-Omni workers.  ref_text is
+    its transcript; required for in-context cloning, ignored (may be None) in
+    x-vector-only mode.
+    """
+
+    ref_audio: str
+    ref_text: str | None = None
 
 
 class VLLMQwen3TTS:
@@ -44,6 +57,8 @@ class VLLMQwen3TTS:
         stage_configs_path: Path,
         max_new_tokens: int = 2048,
         bucket_by_length: bool = True,
+        clone_refs: Mapping[str, CloneReference] | None = None,
+        clone_x_vector_only: bool = False,
     ) -> None:
         if batch_size < 1 or batch_size & (batch_size - 1):
             raise ValueError("vLLM-Omni batch_size must be a positive power of two")
@@ -52,8 +67,37 @@ class VLLMQwen3TTS:
                 "The V100 production backend requires --dtype float16 "
                 "(Volta does not support bfloat16)."
             )
-        if "CustomVoice" not in model_id:
-            raise ValueError("The vLLM backend currently supports Qwen3-TTS CustomVoice models only")
+        # Two task modes (vllm-omni >= 0.22.0):
+        #   CustomVoice: preset speakers on a *-CustomVoice model (clone_refs None).
+        #   Base:        voice clone on a *-Base model, one CloneReference per
+        #                role ("user"/"moshi", extra keys usable via
+        #                speaker_override).
+        self.clone_refs = dict(clone_refs) if clone_refs else None
+        self.clone_x_vector_only = bool(clone_x_vector_only)
+        if self.clone_refs is not None:
+            if "Base" not in model_id:
+                raise ValueError(
+                    "Voice clone (clone_refs) requires a Qwen3-TTS Base model, "
+                    f"e.g. Qwen/Qwen3-TTS-12Hz-1.7B-Base; got {model_id!r}"
+                )
+            missing = [role for role in ("user", "moshi") if role not in self.clone_refs]
+            if missing:
+                raise ValueError(f"clone_refs is missing role reference(s): {missing}")
+            if not self.clone_x_vector_only:
+                no_text = [
+                    name for name, ref in self.clone_refs.items()
+                    if not (ref.ref_text or "").strip()
+                ]
+                if no_text:
+                    raise ValueError(
+                        "In-context cloning requires ref_text for every reference "
+                        f"(missing: {no_text}). Use x-vector-only mode to skip transcripts."
+                    )
+        elif "CustomVoice" not in model_id:
+            raise ValueError(
+                "Preset-speaker synthesis requires a Qwen3-TTS CustomVoice model "
+                "(pass clone_refs to use a Base model for voice cloning)"
+            )
 
         self.model_id = model_id
         self.dtype_str = dtype_str
@@ -131,19 +175,46 @@ class VLLMQwen3TTS:
             return instruct
         return self.instruct_user if speaker_role == "user" else self.instruct_moshi
 
+    def _resolve_clone_ref(self, request: SynthesisRequest) -> CloneReference:
+        assert self.clone_refs is not None
+        name = request.speaker_override or request.speaker_role
+        ref = self.clone_refs.get(name)
+        if ref is None:
+            raise ValueError(
+                f"No clone reference for speaker {name!r} "
+                f"(available: {sorted(self.clone_refs)}). In clone mode, "
+                "speaker overrides must name a clone_refs entry, not a preset speaker."
+            )
+        return ref
+
     def _to_prompt(self, request: SynthesisRequest) -> dict[str, Any]:
         assert self._tokenizer is not None
-        voice = request.speaker_override or (
-            self.speaker_user if request.speaker_role == "user" else self.speaker_moshi
-        )
-        additional_information = {
-            "task_type": ["CustomVoice"],
-            "text": [request.text],
-            "language": [self.language],
-            "speaker": [voice],
-            "instruct": [self.resolve_instruct(request.speaker_role, request.instruct) or ""],
-            "max_new_tokens": [self.max_new_tokens],
-        }
+        instruct = self.resolve_instruct(request.speaker_role, request.instruct) or ""
+        if self.clone_refs is not None:
+            ref = self._resolve_clone_ref(request)
+            additional_information: dict[str, Any] = {
+                "task_type": ["Base"],
+                "text": [request.text],
+                "language": [self.language],
+                "ref_audio": [ref.ref_audio],
+                "x_vector_only_mode": [self.clone_x_vector_only],
+                "instruct": [instruct],
+                "max_new_tokens": [self.max_new_tokens],
+            }
+            if (ref.ref_text or "").strip():
+                additional_information["ref_text"] = [ref.ref_text]
+        else:
+            voice = request.speaker_override or (
+                self.speaker_user if request.speaker_role == "user" else self.speaker_moshi
+            )
+            additional_information = {
+                "task_type": ["CustomVoice"],
+                "text": [request.text],
+                "language": [self.language],
+                "speaker": [voice],
+                "instruct": [instruct],
+                "max_new_tokens": [self.max_new_tokens],
+            }
         prompt_len = self._estimate_prompt_len(additional_information)
         return {
             "prompt_token_ids": [0] * prompt_len,
@@ -158,7 +229,7 @@ class VLLMQwen3TTS:
 
             return Qwen3TTSPromptEmbedsBuilder.estimate_prompt_len_from_additional_information(
                 additional_information=additional_information,
-                task_type="CustomVoice",
+                task_type=additional_information["task_type"][0],
                 tokenize_prompt=lambda text: self._tokenizer(text, padding=False)["input_ids"],
                 codec_language_id=getattr(self._talker_config, "codec_language_id", None),
                 spk_is_dialect=getattr(self._talker_config, "spk_is_dialect", None),

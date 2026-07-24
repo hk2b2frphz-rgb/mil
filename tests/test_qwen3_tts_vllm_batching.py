@@ -12,7 +12,13 @@ from scripts.generate_qwen3_tts_data import (
     iter_dialogue_render_jobs,
     plan_whole_utterance_synthesis,
 )
-from scripts.qwen3_tts_vllm_backend import SynthesisRequest, VLLMQwen3TTS
+import pytest
+
+from scripts.qwen3_tts_vllm_backend import (
+    CloneReference,
+    SynthesisRequest,
+    VLLMQwen3TTS,
+)
 
 
 class RecordingTTS:
@@ -157,6 +163,90 @@ class FakeOmni:
             )
             outputs.append(SimpleNamespace(request_output=request_output))
         return outputs
+
+
+def _make_clone_backend(tmp_path, **overrides):
+    config = tmp_path / "stage.yaml"
+    config.write_text("stages: []\n", encoding="utf-8")
+    kwargs = dict(
+        model_id="Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+        dtype_str="float16",
+        speaker_user="Ono_Anna",
+        speaker_moshi="Serena",
+        language="Japanese",
+        instruct_user=None,
+        instruct_moshi="落ち着いて",
+        batch_size=2,
+        stage_configs_path=config,
+        clone_refs={
+            "user": CloneReference("refs/user.wav", "こんにちは"),
+            "moshi": CloneReference("refs/moshi.wav", "もしもし"),
+        },
+    )
+    kwargs.update(overrides)
+    return VLLMQwen3TTS(**kwargs)
+
+
+def test_clone_prompt_uses_base_task_and_role_reference(tmp_path) -> None:
+    backend = _make_clone_backend(tmp_path)
+    backend._tokenizer = object()  # _to_prompt only asserts presence
+    prompt = backend._to_prompt(SynthesisRequest("お元気ですか", "moshi"))
+    info = prompt["additional_information"]
+    assert info["task_type"] == ["Base"]
+    assert info["ref_audio"] == ["refs/moshi.wav"]
+    assert info["ref_text"] == ["もしもし"]
+    assert info["x_vector_only_mode"] == [False]
+    assert info["instruct"] == ["落ち着いて"]
+    assert "speaker" not in info
+    assert len(prompt["prompt_token_ids"]) > 0
+
+
+def test_clone_x_vector_only_allows_missing_ref_text(tmp_path) -> None:
+    backend = _make_clone_backend(
+        tmp_path,
+        clone_refs={
+            "user": CloneReference("refs/user.wav"),
+            "moshi": CloneReference("refs/moshi.wav"),
+        },
+        clone_x_vector_only=True,
+    )
+    backend._tokenizer = object()
+    info = backend._to_prompt(SynthesisRequest("テスト", "user"))["additional_information"]
+    assert info["x_vector_only_mode"] == [True]
+    assert "ref_text" not in info
+
+
+def test_clone_mode_validation_errors(tmp_path) -> None:
+    with pytest.raises(ValueError, match="Base model"):
+        _make_clone_backend(
+            tmp_path, model_id="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+        )
+    with pytest.raises(ValueError, match="missing role"):
+        _make_clone_backend(
+            tmp_path, clone_refs={"user": CloneReference("refs/user.wav", "text")}
+        )
+    with pytest.raises(ValueError, match="ref_text"):
+        _make_clone_backend(
+            tmp_path,
+            clone_refs={
+                "user": CloneReference("refs/user.wav"),
+                "moshi": CloneReference("refs/moshi.wav", "text"),
+            },
+        )
+    # CustomVoice mode still rejects non-CustomVoice models.
+    with pytest.raises(ValueError, match="CustomVoice"):
+        _make_clone_backend(
+            tmp_path, model_id="Qwen/Qwen3-TTS-12Hz-1.7B-Base", clone_refs=None
+        )
+
+
+def test_clone_unknown_speaker_override_raises(tmp_path) -> None:
+    backend = _make_clone_backend(tmp_path)
+    backend._tokenizer = object()
+    with pytest.raises(ValueError, match="No clone reference"):
+        backend._to_prompt(
+            SynthesisRequest("テスト", "user", speaker_override="Dylan")
+        )
 
 
 def test_vllm_backend_batches_and_restores_original_order(tmp_path) -> None:

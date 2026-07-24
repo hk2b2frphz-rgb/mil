@@ -48,9 +48,17 @@ except ImportError:  # スクリプト直接実行時（scripts/ が sys.path �
     from alignment_words import get_segmenter_name, split_utterance_alignments
 
 try:
-    from scripts.qwen3_tts_vllm_backend import SynthesisRequest, VLLMQwen3TTS
+    from scripts.qwen3_tts_vllm_backend import (
+        CloneReference,
+        SynthesisRequest,
+        VLLMQwen3TTS,
+    )
 except ImportError:
-    from qwen3_tts_vllm_backend import SynthesisRequest, VLLMQwen3TTS
+    from qwen3_tts_vllm_backend import (  # type: ignore[no-redef]
+        CloneReference,
+        SynthesisRequest,
+        VLLMQwen3TTS,
+    )
 
 logging.basicConfig(
     level=logging.INFO,
@@ -2026,6 +2034,35 @@ def parse_args() -> argparse.Namespace:
         help="Maximum Qwen3-TTS talker tokens per request.",
     )
     parser.add_argument(
+        "--qwen-clone-ref-audio-user",
+        default=None,
+        help="Voice-clone reference WAV for the user role (vllm-omni engine + "
+             "Base model). Enables clone mode; both roles need a reference.",
+    )
+    parser.add_argument(
+        "--qwen-clone-ref-text-user",
+        default=None,
+        help="Transcript of --qwen-clone-ref-audio-user (required unless "
+             "--qwen-clone-x-vector-only).",
+    )
+    parser.add_argument(
+        "--qwen-clone-ref-audio-moshi",
+        default=None,
+        help="Voice-clone reference WAV for the moshi role.",
+    )
+    parser.add_argument(
+        "--qwen-clone-ref-text-moshi",
+        default=None,
+        help="Transcript of --qwen-clone-ref-audio-moshi (required unless "
+             "--qwen-clone-x-vector-only).",
+    )
+    parser.add_argument(
+        "--qwen-clone-x-vector-only",
+        action="store_true",
+        help="Clone timbre only from an x-vector (no in-context prosody transfer; "
+             "ref texts become optional).",
+    )
+    parser.add_argument(
         "--moss-model",
         default="OpenMOSS-Team/MOSS-TTSD-v1.0",
         help="MOSS-TTSD Hugging Face model ID.",
@@ -2257,6 +2294,40 @@ def parse_args() -> argparse.Namespace:
             parser.error("--tts-batch-size must be a positive power of two")
         if args.dialogue_batch_size < 1:
             parser.error("--dialogue-batch-size must be positive")
+
+    # Voice clone (vllm-omni Base task): validate the reference set.
+    clone_args = [
+        args.qwen_clone_ref_audio_user, args.qwen_clone_ref_text_user,
+        args.qwen_clone_ref_audio_moshi, args.qwen_clone_ref_text_moshi,
+    ]
+    args.qwen_clone_enabled = any(a is not None for a in clone_args) or args.qwen_clone_x_vector_only
+    if args.qwen_clone_enabled:
+        if args.qwen_engine != "vllm-omni":
+            parser.error("--qwen-clone-* requires --qwen-engine vllm-omni")
+        if not args.qwen_clone_ref_audio_user or not args.qwen_clone_ref_audio_moshi:
+            parser.error(
+                "clone mode requires both --qwen-clone-ref-audio-user and "
+                "--qwen-clone-ref-audio-moshi"
+            )
+        if "Base" not in args.model:
+            parser.error(
+                "clone mode requires a Base model, e.g. "
+                "--model Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+            )
+        if not args.qwen_clone_x_vector_only:
+            if not args.qwen_clone_ref_text_user or not args.qwen_clone_ref_text_moshi:
+                parser.error(
+                    "in-context clone requires --qwen-clone-ref-text-user/-moshi "
+                    "(or use --qwen-clone-x-vector-only)"
+                )
+        for path in (args.qwen_clone_ref_audio_user, args.qwen_clone_ref_audio_moshi):
+            if not Path(path).is_file():
+                parser.error(f"clone reference WAV not found: {path}")
+        if args.user_speaker_pool.strip():
+            parser.error(
+                "--user-speaker-pool cannot be combined with clone mode "
+                "(preset speaker overrides have no clone reference)"
+            )
 
     if args.tts_backend == "qwen3":
         for role, name in [
@@ -2588,6 +2659,18 @@ def main() -> None:
             model_id=args.kokoro_model,
         )
     elif args.qwen_engine == "vllm-omni":
+        clone_refs = None
+        if args.qwen_clone_enabled:
+            clone_refs = {
+                "user": CloneReference(
+                    ref_audio=args.qwen_clone_ref_audio_user,
+                    ref_text=args.qwen_clone_ref_text_user,
+                ),
+                "moshi": CloneReference(
+                    ref_audio=args.qwen_clone_ref_audio_moshi,
+                    ref_text=args.qwen_clone_ref_text_moshi,
+                ),
+            }
         tts = VLLMQwen3TTS(
             model_id=args.model,
             dtype_str=args.dtype,
@@ -2599,6 +2682,8 @@ def main() -> None:
             batch_size=args.tts_batch_size,
             stage_configs_path=args.vllm_stage_config,
             max_new_tokens=args.vllm_max_new_tokens,
+            clone_refs=clone_refs,
+            clone_x_vector_only=args.qwen_clone_x_vector_only,
         )
     else:
         tts = Qwen3TTS(
@@ -2791,6 +2876,17 @@ def main() -> None:
                     "speaker_moshi": args.speaker_moshi,
                     "speaker_other": args.speaker_other,
                     "speaker_background": args.speaker_background,
+                    "qwen_clone": (
+                        {
+                            "x_vector_only": args.qwen_clone_x_vector_only,
+                            "ref_audio_user": args.qwen_clone_ref_audio_user,
+                            "ref_text_user": args.qwen_clone_ref_text_user,
+                            "ref_audio_moshi": args.qwen_clone_ref_audio_moshi,
+                            "ref_text_moshi": args.qwen_clone_ref_text_moshi,
+                        }
+                        if getattr(args, "qwen_clone_enabled", False)
+                        else None
+                    ),
                     "left_channel": "moshi",
                     "right_channel": "user",
                     "wall_time_sec": round(elapsed, 3),

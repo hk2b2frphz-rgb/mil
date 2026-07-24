@@ -166,6 +166,26 @@ NUM_DIALOGUES=100 FRESH=1 qsub -V scripts/run_qwen_tts_vllm_10000_4gpu.pbs
 qsub -V scripts/run_qwen_tts_vllm_10000_4gpu.pbs
 ```
 
+vLLM-Omni 0.22.0 からは Base モデルのボイスクローンも同じバッチ経路で使える。
+`generate_qwen3_tts_data.py` に以下を渡すと、プリセット話者の代わりに
+参照音声の声で全対話を合成する（ロールごとに参照が必要）:
+
+```bash
+uv run python scripts/generate_qwen3_tts_data.py \
+    --qwen-engine vllm-omni --whole-utterance \
+    --model Qwen/Qwen3-TTS-12Hz-1.7B-Base \
+    --qwen-clone-ref-audio-moshi refs/counselor.wav \
+    --qwen-clone-ref-text-moshi "参照音声の書き起こし" \
+    --qwen-clone-ref-audio-user refs/caller.wav \
+    --qwen-clone-ref-text-user "参照音声の書き起こし" \
+    ...
+```
+
+`--qwen-clone-x-vector-only` で声質のみ移す x-vector モードになり、書き起こしは
+不要になる（韻律・テンションまで真似るのは in-context。参照の選び方は
+`clone_voice_examples.py` の聴き比べで決める）。クローン時は `--user-speaker-pool`
+などプリセット話者の混在は使えない。
+
 既定は `TTS_BATCH_SIZE=16`、`DIALOGUE_BATCH_SIZE=16`、`float16`。
 V100はbfloat16非対応なので変更しない。OOM時は両方を8に下げる。専用環境は
 `cuda12.6_cudnn9.7.1_nccl2.24.3` module と PyTorch 2.11の `cu126` wheelを使う。
