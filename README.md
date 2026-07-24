@@ -170,8 +170,11 @@ qsub -V scripts/run_qwen_tts_vllm_10000_4gpu.pbs
 V100はbfloat16非対応なので変更しない。OOM時は両方を8に下げる。専用環境は
 `cuda12.6_cudnn9.7.1_nccl2.24.3` module と PyTorch 2.11の `cu126` wheelを使う。
 cu128/cu129 wheelはV100のsm70 kernelを含まないため使わない。セットアップは
-PyTorchのsm70対応とCUDA実行を先に検査し、そのPyTorchに対してvLLM 0.21.0を
-`TORCH_CUDA_ARCH_LIST=7.0` でソースビルドする。初回ビルドには時間がかかる。
+PyTorchのsm70対応とCUDA実行を先に検査し、そのPyTorchに対してvLLM 0.22.0を
+`TORCH_CUDA_ARCH_LIST=7.0` でソースビルドする（vllm-omni 0.22.0とペア。
+0.21.0rc1のtalkerは現行Qwen3-TTSモデル世代と不整合で、codec範囲外IDを出す。
+0.22.0はBaseモデルのボイスクローン task にも対応し、vllm 0.22.0のtorch pinは
+2.11.0のままなのでcu126/sm70スタックは変わらない）。初回ビルドには時間がかかる。
 ビルドは ninja 進捗を流しつつ `vllm_build.log`（共有FS）へ tee するので、計算
 ノードに入れなくても、ログインノードから `tail -f vllm_build.log` で進捗を追える。
 `[N/M] Building CUDA object ...` が進めば健全、`Fetching`/configure で停止したまま

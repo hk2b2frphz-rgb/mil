@@ -15,9 +15,14 @@ if [[ -f "$PWD/scripts/setup_proxy.sh" ]]; then
 fi
 
 VLLM_ENV_DIR="${VLLM_ENV_DIR:-$PWD/.venv-vllm-omni}"
-VLLM_VERSION="${VLLM_VERSION:-0.21.0}"
+# 0.22.0 is the first vllm-omni whose Qwen3-TTS talker matches the current
+# CustomVoice/Base model generation (0.21.0rc1's talker predates it and emits
+# out-of-range codec ids), and it adds the Base voice-clone task
+# (ref_audio/ref_text/x_vector_only_mode). vllm 0.22.0 still pins
+# torch==2.11.0, so the verified cu126/sm70 stack is unchanged.
+VLLM_VERSION="${VLLM_VERSION:-0.22.0}"
 VLLM_SRC_DIR="${VLLM_SRC_DIR:-$PWD/.vendor/vllm-v${VLLM_VERSION}}"
-VLLM_OMNI_VERSION="${VLLM_OMNI_VERSION:-0.21.0rc1}"
+VLLM_OMNI_VERSION="${VLLM_OMNI_VERSION:-0.22.0}"
 VLLM_CUDA_MODULE="${VLLM_CUDA_MODULE:-cuda12.6_cudnn9.7.1_nccl2.24.3}"
 PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu126}"
 TORCH_VERSION="${TORCH_VERSION:-2.11.0}"
