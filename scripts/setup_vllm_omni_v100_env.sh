@@ -250,9 +250,12 @@ sed 's/^/  /' "$TORCH_CONSTRAINTS"
     fi
 )
 
+# more-itertools is a runtime dependency of openai-whisper (pulled in via
+# vllm-omni) that can be left out of the resolved set; import then fails with
+# "openai-whisper requires more-itertools". Install it explicitly to be safe.
 uv pip install --python "$VLLM_PYTHON" --constraint "$TORCH_CONSTRAINTS" \
     "vllm-omni==$VLLM_OMNI_VERSION" \
-    numpy soundfile sphn uroman scipy PyYAML
+    numpy soundfile sphn uroman scipy PyYAML more-itertools
 
 "$VLLM_PYTHON" - <<'PY'
 import torch
