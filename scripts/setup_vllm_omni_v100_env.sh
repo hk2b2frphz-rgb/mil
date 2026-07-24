@@ -84,10 +84,32 @@ echo "CUDA architectures: $TORCH_CUDA_ARCH_LIST"
 echo "Build parallelism: MAX_JOBS=$MAX_JOBS NVCC_THREADS=$NVCC_THREADS"
 echo "Build log: $VLLM_BUILD_LOG (tail -f from a login node to watch progress)"
 
-# --clear recreates the env even if the directory already exists. A stale env
-# from an aborted run must not be reused: it may hold CPU-only or cu129 PyTorch,
-# or a half-built vLLM, which would silently defeat the sm70/cu126 pins below.
-uv venv --python 3.12 --seed --clear "$VLLM_ENV_DIR"
+# Fast resume: if a previous run already produced a complete, valid env, do
+# nothing. Re-submitting the (long) build job is then cheap. FRESH=1 forces a
+# full clean rebuild.
+if [[ "${FRESH:-0}" != "1" && -x "$VLLM_PYTHON" ]] && \
+   EXPECT_TORCH="$TORCH_VERSION" "$VLLM_PYTHON" - >/dev/null 2>&1 <<'PY'
+import os, torch, vllm, vllm_omni  # noqa: F401
+assert torch.__version__.startswith(os.environ["EXPECT_TORCH"]), torch.__version__
+assert torch.version.cuda == "12.6", torch.version.cuda
+assert "sm_70" in torch.cuda.get_arch_list()
+PY
+then
+    echo "vLLM-Omni environment already complete and valid: $VLLM_ENV_DIR"
+    echo "Nothing to do. Set FRESH=1 to rebuild from scratch."
+    exit 0
+fi
+
+# Recreate the venv only for a fresh build or when it is missing/broken.
+# Reusing a healthy venv on resume keeps the torch install and, crucially, lets
+# the vLLM build reuse ninja's compiled objects in the source tree rather than
+# recompiling from scratch. --clear guarantees a clean slate when we do rebuild;
+# a stale env may hold CPU-only or cu129 PyTorch, or a half-built vLLM.
+if [[ "${FRESH:-0}" == "1" || ! -x "$VLLM_PYTHON" ]]; then
+    uv venv --python 3.12 --seed --clear "$VLLM_ENV_DIR"
+else
+    echo "Reusing existing venv: $VLLM_ENV_DIR (set FRESH=1 to recreate)"
+fi
 
 # Reinstalling is intentional: an earlier setup may have left CPU-only or
 # cu129 PyTorch in this same environment.

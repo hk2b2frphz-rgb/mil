@@ -25,10 +25,15 @@
 #   VLLM_OMNI_VERSION=0.21.0rc1
 #   VLLM_CUDA_MODULE=cuda12.6_cudnn9.7.1_nccl2.24.3
 #
-# The build is idempotent enough to re-submit: an existing correct venv/torch is
-# reinstalled deterministically and an existing vLLM checkout at the right tag
-# is reused. The setup script loads the CUDA module and sources setup_proxy.sh
-# itself, so this wrapper only needs to enter the work directory and hand off.
+# Resuming is cheap: if a previous run already produced a complete, valid env
+# the setup script exits immediately. Otherwise it reuses the existing venv and
+# the vLLM checkout, so the CUDA compile continues incrementally (ninja reuses
+# already-built objects) instead of starting over. Force a full clean rebuild
+# with FRESH=1:
+#   FRESH=1 PROXY_URL=http://<host>:<port> qsub -V scripts/setup_vllm_omni_v100_env.pbs
+#
+# The setup script loads the CUDA module and sources setup_proxy.sh itself, so
+# this wrapper only needs to enter the work directory and hand off.
 
 set -euo pipefail
 

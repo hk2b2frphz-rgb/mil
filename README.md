@@ -153,6 +153,9 @@ PROXY_URL=http://<proxy-host>:<port> \
 # CMake configure + CUDA コンパイルが長いので、インタラクティブではなく
 # 24h の PBS ジョブ（xvn_s / res=small = V100 1枚）で回す場合はこちら。
 # ログインノードから tail -f <repo>/vllm_build.log で進捗を追える。
+# 再投入は安全: 完成済みなら即終了、途中なら venv と vLLM checkout を
+# 使い回してビルドは差分から続く（毎回フル再コンパイルにはならない）。
+# 完全に作り直したいときだけ FRESH=1 を付ける。
 PROXY_URL=http://<proxy-host>:<port> \
   qsub -V scripts/setup_vllm_omni_v100_env.pbs
 
