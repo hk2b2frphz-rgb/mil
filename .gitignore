@@ -38,3 +38,4 @@ experiments/_submitted_*.json
 references/
 vllm_build.log
 .vllm-build/
+qwen3_tts_compat.txt
