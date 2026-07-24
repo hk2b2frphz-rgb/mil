@@ -35,6 +35,11 @@ VLLM_PYTHON="$VLLM_ENV_DIR/bin/python"
 # lives on the shared filesystem, so `tail -f` from a login node shows the
 # ninja/cmake progress even when you cannot open a second shell on the node.
 VLLM_BUILD_LOG="${VLLM_BUILD_LOG:-$PWD/vllm_build.log}"
+# Persistent build/cache root on the shared filesystem. PBS sets TMPDIR to a
+# per-job dir (/var/tmp/pbs.<jobid>) that is wiped at job end, so a build that
+# lands there recompiles from scratch every submit. Pin the CMake build dir and
+# a ccache store here instead, so the sm70 CUDA objects survive across jobs.
+VLLM_BUILD_ROOT="${VLLM_BUILD_ROOT:-$PWD/.vllm-build}"
 
 if ! command -v module >/dev/null 2>&1; then
     for init in /etc/profile.d/modules.sh /usr/share/Modules/init/bash; do
@@ -181,6 +186,29 @@ sed 's/^/  /' "$TORCH_CONSTRAINTS"
     uv pip install --python "$VLLM_PYTHON" "cmake>=3.26,<4" ninja
     export PATH="$VLLM_ENV_DIR/bin:$PATH"
     echo "Using CMake: $(command -v cmake) ($(cmake --version | head -n1))"
+
+    # Keep the CUDA build off the per-job TMPDIR so it persists and rebuilds
+    # incrementally. CMAKE_BUILD_DIR is read by vLLM's build; a stable path here
+    # means ninja reuses already-compiled sm70 objects on the next submit.
+    export CMAKE_BUILD_DIR="$VLLM_BUILD_ROOT/cmake"
+    mkdir -p "$CMAKE_BUILD_DIR"
+    # ccache is content-addressed, so it survives even if the build dir name
+    # changes between runs (pip picks a fresh temp each time). vLLM's CMake wires
+    # these launchers automatically when ccache is present; point its store at
+    # the shared filesystem so the cache is not lost with the job's TMPDIR.
+    if command -v ccache >/dev/null 2>&1; then
+        export CCACHE_DIR="$VLLM_BUILD_ROOT/ccache"
+        mkdir -p "$CCACHE_DIR"
+        export CMAKE_C_COMPILER_LAUNCHER=ccache
+        export CMAKE_CXX_COMPILER_LAUNCHER=ccache
+        export CMAKE_CUDA_COMPILER_LAUNCHER=ccache
+        echo "ccache active: $(ccache --version | head -n1) (dir=$CCACHE_DIR)"
+    else
+        echo "WARNING: ccache not found on PATH. A from-scratch rebuild will"
+        echo "         recompile every CUDA object. Install/module-load ccache"
+        echo "         to make subsequent builds fast, or reuse CMAKE_BUILD_DIR."
+    fi
+
     # Build vLLM from source. uv hides the build backend's output, so the long
     # CUDA compile looks like a hang at "Preparing packages (0/1)". Use pip -v
     # (the venv is --seeded so pip exists) to stream the ninja "[N/M]" progress,
@@ -195,6 +223,10 @@ sed 's/^/  /' "$TORCH_CONSTRAINTS"
     PIP_CONSTRAINT="$TORCH_CONSTRAINTS" \
         "$VLLM_PYTHON" -m pip install --no-build-isolation -v -e . 2>&1 \
         | tee "$VLLM_BUILD_LOG"
+    # Cache stats help confirm the next build will reuse compiled objects.
+    if command -v ccache >/dev/null 2>&1; then
+        ccache -s 2>/dev/null | sed 's/^/ccache: /' || true
+    fi
 )
 
 uv pip install --python "$VLLM_PYTHON" --constraint "$TORCH_CONSTRAINTS" \

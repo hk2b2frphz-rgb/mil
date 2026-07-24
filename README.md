@@ -178,7 +178,12 @@ PyTorchのsm70対応とCUDA実行を先に検査し、そのPyTorchに対してv
 なら FetchContent のネットワーク固着を疑う。`MAX_JOBS` は既定でノードのコア数
 （`nproc`）に連動する。メモリ不足なら明示的に下げる。ノードのシステム CMake が
 古い（3.26 未満、例: 3.22.1）とビルドが落ちるため、モダンな CMake と ninja を
-venv に入れ、venv の `bin` を PATH 先頭に置いてそちらを使う。
+venv に入れ、venv の `bin` を PATH 先頭に置いてそちらを使う。CUDA ビルドは
+PBS の per-job TMPDIR（`/var/tmp/pbs.<jobid>`、ジョブ終了で消える）ではなく
+共有FSの `.vllm-build/`（`CMAKE_BUILD_DIR` と ccache）へ出力するので、再投入時は
+ninja/ccache が既存の sm70 オブジェクトを再利用し、フル再コンパイルを避ける。
+ccache が PATH になければ毎回フルビルドになるので、可能なら `module load ccache`
+等で用意する。キャッシュごと捨てたいときは `.vllm-build/` を削除する。
 実行ジョブも同じCUDA moduleを自動loadする。変更が必要なら
 `VLLM_CUDA_MODULE`、`VLLM_VERSION`、`VLLM_OMNI_VERSION` を明示する。
 出力形式、MMS_FA alignment、resume、4シャードのマージは従来ジョブと同じ。
