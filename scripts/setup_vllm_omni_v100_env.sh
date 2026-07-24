@@ -190,7 +190,23 @@ sed 's/^/  /' "$TORCH_CONSTRAINTS"
     # Keep the CUDA build off the per-job TMPDIR so it persists and rebuilds
     # incrementally. CMAKE_BUILD_DIR is read by vLLM's build; a stable path here
     # means ninja reuses already-compiled sm70 objects on the next submit.
-    export CMAKE_BUILD_DIR="$VLLM_BUILD_ROOT/cmake"
+    #
+    # Prefer a build directory that survived a previous successful compile so its
+    # objects are reused instead of recompiled. vLLM's default build_temp lands
+    # under the source tree; if a configured build (CMakeCache.txt) is still
+    # there, point at it. Otherwise use the persistent shared-FS location. Both
+    # live outside the per-job TMPDIR, so future submits stay incremental.
+    if [[ -z "${CMAKE_BUILD_DIR:-}" ]]; then
+        prev_build="$(find "$VLLM_SRC_DIR/build" -maxdepth 3 -name CMakeCache.txt \
+            -printf '%h\n' 2>/dev/null | head -n1)"
+        if [[ -n "$prev_build" ]]; then
+            export CMAKE_BUILD_DIR="$prev_build"
+            echo "Reusing surviving vLLM build dir: $CMAKE_BUILD_DIR"
+        else
+            export CMAKE_BUILD_DIR="$VLLM_BUILD_ROOT/cmake"
+            echo "No prior build dir found; using persistent $CMAKE_BUILD_DIR"
+        fi
+    fi
     mkdir -p "$CMAKE_BUILD_DIR"
     # ccache is content-addressed, so it survives even if the build dir name
     # changes between runs (pip picks a fresh temp each time). vLLM's CMake wires
