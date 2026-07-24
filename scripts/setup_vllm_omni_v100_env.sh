@@ -23,6 +23,11 @@ PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu126}"
 TORCH_VERSION="${TORCH_VERSION:-2.11.0}"
 TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-2.11.0}"
 TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.26.0}"
+# vllm-omni's bundled Qwen3-TTS code calls create_causal_mask(input_embeds=...).
+# transformers 5.x renamed that kwarg to inputs_embeds, so the newest transformers
+# vllm pulls in breaks Stage1. Pin to the last version that still uses
+# input_embeds (verified importing vllm + vllm-omni).
+TRANSFORMERS_VERSION="${TRANSFORMERS_VERSION:-4.57.1}"
 TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-7.0}"
 # Default the compile parallelism to the node's core count. The old fixed
 # default of 4 made a healthy build look stalled for hours under uv's silent
@@ -93,11 +98,13 @@ echo "Build log: $VLLM_BUILD_LOG (tail -f from a login node to watch progress)"
 # nothing. Re-submitting the (long) build job is then cheap. FRESH=1 forces a
 # full clean rebuild.
 if [[ "${FRESH:-0}" != "1" && -x "$VLLM_PYTHON" ]] && \
-   EXPECT_TORCH="$TORCH_VERSION" "$VLLM_PYTHON" - >/dev/null 2>&1 <<'PY'
-import os, torch, vllm, vllm_omni  # noqa: F401
+   EXPECT_TORCH="$TORCH_VERSION" EXPECT_TRANSFORMERS="$TRANSFORMERS_VERSION" \
+   "$VLLM_PYTHON" - >/dev/null 2>&1 <<'PY'
+import os, torch, transformers, vllm, vllm_omni  # noqa: F401
 assert torch.__version__.startswith(os.environ["EXPECT_TORCH"]), torch.__version__
 assert torch.version.cuda == "12.6", torch.version.cuda
 assert "sm_70" in torch.cuda.get_arch_list()
+assert transformers.__version__ == os.environ["EXPECT_TRANSFORMERS"], transformers.__version__
 PY
 then
     echo "vLLM-Omni environment already complete and valid: $VLLM_ENV_DIR"
@@ -257,18 +264,34 @@ uv pip install --python "$VLLM_PYTHON" --constraint "$TORCH_CONSTRAINTS" \
     "vllm-omni==$VLLM_OMNI_VERSION" \
     numpy soundfile sphn uroman scipy PyYAML more-itertools
 
-"$VLLM_PYTHON" - <<'PY'
+# Force transformers to the vllm-omni-compatible version last, overriding the
+# newer one vllm pulls in. Done as a separate step (rather than a constraint on
+# the installs above) so it cannot conflict with vllm's declared lower bound;
+# vllm and vllm-omni were verified to import at this version.
+uv pip install --python "$VLLM_PYTHON" --constraint "$TORCH_CONSTRAINTS" \
+    "transformers==$TRANSFORMERS_VERSION"
+
+EXPECT_TRANSFORMERS="$TRANSFORMERS_VERSION" "$VLLM_PYTHON" - <<'PY'
+import os
 import torch
 import torchaudio
+import transformers
 import vllm
 import vllm_omni
 
 print("torch:", torch.__version__)
 print("torchaudio:", torchaudio.__version__)
 print("torch CUDA runtime:", torch.version.cuda)
+print("transformers:", transformers.__version__)
 print("vllm:", vllm.__version__)
 print("vllm-omni:", getattr(vllm_omni, "__version__", "unknown"))
 print("compiled CUDA arches:", torch.cuda.get_arch_list())
+expected_tf = os.environ["EXPECT_TRANSFORMERS"]
+if transformers.__version__ != expected_tf:
+    raise SystemExit(
+        f"transformers {transformers.__version__} != pinned {expected_tf}; "
+        "vllm-omni Stage1 needs the input_embeds create_causal_mask signature"
+    )
 if not torch.cuda.is_available():
     raise SystemExit("CUDA became unavailable after installing vLLM-Omni")
 if "sm_70" not in torch.cuda.get_arch_list():
