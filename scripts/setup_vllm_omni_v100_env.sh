@@ -130,12 +130,26 @@ if [[ "$VLLM_SOURCE_TAG" != "v$VLLM_VERSION" ]]; then
     exit 1
 fi
 
+# Pin the whole torch stack so no later install step can swap it. vLLM (and
+# vllm-omni) still declare torch as a dependency; without this, pip/uv resolve
+# to the newest torch (e.g. 2.13.0) during `pip install -e .`, uninstall the
+# verified cu126/sm70 2.11.0, and then collide with the pinned torchvision.
+TORCH_CONSTRAINTS="$VLLM_ENV_DIR/torch-constraints.txt"
+cat > "$TORCH_CONSTRAINTS" <<EOF
+torch==$TORCH_VERSION
+torchaudio==$TORCHAUDIO_VERSION
+torchvision==$TORCHVISION_VERSION
+EOF
+echo "torch constraints ($TORCH_CONSTRAINTS):"
+sed 's/^/  /' "$TORCH_CONSTRAINTS"
+
 (
     cd "$VLLM_SRC_DIR"
     # Remove only torch/torchaudio/torchvision pins. The source build must use
     # the already verified cu126 PyTorch rather than resolving another wheel.
     "$VLLM_PYTHON" use_existing_torch.py --prefix
-    uv pip install --python "$VLLM_PYTHON" -r requirements/build/cuda.txt
+    uv pip install --python "$VLLM_PYTHON" --constraint "$TORCH_CONSTRAINTS" \
+        -r requirements/build/cuda.txt
     uv pip uninstall --python "$VLLM_PYTHON" vllm >/dev/null 2>&1 || true
     # vLLM needs CMake >= 3.26, but the node's system CMake is older (e.g.
     # 3.22.1) and the build picks it up off PATH. Install a modern CMake (and
@@ -152,10 +166,16 @@ fi
     # pipefail (set -o) keeps a build failure fatal despite the tee.
     echo "Building vLLM from source with streaming progress (MAX_JOBS=$MAX_JOBS)."
     echo "Follow along: tail -f $VLLM_BUILD_LOG"
-    "$VLLM_PYTHON" -m pip install --no-build-isolation -v -e . 2>&1 | tee "$VLLM_BUILD_LOG"
+    # PIP_CONSTRAINT holds torch at the verified cu126/sm70 build even though
+    # vLLM lists torch as a runtime dependency. If vLLM hard-pins a different
+    # torch this fails fast at resolution (before the compile), surfacing a real
+    # version mismatch rather than silently clobbering torch.
+    PIP_CONSTRAINT="$TORCH_CONSTRAINTS" \
+        "$VLLM_PYTHON" -m pip install --no-build-isolation -v -e . 2>&1 \
+        | tee "$VLLM_BUILD_LOG"
 )
 
-uv pip install --python "$VLLM_PYTHON" \
+uv pip install --python "$VLLM_PYTHON" --constraint "$TORCH_CONSTRAINTS" \
     "vllm-omni==$VLLM_OMNI_VERSION" \
     numpy soundfile sphn uroman scipy PyYAML
 
