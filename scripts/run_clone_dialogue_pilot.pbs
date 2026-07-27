@@ -7,7 +7,7 @@
 #PBS -j oe
 #PBS -V
 
-# Render ONE dialogue with both roles voice-cloned from real diarized speech,
+# Render a few dialogues with both roles voice-cloned from real diarized speech,
 # through the production renderer -- whole-utterance synthesis + CTC forced
 # alignment + timeline placement, exactly what a full run does. The point is
 # for the listening check to have the same prosody the training data will,
@@ -32,8 +32,8 @@
 #   REF_RANK=0                        0 = ref00 (the longest clean segment)
 #   CLONE_MODE=in-context|x-vector    x-vector clones timbre only, no transcript
 #   DIALOGUES_JSONL=<path>            script source; default = built-in templates
-#   DIALOGUE_INDEX=0                  which dialogue in that JSONL (0-based).
-#                                     Only that one is rendered.
+#   NUM_DIALOGUES=3                   how many dialogues to render (default 3)
+#   DIALOGUE_INDEX=0                  where to start in that JSONL (0-based)
 #   USER_REF_TEXT / MOSHI_REF_TEXT    fix a wrong reference transcript
 #   USER_REF_WAV  / MOSHI_REF_WAV     pick the reference audio by hand
 #   GREETING_CACHE=1                  reuse the cached opening line instead of
@@ -60,6 +60,16 @@ REF_RANK="${REF_RANK:-0}"
 CLONE_MODE="${CLONE_MODE:-in-context}"
 MODEL="${MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-Base}"
 DIALOGUE_INDEX="${DIALOGUE_INDEX:-0}"
+NUM_DIALOGUES="${NUM_DIALOGUES:-3}"
+
+if ! [[ "$NUM_DIALOGUES" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: NUM_DIALOGUES must be a positive integer: $NUM_DIALOGUES" >&2
+    exit 1
+fi
+if ! [[ "$DIALOGUE_INDEX" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: DIALOGUE_INDEX must be a non-negative integer: $DIALOGUE_INDEX" >&2
+    exit 1
+fi
 
 if [[ "$CLONE_MODE" != "in-context" && "$CLONE_MODE" != "x-vector" ]]; then
     echo "ERROR: CLONE_MODE must be in-context or x-vector: $CLONE_MODE" >&2
@@ -107,7 +117,7 @@ gen_args=(
     --model "$MODEL"
     --device cuda
     --dtype float16
-    --num-dialogues 1
+    --num-dialogues "$NUM_DIALOGUES"
     # Clone mode has one reference per role, so the per-dialogue preset rotation
     # must be off; an empty pool is what generate_qwen3_tts_data.py requires.
     --user-speaker-pool ''
@@ -133,15 +143,20 @@ else
     )
 fi
 
-# --num-dialogues takes the FIRST n, so to render one specific dialogue, hand
-# the renderer a one-line JSONL holding just that dialogue.
+# --num-dialogues takes the FIRST n, so DIALOGUE_INDEX is honoured by handing
+# the renderer a JSONL that already starts where we want it to.
 if [[ -n "${DIALOGUES_JSONL:-}" ]]; then
-    SELECTED="$OUT_DIR/selected_dialogue.jsonl"
-    awk -v n="$((DIALOGUE_INDEX + 1))" 'NF && ++c == n { print; exit }' \
+    SELECTED="$OUT_DIR/selected_dialogues.jsonl"
+    awk -v s="$((DIALOGUE_INDEX + 1))" -v n="$NUM_DIALOGUES" \
+        'NF { c++; if (c >= s && c < s + n) print; if (c >= s + n) exit }' \
         "$DIALOGUES_JSONL" > "$SELECTED"
-    if [[ ! -s "$SELECTED" ]]; then
+    selected_count="$(grep -c . "$SELECTED" || true)"
+    if [[ "$selected_count" -eq 0 ]]; then
         echo "ERROR: DIALOGUE_INDEX=$DIALOGUE_INDEX is out of range in $DIALOGUES_JSONL" >&2
         exit 1
+    fi
+    if [[ "$selected_count" -lt "$NUM_DIALOGUES" ]]; then
+        echo "NOTE: only $selected_count dialogue(s) available from index $DIALOGUE_INDEX" >&2
     fi
     gen_args+=(--dialogues-jsonl "$SELECTED")
 fi
@@ -154,6 +169,7 @@ export PYTHONUNBUFFERED=1
     echo "job:        ${JOB_ID_RAW}"
     echo "started:    $(date -Is)"
     echo "mode:       $CLONE_MODE (rank=$REF_RANK)"
+    echo "dialogues:  $NUM_DIALOGUES from index $DIALOGUE_INDEX"
     echo "model:      $MODEL"
     echo "user  ref:  $REF_WAV_USER"
     echo "moshi ref:  $REF_WAV_MOSHI"
