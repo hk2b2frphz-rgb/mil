@@ -32,6 +32,11 @@
 # with FRESH=1:
 #   FRESH=1 PROXY_URL=http://<host>:<port> qsub -V scripts/setup_vllm_omni_v100_env.pbs
 #
+# An env left behind by the torch-swap bug (torch on cu130 while torchaudio and
+# the compiled vLLM are on cu126) does NOT need FRESH=1: the resume check now
+# rejects it, and a plain re-submit reinstalls the cu126 torch stack over it and
+# reuses the already-compiled sm70 objects.
+#
 # The setup script loads the CUDA module and sources setup_proxy.sh itself, so
 # this wrapper only needs to enter the work directory and hand off.
 

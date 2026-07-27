@@ -4,6 +4,13 @@
 # PyTorch's cu128/cu129 wheels no longer contain Volta (sm70) kernels.  Install
 # the cu126 wheel explicitly, verify sm70 support, and build vLLM against that
 # PyTorch/CUDA combination instead of using vLLM's prebuilt cu129 wheel.
+#
+# Every torch pin below carries the CUDA local version segment (2.11.0+cu126).
+# PyPI's torch 2.11.0 is a CUDA 13 build published under the *same* version
+# number, so a bare "torch==2.11.0" pin lets any later resolution step swap the
+# verified cu126/sm70 wheel for the cu130 one. That is not hypothetical: it left
+# torch on cu130 while torchaudio and the source-built vLLM stayed on cu126, and
+# the mismatch only surfaced when the compiled vLLM extension failed to load.
 
 set -euo pipefail
 
@@ -25,6 +32,11 @@ VLLM_SRC_DIR="${VLLM_SRC_DIR:-$PWD/.vendor/vllm-v${VLLM_VERSION}}"
 VLLM_OMNI_VERSION="${VLLM_OMNI_VERSION:-0.22.0}"
 VLLM_CUDA_MODULE="${VLLM_CUDA_MODULE:-cuda12.6_cudnn9.7.1_nccl2.24.3}"
 PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu126}"
+# Wheel tag of that index ("cu126"), used as the local version segment on every
+# torch pin and to derive the CUDA runtime version we assert against.
+CUDA_WHEEL_TAG="${CUDA_WHEEL_TAG:-$(basename "$PYTORCH_INDEX_URL")}"
+# cu126 -> 12.6, cu130 -> 13.0. This is what torch.version.cuda reports.
+EXPECTED_TORCH_CUDA="${EXPECTED_TORCH_CUDA:-$(echo "$CUDA_WHEEL_TAG" | sed -E 's/^cu([0-9]+)([0-9])$/\1.\2/')}"
 TORCH_VERSION="${TORCH_VERSION:-2.11.0}"
 TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-2.11.0}"
 TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.26.0}"
@@ -80,8 +92,8 @@ command -v git >/dev/null 2>&1 || {
 }
 
 NVCC_RELEASE="$(nvcc --version | sed -n 's/.*release \([0-9.]*\).*/\1/p' | tail -n 1)"
-if [[ "$NVCC_RELEASE" != 12.6* ]]; then
-    echo "ERROR: expected CUDA 12.6 from $VLLM_CUDA_MODULE, got ${NVCC_RELEASE:-unknown}" >&2
+if [[ "$NVCC_RELEASE" != "$EXPECTED_TORCH_CUDA"* ]]; then
+    echo "ERROR: expected CUDA $EXPECTED_TORCH_CUDA from $VLLM_CUDA_MODULE, got ${NVCC_RELEASE:-unknown}" >&2
     exit 1
 fi
 
@@ -90,10 +102,82 @@ if [[ -z "${CUDA_HOME:-}" ]]; then
 fi
 export CUDA_HOME TORCH_CUDA_ARCH_LIST MAX_JOBS NVCC_THREADS
 
+# The first torch install is not the only step that resolves torch: the vLLM
+# source build and the vllm-omni install both pull it in transitively. Those
+# steps used to run against PyPI only, where "2.11.0+cu126" does not exist at
+# all, so they resolved the cu130 wheel instead. Make the CUDA wheel index
+# visible to every uv/pip invocation below, and tell uv to look at all indexes
+# (its default first-index strategy would stop at PyPI and never see the +cu126
+# wheel). Both indexes are trusted, so best-match across them is safe here.
+export UV_EXTRA_INDEX_URL="$PYTORCH_INDEX_URL"
+export UV_INDEX_STRATEGY="unsafe-best-match"
+export PIP_EXTRA_INDEX_URL="$PYTORCH_INDEX_URL"
+
+# Assert the whole torch stack is still the CUDA-wheel build we verified. Called
+# after every step that can resolve torch so a swap is attributed to the step
+# that caused it, instead of surfacing much later as an "undefined symbol" when
+# the source-built vLLM extension is finally imported.
+verify_torch_stack() {
+    STAGE="$1" \
+    EXPECT_TORCH="$TORCH_VERSION+$CUDA_WHEEL_TAG" \
+    EXPECT_TORCHAUDIO="$TORCHAUDIO_VERSION+$CUDA_WHEEL_TAG" \
+    EXPECT_TORCHVISION="$TORCHVISION_VERSION+$CUDA_WHEEL_TAG" \
+    EXPECT_CUDA="$EXPECTED_TORCH_CUDA" \
+    "$VLLM_PYTHON" - <<'PY'
+import os
+from importlib.metadata import PackageNotFoundError, version
+
+stage = os.environ["STAGE"]
+expected = {
+    "torch": os.environ["EXPECT_TORCH"],
+    "torchaudio": os.environ["EXPECT_TORCHAUDIO"],
+    "torchvision": os.environ["EXPECT_TORCHVISION"],
+}
+
+# Read versions from the installed distribution metadata rather than by
+# importing: if torch was swapped, importing torchaudio/torchvision (still
+# linked against the previous torch) can fail before we get to report why.
+problems = []
+for dist, want in expected.items():
+    try:
+        got = version(dist)
+    except PackageNotFoundError:
+        problems.append(f"{dist}: not installed (expected {want})")
+        continue
+    print(f"[{stage}] {dist}: {got}")
+    if got != want:
+        problems.append(f"{dist}: {got} != {want}")
+
+import torch
+
+print(f"[{stage}] torch CUDA runtime: {torch.version.cuda}")
+if torch.version.cuda != os.environ["EXPECT_CUDA"]:
+    problems.append(f"torch.version.cuda: {torch.version.cuda} != {os.environ['EXPECT_CUDA']}")
+arches = torch.cuda.get_arch_list()
+print(f"[{stage}] compiled CUDA arches: {arches}")
+if "sm_70" not in arches:
+    problems.append("installed torch has no V100 sm70 kernels")
+if not torch.cuda.is_available():
+    problems.append("CUDA is unavailable on this node")
+else:
+    print(f"[{stage}] gpu: {torch.cuda.get_device_name(0)} {torch.cuda.get_device_capability(0)}")
+
+if problems:
+    raise SystemExit(
+        f"{stage}: the pinned torch stack was replaced:\n  "
+        + "\n  ".join(problems)
+        + "\nA bare torch==<version> pin also matches PyPI's CUDA 13 wheel of the "
+        "same version. Keep the +cuXXX local segment on every pin and make the "
+        "PyTorch index reachable from the install step above."
+    )
+PY
+}
+
 echo "CUDA module: $VLLM_CUDA_MODULE"
 echo "CUDA_HOME: $CUDA_HOME"
 echo "nvcc: $(command -v nvcc) (release $NVCC_RELEASE)"
-echo "PyTorch index: $PYTORCH_INDEX_URL"
+echo "PyTorch index: $PYTORCH_INDEX_URL (wheel tag $CUDA_WHEEL_TAG, CUDA $EXPECTED_TORCH_CUDA)"
+echo "PyTorch pins: torch==$TORCH_VERSION+$CUDA_WHEEL_TAG torchaudio==$TORCHAUDIO_VERSION+$CUDA_WHEEL_TAG torchvision==$TORCHVISION_VERSION+$CUDA_WHEEL_TAG"
 echo "vLLM source: $VLLM_SRC_DIR (v$VLLM_VERSION)"
 echo "CUDA architectures: $TORCH_CUDA_ARCH_LIST"
 echo "Build parallelism: MAX_JOBS=$MAX_JOBS NVCC_THREADS=$NVCC_THREADS"
@@ -102,13 +186,13 @@ echo "Build log: $VLLM_BUILD_LOG (tail -f from a login node to watch progress)"
 # Fast resume: if a previous run already produced a complete, valid env, do
 # nothing. Re-submitting the (long) build job is then cheap. FRESH=1 forces a
 # full clean rebuild.
+# The torch-stack half of this check is deliberately the same assertion the
+# build steps use, so an env whose torch was swapped is never treated as valid.
 if [[ "${FRESH:-0}" != "1" && -x "$VLLM_PYTHON" ]] && \
-   EXPECT_TORCH="$TORCH_VERSION" EXPECT_TRANSFORMERS="$TRANSFORMERS_VERSION" \
+   verify_torch_stack "resume check" >/dev/null 2>&1 && \
+   EXPECT_TRANSFORMERS="$TRANSFORMERS_VERSION" \
    "$VLLM_PYTHON" - >/dev/null 2>&1 <<'PY'
-import os, torch, transformers, vllm, vllm_omni  # noqa: F401
-assert torch.__version__.startswith(os.environ["EXPECT_TORCH"]), torch.__version__
-assert torch.version.cuda == "12.6", torch.version.cuda
-assert "sm_70" in torch.cuda.get_arch_list()
+import os, transformers, vllm, vllm_omni  # noqa: F401
 assert transformers.__version__ == os.environ["EXPECT_TRANSFORMERS"], transformers.__version__
 PY
 then
@@ -133,25 +217,11 @@ fi
 uv pip install --python "$VLLM_PYTHON" \
     --reinstall \
     --index-url "$PYTORCH_INDEX_URL" \
-    "torch==$TORCH_VERSION" \
-    "torchaudio==$TORCHAUDIO_VERSION" \
-    "torchvision==$TORCHVISION_VERSION"
+    "torch==$TORCH_VERSION+$CUDA_WHEEL_TAG" \
+    "torchaudio==$TORCHAUDIO_VERSION+$CUDA_WHEEL_TAG" \
+    "torchvision==$TORCHVISION_VERSION+$CUDA_WHEEL_TAG"
 
-"$VLLM_PYTHON" - <<'PY'
-import torch
-
-print("torch:", torch.__version__)
-print("torch CUDA runtime:", torch.version.cuda)
-print("compiled CUDA arches:", torch.cuda.get_arch_list())
-if torch.version.cuda != "12.6":
-    raise SystemExit(f"expected PyTorch cu126, got CUDA {torch.version.cuda}")
-if "sm_70" not in torch.cuda.get_arch_list():
-    raise SystemExit("installed PyTorch does not contain V100 sm70 kernels")
-if not torch.cuda.is_available():
-    raise SystemExit("CUDA is unavailable on this node")
-print("gpu:", torch.cuda.get_device_name(0))
-print("capability:", torch.cuda.get_device_capability(0))
-PY
+verify_torch_stack "torch install"
 
 mkdir -p "$(dirname "$VLLM_SRC_DIR")"
 if [[ ! -e "$VLLM_SRC_DIR" ]]; then
@@ -173,11 +243,15 @@ fi
 # vllm-omni) still declare torch as a dependency; without this, pip/uv resolve
 # to the newest torch (e.g. 2.13.0) during `pip install -e .`, uninstall the
 # verified cu126/sm70 2.11.0, and then collide with the pinned torchvision.
+#
+# The +$CUDA_WHEEL_TAG local segment is the load-bearing part. Without it the
+# constraint is satisfied by PyPI's CUDA 13 wheel of the very same version, so
+# the constraint file looks respected while torch is silently swapped.
 TORCH_CONSTRAINTS="$VLLM_ENV_DIR/torch-constraints.txt"
 cat > "$TORCH_CONSTRAINTS" <<EOF
-torch==$TORCH_VERSION
-torchaudio==$TORCHAUDIO_VERSION
-torchvision==$TORCHVISION_VERSION
+torch==$TORCH_VERSION+$CUDA_WHEEL_TAG
+torchaudio==$TORCHAUDIO_VERSION+$CUDA_WHEEL_TAG
+torchvision==$TORCHVISION_VERSION+$CUDA_WHEEL_TAG
 EOF
 echo "torch constraints ($TORCH_CONSTRAINTS):"
 sed 's/^/  /' "$TORCH_CONSTRAINTS"
@@ -189,6 +263,7 @@ sed 's/^/  /' "$TORCH_CONSTRAINTS"
     "$VLLM_PYTHON" use_existing_torch.py --prefix
     uv pip install --python "$VLLM_PYTHON" --constraint "$TORCH_CONSTRAINTS" \
         -r requirements/build/cuda.txt
+    verify_torch_stack "vLLM build requirements"
     uv pip uninstall --python "$VLLM_PYTHON" vllm >/dev/null 2>&1 || true
     # vLLM needs CMake >= 3.26, but the node's system CMake is older (e.g.
     # 3.22.1) and the build picks it up off PATH. Install a modern CMake (and
@@ -256,6 +331,8 @@ sed 's/^/  /' "$TORCH_CONSTRAINTS"
     PIP_CONSTRAINT="$TORCH_CONSTRAINTS" \
         "$VLLM_PYTHON" -m pip install --no-build-isolation -v -e . 2>&1 \
         | tee "$VLLM_BUILD_LOG"
+    # The extension that was just compiled links against this exact torch build.
+    verify_torch_stack "vLLM source build"
     # Cache stats help confirm the next build will reuse compiled objects.
     if command -v ccache >/dev/null 2>&1; then
         ccache -s 2>/dev/null | sed 's/^/ccache: /' || true
@@ -265,9 +342,18 @@ sed 's/^/  /' "$TORCH_CONSTRAINTS"
 # more-itertools is a runtime dependency of openai-whisper (pulled in via
 # vllm-omni) that can be left out of the resolved set; import then fails with
 # "openai-whisper requires more-itertools". Install it explicitly to be safe.
+#
+# This is the step that used to break the environment: vllm-omni pulls torch in
+# transitively (torchsde, x-transformers, openai-whisper), and with a bare
+# torch==<version> constraint against PyPI it reinstalled the CUDA 13 wheel over
+# the verified cu126 one -- leaving torchaudio and the source-built vLLM on
+# cu126. The +$CUDA_WHEEL_TAG constraint plus the exported PyTorch index keep it
+# pinned, and the check below fails loudly if anything still moves it.
 uv pip install --python "$VLLM_PYTHON" --constraint "$TORCH_CONSTRAINTS" \
     "vllm-omni==$VLLM_OMNI_VERSION" \
     numpy soundfile sphn uroman scipy PyYAML more-itertools
+
+verify_torch_stack "vllm-omni install"
 
 # Force transformers to the vllm-omni-compatible version last, overriding the
 # newer one vllm pulls in. Done as a separate step (rather than a constraint on
@@ -276,6 +362,11 @@ uv pip install --python "$VLLM_PYTHON" --constraint "$TORCH_CONSTRAINTS" \
 uv pip install --python "$VLLM_PYTHON" --constraint "$TORCH_CONSTRAINTS" \
     "transformers==$TRANSFORMERS_VERSION"
 
+verify_torch_stack "transformers pin"
+
+# Final end-to-end check: importing vllm loads the C extension that was compiled
+# against the torch above, so this is where a surviving torch/CUDA mismatch
+# would show up as an undefined-symbol ImportError.
 EXPECT_TRANSFORMERS="$TRANSFORMERS_VERSION" "$VLLM_PYTHON" - <<'PY'
 import os
 import torch
@@ -290,19 +381,12 @@ print("torch CUDA runtime:", torch.version.cuda)
 print("transformers:", transformers.__version__)
 print("vllm:", vllm.__version__)
 print("vllm-omni:", getattr(vllm_omni, "__version__", "unknown"))
-print("compiled CUDA arches:", torch.cuda.get_arch_list())
 expected_tf = os.environ["EXPECT_TRANSFORMERS"]
 if transformers.__version__ != expected_tf:
     raise SystemExit(
         f"transformers {transformers.__version__} != pinned {expected_tf}; "
         "vllm-omni Stage1 needs the input_embeds create_causal_mask signature"
     )
-if not torch.cuda.is_available():
-    raise SystemExit("CUDA became unavailable after installing vLLM-Omni")
-if "sm_70" not in torch.cuda.get_arch_list():
-    raise SystemExit("sm70 support was replaced while installing vLLM-Omni")
-print("gpu:", torch.cuda.get_device_name(0))
-print("capability:", torch.cuda.get_device_capability(0))
 print("CUDA smoke:", (torch.ones(1, device="cuda") + 1).item())
 PY
 
