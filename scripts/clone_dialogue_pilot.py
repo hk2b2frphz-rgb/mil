@@ -29,7 +29,10 @@ vLLM-Omni は使わない。バッチ生成のクローン経路(generate_qwen3_
         --out-dir data/clone_dialogue_pilot/test01
 
 出力 <out_dir>/ 配下:
-  - dialogue.wav        連結した対話全体
+  - dialogue.wav        連結した対話全体(モノラル)
+  - dialogue_stereo.wav 同じタイミングで L=user / R=moshi に振り分けたもの。
+                        1 本で通して聴きながらロールを聴き分けられる
+                        (analyze_real_dialogue.py の stereo_diarized.wav と同趣旨)
   - turns/00_user.wav   ターンごとの合成結果
   - manifest.json       参照・台本・タイミングの記録
 """
@@ -250,36 +253,65 @@ def assemble_dialogue(
     wavs: list[Any], turns: list[dict[str, str]], sample_rate: int,
     lead_in_sec: float, gap_sec: float,
 ) -> tuple[Any, list[dict[str, Any]]]:
-    """ターン波形を無音で繋いで 1 本にし、各ターンの開始/終了秒を返す。"""
+    """ターン波形を無音で繋いで 1 本にし、各ターンの位置を返す。
+
+    タイムラインには秒だけでなくサンプル位置も入れる。ステレオ版はこの位置を
+    使ってモノラル版と完全に同じタイミングへ置くので、秒に丸めた値から再計算
+    すると 1 サンプルずれる。
+    """
     import numpy as np
 
     gap = np.zeros(int(sample_rate * max(0.0, gap_sec)), dtype=np.float32)
     pieces: list[Any] = []
     timeline: list[dict[str, Any]] = []
-    cursor = 0.0
+    cursor = 0  # サンプル数
 
     if lead_in_sec > 0:
         lead = np.zeros(int(sample_rate * lead_in_sec), dtype=np.float32)
         pieces.append(lead)
-        cursor += len(lead) / sample_rate
+        cursor += len(lead)
 
     for i, (wav, turn) in enumerate(zip(wavs, turns)):
         audio = np.asarray(wav, dtype=np.float32).squeeze()
         start = cursor
         pieces.append(audio)
-        cursor += len(audio) / sample_rate
+        cursor += len(audio)
         timeline.append({
             "index": i,
             "speaker": turn["speaker"],
             "text": turn["text"],
-            "start": round(start, 3),
-            "end": round(cursor, 3),
+            "start": round(start / sample_rate, 3),
+            "end": round(cursor / sample_rate, 3),
+            "start_sample": start,
+            "num_samples": len(audio),
         })
         if i < len(wavs) - 1 and len(gap):
             pieces.append(gap)
-            cursor += len(gap) / sample_rate
+            cursor += len(gap)
 
     return np.concatenate(pieces), timeline
+
+
+def assemble_stereo(
+    wavs: list[Any], timeline: list[dict[str, Any]], total_samples: int,
+    left_role: str,
+) -> Any:
+    """ロールごとに L/R へ振り分けたステレオ版を作る。
+
+    analyze_real_dialogue.py の stereo_diarized.wav と同じ発想で、どちらの声が
+    どちらのロールかを聴き分けやすくするためのもの。タイミングはモノラル版と
+    同一(ターンは元々重ならないので、L と R が交互に鳴る)。
+    """
+    import numpy as np
+
+    stereo = np.zeros((total_samples, 2), dtype=np.float32)
+    for wav, entry in zip(wavs, timeline):
+        audio = np.asarray(wav, dtype=np.float32).squeeze()
+        channel = 0 if entry["speaker"] == left_role else 1
+        start = entry["start_sample"]
+        # 重畳は現状ないが、将来重ねる場合に切り捨てず混ざるよう加算する。
+        stereo[start:start + len(audio), channel] += audio
+    return stereo
 
 
 def main() -> None:
@@ -329,6 +361,8 @@ def main() -> None:
     gen.add_argument("--max-new-tokens", type=int, default=4096)
     gen.add_argument("--gap-sec", type=float, default=0.4, help="ターン間の無音(秒)")
     gen.add_argument("--lead-in-sec", type=float, default=0.3)
+    gen.add_argument("--stereo-left", default="user", choices=list(ROLES),
+                     help="dialogue_stereo.wav の L チャンネルに置くロール(既定 user)")
 
     args = parser.parse_args()
     if args.rank < 0:
@@ -361,6 +395,11 @@ def main() -> None:
     dialogue_path = args.out_dir / "dialogue.wav"
     sf.write(str(dialogue_path), dialogue, sample_rate)
 
+    right_role = ROLES[1] if args.stereo_left == ROLES[0] else ROLES[0]
+    stereo = assemble_stereo(wavs, timeline, len(dialogue), args.stereo_left)
+    stereo_path = args.out_dir / "dialogue_stereo.wav"
+    sf.write(str(stereo_path), stereo, sample_rate)
+
     manifest = {
         "model": args.model,
         "mode": args.mode,
@@ -370,6 +409,7 @@ def main() -> None:
         "gap_sec": args.gap_sec,
         "lead_in_sec": args.lead_in_sec,
         "duration_sec": round(len(dialogue) / sample_rate, 2),
+        "stereo": {"left": args.stereo_left, "right": right_role},
         "references": refs,
         "turns": timeline,
         "turn_files": turn_files,
@@ -380,6 +420,7 @@ def main() -> None:
     logger.info("完了: %s (%.1f 秒, %d ターン)",
                 dialogue_path, manifest["duration_sec"], len(turns))
     print(f"dialogue: {dialogue_path}")
+    print(f"stereo:   {stereo_path} (L={args.stereo_left} / R={right_role})")
     print(f"manifest: {args.out_dir / 'manifest.json'}")
 
 

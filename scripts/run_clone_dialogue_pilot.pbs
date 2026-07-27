@@ -37,6 +37,7 @@
 #   DIALOGUE_INDEX=0                  which dialogue in that JSONL
 #   USER_REF_TEXT / MOSHI_REF_TEXT    fix a wrong reference transcript
 #   USER_REF_WAV  / MOSHI_REF_WAV     pick the reference audio by hand
+#   STEREO_LEFT=user|moshi            which role goes to the left channel
 #   OUT_DIR=data/clone_dialogue_pilot/<name>
 #   EXTRA_ARGS="--gap-sec 0.6"        extra flags passed verbatim
 
@@ -91,6 +92,7 @@ fi
 [[ -n "${MOSHI_REF_TEXT:-}" ]] && args+=(--moshi-ref-text "$MOSHI_REF_TEXT")
 [[ -n "${USER_REF_WAV:-}" ]]   && args+=(--user-ref-wav "$USER_REF_WAV")
 [[ -n "${MOSHI_REF_WAV:-}" ]]  && args+=(--moshi-ref-wav "$MOSHI_REF_WAV")
+[[ -n "${STEREO_LEFT:-}" ]]    && args+=(--stereo-left "$STEREO_LEFT")
 
 mkdir -p "$OUT_DIR"
 LOG_FILE="${LOG_FILE:-$OUT_DIR/run.log}"
@@ -108,4 +110,4 @@ export PYTHONUNBUFFERED=1
 # shellcheck disable=SC2086
 "${args[@]}" ${EXTRA_ARGS:-} 2>&1 | tee -a "$LOG_FILE"
 
-echo "done: $OUT_DIR/dialogue.wav (log: $LOG_FILE)" | tee -a "$LOG_FILE"
+echo "done: $OUT_DIR/dialogue_stereo.wav (log: $LOG_FILE)" | tee -a "$LOG_FILE"
