@@ -38,6 +38,7 @@ import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -475,6 +476,8 @@ class Qwen3TTS:
         language: str,
         instruct_user: str | None,
         instruct_moshi: str | None,
+        clone_refs: Mapping[str, CloneReference] | None = None,
+        clone_x_vector_only: bool = False,
     ):
         self.model_id = model_id
         self.device = device
@@ -487,6 +490,32 @@ class Qwen3TTS:
         self.instruct_moshi = instruct_moshi
         self.model = None
         self.sample_rate: int = 0
+        # クローンモード（Base モデル）。プリセット話者の代わりに参照音声を使う。
+        self.clone_refs = dict(clone_refs) if clone_refs else None
+        self.clone_x_vector_only = bool(clone_x_vector_only)
+        # 参照プロンプトはロールにつき1回作れば使い回せる。whole-utterance では
+        # 話者あたり chunk 数ぶん synthesize が呼ばれるので、毎回作り直すと
+        # 参照音声のエンコードを無駄に繰り返すことになる。
+        self._clone_prompts: dict[str, Any] = {}
+        if self.clone_refs is not None:
+            if "Base" not in model_id:
+                raise ValueError(
+                    "Voice clone requires a Qwen3-TTS Base model, "
+                    f"e.g. Qwen/Qwen3-TTS-12Hz-1.7B-Base; got {model_id!r}"
+                )
+            missing = [role for role in ("user", "moshi") if role not in self.clone_refs]
+            if missing:
+                raise ValueError(f"clone_refs is missing role reference(s): {missing}")
+            if not self.clone_x_vector_only:
+                no_text = [
+                    name for name, ref in self.clone_refs.items()
+                    if not (ref.ref_text or "").strip()
+                ]
+                if no_text:
+                    raise ValueError(
+                        "In-context cloning requires ref_text for every reference "
+                        f"(missing: {no_text}). Use x-vector-only mode to skip transcripts."
+                    )
 
     def load(self) -> None:
         if self.model is not None:
@@ -564,23 +593,49 @@ class Qwen3TTS:
         self.load()
         assert self.model is not None
 
-        if speaker_override:
-            voice = speaker_override
-        else:
-            voice = self.speaker_user if speaker_role == "user" else self.speaker_moshi
         instruct = self.resolve_instruct(speaker_role, instruct)
 
-        kwargs: dict[str, Any] = {
-            "text": text,
-            "language": self.language,
-            "speaker": voice,
-        }
-        if instruct:
-            kwargs["instruct"] = instruct
-
         import torch
-        with torch.no_grad():
-            wavs, sr = self.model.generate_custom_voice(**kwargs)
+
+        if self.clone_refs is not None:
+            # speaker_override は通常プリセット話者名なので、クローン参照として
+            # 登録されている名前のときだけ採用する。other/background ターンは
+            # speaker が "user" のまま別の話者名で来るため、そのロールの参照に
+            # 落ちる（第三者の声はクローンでは作り分けられない）。
+            voice = speaker_override if speaker_override in self.clone_refs else speaker_role
+            prompt_items = self._clone_prompts.get(voice)
+            if prompt_items is None:
+                ref = self.clone_refs[voice]
+                prompt_items = self.model.create_voice_clone_prompt(
+                    ref_audio=str(ref.ref_audio),
+                    ref_text=ref.ref_text,
+                    x_vector_only_mode=self.clone_x_vector_only,
+                )
+                self._clone_prompts[voice] = prompt_items
+            # generate_voice_clone は instruct を取らない。スタイル指示は参照音声の
+            # 話し方に置き換わる。
+            with torch.no_grad():
+                wavs, sr = self.model.generate_voice_clone(
+                    text=[text],
+                    language=[self.language],
+                    voice_clone_prompt=prompt_items,
+                )
+        else:
+            if speaker_override:
+                voice = speaker_override
+            else:
+                voice = self.speaker_user if speaker_role == "user" else self.speaker_moshi
+
+            kwargs: dict[str, Any] = {
+                "text": text,
+                "language": self.language,
+                "speaker": voice,
+            }
+            if instruct:
+                kwargs["instruct"] = instruct
+
+            with torch.no_grad():
+                wavs, sr = self.model.generate_custom_voice(**kwargs)
 
         # wavs は numpy 配列のリスト
         audio = wavs[0] if isinstance(wavs, (list, tuple)) else wavs
@@ -2302,8 +2357,8 @@ def parse_args() -> argparse.Namespace:
     ]
     args.qwen_clone_enabled = any(a is not None for a in clone_args) or args.qwen_clone_x_vector_only
     if args.qwen_clone_enabled:
-        if args.qwen_engine != "vllm-omni":
-            parser.error("--qwen-clone-* requires --qwen-engine vllm-omni")
+        if args.tts_backend != "qwen3":
+            parser.error("--qwen-clone-* requires --tts-backend qwen3")
         if not args.qwen_clone_ref_audio_user or not args.qwen_clone_ref_audio_moshi:
             parser.error(
                 "clone mode requires both --qwen-clone-ref-audio-user and "
@@ -2461,7 +2516,12 @@ def prepare_dialogue_render_job(
     user_voice = args.user_speaker_pool_list[
         (index - 1) % len(args.user_speaker_pool_list)
     ]
-    user_override = "user" if args.tts_backend == "moss-ttsd" else user_voice
+    # クローンモードでは参照がロール名で登録されているので、プリセット話者名を
+    # override に流すと参照が見つからない。moss-ttsd と同じくロール名を渡す。
+    if args.tts_backend == "moss-ttsd" or getattr(args, "qwen_clone_enabled", False):
+        user_override = "user"
+    else:
+        user_override = user_voice
     other_override = (
         "other" if args.tts_backend in ("moss-ttsd", "kokoro") else args.speaker_other
     )
@@ -2632,6 +2692,21 @@ def main() -> None:
                 "Invalid full-duplex dialogue schema. Regenerate or fix dialogues.jsonl:\n"
                 + details
             )
+    # クローン参照はエンジン非依存。vllm-omni と transformers のどちらの
+    # バックエンドも同じ dict を受け取る。
+    clone_refs = None
+    if args.qwen_clone_enabled:
+        clone_refs = {
+            "user": CloneReference(
+                ref_audio=args.qwen_clone_ref_audio_user,
+                ref_text=args.qwen_clone_ref_text_user,
+            ),
+            "moshi": CloneReference(
+                ref_audio=args.qwen_clone_ref_audio_moshi,
+                ref_text=args.qwen_clone_ref_text_moshi,
+            ),
+        }
+
     tts: Any
     if args.tts_backend == "moss-ttsd":
         ref_audio_paths, ref_texts = load_moss_references(args)
@@ -2659,18 +2734,6 @@ def main() -> None:
             model_id=args.kokoro_model,
         )
     elif args.qwen_engine == "vllm-omni":
-        clone_refs = None
-        if args.qwen_clone_enabled:
-            clone_refs = {
-                "user": CloneReference(
-                    ref_audio=args.qwen_clone_ref_audio_user,
-                    ref_text=args.qwen_clone_ref_text_user,
-                ),
-                "moshi": CloneReference(
-                    ref_audio=args.qwen_clone_ref_audio_moshi,
-                    ref_text=args.qwen_clone_ref_text_moshi,
-                ),
-            }
         tts = VLLMQwen3TTS(
             model_id=args.model,
             dtype_str=args.dtype,
@@ -2696,6 +2759,8 @@ def main() -> None:
             language=args.language,
             instruct_user=args.instruct_user,
             instruct_moshi=args.instruct_moshi,
+            clone_refs=clone_refs,
+            clone_x_vector_only=args.qwen_clone_x_vector_only,
         )
     tts.load()
 
@@ -2723,6 +2788,15 @@ def main() -> None:
             speaker=(
                 "moshi" if args.tts_backend == "moss-ttsd"
                 else args.kokoro_voice_moshi if args.tts_backend == "kokoro"
+                # クローン時の声は --speaker-moshi ではなく moshi 側の参照で
+                # 決まるので、そちらをキーに含める。含めないと参照だけ差し替えた
+                # 再実行が前の参照で作った挨拶を再利用してしまう。
+                else "|".join([
+                    "clone",
+                    str(args.qwen_clone_ref_audio_moshi),
+                    str(args.qwen_clone_ref_text_moshi or ""),
+                    str(bool(args.qwen_clone_x_vector_only)),
+                ]) if args.qwen_clone_enabled
                 else args.speaker_moshi
             ),
         )
