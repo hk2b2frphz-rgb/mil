@@ -212,16 +212,25 @@ else
     echo "Reusing existing venv: $VLLM_ENV_DIR (set FRESH=1 to recreate)"
 fi
 
-# Reinstalling is intentional: an earlier setup may have left CPU-only or
-# cu129 PyTorch in this same environment.
-uv pip install --python "$VLLM_PYTHON" \
-    --reinstall \
-    --index-url "$PYTORCH_INDEX_URL" \
-    "torch==$TORCH_VERSION+$CUDA_WHEEL_TAG" \
-    "torchaudio==$TORCHAUDIO_VERSION+$CUDA_WHEEL_TAG" \
-    "torchvision==$TORCHVISION_VERSION+$CUDA_WHEEL_TAG"
+# Only touch torch when it is actually wrong. --reinstall is intentional when we
+# do (an earlier setup may have left CPU-only, cu129, or PyPI's cu130 PyTorch
+# here), but it rewrites every torch header and library. ninja decides staleness
+# by mtime, so an unconditional reinstall marks essentially every vLLM CUDA
+# object out of date and turns a resume into a full recompile. Skipping the
+# no-op case keeps later re-submits genuinely incremental.
+if verify_torch_stack "existing torch" >/dev/null 2>&1; then
+    echo "torch stack already correct; skipping reinstall to keep the vLLM build incremental"
+    verify_torch_stack "existing torch"
+else
+    uv pip install --python "$VLLM_PYTHON" \
+        --reinstall \
+        --index-url "$PYTORCH_INDEX_URL" \
+        "torch==$TORCH_VERSION+$CUDA_WHEEL_TAG" \
+        "torchaudio==$TORCHAUDIO_VERSION+$CUDA_WHEEL_TAG" \
+        "torchvision==$TORCHVISION_VERSION+$CUDA_WHEEL_TAG"
 
-verify_torch_stack "torch install"
+    verify_torch_stack "torch install"
+fi
 
 mkdir -p "$(dirname "$VLLM_SRC_DIR")"
 if [[ ! -e "$VLLM_SRC_DIR" ]]; then
