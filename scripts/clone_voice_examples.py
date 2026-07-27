@@ -11,10 +11,12 @@
 
 (A) --ref-dir : 自前録音のフォルダ。diarization を通さない。
       <ref_dir>/1.wav, 2.wav, ...          （数値順に並べる）
-      書き起こしは次のいずれか:
+      書き起こしは次のいずれか(名前は拡張子付きでも無しでもよい):
+        - reference.tsv                    "1<TAB>書き起こし"（既定で探す）
         - 1.txt, 2.txt ...                 各音声と同名
-        - transcripts.txt (または .tsv)    "1.wav<TAB>書き起こし" / "1: 書き起こし"
+        - transcripts.txt / .tsv           "1.wav<TAB>書き起こし" / "1: 書き起こし"
         - transcripts.json / .jsonl        {"1.wav": "..."} / {"wav":..,"text":..}
+        - 別名のファイルは --transcripts <path> で指定
       in-context は長さ条件を満たすものから上位 --num-refs 件(既定 3)、
       x-vector は全クリップを連結した 1 本を使う(--xvector-max-sec 既定 0=無制限)。
 
@@ -142,11 +144,23 @@ DEFAULT_EXAMPLES = [
 
 REF_DIR_SPEAKER = "self"  # --ref-dir は 1 話者ぶんなので話者ラベルは固定。
 AUDIO_SUFFIXES = (".wav", ".flac", ".ogg", ".mp3", ".m4a")
-# 書き起こしをまとめて置く場合に探すファイル名。
+# 書き起こしをまとめて置く場合に探すファイル名。--transcripts で明示指定も可。
 TRANSCRIPT_FILENAMES = (
+    "reference.tsv", "reference.txt", "references.tsv",
     "transcripts.jsonl", "transcripts.json",
     "transcripts.tsv", "transcripts.txt", "transcript.txt", "texts.txt",
 )
+
+
+def _stem_key(name: str) -> str:
+    """一覧側の名前を音声ファイルの stem に合わせる。
+
+    拡張子は付いていても付いていなくてもよい。ただの Path().stem だと拡張子で
+    ない末尾（"rec.01" の ".01" など）まで落としてしまうので、既知の音声拡張子
+    のときだけ外す。
+    """
+    candidate = Path(name.strip())
+    return candidate.stem if candidate.suffix.lower() in AUDIO_SUFFIXES else candidate.name
 
 
 def _natural_key(path: Path) -> tuple[int, str]:
@@ -155,25 +169,40 @@ def _natural_key(path: Path) -> tuple[int, str]:
     return (int(stem), "") if stem.isdigit() else (10**9, stem)
 
 
-def load_ref_dir_transcripts(ref_dir: Path) -> dict[str, str]:
+def load_ref_dir_transcripts(
+    ref_dir: Path, transcripts_path: str | Path | None = None
+) -> dict[str, str]:
     """フォルダ内の書き起こしを {ファイル名の stem: text} で返す。
 
-    次の順に探す（先に見つかったものを使う）:
-      1. 各音声と同名の .txt（1.wav なら 1.txt）
-      2. transcripts.jsonl / .json    {"wav": "1.wav", "text": ...} または {"1": ...}
-      3. transcripts.tsv / .txt など  "1<TAB>text" / "1.wav<TAB>text" / "1: text"
-    """
-    per_file = {
-        p.stem: p.read_text(encoding="utf-8").strip()
-        for p in sorted(ref_dir.glob("*.txt"))
-        if p.name not in TRANSCRIPT_FILENAMES and (ref_dir / f"{p.stem}.wav").is_file()
-    }
-    if per_file:
-        logger.info("書き起こし: 音声と同名の .txt を %d 件読み込み", len(per_file))
-        return per_file
+    キーは stem で持つので、一覧側の名前は拡張子付き(1.wav)でも無し(1)でもよい。
 
-    for name in TRANSCRIPT_FILENAMES:
-        path = ref_dir / name
+    --transcripts が指定されていればそれを読む。無ければ次の順に探す:
+      1. 各音声と同名の .txt（1.wav なら 1.txt）
+      2. reference.tsv / transcripts.tsv など  "1<TAB>text" / "1.wav<TAB>text" / "1: text"
+      3. transcripts.jsonl / .json             {"1.wav": "..."} / {"wav":..,"text":..}
+    """
+    if transcripts_path is not None:
+        path = Path(transcripts_path)
+        if not path.is_file():
+            raise SystemExit(f"--transcripts が存在しません: {path}")
+        candidates = [path]
+    else:
+        audio_stems = {
+            p.stem for p in ref_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in AUDIO_SUFFIXES
+        }
+        per_file = {
+            p.stem: p.read_text(encoding="utf-8").strip()
+            for p in sorted(ref_dir.glob("*.txt"))
+            if p.name not in TRANSCRIPT_FILENAMES and p.stem in audio_stems
+        }
+        if per_file:
+            logger.info("書き起こし: 音声と同名の .txt を %d 件読み込み", len(per_file))
+            return per_file
+        candidates = [ref_dir / name for name in TRANSCRIPT_FILENAMES]
+
+    for path in candidates:
+        name = path.name
         if not path.is_file():
             continue
         texts: dict[str, str] = {}
@@ -185,10 +214,10 @@ def load_ref_dir_transcripts(ref_dir: Path) -> dict[str, str]:
                     continue
                 row = json.loads(line)
                 key = str(row.get("wav") or row.get("file") or row.get("id") or "")
-                texts[Path(key).stem] = str(row.get("text", "")).strip()
+                texts[_stem_key(key)] = str(row.get("text", "")).strip()
         elif name.endswith(".json"):
             for key, value in json.loads(raw).items():
-                texts[Path(str(key)).stem] = str(value).strip()
+                texts[_stem_key(str(key))] = str(value).strip()
         else:
             for lineno, line in enumerate(raw.splitlines(), start=1):
                 line = line.strip()
@@ -203,7 +232,7 @@ def load_ref_dir_transcripts(ref_dir: Path) -> dict[str, str]:
                         f"{path}:{lineno}: '<ファイル名><TAB>書き起こし' または "
                         f"'<ファイル名>: 書き起こし' の形式が必要です: {line!r}"
                     )
-                texts[Path(key.strip()).stem] = text.strip()
+                texts[_stem_key(key)] = text.strip()
         texts = {k: v for k, v in texts.items() if v}
         if texts:
             logger.info("書き起こし: %s から %d 件読み込み", path.name, len(texts))
@@ -211,12 +240,15 @@ def load_ref_dir_transcripts(ref_dir: Path) -> dict[str, str]:
 
     raise SystemExit(
         f"書き起こしが見つかりません: {ref_dir}\n"
-        "各音声と同名の .txt を置くか、transcripts.txt に "
-        "'1.wav<TAB>書き起こし' の形式で並べてください。"
+        "reference.tsv に '<名前><TAB>書き起こし' の形式で並べるか、"
+        "各音声と同名の .txt を置いてください。"
+        "別名のファイルなら --transcripts <path> で指定できます。"
     )
 
 
-def load_ref_dir_clips(ref_dir: Path) -> list[dict[str, Any]]:
+def load_ref_dir_clips(
+    ref_dir: Path, transcripts_path: str | Path | None = None
+) -> list[dict[str, Any]]:
     """音声フォルダを timeline.jsonl 相当のセグメント列に変換する。
 
     analyze_real_dialogue.py 由来の区間と同じ形に揃えることで、参照の選別
@@ -234,7 +266,7 @@ def load_ref_dir_clips(ref_dir: Path) -> list[dict[str, Any]]:
     )
     if not wavs:
         raise SystemExit(f"音声ファイルが 1 つもありません: {ref_dir}")
-    texts = load_ref_dir_transcripts(ref_dir)
+    texts = load_ref_dir_transcripts(ref_dir, transcripts_path)
 
     clips: list[dict[str, Any]] = []
     missing: list[str] = []
@@ -429,7 +461,7 @@ def resolve_references(
     if args.ref_dir:
         analysis_dir = None
         speaker = REF_DIR_SPEAKER
-        segs = load_ref_dir_clips(Path(args.ref_dir))
+        segs = load_ref_dir_clips(Path(args.ref_dir), args.transcripts)
     elif args.analysis_dir:
         analysis_dir = Path(args.analysis_dir)
         speaker = args.speaker
@@ -642,7 +674,7 @@ def run_xvectorall_combo(model, tag: str, examples: list[str],
     if args.ref_dir:
         analysis_dir = None
         speaker = REF_DIR_SPEAKER
-        segs = load_ref_dir_clips(Path(args.ref_dir))
+        segs = load_ref_dir_clips(Path(args.ref_dir), args.transcripts)
     else:
         analysis_dir = Path(args.analysis_dir)
         speaker = args.speaker
@@ -842,6 +874,8 @@ def main() -> None:
     parser.add_argument("--ref-dir", type=str, default=None,
                         help="自前録音のフォルダ(1.wav, 2.wav ... + 書き起こし)。"
                              "diarization を通さず、そのまま参照に使う")
+    parser.add_argument("--transcripts", default=None,
+                        help="書き起こし一覧ファイルを明示指定(既定は --ref-dir 内を自動探索)")
     parser.add_argument("--speaker", default="A", help="参照にする話者 A / B(既定 A)")
     parser.add_argument("--ref-wav", default=None, help="参照音声を明示指定(--ref-text 必須)")
     parser.add_argument("--ref-text", default=None, help="--ref-wav の書き起こし")

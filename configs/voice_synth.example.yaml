@@ -22,6 +22,7 @@ cuda_visible_devices: "0,1,2,3"
 analysis_dir: ""          # analyze_real_dialogue.py output <wav_stem>/ (needed for clone)
 ref_dir: ""               # OR: own-recording folder (1.wav, 2.wav ... + transcripts).
                           # Mutually exclusive with analysis_dir; skips diarization.
+transcripts: ""           # transcript list file; blank = auto-detect (reference.tsv etc.)
 speaker: A                # diarized speaker to clone (A / B)
 out_dir: ""               # blank = data/clone_examples/<jobid>
 examples_file: ""         # one sentence per line; blank = built-in examples
