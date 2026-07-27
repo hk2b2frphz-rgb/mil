@@ -22,6 +22,7 @@
 #   CONFIG=configs/voice_synth.local.yaml   (which config to use)
 #   OUT_DIR=...  NUM_SHARDS=4  CUDA_VISIBLE_DEVICES=0,1,2,3
 #   ANALYSIS_DIR=...  SPEAKER=A
+#   REF_DIR=data/real_data/<name>           (own recordings instead of diarization)
 #   EXTRA_ARGS="..."                        (extra flags passed verbatim)
 
 set -euo pipefail
@@ -84,6 +85,7 @@ COMMON_ARGS=( scripts/clone_voice_examples.py --config "$CONFIG"
     --out-dir "$OUT_DIR" --num-shards "$NUM_SHARDS" )
 [[ -n "${SPEAKER:-}" ]]       && COMMON_ARGS+=( --speaker "$SPEAKER" )
 [[ -n "${ANALYSIS_DIR:-}" ]]  && COMMON_ARGS+=( --analysis-dir "$ANALYSIS_DIR" )
+[[ -n "${REF_DIR:-}" ]]       && COMMON_ARGS+=( --ref-dir "$REF_DIR" )
 # shellcheck disable=SC2206
 [[ -n "${EXTRA_ARGS:-}" ]]    && COMMON_ARGS+=( $EXTRA_ARGS )
 

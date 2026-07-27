@@ -7,7 +7,18 @@
 ことがあるため、実相談員/相談者の声を「参照音声 + その書き起こし」で in-context
 クローンし、本人の声・韻律・落ち着いたテンションのまま例文を喋らせる。
 
-入力は analyze_real_dialogue.py の出力ディレクトリ(<wav_stem>/ 配下):
+参照の入力は 2 通り。
+
+(A) --ref-dir : 自前録音のフォルダ。diarization を通さない。
+      <ref_dir>/1.wav, 2.wav, ...          （数値順に並べる）
+      書き起こしは次のいずれか:
+        - 1.txt, 2.txt ...                 各音声と同名
+        - transcripts.txt (または .tsv)    "1.wav<TAB>書き起こし" / "1: 書き起こし"
+        - transcripts.json / .jsonl        {"1.wav": "..."} / {"wav":..,"text":..}
+      in-context は長さ条件を満たすものから上位 --num-refs 件(既定 3)、
+      x-vector は全クリップを連結した 1 本を使う(--xvector-max-sec 既定 0=無制限)。
+
+(B) --analysis-dir : analyze_real_dialogue.py の出力ディレクトリ(<wav_stem>/ 配下):
   - timeline.jsonl        {speaker, start, end, text, overlap_sec, is_aizuchi}
   - segments/A/, segments/B/   発話ごとの切り出し WAV(ファイル名先頭が通し番号)
 話者(A/B)はユーザーが --speaker で指定する。参照はその話者の
@@ -129,6 +140,134 @@ DEFAULT_EXAMPLES = [
 ]
 
 
+REF_DIR_SPEAKER = "self"  # --ref-dir は 1 話者ぶんなので話者ラベルは固定。
+AUDIO_SUFFIXES = (".wav", ".flac", ".ogg", ".mp3", ".m4a")
+# 書き起こしをまとめて置く場合に探すファイル名。
+TRANSCRIPT_FILENAMES = (
+    "transcripts.jsonl", "transcripts.json",
+    "transcripts.tsv", "transcripts.txt", "transcript.txt", "texts.txt",
+)
+
+
+def _natural_key(path: Path) -> tuple[int, str]:
+    """1.wav, 2.wav, 10.wav を数値順に並べる（辞書順だと 10 が 2 より前に来る）。"""
+    stem = path.stem
+    return (int(stem), "") if stem.isdigit() else (10**9, stem)
+
+
+def load_ref_dir_transcripts(ref_dir: Path) -> dict[str, str]:
+    """フォルダ内の書き起こしを {ファイル名の stem: text} で返す。
+
+    次の順に探す（先に見つかったものを使う）:
+      1. 各音声と同名の .txt（1.wav なら 1.txt）
+      2. transcripts.jsonl / .json    {"wav": "1.wav", "text": ...} または {"1": ...}
+      3. transcripts.tsv / .txt など  "1<TAB>text" / "1.wav<TAB>text" / "1: text"
+    """
+    per_file = {
+        p.stem: p.read_text(encoding="utf-8").strip()
+        for p in sorted(ref_dir.glob("*.txt"))
+        if p.name not in TRANSCRIPT_FILENAMES and (ref_dir / f"{p.stem}.wav").is_file()
+    }
+    if per_file:
+        logger.info("書き起こし: 音声と同名の .txt を %d 件読み込み", len(per_file))
+        return per_file
+
+    for name in TRANSCRIPT_FILENAMES:
+        path = ref_dir / name
+        if not path.is_file():
+            continue
+        texts: dict[str, str] = {}
+        raw = path.read_text(encoding="utf-8")
+        if name.endswith(".jsonl"):
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                key = str(row.get("wav") or row.get("file") or row.get("id") or "")
+                texts[Path(key).stem] = str(row.get("text", "")).strip()
+        elif name.endswith(".json"):
+            for key, value in json.loads(raw).items():
+                texts[Path(str(key)).stem] = str(value).strip()
+        else:
+            for lineno, line in enumerate(raw.splitlines(), start=1):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "\t" in line:
+                    key, _, text = line.partition("\t")
+                elif ":" in line:
+                    key, _, text = line.partition(":")
+                else:
+                    raise SystemExit(
+                        f"{path}:{lineno}: '<ファイル名><TAB>書き起こし' または "
+                        f"'<ファイル名>: 書き起こし' の形式が必要です: {line!r}"
+                    )
+                texts[Path(key.strip()).stem] = text.strip()
+        texts = {k: v for k, v in texts.items() if v}
+        if texts:
+            logger.info("書き起こし: %s から %d 件読み込み", path.name, len(texts))
+            return texts
+
+    raise SystemExit(
+        f"書き起こしが見つかりません: {ref_dir}\n"
+        "各音声と同名の .txt を置くか、transcripts.txt に "
+        "'1.wav<TAB>書き起こし' の形式で並べてください。"
+    )
+
+
+def load_ref_dir_clips(ref_dir: Path) -> list[dict[str, Any]]:
+    """音声フォルダを timeline.jsonl 相当のセグメント列に変換する。
+
+    analyze_real_dialogue.py 由来の区間と同じ形に揃えることで、参照の選別
+    （select_references）と x-vector 用の連結（build_aggregate_reference）を
+    そのまま使い回せる。重畳・相槌は自前録音には無いので固定値を入れる。
+    """
+    import soundfile as sf
+
+    if not ref_dir.is_dir():
+        raise SystemExit(f"--ref-dir が存在しません: {ref_dir}")
+    wavs = sorted(
+        (p for p in ref_dir.iterdir()
+         if p.is_file() and p.suffix.lower() in AUDIO_SUFFIXES),
+        key=_natural_key,
+    )
+    if not wavs:
+        raise SystemExit(f"音声ファイルが 1 つもありません: {ref_dir}")
+    texts = load_ref_dir_transcripts(ref_dir)
+
+    clips: list[dict[str, Any]] = []
+    missing: list[str] = []
+    cursor = 0.0
+    for i, wav in enumerate(wavs):
+        text = texts.get(wav.stem, "").strip()
+        if not text:
+            missing.append(wav.name)
+            continue
+        info = sf.info(str(wav))
+        duration = float(info.frames) / float(info.samplerate)
+        # start/end は選別が長さを測るためだけに使う。録音同士は連続しないので
+        # 見かけ上つなげた時刻を入れておく。
+        clips.append({
+            "speaker": REF_DIR_SPEAKER,
+            "start": cursor,
+            "end": cursor + duration,
+            "text": text,
+            "overlap_sec": 0.0,
+            "is_aizuchi": False,
+            "_index": i,
+            "_wav": wav,
+        })
+        cursor += duration
+    if missing:
+        logger.warning("書き起こしが無い音声をスキップ: %s", missing)
+    if not clips:
+        raise SystemExit(f"書き起こしのある音声が 1 つもありません: {ref_dir}")
+    logger.info("参照フォルダ: %s から %d クリップ (合計 %.1f 秒)",
+                ref_dir, len(clips), cursor)
+    return clips
+
+
 def load_timeline(analysis_dir: Path) -> list[dict[str, Any]]:
     path = analysis_dir / "timeline.jsonl"
     if not path.is_file():
@@ -152,12 +291,22 @@ def find_segment_wav(analysis_dir: Path, speaker: str, index: int) -> Path | Non
     return matches[0] if matches else None
 
 
+def segment_wav(analysis_dir: Path | None, speaker: str, seg: dict[str, Any]) -> Path | None:
+    """区間に対応する WAV。--ref-dir 由来ならファイルを直接持っている。"""
+    wav = seg.get("_wav")
+    if wav is not None:
+        return Path(wav)
+    if analysis_dir is None:
+        return None
+    return find_segment_wav(analysis_dir, speaker, seg["_index"])
+
+
 def _dur(seg: dict[str, Any]) -> float:
     return float(seg["end"]) - float(seg["start"])
 
 
 def build_aggregate_reference(
-    analysis_dir: Path, speaker: str, segs: list[dict[str, Any]],
+    analysis_dir: Path | None, speaker: str, segs: list[dict[str, Any]],
     out_wav: Path, max_sec: float, gap_sec: float,
 ) -> tuple[Path, str, float, int] | None:
     """話者の重畳なし区間を(時系列順に)連結した1本の参照 WAV を作る。
@@ -181,7 +330,7 @@ def build_aggregate_reference(
     sr0: int | None = None
     used = 0
     for s in clips:
-        wav = find_segment_wav(analysis_dir, speaker, s["_index"])
+        wav = segment_wav(analysis_dir, speaker, s)
         if wav is None:
             continue
         audio, sr = sf.read(str(wav), dtype="float32")
@@ -200,7 +349,9 @@ def build_aggregate_reference(
             texts.append(txt)
         total += len(audio) / sr0
         used += 1
-        if total >= max_sec:
+        # max_sec <= 0 は「全部つなげる」。自前録音の参照はクリップ数が知れて
+        # いるので、頭打ちせず全クリップ入れたいことが多い。
+        if 0 < max_sec <= total:
             break
     if not pieces or sr0 is None:
         return None
@@ -259,30 +410,39 @@ def resolve_references(
             raise SystemExit("--ref-wav を使うときは --ref-text も必須です")
         return [(ref_wav, args.ref_text.strip(), None)]
 
-    if not args.analysis_dir:
-        raise SystemExit("--analysis-dir か、--ref-wav/--ref-text のどちらかが必要です")
-    analysis_dir = Path(args.analysis_dir)
-    segs = load_timeline(analysis_dir)
+    if args.ref_dir:
+        analysis_dir = None
+        speaker = REF_DIR_SPEAKER
+        segs = load_ref_dir_clips(Path(args.ref_dir))
+    elif args.analysis_dir:
+        analysis_dir = Path(args.analysis_dir)
+        speaker = args.speaker
+        segs = load_timeline(analysis_dir)
+    else:
+        raise SystemExit(
+            "--ref-dir / --analysis-dir / --ref-wav+--ref-text のいずれかが必要です"
+        )
     chosens = select_references(
-        segs, args.speaker, args.min_ref_sec, args.max_ref_sec, args.num_refs
+        segs, speaker, args.min_ref_sec, args.max_ref_sec, args.num_refs
     )
     if not chosens:
         raise SystemExit(
-            f"話者 {args.speaker} に参照向きの区間が見つかりません"
-            "(重畳なし・相槌でない・テキストありが必要)。--ref-wav/--ref-text で明示指定してください。"
+            f"話者 {speaker} に参照向きの区間が見つかりません"
+            f"(長さ {args.min_ref_sec}〜{args.max_ref_sec} 秒・テキストありが必要)。"
+            "--min-ref-sec/--max-ref-sec を緩めるか、--ref-wav/--ref-text で明示指定してください。"
         )
     refs: list[tuple[Path, str, dict[str, Any] | None]] = []
     for chosen in chosens:
-        ref_wav = find_segment_wav(analysis_dir, args.speaker, chosen["_index"])
+        ref_wav = segment_wav(analysis_dir, speaker, chosen)
         if ref_wav is None:
             logger.warning(
                 "区間 %04d の WAV が見つからずスキップ: segments/%s/",
-                chosen["_index"], args.speaker,
+                chosen["_index"], speaker,
             )
             continue
         logger.info(
             "参照候補: 話者%s idx=%d dur=%.1fs text=%r",
-            args.speaker, chosen["_index"], _dur(chosen), chosen["text"],
+            speaker, chosen["_index"], _dur(chosen), chosen["text"],
         )
         refs.append((ref_wav, str(chosen["text"]).strip(), chosen))
     if not refs:
@@ -463,11 +623,17 @@ def run_xvectorall_combo(model, tag: str, examples: list[str],
                          args: argparse.Namespace) -> dict[str, Any] | None:
     import soundfile as sf
 
-    analysis_dir = Path(args.analysis_dir)
-    segs = load_timeline(analysis_dir)
+    if args.ref_dir:
+        analysis_dir = None
+        speaker = REF_DIR_SPEAKER
+        segs = load_ref_dir_clips(Path(args.ref_dir))
+    else:
+        analysis_dir = Path(args.analysis_dir)
+        speaker = args.speaker
+        segs = load_timeline(analysis_dir)
     agg_wav = args.out_dir / "_xvector_all_ref.wav"
     built = build_aggregate_reference(
-        analysis_dir, args.speaker, segs, agg_wav,
+        analysis_dir, speaker, segs, agg_wav,
         args.xvector_max_sec, args.xvector_gap_sec)
     if built is None:
         logger.warning("集約 x-vector: 連結できる区間がなくスキップ")
@@ -657,6 +823,9 @@ def main() -> None:
                         help="YAML 設定ファイル。CLI フラグが優先")
     parser.add_argument("--analysis-dir", type=str, default=None,
                         help="analyze_real_dialogue.py の出力(<wav_stem>/)。参照を自動選別")
+    parser.add_argument("--ref-dir", type=str, default=None,
+                        help="自前録音のフォルダ(1.wav, 2.wav ... + 書き起こし)。"
+                             "diarization を通さず、そのまま参照に使う")
     parser.add_argument("--speaker", default="A", help="参照にする話者 A / B(既定 A)")
     parser.add_argument("--ref-wav", default=None, help="参照音声を明示指定(--ref-text 必須)")
     parser.add_argument("--ref-text", default=None, help="--ref-wav の書き起こし")
@@ -684,8 +853,10 @@ def main() -> None:
                              "集約モードも試す(既定 ON)")
     parser.add_argument("--no-xvector-all", dest="xvector_all", action="store_false",
                         help="集約 x-vector モードを試さない")
-    parser.add_argument("--xvector-max-sec", type=float, default=90.0,
-                        help="集約 x-vector に使う参照の総秒数の上限(既定 90)")
+    parser.add_argument("--xvector-max-sec", type=float, default=None,
+                        help="集約 x-vector に使う参照の総秒数の上限。0 で無制限。"
+                             "既定は --analysis-dir なら 90、--ref-dir なら 0"
+                             "(自前録音は全クリップ連結が狙いなので頭打ちしない)")
     parser.add_argument("--xvector-gap-sec", type=float, default=0.1,
                         help="集約参照でクリップ間に挟む無音秒(既定 0.1)")
     parser.add_argument("--clone", dest="clone_enabled", action="store_true",
@@ -726,6 +897,12 @@ def main() -> None:
         raise SystemExit("--num-shards は 1 以上")
     if not (0 <= args.shard_index < args.num_shards):
         raise SystemExit("--shard-index は 0..num_shards-1 の範囲")
+    if args.ref_dir and args.analysis_dir:
+        raise SystemExit("--ref-dir と --analysis-dir は同時に指定できません")
+    if args.xvector_max_sec is None:
+        # 自前録音は全クリップを 1 本に連結したいので頭打ちしない。diarization
+        # 由来は長時間対話まるごとになりうるので従来どおり 90 秒で切る。
+        args.xvector_max_sec = 0.0 if args.ref_dir else 90.0
 
     refs = resolve_references(args) if args.clone_enabled else []
     modes = resolve_modes(args)

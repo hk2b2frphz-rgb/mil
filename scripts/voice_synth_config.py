@@ -23,7 +23,7 @@ from typing import Any
 # 合成側の既定値に反映する(proxy / cuda_visible_devices など orchestration 用の
 # キーは合成側には渡さない)。
 _ARG_KEYS = {
-    "analysis_dir", "speaker", "out_dir", "examples_file", "language", "dtype",
+    "analysis_dir", "ref_dir", "speaker", "out_dir", "examples_file", "language", "dtype",
     "attn_impl", "device", "max_new_tokens", "gen_batch_size", "num_refs",
     "modes", "xvector_all", "xvector_max_sec", "xvector_gap_sec",
     "min_ref_sec", "max_ref_sec", "ref_wav", "ref_text", "model",
