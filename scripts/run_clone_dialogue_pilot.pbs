@@ -30,8 +30,13 @@
 #                                     speaking time, not by role.
 #   REF_RANK=0                        0 = ref00 (the longest clean segment)
 #   CLONE_MODE=in-context|x-vector    x-vector clones timbre only, no transcript
+#   SCRIPT_FILE=<path>                plain-text script, one turn per line:
+#                                       user: ...
+#                                       moshi: ...
 #   DIALOGUES_JSONL=<path>            script to read; default = built-in
 #   DIALOGUE_INDEX=0                  which dialogue in that JSONL
+#   USER_REF_TEXT / MOSHI_REF_TEXT    fix a wrong reference transcript
+#   USER_REF_WAV  / MOSHI_REF_WAV     pick the reference audio by hand
 #   OUT_DIR=data/clone_dialogue_pilot/<name>
 #   EXTRA_ARGS="--gap-sec 0.6"        extra flags passed verbatim
 
@@ -76,9 +81,16 @@ elif [[ -z "${CLONE_OUT_DIR_USER:-}" || -z "${CLONE_OUT_DIR_MOSHI:-}" ]]; then
     echo "ERROR: set ANALYSIS_DIR, or both CLONE_OUT_DIR_USER and CLONE_OUT_DIR_MOSHI" >&2
     exit 1
 fi
-if [[ -n "${DIALOGUES_JSONL:-}" ]]; then
+if [[ -n "${SCRIPT_FILE:-}" ]]; then
+    args+=(--script-file "$SCRIPT_FILE")
+elif [[ -n "${DIALOGUES_JSONL:-}" ]]; then
     args+=(--dialogues-jsonl "$DIALOGUES_JSONL" --dialogue-index "${DIALOGUE_INDEX:-0}")
 fi
+# Transcript fixes for the reference audio (whisper output is not always right).
+[[ -n "${USER_REF_TEXT:-}" ]]  && args+=(--user-ref-text "$USER_REF_TEXT")
+[[ -n "${MOSHI_REF_TEXT:-}" ]] && args+=(--moshi-ref-text "$MOSHI_REF_TEXT")
+[[ -n "${USER_REF_WAV:-}" ]]   && args+=(--user-ref-wav "$USER_REF_WAV")
+[[ -n "${MOSHI_REF_WAV:-}" ]]  && args+=(--moshi-ref-wav "$MOSHI_REF_WAV")
 
 mkdir -p "$OUT_DIR"
 LOG_FILE="${LOG_FILE:-$OUT_DIR/run.log}"

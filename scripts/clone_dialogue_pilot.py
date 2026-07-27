@@ -13,8 +13,14 @@ vLLM-Omni は使わない。バッチ生成のクローン経路(generate_qwen3_
   --analysis-dir       analyze_real_dialogue.py の出力から話者ごとに refNN を選別
   --clone-out-dir-*    clone_voice_examples.py の出力の refNN をそのまま使う
 
-台本は --dialogues-jsonl(generate_qwen3_tts_data.py と同じ形式)か、未指定なら
-内蔵の短い台本。turns は {"speaker": "user"|"moshi", "text": ...}。
+台本は次の優先順で決まる:
+  --script-file        1 行 1 ターンの素テキスト('user: ...' / 'moshi: ...')。
+                       台詞をいじるだけならこれが一番速い。
+  --dialogues-jsonl    generate_qwen3_tts_data.py と同じ形式の対話 JSONL。
+  (どちらも未指定)     内蔵の短い台本。
+
+参照の書き起こしが whisper の誤りで汚れている場合は --user-ref-text /
+--moshi-ref-text で上書きできる(timeline.jsonl は書き換えない)。
 
 使い方:
     uv run python scripts/clone_dialogue_pilot.py \
@@ -79,11 +85,28 @@ DEFAULT_TURNS: list[dict[str, str]] = [
 
 
 def resolve_role_references(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
-    """user / moshi それぞれの参照(wav + text)を解決する。"""
+    """user / moshi それぞれの参照(wav + text)を解決する。
+
+    --*-ref-text は解決結果の書き起こしを上書きする。参照の書き起こしは whisper
+    の出力なので誤りが混じることがあり、in-context クローンではそれがそのまま
+    条件付けの汚れになる。timeline.jsonl を直接書き換えると diarization をやり
+    直した瞬間に消え、何で回したか追えなくなるので、上書きはここで受ける
+    (manifest.json に overridden として残る)。
+    """
     refs: dict[str, dict[str, Any]] = {}
     for role in ROLES:
         clone_out = getattr(args, f"clone_out_dir_{role}")
-        if clone_out:
+        ref_wav = getattr(args, f"{role}_ref_wav")
+        ref_text = getattr(args, f"{role}_ref_text")
+        if ref_wav:
+            if not Path(ref_wav).is_file():
+                raise SystemExit(f"--{role}-ref-wav が存在しません: {ref_wav}")
+            info = {
+                "source": "explicit", "wav": str(ref_wav),
+                "text": (ref_text or "").strip(),
+                "timeline_index": None, "duration_sec": None,
+            }
+        elif clone_out:
             info = resolve_from_clone_out_dir(Path(clone_out), args.rank, args.mode)
         else:
             if not args.analysis_dir:
@@ -95,6 +118,8 @@ def resolve_role_references(args: argparse.Namespace) -> dict[str, dict[str, Any
                 Path(args.analysis_dir), speaker, args.rank,
                 args.min_ref_sec, args.max_ref_sec,
             )
+        if ref_text is not None and not ref_wav:
+            info = {**info, "text": ref_text.strip(), "text_overridden": True}
         if args.mode == "in-context" and not info["text"]:
             raise SystemExit(
                 f"{role} の参照に書き起こしがありません。--mode x-vector なら不要です。"
@@ -110,8 +135,40 @@ def resolve_role_references(args: argparse.Namespace) -> dict[str, dict[str, Any
     return refs
 
 
+def load_script_file(path: Path) -> list[dict[str, str]]:
+    """1 行 1 ターンの素のテキスト台本を読む。
+
+        user: こんばんは。少し話してもいいですか。
+        moshi: もちろんです。ゆっくりどうぞ。
+        # 行頭 # はコメント、空行は無視
+
+    台詞をいじるだけなら JSONL を組むより速いので、テスト用にこの形式を持つ。
+    """
+    turns: list[dict[str, str]] = []
+    for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        speaker, sep, text = line.partition(":")
+        speaker = speaker.strip().lower()
+        if not sep or speaker not in ROLES:
+            raise SystemExit(
+                f"{path}:{lineno}: 行頭は 'user:' か 'moshi:' が必要です: {raw!r}"
+            )
+        text = text.strip()
+        if not text:
+            raise SystemExit(f"{path}:{lineno}: 台詞が空です")
+        turns.append({"speaker": speaker, "text": text})
+    if not turns:
+        raise SystemExit(f"台本が空です: {path}")
+    logger.info("台本: %s (%d ターン)", path, len(turns))
+    return turns
+
+
 def load_turns(args: argparse.Namespace) -> list[dict[str, str]]:
     """台本を {"speaker", "text"} の列で返す。"""
+    if args.script_file:
+        return load_script_file(Path(args.script_file))
     if not args.dialogues_jsonl:
         logger.info("内蔵台本を使用(%d ターン)", len(DEFAULT_TURNS))
         return [dict(t) for t in DEFAULT_TURNS]
@@ -247,10 +304,17 @@ def main() -> None:
     src.add_argument("--max-ref-sec", type=float, default=12.0)
     src.add_argument("--allow-same-reference", action="store_true",
                      help="両ロールが同じ参照でも続行する(声が同一になる)")
+    for role in ROLES:
+        src.add_argument(f"--{role}-ref-wav", default=None,
+                         help=f"{role} の参照 WAV を明示指定(自動選別を使わない)")
+        src.add_argument(f"--{role}-ref-text", default=None,
+                         help=f"{role} の参照の書き起こしを上書き(whisper の誤りを直す用)")
 
     script = parser.add_argument_group("台本")
+    script.add_argument("--script-file", default=None,
+                        help="1 行 1 ターンの素のテキスト台本('user: ...' / 'moshi: ...')")
     script.add_argument("--dialogues-jsonl", default=None,
-                        help="対話 JSONL。未指定なら内蔵台本。")
+                        help="対話 JSONL。--script-file も未指定なら内蔵台本。")
     script.add_argument("--dialogue-index", type=int, default=0,
                         help="JSONL の何番目の対話を使うか(既定 0)")
 
