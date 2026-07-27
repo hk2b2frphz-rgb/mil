@@ -37,6 +37,7 @@
 #   DIALOGUE_INDEX=0                  which dialogue in that JSONL
 #   USER_REF_TEXT / MOSHI_REF_TEXT    fix a wrong reference transcript
 #   USER_REF_WAV  / MOSHI_REF_WAV     pick the reference audio by hand
+#   NO_OPENING_GREETING=1             drop the fixed moshi first line
 #   STEREO_LEFT=user|moshi            which role goes to the left channel
 #   OUT_DIR=data/clone_dialogue_pilot/<name>
 #   EXTRA_ARGS="--gap-sec 0.6"        extra flags passed verbatim
@@ -93,6 +94,7 @@ fi
 [[ -n "${USER_REF_WAV:-}" ]]   && args+=(--user-ref-wav "$USER_REF_WAV")
 [[ -n "${MOSHI_REF_WAV:-}" ]]  && args+=(--moshi-ref-wav "$MOSHI_REF_WAV")
 [[ -n "${STEREO_LEFT:-}" ]]    && args+=(--stereo-left "$STEREO_LEFT")
+[[ -n "${NO_OPENING_GREETING:-}" ]] && args+=(--no-opening-greeting)
 
 mkdir -p "$OUT_DIR"
 LOG_FILE="${LOG_FILE:-$OUT_DIR/run.log}"

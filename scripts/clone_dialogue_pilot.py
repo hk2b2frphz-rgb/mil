@@ -56,6 +56,7 @@ try:
         generate_clone_batched,
         load_qwen_model,
     )
+    from scripts.generate_qwen3_tts_data import OPENING_GREETING_TEXT
     from scripts.resolve_clone_refs import (
         resolve_from_analysis_dir,
         resolve_from_clone_out_dir,
@@ -66,6 +67,7 @@ except ImportError:  # スクリプト直接実行時（scripts/ が sys.path �
         generate_clone_batched,
         load_qwen_model,
     )
+    from generate_qwen3_tts_data import OPENING_GREETING_TEXT  # type: ignore[no-redef]
     from resolve_clone_refs import (  # type: ignore[no-redef]
         resolve_from_analysis_dir,
         resolve_from_clone_out_dir,
@@ -77,6 +79,8 @@ logger = logging.getLogger(__name__)
 ROLES = ("user", "moshi")
 
 # 内蔵台本。短く、相槌と間の取り方が見える程度の長さにしてある。
+# 冒頭の固定挨拶は台本には含めない。本番と同じく moshi の第一声として
+# 自動で差し込む(--no-opening-greeting で外せる)。
 DEFAULT_TURNS: list[dict[str, str]] = [
     {"speaker": "user",  "text": "こんばんは。相談というほどでもないんですが、少し話してもいいですか。"},
     {"speaker": "moshi", "text": "もちろんです。来てくれてありがとうございます。どうぞゆっくり話してください。"},
@@ -168,13 +172,33 @@ def load_script_file(path: Path) -> list[dict[str, str]]:
     return turns
 
 
+def prepend_opening_greeting(
+    turns: list[dict[str, str]], greeting: str
+) -> list[dict[str, str]]:
+    """本番と同じ固定の第一声を moshi のターンとして先頭に置く。
+
+    本番(generate_qwen3_tts_data.py)では毎回この 1 文から始まるので、聴取確認も
+    同じ入りにしないと印象が揃わない。台本側が既にこの挨拶で始まっている場合は
+    二重に置かない。
+    """
+    greeting = greeting.strip()
+    if not greeting:
+        return turns
+    first = turns[0] if turns else None
+    if first and first["speaker"] == "moshi" and first["text"].strip() == greeting:
+        return turns
+    return [{"speaker": "moshi", "text": greeting}] + turns
+
+
 def load_turns(args: argparse.Namespace) -> list[dict[str, str]]:
     """台本を {"speaker", "text"} の列で返す。"""
     if args.script_file:
-        return load_script_file(Path(args.script_file))
+        return prepend_opening_greeting(
+            load_script_file(Path(args.script_file)), args.opening_greeting)
     if not args.dialogues_jsonl:
         logger.info("内蔵台本を使用(%d ターン)", len(DEFAULT_TURNS))
-        return [dict(t) for t in DEFAULT_TURNS]
+        return prepend_opening_greeting(
+            [dict(t) for t in DEFAULT_TURNS], args.opening_greeting)
 
     path = Path(args.dialogues_jsonl)
     rows: list[dict[str, Any]] = []
@@ -206,7 +230,7 @@ def load_turns(args: argparse.Namespace) -> list[dict[str, str]]:
             f"user/moshi のターンがありません: {path} の {args.dialogue_index} 番目"
         )
     logger.info("台本: %s (id=%s, %d ターン)", path, dialogue.get("id"), len(turns))
-    return turns
+    return prepend_opening_greeting(turns, args.opening_greeting)
 
 
 def synthesize_turns(
@@ -349,6 +373,12 @@ def main() -> None:
                         help="対話 JSONL。--script-file も未指定なら内蔵台本。")
     script.add_argument("--dialogue-index", type=int, default=0,
                         help="JSONL の何番目の対話を使うか(既定 0)")
+    script.add_argument("--opening-greeting", default=OPENING_GREETING_TEXT,
+                        help="moshi の固定の第一声。空文字で無効。"
+                             f"既定: {OPENING_GREETING_TEXT}")
+    script.add_argument("--no-opening-greeting", dest="opening_greeting",
+                        action="store_const", const="",
+                        help="固定の第一声を入れない")
 
     gen = parser.add_argument_group("生成")
     gen.add_argument("--model", default="Qwen/Qwen3-TTS-12Hz-1.7B-Base")
@@ -410,6 +440,7 @@ def main() -> None:
         "lead_in_sec": args.lead_in_sec,
         "duration_sec": round(len(dialogue) / sample_rate, 2),
         "stereo": {"left": args.stereo_left, "right": right_role},
+        "opening_greeting": args.opening_greeting or None,
         "references": refs,
         "turns": timeline,
         "turn_files": turn_files,
