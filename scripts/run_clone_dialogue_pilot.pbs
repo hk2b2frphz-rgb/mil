@@ -36,6 +36,8 @@
 #                                     Only that one is rendered.
 #   USER_REF_TEXT / MOSHI_REF_TEXT    fix a wrong reference transcript
 #   USER_REF_WAV  / MOSHI_REF_WAV     pick the reference audio by hand
+#   GREETING_CACHE=1                  reuse the cached opening line instead of
+#                                     re-synthesizing it (production behaviour)
 #   OUT_DIR=data/clone_dialogue_pilot/<name>
 #   EXTRA_ARGS="--gap-sec 0.6"        extra flags passed verbatim
 #
@@ -112,6 +114,14 @@ gen_args=(
     --qwen-clone-ref-audio-user "$REF_WAV_USER"
     --qwen-clone-ref-audio-moshi "$REF_WAV_MOSHI"
 )
+# Production caches the greeting so every shard emits a bit-identical opening
+# line. For a listening check that only hides things: a cache entry rendered
+# with an earlier reference (or with a preset voice) keeps being replayed in
+# front of freshly cloned turns, which is exactly what makes the opening sound
+# like a different voice. Re-synthesize it each submit unless asked otherwise.
+if [[ -z "${GREETING_CACHE:-}" ]]; then
+    gen_args+=(--opening-greeting-cache-dir '')
+fi
 if [[ "$CLONE_MODE" == "x-vector" ]]; then
     gen_args+=(--qwen-clone-x-vector-only)
 else
