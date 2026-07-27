@@ -365,7 +365,13 @@ def select_references(
     segs: list[dict[str, Any]], speaker: str, min_sec: float, max_sec: float, n: int
 ) -> list[dict[str, Any]]:
     """参照に向く区間を上位 n 件返す: 重畳なし・相槌でない・テキストありの中から、
-    推奨長レンジ内を長い順に。レンジ内が足りなければ全 clean から補う。"""
+    推奨長レンジ内を長い順に。レンジ内が足りなければ全 clean から補う。
+
+    min_sec/max_sec はモデルの制限ではなく好ましい長さの目安。レンジ外しか
+    無ければレンジ外からでも選ぶ（長い順）ので、長い録音しかなくても失敗は
+    しない。ただし in-context では参照音声と書き起こしがそのまま文脈に載る
+    ため、極端に長い参照は VRAM を食うだけで質は上がりにくい。
+    """
     clean = [
         s for s in segs
         if s.get("speaker") == speaker
@@ -378,11 +384,21 @@ def select_references(
     )
     if len(in_range) >= n:
         return in_range[:n]
-    # レンジ内が足りない分はレンジ外の clean(長い順)で埋める。
+    # レンジ内が足りない分はレンジ外の clean(長い順)で埋める。黙って埋めると
+    # 「なぜか 40 秒の参照が使われている」に気づけないので警告を出す。
     rest = sorted(
         (s for s in clean if s not in in_range), key=_dur, reverse=True
     )
-    return (in_range + rest)[:n]
+    picked = (in_range + rest)[:n]
+    out_of_range = [s for s in picked if not (min_sec <= _dur(s) <= max_sec)]
+    if out_of_range:
+        logger.warning(
+            "推奨長 %.1f〜%.1f 秒の区間が %d 件しかないため、レンジ外を %d 件使います "
+            "(長さ: %s)。--min-ref-sec/--max-ref-sec で窓を変えられます。",
+            min_sec, max_sec, len(in_range), len(out_of_range),
+            [round(_dur(s), 1) for s in out_of_range],
+        )
+    return picked
 
 
 def load_examples(args: argparse.Namespace) -> list[str]:
