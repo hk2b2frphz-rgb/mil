@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N clone_dialogue_pilot
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -V
+
+# Synthesize ONE dialogue with both roles voice-cloned from real diarized
+# speech (Qwen3-TTS Base task through vLLM-Omni), as a listening check before
+# committing to a full run.
+#
+# Clone mode needs a reference for BOTH roles, so this resolves one reference
+# per diarized speaker (A -> one role, B -> the other) via resolve_clone_refs.py
+# rather than having the transcripts pasted in by hand.
+#
+# Submit (references re-selected from the diarization output):
+#   qsub -v ANALYSIS_DIR=data/real_dialogue/<jobid>/<wav_stem> \
+#        scripts/run_clone_dialogue_pilot.pbs
+#
+# Or reuse the exact references a previous clone_voice_examples.py run used
+# (self-contained: reference.wav + manifest.json live in those directories):
+#   qsub -v 'CLONE_OUT_DIR_USER=data/clone_examples/<a>,CLONE_OUT_DIR_MOSHI=data/clone_examples/<b>' \
+#        scripts/run_clone_dialogue_pilot.pbs
+#
+# Optional:
+#   USER_SPEAKER=A / MOSHI_SPEAKER=B  which diarized speaker plays which role.
+#                                     CHECK THIS -- A/B is assigned by total
+#                                     speaking time, not by role.
+#   REF_RANK=0                        0 = ref00 (the longest clean segment)
+#   CLONE_MODE=in-context|x-vector    x-vector clones timbre only, no transcript
+#   DIALOGUES_JSONL=<path>            script to read; default = built-in template
+#   NUM_DIALOGUES=1
+#   OUT_DIR=data/clone_dialogue_pilot/<name>
+#
+# Requires the vLLM-Omni env built by scripts/setup_vllm_omni_v100_env.pbs.
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+if [[ -f "$PWD/scripts/setup_proxy.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$PWD/scripts/setup_proxy.sh"
+fi
+
+export VLLM_CUDA_MODULE="${VLLM_CUDA_MODULE:-cuda12.6_cudnn9.7.1_nccl2.24.3}"
+if ! command -v module >/dev/null 2>&1; then
+    for module_init in /etc/profile.d/modules.sh /usr/share/Modules/init/bash; do
+        if [[ -r "$module_init" ]]; then
+            # shellcheck source=/dev/null
+            source "$module_init"
+            break
+        fi
+    done
+fi
+command -v module >/dev/null 2>&1 || {
+    echo "ERROR: environment modules are unavailable; cannot load $VLLM_CUDA_MODULE" >&2
+    exit 1
+}
+module load "$VLLM_CUDA_MODULE"
+
+VLLM_PYTHON="${VLLM_PYTHON:-$PWD/.venv-vllm-omni/bin/python}"
+if [[ ! -x "$VLLM_PYTHON" ]]; then
+    echo "ERROR: vLLM Python not found: $VLLM_PYTHON" >&2
+    echo "       Build it first: qsub -V scripts/setup_vllm_omni_v100_env.pbs" >&2
+    exit 1
+fi
+
+USER_SPEAKER="${USER_SPEAKER:-A}"
+MOSHI_SPEAKER="${MOSHI_SPEAKER:-B}"
+REF_RANK="${REF_RANK:-0}"
+CLONE_MODE="${CLONE_MODE:-in-context}"
+NUM_DIALOGUES="${NUM_DIALOGUES:-1}"
+MODEL="${MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-Base}"
+
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+OUT_DIR="${OUT_DIR:-data/clone_dialogue_pilot/${JOB_ID_SHORT}}"
+
+if [[ "$CLONE_MODE" != "in-context" && "$CLONE_MODE" != "x-vector" ]]; then
+    echo "ERROR: CLONE_MODE must be in-context or x-vector: $CLONE_MODE" >&2
+    exit 1
+fi
+if [[ "$USER_SPEAKER" == "$MOSHI_SPEAKER" && -z "${ALLOW_SAME_SPEAKER:-}" ]]; then
+    echo "ERROR: USER_SPEAKER and MOSHI_SPEAKER are both '$USER_SPEAKER'." >&2
+    echo "       Both roles would get the same voice. Set ALLOW_SAME_SPEAKER=1 to override." >&2
+    exit 1
+fi
+
+# Resolve one reference per role. Each field is fetched separately so the
+# Japanese transcript never has to survive shell word splitting.
+resolve() {  # resolve <field> <role>
+    local field="$1" role="$2"
+    local -a src=()
+    local clone_out
+    clone_out="$([[ "$role" == "user" ]] && echo "${CLONE_OUT_DIR_USER:-}" || echo "${CLONE_OUT_DIR_MOSHI:-}")"
+    if [[ -n "$clone_out" ]]; then
+        src=(--clone-out-dir "$clone_out" --mode "$CLONE_MODE")
+    else
+        local speaker
+        speaker="$([[ "$role" == "user" ]] && echo "$USER_SPEAKER" || echo "$MOSHI_SPEAKER")"
+        src=(--analysis-dir "${ANALYSIS_DIR:?Set ANALYSIS_DIR or CLONE_OUT_DIR_USER/_MOSHI}" \
+             --speaker "$speaker")
+    fi
+    "$VLLM_PYTHON" scripts/resolve_clone_refs.py "${src[@]}" \
+        --rank "$REF_RANK" --field "$field"
+}
+
+REF_WAV_USER="$(resolve wav user)"
+REF_WAV_MOSHI="$(resolve wav moshi)"
+
+echo "===== clone dialogue pilot ====="
+echo "job:        $JOB_ID_RAW"
+echo "mode:       $CLONE_MODE (rank=$REF_RANK)"
+echo "model:      $MODEL"
+echo "user  ref:  $REF_WAV_USER"
+echo "moshi ref:  $REF_WAV_MOSHI"
+echo "out_dir:    $OUT_DIR"
+
+gen_args=(
+    "$VLLM_PYTHON" scripts/generate_qwen3_tts_data.py
+    --out-dir "$OUT_DIR"
+    --tts-backend qwen3
+    --qwen-engine vllm-omni
+    --whole-utterance
+    --model "$MODEL"
+    --device cuda
+    --dtype float16
+    --num-dialogues "$NUM_DIALOGUES"
+    --qwen-clone-ref-audio-user "$REF_WAV_USER"
+    --qwen-clone-ref-audio-moshi "$REF_WAV_MOSHI"
+)
+if [[ "$CLONE_MODE" == "x-vector" ]]; then
+    gen_args+=(--qwen-clone-x-vector-only)
+else
+    # in-context cloning conditions on the reference transcript, so both are
+    # required; resolve_clone_refs.py fails loudly if either is empty.
+    REF_TEXT_USER="$(resolve text user)"
+    REF_TEXT_MOSHI="$(resolve text moshi)"
+    echo "user  text: $REF_TEXT_USER"
+    echo "moshi text: $REF_TEXT_MOSHI"
+    gen_args+=(
+        --qwen-clone-ref-text-user "$REF_TEXT_USER"
+        --qwen-clone-ref-text-moshi "$REF_TEXT_MOSHI"
+    )
+fi
+if [[ -n "${DIALOGUES_JSONL:-}" ]]; then
+    gen_args+=(--dialogues-jsonl "$DIALOGUES_JSONL")
+fi
+
+mkdir -p "$OUT_DIR"
+LOG_FILE="${LOG_FILE:-$OUT_DIR/run.log}"
+export PYTHONUNBUFFERED=1
+
+"${gen_args[@]}" 2>&1 | tee "$LOG_FILE"
+
+echo "done: $OUT_DIR (log: $LOG_FILE)"
