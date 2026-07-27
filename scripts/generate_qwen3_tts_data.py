@@ -478,6 +478,7 @@ class Qwen3TTS:
         instruct_moshi: str | None,
         clone_refs: Mapping[str, CloneReference] | None = None,
         clone_x_vector_only: bool = False,
+        clone_max_new_tokens: int = 4096,
     ):
         self.model_id = model_id
         self.device = device
@@ -493,6 +494,7 @@ class Qwen3TTS:
         # クローンモード（Base モデル）。プリセット話者の代わりに参照音声を使う。
         self.clone_refs = dict(clone_refs) if clone_refs else None
         self.clone_x_vector_only = bool(clone_x_vector_only)
+        self.clone_max_new_tokens = int(clone_max_new_tokens)
         # 参照プロンプトはロールにつき1回作れば使い回せる。whole-utterance では
         # 話者あたり chunk 数ぶん synthesize が呼ばれるので、毎回作り直すと
         # 参照音声のエンコードを無駄に繰り返すことになる。
@@ -606,6 +608,15 @@ class Qwen3TTS:
             prompt_items = self._clone_prompts.get(voice)
             if prompt_items is None:
                 ref = self.clone_refs[voice]
+                # 参照が本当に読まれたことを run.log に残す。クローンが効いて
+                # いるかは音を聴くまで分からないので、少なくとも「どの参照で
+                # プロンプトを作ったか」は INFO で確認できるようにする。
+                logger.info(
+                    "ボイスクローン参照を読み込み: role=%s ref_audio=%s "
+                    "x_vector_only=%s ref_text=%r",
+                    voice, ref.ref_audio, self.clone_x_vector_only,
+                    (ref.ref_text or "")[:40],
+                )
                 prompt_items = self.model.create_voice_clone_prompt(
                     ref_audio=str(ref.ref_audio),
                     ref_text=ref.ref_text,
@@ -613,12 +624,14 @@ class Qwen3TTS:
                 )
                 self._clone_prompts[voice] = prompt_items
             # generate_voice_clone は instruct を取らない。スタイル指示は参照音声の
-            # 話し方に置き換わる。
+            # 話し方に置き換わる。max_new_tokens は runaway 生成（終了トークンが
+            # 出ず KV キャッシュが膨れて OOM）の上限。
             with torch.no_grad():
                 wavs, sr = self.model.generate_voice_clone(
                     text=[text],
                     language=[self.language],
                     voice_clone_prompt=prompt_items,
+                    max_new_tokens=self.clone_max_new_tokens,
                 )
         else:
             if speaker_override:
@@ -2112,6 +2125,13 @@ def parse_args() -> argparse.Namespace:
              "--qwen-clone-x-vector-only).",
     )
     parser.add_argument(
+        "--qwen-clone-max-new-tokens",
+        type=int,
+        default=4096,
+        help="クローン合成 1 回あたりの上限トークン数。終了トークンが出ないまま"
+             "生成が続く runaway を打ち切って OOM を防ぐ。",
+    )
+    parser.add_argument(
         "--qwen-clone-x-vector-only",
         action="store_true",
         help="Clone timbre only from an x-vector (no in-context prosody transfer; "
@@ -2761,6 +2781,7 @@ def main() -> None:
             instruct_moshi=args.instruct_moshi,
             clone_refs=clone_refs,
             clone_x_vector_only=args.qwen_clone_x_vector_only,
+            clone_max_new_tokens=args.qwen_clone_max_new_tokens,
         )
     tts.load()
 
