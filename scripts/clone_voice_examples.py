@@ -921,8 +921,11 @@ def main() -> None:
     parser.add_argument("--customvoice-model",
                         default="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
                         help="CustomVoice モデル ID")
-    parser.add_argument("--customvoice-speaker", default="Ono_Anna",
-                        help="CustomVoice のプリセット話者(既定 Ono_Anna)")
+    # 本番(generate_qwen3_tts_data.py)の --speaker-moshi と同じ話者にしておく。
+    # ここは「クローンとプリセットのどちらが良いか」を聴き比べるための基準線
+    # なので、実際に使っている声でないと比較にならない。
+    parser.add_argument("--customvoice-speaker", default="Serena",
+                        help="CustomVoice のプリセット話者(既定 Serena=本番の moshi)")
     parser.add_argument("--customvoice-instruct", default=None,
                         help="CustomVoice の instruct(既定なし=素のプリセット)")
     parser.add_argument("--max-new-tokens", type=int, default=4096,

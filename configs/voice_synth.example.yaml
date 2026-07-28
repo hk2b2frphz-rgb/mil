@@ -46,5 +46,5 @@ ref_text: ""
 # --- CustomVoice (preset-speaker baseline) ---
 customvoice: true         # set false to run clone only
 customvoice_model: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
-customvoice_speaker: Ono_Anna
+customvoice_speaker: Serena   # production's --speaker-moshi; the baseline to beat
 customvoice_instruct: ""
