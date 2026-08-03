@@ -23,6 +23,14 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+# vLLM-Omni tears its engine down asynchronously, and the bigger the pass the
+# longer its orchestrator takes to drain. Give shutdown room before concluding
+# the engine is stuck; the mixed-role passes only need it gone before the next
+# model loads, not gone instantly.
+ENGINE_SHUTDOWN_TIMEOUT_SEC = 180.0
+ENGINE_SHUTDOWN_POLL_SEC = 1.0
+
+
 @dataclass(frozen=True)
 class SynthesisRequest:
     text: str
@@ -63,6 +71,7 @@ class VLLMQwen3TTS:
         bucket_by_length: bool = True,
         clone_refs: Mapping[str, CloneReference] | None = None,
         clone_x_vector_only: bool = False,
+        engine_shutdown_timeout_sec: float = ENGINE_SHUTDOWN_TIMEOUT_SEC,
     ) -> None:
         if batch_size < 1 or batch_size & (batch_size - 1):
             raise ValueError("vLLM-Omni batch_size must be a positive power of two")
@@ -115,6 +124,7 @@ class VLLMQwen3TTS:
         self.stage_configs_path = Path(stage_configs_path)
         self.max_new_tokens = max_new_tokens
         self.bucket_by_length = bucket_by_length
+        self.engine_shutdown_timeout_sec = float(engine_shutdown_timeout_sec)
         self.sample_rate = 0
         self._omni: Any = None
         self._tokenizer: Any = None
@@ -169,6 +179,20 @@ class VLLMQwen3TTS:
         )
         logger.info("Qwen3-TTS vLLM-Omni engine ready")
 
+    @staticmethod
+    def _engine_alive(omni: Any) -> bool:
+        engine = getattr(omni, "engine", None)
+        is_alive = getattr(engine, "is_alive", None)
+        if not callable(is_alive):
+            return bool(is_alive)
+        try:
+            return bool(is_alive())
+        except Exception:
+            # A torn-down engine can fail its own liveness probe. That is the
+            # state we were hoping for, not a reason to refuse the next model.
+            logger.debug("engine.is_alive() raised; treating as stopped", exc_info=True)
+            return False
+
     def close(self) -> None:
         self._ref_code_len_cache.clear()
         omni = self._omni
@@ -177,15 +201,38 @@ class VLLMQwen3TTS:
         shutdown_error: RuntimeError | None = None
         try:
             close = getattr(omni, "close", None)
+            close_error: BaseException | None = None
             if callable(close):
-                close()
-            engine = getattr(omni, "engine", None)
-            is_alive = getattr(engine, "is_alive", None)
-            still_alive = is_alive() if callable(is_alive) else bool(is_alive)
-            if still_alive:
+                try:
+                    close()
+                except Exception as exc:
+                    # Shutdown complaints such as "orchestrator thread did not
+                    # exit in time" must not discard a pass that already
+                    # finished and cached its audio. What matters for the next
+                    # mixed-role model is whether the engine actually let go,
+                    # so decide on that below rather than on this exception.
+                    close_error = exc
+                    logger.warning(
+                        "vLLM-Omni close() reported an error; verifying the "
+                        "engine released anyway: %s",
+                        exc,
+                    )
+
+            deadline = time.monotonic() + self.engine_shutdown_timeout_sec
+            while self._engine_alive(omni) and time.monotonic() < deadline:
+                time.sleep(ENGINE_SHUTDOWN_POLL_SEC)
+
+            if self._engine_alive(omni):
                 shutdown_error = RuntimeError(
-                    "vLLM-Omni engine is still alive after close(); "
+                    "vLLM-Omni engine is still alive "
+                    f"{self.engine_shutdown_timeout_sec:.0f}s after close(); "
                     "refusing to load the next mixed-role model"
+                )
+                if close_error is not None:
+                    shutdown_error.__cause__ = close_error
+            elif close_error is not None:
+                logger.info(
+                    "vLLM-Omni engine released despite the close() error above"
                 )
         finally:
             self._omni = None
