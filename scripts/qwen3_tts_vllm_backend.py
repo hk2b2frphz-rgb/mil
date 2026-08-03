@@ -250,9 +250,9 @@ class VLLMQwen3TTS:
                         ipc_collect()
             except Exception:
                 logger.debug("CUDA cleanup after vLLM-Omni close failed", exc_info=True)
-        logger.info("Qwen3-TTS vLLM-Omni engine released: %s", self.model_id)
         if shutdown_error is not None:
             raise shutdown_error
+        logger.info("Qwen3-TTS vLLM-Omni engine released: %s", self.model_id)
 
     def resolve_instruct(self, speaker_role: str, instruct: str | None) -> str | None:
         if instruct:

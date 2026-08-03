@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 import wave
 from types import ModuleType, SimpleNamespace
@@ -135,7 +136,12 @@ def test_prompt_length_builder_receives_reference_length_estimator(
 class _ShutdownOmni:
     """Omni double whose engine liveness and close() behaviour are scripted."""
 
-    def __init__(self, *, alive_probes: list[bool], close_error: Exception | None = None):
+    def __init__(
+        self,
+        *,
+        alive_probes: list[bool | Exception],
+        close_error: Exception | None = None,
+    ):
         self._alive_probes = list(alive_probes)
         self._close_error = close_error
         self.close_calls = 0
@@ -143,8 +149,12 @@ class _ShutdownOmni:
 
     def _is_alive(self) -> bool:
         if len(self._alive_probes) > 1:
-            return self._alive_probes.pop(0)
-        return self._alive_probes[0]
+            result = self._alive_probes.pop(0)
+        else:
+            result = self._alive_probes[0]
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     def close(self) -> None:
         self.close_calls += 1
@@ -152,7 +162,7 @@ class _ShutdownOmni:
             raise self._close_error
 
 
-def test_close_tolerates_a_shutdown_error_once_the_engine_is_gone(tmp_path) -> None:
+def test_close_tolerates_a_shutdown_error_once_the_engine_is_gone(tmp_path, caplog) -> None:
     """"orchestrator thread did not exit in time" must not discard a finished pass."""
     backend = _make_backend(tmp_path)
     omni = _ShutdownOmni(
@@ -161,32 +171,51 @@ def test_close_tolerates_a_shutdown_error_once_the_engine_is_gone(tmp_path) -> N
     )
     backend._omni = omni
 
-    backend.close()
+    with caplog.at_level(logging.WARNING):
+        backend.close()
 
     assert omni.close_calls == 1
     assert backend._omni is None
+    assert "vLLM-Omni close() reported an error" in caplog.text
 
 
-def test_close_waits_for_an_engine_that_is_still_draining(tmp_path) -> None:
+def test_close_treats_a_failed_liveness_probe_as_stopped(tmp_path, caplog) -> None:
+    backend = _make_backend(tmp_path)
+    backend._omni = _ShutdownOmni(
+        alive_probes=[RuntimeError("engine already torn down")]
+    )
+
+    with caplog.at_level(logging.INFO):
+        backend.close()
+
+    assert backend._omni is None
+    assert "vLLM-Omni engine released" in caplog.text
+
+
+def test_close_waits_for_an_engine_that_is_still_draining(tmp_path, caplog) -> None:
     backend = _make_backend(tmp_path)
     backend.engine_shutdown_timeout_sec = 5.0
     omni = _ShutdownOmni(alive_probes=[True, True, False])
     backend._omni = omni
 
-    backend.close()
+    with caplog.at_level(logging.INFO):
+        backend.close()
 
     assert backend._omni is None
+    assert "vLLM-Omni engine released" in caplog.text
 
 
-def test_close_still_refuses_when_the_engine_never_releases(tmp_path) -> None:
+def test_close_still_refuses_when_the_engine_never_releases(tmp_path, caplog) -> None:
     backend = _make_backend(tmp_path)
     # Short enough to fail fast; the guard itself is what is under test.
     backend.engine_shutdown_timeout_sec = 0.0
     backend._omni = _ShutdownOmni(alive_probes=[True])
 
-    with pytest.raises(RuntimeError, match="still alive"):
-        backend.close()
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(RuntimeError, match="still alive"):
+            backend.close()
     assert backend._omni is None
+    assert "vLLM-Omni engine released" not in caplog.text
 
 
 def test_prompt_length_failure_raises_instead_of_guessing(
