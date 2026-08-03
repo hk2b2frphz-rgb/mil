@@ -41,12 +41,19 @@ stages:
     devices: "0"
     output_connectors:
       to_stage_1: connector_of_shared_memory
+    # Both the penalty and the min_tokens logit processors use token ids as
+    # indices into a logits tensor whose width is the talker's codec
+    # vocabulary. Ids from outside that vocabulary -- the text tokenizer's
+    # stop ids, and whatever the Base task's reference prefix contributes --
+    # index out of bounds and abort the CUDA context. Neither processor runs
+    # while the penalty is neutral and no minimum is set, so leave them off.
+    # CustomVoice tolerated these for a long time; the Base/in-context path
+    # does not, which is why only the clone modes died here.
     default_sampling_params:
       temperature: 0.9
       top_k: 50
       max_tokens: 4096
-      min_tokens: 2
-      repetition_penalty: 1.05
+      repetition_penalty: 1.0
     subtalker_sampling_params:
       do_sample: true
       temperature: 0.9
