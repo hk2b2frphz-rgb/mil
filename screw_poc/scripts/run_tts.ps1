@@ -23,7 +23,10 @@ $Arguments = @(
     "--user-speaker-pool", "Serena,Sohee,Vivian,Dylan,Eric,Aiden,Uncle_Fu,Ryan",
     "--speaker-other", "Dylan",
     "--speaker-background", "Ryan",
+    "--device", "cuda",
+    "--dtype", "float16",
     "--no-opening-greeting",
+    "--no-emotion",
     "--whole-utterance"
 )
 if ($null -ne $NumDialogues) { $Arguments += @("--num-dialogues", "$NumDialogues") }

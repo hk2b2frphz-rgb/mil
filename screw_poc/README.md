@@ -79,6 +79,41 @@ bash screw_poc/scripts/run_train.sh
 
 既存の安全策を含む学習ランチャーを再利用しつつ、設定、データ、ログ、チェックポイントは `screw_poc/experiments/lora_base_config/` に置かれます。100件・300件を試す場合は、各サブセットを `run_tts.sh` の第1引数に渡し、TTS出力先を第2引数で分けてください。
 
+## PBSで実行する
+
+PBSサーバーでは、リポジトリ直下から投入します。まず3対話の音声確認を行います。
+
+```bash
+qsub -V screw_poc/pbs/run_tts_smoke.pbs
+```
+
+問題がなければ、4 GPUで1,000対話を生成します。
+
+```bash
+qsub -V screw_poc/pbs/run_tts_1000_4gpu.pbs
+```
+
+TTS終了後、Moshi LoRA学習を投入します。
+
+```bash
+qsub -V screw_poc/pbs/run_train.pbs
+```
+
+TTS成功後に学習を自動開始する依存関係付き投入は、次の1コマンドです。
+
+```bash
+bash screw_poc/pbs/submit_pipeline.sh
+```
+
+この場合、`afterok` 依存を使うため、TTSが失敗した場合に学習は始まりません。出力先は `screw_poc/artifacts/tts_1000/`、PBSログは `screw_poc/artifacts/pbs_logs/`、学習結果は `screw_poc/experiments/lora_base_config/` です。
+
+100・300対話の比較実験では、たとえば300対話を次のように投入できます。
+
+```bash
+qsub -V -v DIALOGUES_JSONL=screw_poc/artifacts/subsets/train_0300.jsonl,NUM_DIALOGUES=300,OUT_ROOT=screw_poc/artifacts/tts_0300 screw_poc/pbs/run_tts_1000_4gpu.pbs
+qsub -V -v TTS_RUN_DIR=screw_poc/artifacts/tts_0300/merged screw_poc/pbs/run_train.pbs
+```
+
 ## 4. テスト
 
 ```bash
