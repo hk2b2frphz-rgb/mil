@@ -8,9 +8,12 @@ import numpy as np
 
 from scripts.build_full_duplex_training_use_cases import TASKS
 from scripts.generate_qwen3_tts_data import (
+    CHANNEL_GAIN_MAX,
+    AudioSegment,
     Dialogue,
     DialogueTurn,
     build_segments,
+    channel_rms,
     render_stereo,
     validate_duplex_dialogue,
 )
@@ -163,6 +166,63 @@ class FullDuplexTimingTests(unittest.TestCase):
         overlap_sample = int(round(0.9 * tts.sample_rate))
         self.assertGreater(float(stereo[0, overlap_sample]), 0.0)
         self.assertGreater(float(stereo[1, overlap_sample]), 0.0)
+
+
+class ChannelLevelMatchingTest(unittest.TestCase):
+    SAMPLE_RATE = 100
+
+    def _segment(self, speaker: str, start_sec: float, amplitude: float) -> AudioSegment:
+        pcm = np.full(self.SAMPLE_RATE, amplitude, dtype=np.float32)
+        return AudioSegment(
+            speaker=speaker,
+            label=speaker,
+            text="t",
+            start_sec=start_sec,
+            end_sec=start_sec + 1.0,
+            pcm=pcm,
+        )
+
+    def test_quiet_moshi_is_raised_to_the_user_channel(self) -> None:
+        stereo = render_stereo(
+            [
+                self._segment("moshi", 0.0, 0.05),
+                self._segment("user", 1.0, 0.20),
+            ],
+            self.SAMPLE_RATE,
+            tail_sec=0.0,
+        )
+
+        self.assertAlmostEqual(
+            channel_rms(stereo[0]), channel_rms(stereo[1]), places=5
+        )
+        # The user channel is the reference and stays where it was.
+        self.assertAlmostEqual(channel_rms(stereo[1]), 0.20, places=5)
+
+    def test_gain_is_clamped_so_a_broken_channel_is_not_amplified(self) -> None:
+        quiet = 1e-3
+        stereo = render_stereo(
+            [
+                self._segment("moshi", 0.0, quiet),
+                self._segment("user", 1.0, 0.50),
+            ],
+            self.SAMPLE_RATE,
+            tail_sec=0.0,
+        )
+
+        self.assertAlmostEqual(
+            channel_rms(stereo[0]), quiet * CHANNEL_GAIN_MAX, places=5
+        )
+        self.assertLess(channel_rms(stereo[0]), channel_rms(stereo[1]))
+
+    def test_a_silent_moshi_channel_is_left_alone(self) -> None:
+        stereo = render_stereo(
+            [self._segment("user", 0.0, 0.20)],
+            self.SAMPLE_RATE,
+            tail_sec=0.0,
+        )
+
+        self.assertEqual(channel_rms(stereo[0]), 0.0)
+        self.assertAlmostEqual(channel_rms(stereo[1]), 0.20, places=5)
 
 
 if __name__ == "__main__":

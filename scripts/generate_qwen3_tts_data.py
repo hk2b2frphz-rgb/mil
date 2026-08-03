@@ -2119,6 +2119,24 @@ def validate_duplex_dialogue(dialogue: dict[str, Any]) -> list[str]:
     return errors
 
 
+# Silence floor for level measurement. Below this a sample is gap or codec
+# noise, and including it would drag a channel's RMS toward how much of the
+# dialogue that speaker happened to be silent for.
+CHANNEL_LEVEL_FLOOR = 1e-4
+# Bounds on the moshi gain, ~±12 dB. A channel that came out nearly silent is
+# broken rather than quiet, and must not have its noise floor amplified.
+CHANNEL_GAIN_MIN = 0.25
+CHANNEL_GAIN_MAX = 4.0
+
+
+def channel_rms(channel: np.ndarray) -> float:
+    """RMS over the voiced part of one channel, 0.0 when it is all silence."""
+    voiced = channel[np.abs(channel) > CHANNEL_LEVEL_FLOOR]
+    if voiced.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(np.square(voiced.astype(np.float64)))))
+
+
 def render_stereo(segments: list[AudioSegment], sample_rate: int, tail_sec: float = 0.5) -> np.ndarray:
     duration = max((s.end_sec for s in segments), default=0.0) + tail_sec
     n = max(1, int(math.ceil(duration * sample_rate)))
@@ -2129,6 +2147,20 @@ def render_stereo(segments: list[AudioSegment], sample_rate: int, tail_sec: floa
         en = min(n, st + seg.pcm.size)
         if en > st:
             stereo[ch, st:en] += seg.pcm[: en - st]
+
+    # The two channels arrive at unrelated levels. In mixed mode moshi is cloned
+    # from a reference recording and inherits that recording's level, while the
+    # user channel comes from a preset voice; a quiet reference leaves the whole
+    # moshi channel quiet, and the imbalance goes straight into the training
+    # data. Match moshi to the user channel with a single gain for the whole
+    # dialogue -- normalising per utterance would flatten the prosody the model
+    # is meant to learn.
+    moshi_rms = channel_rms(stereo[0])
+    user_rms = channel_rms(stereo[1])
+    if moshi_rms > 0.0 and user_rms > 0.0:
+        gain = min(max(user_rms / moshi_rms, CHANNEL_GAIN_MIN), CHANNEL_GAIN_MAX)
+        stereo[0] *= gain
+
     peak = float(np.max(np.abs(stereo)))
     if peak > 0.99:
         stereo = stereo / peak * 0.99
