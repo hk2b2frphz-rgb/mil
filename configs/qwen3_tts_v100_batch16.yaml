@@ -19,11 +19,15 @@ connectors:
       codec_left_context_frames: 72
       initial_codec_chunk_frames: 1
       decode_cudagraph_capture_sizes: [25, 73, 97, 169, 325]
-      # Keep Code2Wav CUDA graphs at B=1 on a 32 GB V100. Capture shapes are
-      # the Cartesian product of these two lists, and B=4 x 325 exhausts VRAM.
-      # The outer talker/request batch remains 16; only decoder work is split.
+      # Keep Code2Wav CUDA graph *capture* at B=1 on a 32 GB V100. Capture
+      # shapes are the Cartesian product of these two lists, and warming up
+      # B=4 x 325 exhausts VRAM. Runtime batches larger than any captured
+      # shape simply fall back to eager, so this alone fixes the warmup OOM.
+      # Do not also cap the runtime decode batch (decode_batch_max_size): the
+      # OOM is a capture-time cost, and throttling the live decoder drives a
+      # path that indexes past the B=1 buffers and aborts the CUDA context
+      # with a device-side assert.
       decode_cudagraph_batch_sizes: [1]
-      decode_batch_max_size: 1
 
 stages:
   - stage_id: 0

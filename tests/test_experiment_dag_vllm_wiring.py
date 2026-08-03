@@ -92,7 +92,9 @@ def test_v100_profile_caps_code2wav_without_reducing_outer_batch() -> None:
 
     assert extra["decode_cudagraph_capture_sizes"] == [25, 73, 97, 169, 325]
     assert extra["decode_cudagraph_batch_sizes"] == [1]
-    assert extra["decode_batch_max_size"] == 1
+    # Capture-time cap only: throttling the live decoder aborted the CUDA
+    # context with a device-side assert.
+    assert "decode_batch_max_size" not in extra
     assert {stage["stage_id"]: stage["max_num_seqs"] for stage in config["stages"]} == {
         0: 16,
         1: 16,
