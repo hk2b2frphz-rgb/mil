@@ -29,13 +29,19 @@ Qwen3-TTS のプリセット話者 (CustomVoice モデル):
 """
 
 import argparse
+import errno
+import gc
 import hashlib
 import json
 import logging
 import math
+import os
 import random
 import re
+import shutil
+import socket
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from collections.abc import Mapping
@@ -505,9 +511,8 @@ class Qwen3TTS:
                     "Voice clone requires a Qwen3-TTS Base model, "
                     f"e.g. Qwen/Qwen3-TTS-12Hz-1.7B-Base; got {model_id!r}"
                 )
-            missing = [role for role in ("user", "moshi") if role not in self.clone_refs]
-            if missing:
-                raise ValueError(f"clone_refs is missing role reference(s): {missing}")
+            if not self.clone_refs:
+                raise ValueError("clone_refs must contain at least one role reference")
             if not self.clone_x_vector_only:
                 no_text = [
                     name for name, ref in self.clone_refs.items()
@@ -570,6 +575,24 @@ class Qwen3TTS:
 
         logger.info("Qwen3-TTS 読み込み完了")
 
+    def close(self) -> None:
+        """Release one Qwen model before the next mixed-role pass starts."""
+        if self.model is None:
+            return
+        self._clone_prompts.clear()
+        model = self.model
+        self.model = None
+        del model
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            logger.debug("CUDA cache cleanup after Qwen close failed", exc_info=True)
+        logger.info("Qwen3-TTS model released: %s", self.model_id)
+
     def resolve_instruct(self, speaker_role: str, turn_instruct: str | None) -> str | None:
         """ターン側で明示指定があればそれ、無ければ CLI 既定 (--instruct-*) を使う。"""
         if turn_instruct:
@@ -607,7 +630,12 @@ class Qwen3TTS:
             voice = speaker_override if speaker_override in self.clone_refs else speaker_role
             prompt_items = self._clone_prompts.get(voice)
             if prompt_items is None:
-                ref = self.clone_refs[voice]
+                ref = self.clone_refs.get(voice)
+                if ref is None:
+                    raise ValueError(
+                        f"No clone reference for speaker {voice!r} "
+                        f"(available: {sorted(self.clone_refs)})"
+                    )
                 # 参照が本当に読まれたことを run.log に残す。クローンが効いて
                 # いるかは音を聴くまで分からないので、少なくとも「どの参照で
                 # プロンプトを作ったか」は INFO で確認できるようにする。
@@ -1143,6 +1171,11 @@ def truncate_alignment_text(text: str, kept_samples: int, total_samples: int) ->
     return (shortened or text[:1]) + "…"
 
 
+OPENING_GREETING_CACHE_VERSION = 2
+OPENING_GREETING_LOCK_WAIT_SEC = 1800.0
+OPENING_GREETING_LOCK_STALE_SEC = 3600.0
+
+
 def synthesize_opening_greeting(
     tts: Qwen3TTS | MossTTSD,
     text: str,
@@ -1151,37 +1184,198 @@ def synthesize_opening_greeting(
     backend: str,
     model_id: str,
     speaker: str,
+    cache_identity: Mapping[str, Any] | None = None,
 ) -> np.ndarray:
     """固定の冒頭挨拶を1回だけ合成し、全対話で同じ音声を使い回す。
 
     声色を固定するため、対話ごとの style preset ではなく固定 instruct
     （OPENING_GREETING_INSTRUCT）と固定の moshi 話者で合成する。音声を
-    変えうる全パラメータをキーにディスクへキャッシュするので、run や
-    shard をまたいでもビット同一の挨拶になる。
+    変えうる全パラメータを canonical JSON のキーに含める。共有 cache は
+    プロセス間 lock と atomic replace で公開するため、run や shard を
+    またいでも同じ1本の挨拶を使う。
     """
-    cache_path: Path | None = None
-    if cache_dir is not None:
-        key_src = "|".join([text, backend, model_id, speaker, instruct or ""])
-        key = hashlib.sha1(key_src.encode("utf-8")).hexdigest()[:16]
-        cache_path = cache_dir / f"greeting_{key}.npz"
-        if cache_path.exists():
-            data = np.load(cache_path)
-            pcm = np.asarray(data["pcm"], dtype=np.float32)
-            cached_rate = int(data["sample_rate"])
-            if tts.sample_rate == 0:
-                tts.sample_rate = cached_rate
-            elif cached_rate != tts.sample_rate:
-                pcm = _resample(pcm, cached_rate, tts.sample_rate)
-            logger.info("冒頭挨拶: キャッシュを再利用 -> %s", cache_path)
-            return pcm
-    pcm = np.asarray(
-        tts.synthesize(text, "moshi", instruct=instruct), dtype=np.float32
+    identity_payload = {
+        "cache_version": OPENING_GREETING_CACHE_VERSION,
+        "text": text,
+        "backend": backend,
+        "model_id": model_id,
+        "speaker": speaker,
+        "instruct": instruct or "",
+        "runtime": dict(cache_identity or {}),
+    }
+    identity_json = json.dumps(
+        identity_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
     )
-    if cache_path is not None:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(cache_path, pcm=pcm, sample_rate=tts.sample_rate)
+    identity_digest = hashlib.sha256(identity_json.encode("utf-8")).hexdigest()
+
+    def synthesize_pcm() -> tuple[np.ndarray, int]:
+        pcm = np.asarray(
+            tts.synthesize(text, "moshi", instruct=instruct), dtype=np.float32
+        ).reshape(-1)
+        sample_rate = int(tts.sample_rate)
+        if pcm.size == 0 or sample_rate <= 0:
+            raise RuntimeError(
+                "Opening greeting synthesis returned empty audio or no sample rate"
+            )
+        return pcm, sample_rate
+
+    if cache_dir is None:
+        return synthesize_pcm()[0]
+
+    cache_root = Path(cache_dir)
+    cache_root.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_root / f"greeting_{identity_digest[:24]}.npz"
+    lock_path = cache_path.with_name(f"{cache_path.name}.lock")
+
+    def load_cached(*, log_corruption: bool) -> tuple[np.ndarray, int] | None:
+        if not cache_path.is_file():
+            return None
+        try:
+            with np.load(cache_path, allow_pickle=False) as data:
+                stored_digest = str(
+                    np.asarray(data["identity_digest"]).reshape(()).item()
+                )
+                if stored_digest != identity_digest:
+                    raise ValueError(
+                        "opening greeting cache identity digest mismatch"
+                    )
+                pcm = np.asarray(data["pcm"], dtype=np.float32).reshape(-1).copy()
+                cached_rate = int(
+                    np.asarray(data["sample_rate"]).reshape(()).item()
+                )
+            if pcm.size == 0 or cached_rate <= 0:
+                raise ValueError("opening greeting cache contains empty audio")
+            return pcm, cached_rate
+        except Exception:
+            if log_corruption:
+                logger.warning(
+                    "冒頭挨拶: 破損したキャッシュを再生成します -> %s",
+                    cache_path,
+                    exc_info=True,
+                )
+            return None
+
+    def use_cached(cached: tuple[np.ndarray, int]) -> np.ndarray:
+        pcm, cached_rate = cached
+        if tts.sample_rate == 0:
+            tts.sample_rate = cached_rate
+        elif cached_rate != tts.sample_rate:
+            pcm = _resample(pcm, cached_rate, tts.sample_rate)
+        logger.info("冒頭挨拶: キャッシュを再利用 -> %s", cache_path)
+        return pcm
+
+    cached = load_cached(log_corruption=True)
+    if cached is not None:
+        return use_cached(cached)
+
+    def lock_is_stale() -> bool:
+        try:
+            age_sec = max(0.0, time.time() - lock_path.stat().st_mtime)
+        except OSError:
+            return False
+        try:
+            owner = json.loads(lock_path.read_text(encoding="utf-8"))
+            owner_host = str(owner.get("host") or "")
+            owner_pid = int(owner.get("pid"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return age_sec >= OPENING_GREETING_LOCK_STALE_SEC
+        if owner_host == socket.gethostname():
+            if owner_pid == os.getpid():
+                # Another thread in this process owns the lock.
+                return False
+            try:
+                os.kill(owner_pid, 0)
+            except OSError as exc:
+                if exc.errno == errno.ESRCH:
+                    return True
+            else:
+                return False
+        return age_sec >= OPENING_GREETING_LOCK_STALE_SEC
+
+    def unlink_lock() -> None:
+        # On Windows another waiter can briefly have the lock metadata open.
+        # Retry so the owner does not leave a false stale lock behind.
+        for _ in range(100):
+            try:
+                lock_path.unlink()
+                return
+            except FileNotFoundError:
+                return
+            except PermissionError:
+                time.sleep(0.01)
+        lock_path.unlink()
+
+    lock_owned = False
+    wait_deadline = time.monotonic() + OPENING_GREETING_LOCK_WAIT_SEC
+    while not lock_owned:
+        try:
+            lock_fd = os.open(
+                str(lock_path),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o644,
+            )
+        except FileExistsError:
+            cached = load_cached(log_corruption=False)
+            if cached is not None:
+                return use_cached(cached)
+            if lock_is_stale():
+                logger.warning("冒頭挨拶: stale lock を回収 -> %s", lock_path)
+                unlink_lock()
+                continue
+            if time.monotonic() >= wait_deadline:
+                raise TimeoutError(
+                    f"Timed out waiting for opening greeting cache lock: {lock_path}"
+                )
+            time.sleep(0.1)
+            continue
+        with os.fdopen(lock_fd, "w", encoding="utf-8") as lock_file:
+            json.dump(
+                {
+                    "pid": os.getpid(),
+                    "host": socket.gethostname(),
+                    "created_at": time.time(),
+                },
+                lock_file,
+            )
+            lock_file.write("\n")
+        lock_owned = True
+
+    try:
+        # A writer may have published the cache between our first miss and
+        # acquiring the lock. Prefer that canonical result to a second sample.
+        cached = load_cached(log_corruption=False)
+        if cached is not None:
+            return use_cached(cached)
+
+        pcm, sample_rate = synthesize_pcm()
+        tmp_path = cache_path.with_name(
+            f".{cache_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            with tmp_path.open("xb") as handle:
+                np.savez(
+                    handle,
+                    pcm=pcm,
+                    sample_rate=np.asarray(sample_rate, dtype=np.int64),
+                    identity_digest=np.asarray(identity_digest),
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, cache_path)
+        finally:
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
         logger.info("冒頭挨拶: 合成してキャッシュに保存 -> %s", cache_path)
-    return pcm
+        return pcm
+    finally:
+        if lock_owned:
+            unlink_lock()
 
 
 def build_segments(
@@ -2072,6 +2266,31 @@ def parse_args() -> argparse.Namespace:
         help="Qwen3-TTS の HuggingFace モデル ID（CustomVoice 系を推奨）",
     )
     parser.add_argument(
+        "--qwen-voice-mode",
+        default="auto",
+        choices=["auto", "customvoice", "clone", "mixed"],
+        help=(
+            "Qwen voice routing. auto preserves the legacy behavior "
+            "(clone when --qwen-clone-* is present, otherwise CustomVoice). "
+            "mixed renders user/other/background with --model (CustomVoice), "
+            "then moshi with --qwen-clone-model (Base clone), one model at a time."
+        ),
+    )
+    parser.add_argument(
+        "--qwen-clone-model",
+        default="Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+        help="Base model used for the moshi pass in --qwen-voice-mode mixed.",
+    )
+    parser.add_argument(
+        "--qwen-mixed-cache-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Persistent request-audio cache for mixed mode. "
+            "Default: <out-dir>/.qwen_mixed_cache."
+        ),
+    )
+    parser.add_argument(
         "--qwen-engine",
         default="transformers",
         choices=["transformers", "vllm-omni"],
@@ -2370,35 +2589,79 @@ def parse_args() -> argparse.Namespace:
         if args.dialogue_batch_size < 1:
             parser.error("--dialogue-batch-size must be positive")
 
-    # Voice clone (vllm-omni Base task): validate the reference set.
+    # Resolve the backward-compatible Qwen routing mode before validating refs.
     clone_args = [
         args.qwen_clone_ref_audio_user, args.qwen_clone_ref_text_user,
         args.qwen_clone_ref_audio_moshi, args.qwen_clone_ref_text_moshi,
     ]
-    args.qwen_clone_enabled = any(a is not None for a in clone_args) or args.qwen_clone_x_vector_only
+    has_clone_args = any(a is not None for a in clone_args) or args.qwen_clone_x_vector_only
+    if args.qwen_voice_mode == "auto":
+        args.qwen_voice_mode_resolved = "clone" if has_clone_args else "customvoice"
+    else:
+        args.qwen_voice_mode_resolved = args.qwen_voice_mode
+    args.qwen_clone_enabled = args.qwen_voice_mode_resolved in {"clone", "mixed"}
+    args.qwen_full_clone_enabled = args.qwen_voice_mode_resolved == "clone"
+    args.qwen_mixed_role_enabled = args.qwen_voice_mode_resolved == "mixed"
+
+    if args.qwen_voice_mode_resolved == "customvoice" and has_clone_args:
+        parser.error(
+            "--qwen-voice-mode customvoice cannot be combined with --qwen-clone-*"
+        )
+
     if args.qwen_clone_enabled:
         if args.tts_backend != "qwen3":
             parser.error("--qwen-clone-* requires --tts-backend qwen3")
-        if not args.qwen_clone_ref_audio_user or not args.qwen_clone_ref_audio_moshi:
-            parser.error(
-                "clone mode requires both --qwen-clone-ref-audio-user and "
-                "--qwen-clone-ref-audio-moshi"
-            )
-        if "Base" not in args.model:
-            parser.error(
-                "clone mode requires a Base model, e.g. "
-                "--model Qwen/Qwen3-TTS-12Hz-1.7B-Base"
-            )
-        if not args.qwen_clone_x_vector_only:
-            if not args.qwen_clone_ref_text_user or not args.qwen_clone_ref_text_moshi:
+        if args.qwen_mixed_role_enabled and not args.whole_utterance:
+            parser.error("mixed voice mode requires --whole-utterance")
+
+        if args.qwen_full_clone_enabled:
+            if not args.qwen_clone_ref_audio_user or not args.qwen_clone_ref_audio_moshi:
                 parser.error(
-                    "in-context clone requires --qwen-clone-ref-text-user/-moshi "
-                    "(or use --qwen-clone-x-vector-only)"
+                    "clone mode requires both --qwen-clone-ref-audio-user and "
+                    "--qwen-clone-ref-audio-moshi"
                 )
-        for path in (args.qwen_clone_ref_audio_user, args.qwen_clone_ref_audio_moshi):
+            if "Base" not in args.model:
+                parser.error(
+                    "clone mode requires a Base model, e.g. "
+                    "--model Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+                )
+            required_audio = [
+                args.qwen_clone_ref_audio_user,
+                args.qwen_clone_ref_audio_moshi,
+            ]
+            required_text = [
+                args.qwen_clone_ref_text_user,
+                args.qwen_clone_ref_text_moshi,
+            ]
+        else:
+            if args.qwen_clone_ref_audio_user or args.qwen_clone_ref_text_user:
+                parser.error(
+                    "mixed mode clones only moshi; remove the user clone reference"
+                )
+            if not args.qwen_clone_ref_audio_moshi:
+                parser.error(
+                    "mixed mode requires --qwen-clone-ref-audio-moshi"
+                )
+            if "CustomVoice" not in args.model:
+                parser.error(
+                    "mixed mode requires --model to be a CustomVoice model"
+                )
+            if "Base" not in args.qwen_clone_model:
+                parser.error(
+                    "mixed mode requires --qwen-clone-model to be a Base model"
+                )
+            required_audio = [args.qwen_clone_ref_audio_moshi]
+            required_text = [args.qwen_clone_ref_text_moshi]
+
+        if not args.qwen_clone_x_vector_only and not all(required_text):
+            parser.error(
+                "in-context clone requires transcript text for every clone "
+                "reference (or use --qwen-clone-x-vector-only)"
+            )
+        for path in required_audio:
             if not Path(path).is_file():
                 parser.error(f"clone reference WAV not found: {path}")
-        if args.user_speaker_pool.strip():
+        if args.qwen_full_clone_enabled and args.user_speaker_pool.strip():
             parser.error(
                 "--user-speaker-pool cannot be combined with clone mode "
                 "(preset speaker overrides have no clone reference)"
@@ -2538,18 +2801,30 @@ def prepare_dialogue_render_job(
     ]
     # クローンモードでは参照がロール名で登録されているので、プリセット話者名を
     # override に流すと参照が見つからない。moss-ttsd と同じくロール名を渡す。
-    if args.tts_backend == "moss-ttsd" or getattr(args, "qwen_clone_enabled", False):
+    qwen_full_clone_enabled = bool(
+        getattr(args, "qwen_full_clone_enabled", False)
+    )
+    if args.tts_backend == "moss-ttsd" or qwen_full_clone_enabled:
         user_override = "user"
     else:
         user_override = user_voice
-    other_override = (
-        "other" if args.tts_backend in ("moss-ttsd", "kokoro") else args.speaker_other
-    )
-    background_override = (
-        "background"
-        if args.tts_backend in ("moss-ttsd", "kokoro")
-        else args.speaker_background
-    )
+    if qwen_full_clone_enabled:
+        # Full clone mode registers only the user and moshi references.  Turns
+        # labelled other/background still occupy the user channel, so route
+        # them through the user clone instead of an unregistered preset name.
+        other_override = "user"
+        background_override = "user"
+    else:
+        other_override = (
+            "other"
+            if args.tts_backend in ("moss-ttsd", "kokoro")
+            else args.speaker_other
+        )
+        background_override = (
+            "background"
+            if args.tts_backend in ("moss-ttsd", "kokoro")
+            else args.speaker_background
+        )
     log_progress = (
         args.log_every <= 1
         or index == 1
@@ -2587,6 +2862,366 @@ def prepare_dialogue_render_job(
         resolved_preset_key=resolved_preset_key,
         log_progress=log_progress,
     )
+
+
+def prepare_pending_dialogue_render_jobs(
+    templates: list[dict[str, Any]],
+    args: argparse.Namespace,
+    emotion_map: dict[str, str],
+    done_stems: set[str],
+) -> list[DialogueRenderJob]:
+    """Build each unfinished render job once so mixed passes stay identical."""
+    jobs: list[DialogueRenderJob] = []
+    for index, template in enumerate(templates, start=1):
+        stem = f"sample_{index:03d}_{safe_stem(template['id'], f'dialogue_{index:03d}')}"
+        if args.resume and stem in done_stems:
+            continue
+        jobs.append(
+            prepare_dialogue_render_job(
+                index, template, args, emotion_map, len(templates)
+            )
+        )
+    return jobs
+
+
+def plan_render_job_requests(
+    job: DialogueRenderJob,
+    args: argparse.Namespace,
+    greeting_pcm: np.ndarray | None,
+) -> list[SynthesisRequest]:
+    return plan_whole_utterance_synthesis(
+        job.dialogue,
+        user_speaker_override=job.user_override,
+        other_speaker_override=job.other_override,
+        background_speaker_override=job.background_override,
+        instruct_user=job.instruct_user,
+        instruct_moshi=job.instruct_moshi,
+        max_chars_per_synthesis=args.whole_utterance_max_chars,
+        opening_greeting_pcm=greeting_pcm,
+    )
+
+
+def _request_stage_role(request: SynthesisRequest) -> str:
+    if request.speaker_role == "moshi":
+        return "moshi"
+    if request.speaker_role == "user":
+        return "user"
+    raise ValueError(
+        f"Mixed Qwen routing only supports user/moshi requests; got {request!r}"
+    )
+
+
+class MixedRoleAudioCache:
+    """Persistent, fingerprinted PCM cache for sequential mixed-model passes."""
+
+    CACHE_VERSION = 1
+
+    def __init__(
+        self,
+        root: Path,
+        namespace_payload: Mapping[str, Any],
+        *,
+        reset_namespace: bool = False,
+    ) -> None:
+        self.root = Path(root)
+        namespace_json = json.dumps(
+            {
+                "cache_version": self.CACHE_VERSION,
+                **dict(namespace_payload),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self.namespace = hashlib.sha256(namespace_json.encode("utf-8")).hexdigest()[:20]
+        self.namespace_dir = self.root / self.namespace
+        if reset_namespace and self.namespace_dir.is_dir():
+            shutil.rmtree(self.namespace_dir)
+        self.namespace_dir.mkdir(parents=True, exist_ok=True)
+        (self.namespace_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "cache_version": self.CACHE_VERSION,
+                    "namespace": self.namespace,
+                    "config": dict(namespace_payload),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _request_digest(request: SynthesisRequest) -> str:
+        payload = json.dumps(
+            asdict(request),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def path_for(
+        self,
+        job: DialogueRenderJob,
+        request_index: int,
+        request: SynthesisRequest,
+    ) -> Path:
+        role = _request_stage_role(request)
+        digest = self._request_digest(request)
+        return (
+            self.namespace_dir
+            / role
+            / job.stem
+            / f"{request_index:04d}_{digest[:16]}.npz"
+        )
+
+    def load(
+        self,
+        job: DialogueRenderJob,
+        request_index: int,
+        request: SynthesisRequest,
+    ) -> tuple[np.ndarray, int] | None:
+        path = self.path_for(job, request_index, request)
+        if not path.is_file():
+            return None
+        expected_digest = self._request_digest(request)
+        try:
+            with np.load(path, allow_pickle=False) as data:
+                digest = str(np.asarray(data["request_digest"]).item())
+                if digest != expected_digest:
+                    logger.warning("Ignoring stale mixed-role cache entry: %s", path)
+                    return None
+                audio = np.asarray(data["audio"], dtype=np.float32).reshape(-1)
+                sample_rate = int(np.asarray(data["sample_rate"]).item())
+        except Exception:
+            logger.warning("Ignoring unreadable mixed-role cache entry: %s", path)
+            return None
+        if audio.size == 0 or sample_rate <= 0:
+            logger.warning("Ignoring empty mixed-role cache entry: %s", path)
+            return None
+        return audio, sample_rate
+
+    def store(
+        self,
+        job: DialogueRenderJob,
+        request_index: int,
+        request: SynthesisRequest,
+        audio: np.ndarray,
+        sample_rate: int,
+    ) -> Path:
+        path = self.path_for(job, request_index, request)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(
+            f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+        )
+        pcm = np.asarray(audio, dtype=np.float32).reshape(-1)
+        with tmp.open("wb") as handle:
+            np.savez(
+                handle,
+                audio=pcm,
+                sample_rate=np.asarray(sample_rate, dtype=np.int64),
+                request_digest=np.asarray(self._request_digest(request)),
+            )
+        os.replace(tmp, path)
+        return path
+
+    def cleanup_job(self, job: DialogueRenderJob) -> None:
+        for role in ("user", "moshi"):
+            path = self.namespace_dir / role / job.stem
+            if path.is_dir():
+                shutil.rmtree(path)
+
+    def cleanup_namespace(self) -> None:
+        if self.namespace_dir.is_dir():
+            shutil.rmtree(self.namespace_dir)
+
+
+def _synthesize_many_compatible(
+    tts: Any,
+    requests: list[SynthesisRequest],
+) -> list[np.ndarray]:
+    synthesize_many = getattr(tts, "synthesize_many", None)
+    if callable(synthesize_many):
+        return list(synthesize_many(requests))
+    return [
+        tts.synthesize(
+            request.text,
+            request.speaker_role,
+            instruct=request.instruct,
+            speaker_override=request.speaker_override,
+        )
+        for request in requests
+    ]
+
+
+def cache_mixed_role_stage(
+    jobs: list[DialogueRenderJob],
+    args: argparse.Namespace,
+    tts: Any,
+    cache: MixedRoleAudioCache,
+    role: str,
+    *,
+    greeting_pcm: np.ndarray | None,
+    skip_stems: set[str] | None = None,
+) -> dict[str, str]:
+    """Generate all missing requests for one role without loading the other model."""
+    if role not in {"user", "moshi"}:
+        raise ValueError(f"Unknown mixed-role stage: {role}")
+    generated = 0
+    reused = 0
+    failures: dict[str, str] = {}
+    skipped = skip_stems or set()
+    batch_dialogues = max(1, int(args.dialogue_batch_size))
+
+    def store_outputs(
+        entries: list[tuple[DialogueRenderJob, int, SynthesisRequest]],
+        outputs: list[np.ndarray],
+    ) -> None:
+        nonlocal generated
+        if len(outputs) != len(entries):
+            raise RuntimeError(
+                f"{role} mixed-role stage returned {len(outputs)} audio items "
+                f"for {len(entries)} requests"
+            )
+        if tts.sample_rate <= 0:
+            raise RuntimeError(f"{role} mixed-role stage did not set sample_rate")
+        for (job, request_index, request), audio in zip(entries, outputs):
+            pcm = np.asarray(audio, dtype=np.float32).reshape(-1)
+            if pcm.size == 0:
+                raise RuntimeError(
+                    f"{role} mixed-role stage returned empty audio for "
+                    f"{job.stem} request {request_index}"
+                )
+            cache.store(job, request_index, request, pcm, tts.sample_rate)
+            generated += 1
+
+    for start in range(0, len(jobs), batch_dialogues):
+        batch_jobs = jobs[start : start + batch_dialogues]
+        missing: list[tuple[DialogueRenderJob, int, SynthesisRequest]] = []
+        for job in batch_jobs:
+            if job.stem in skipped or job.stem in failures:
+                continue
+            requests = plan_render_job_requests(job, args, greeting_pcm)
+            for request_index, request in enumerate(requests):
+                if _request_stage_role(request) != role:
+                    continue
+                cached = cache.load(job, request_index, request)
+                if cached is not None:
+                    _, cached_rate = cached
+                    if tts.sample_rate == 0:
+                        tts.sample_rate = cached_rate
+                    elif tts.sample_rate != cached_rate:
+                        raise RuntimeError(
+                            f"Mixed-role cache sample rate mismatch: "
+                            f"{cached_rate} != {tts.sample_rate}"
+                        )
+                    reused += 1
+                else:
+                    missing.append((job, request_index, request))
+        if not missing:
+            continue
+        try:
+            outputs = _synthesize_many_compatible(
+                tts, [request for _, _, request in missing]
+            )
+            store_outputs(missing, outputs)
+        except Exception as batch_exc:
+            # A single bad/runaway request must not strand the whole shard on
+            # every resume. Retry this exceptional batch one request at a time
+            # with the same loaded model, then quarantine only the failed job.
+            logger.warning(
+                "mixed-role %s batch failed; isolating requests without "
+                "reloading the model: %s",
+                role,
+                batch_exc,
+                exc_info=True,
+            )
+            for entry in missing:
+                job, request_index, request = entry
+                if job.stem in failures:
+                    continue
+                try:
+                    output = _synthesize_many_compatible(tts, [request])
+                    store_outputs([entry], output)
+                except Exception as request_exc:
+                    failures[job.stem] = (
+                        f"{role} request {request_index} failed: {request_exc}"
+                    )
+                    logger.warning(
+                        "mixed-role %s: skipping dialogue %s after isolated "
+                        "request %d failed: %s",
+                        role,
+                        job.stem,
+                        request_index,
+                        request_exc,
+                        exc_info=True,
+                    )
+        logger.info(
+            "mixed-role %s pass: dialogues=%d..%d generated=%d reused=%d failed=%d",
+            role,
+            start + 1,
+            min(start + len(batch_jobs), len(jobs)),
+            generated,
+            reused,
+            len(failures),
+        )
+    logger.info(
+        "mixed-role %s pass complete: jobs=%d generated=%d reused=%d failed=%d",
+        role,
+        len(jobs),
+        generated,
+        reused,
+        len(failures),
+    )
+    return failures
+
+
+def iter_cached_mixed_role_render_jobs(
+    jobs: list[DialogueRenderJob],
+    args: argparse.Namespace,
+    cache: MixedRoleAudioCache,
+    greeting_pcm: np.ndarray | None,
+    greeting_sample_rate: int = 0,
+) -> Any:
+    """Reassemble both cached role passes in the original request order."""
+    for job in jobs:
+        requests = plan_render_job_requests(job, args, greeting_pcm)
+        audio: list[np.ndarray] = []
+        sample_rate = 0
+        for request_index, request in enumerate(requests):
+            cached = cache.load(job, request_index, request)
+            if cached is None:
+                raise RuntimeError(
+                    f"Missing mixed-role cache for {job.stem} request "
+                    f"{request_index}: {request!r}"
+                )
+            pcm, rate = cached
+            if sample_rate == 0:
+                sample_rate = rate
+            elif rate != sample_rate:
+                raise RuntimeError(
+                    f"CustomVoice/Base sample rates differ for {job.stem}: "
+                    f"{sample_rate} != {rate}"
+                )
+            audio.append(pcm)
+        if sample_rate <= 0:
+            if (
+                greeting_pcm is not None
+                and np.asarray(greeting_pcm).size > 0
+                and greeting_sample_rate > 0
+            ):
+                # A silence-only source dialogue still receives the separately
+                # synthesized fixed greeting. There are no cached role requests
+                # to infer the rate from in that case, so use the greeting's
+                # clone-backend sample rate.
+                sample_rate = int(greeting_sample_rate)
+            else:
+                raise RuntimeError(
+                    f"No mixed-role audio requests planned for {job.stem}"
+                )
+        yield job, ReplayTTS(requests, audio, sample_rate)
 
 
 def iter_dialogue_render_jobs(
@@ -2642,15 +3277,10 @@ def iter_dialogue_render_jobs(
             raise RuntimeError("batched TTS output count did not match the synthesis plan")
         return rendered
 
-    for index, template in enumerate(templates, start=1):
-        stem = f"sample_{index:03d}_{safe_stem(template['id'], f'dialogue_{index:03d}')}"
-        if args.resume and stem in done_stems:
-            continue
-        pending.append(
-            prepare_dialogue_render_job(
-                index, template, args, emotion_map, len(templates)
-            )
-        )
+    for job in prepare_pending_dialogue_render_jobs(
+        templates, args, emotion_map, done_stems
+    ):
+        pending.append(job)
         if len(pending) >= (
             args.dialogue_batch_size if args.qwen_engine == "vllm-omni" else 1
         ):
@@ -2658,6 +3288,153 @@ def iter_dialogue_render_jobs(
             pending.clear()
     if pending:
         yield from flush()
+
+
+def create_qwen_backend(
+    args: argparse.Namespace,
+    *,
+    model_id: str,
+    clone_refs: Mapping[str, CloneReference] | None,
+) -> Any:
+    """Create one lazy Qwen backend; callers control load/close ordering."""
+    if args.qwen_engine == "vllm-omni":
+        return VLLMQwen3TTS(
+            model_id=model_id,
+            dtype_str=args.dtype,
+            speaker_user=args.speaker_user,
+            speaker_moshi=args.speaker_moshi,
+            language=args.language,
+            instruct_user=args.instruct_user,
+            instruct_moshi=args.instruct_moshi,
+            batch_size=args.tts_batch_size,
+            stage_configs_path=args.vllm_stage_config,
+            max_new_tokens=args.vllm_max_new_tokens,
+            clone_refs=clone_refs,
+            clone_x_vector_only=args.qwen_clone_x_vector_only,
+        )
+    return Qwen3TTS(
+        model_id=model_id,
+        device=args.device,
+        dtype_str=args.dtype,
+        attn_impl=args.attn_impl,
+        speaker_user=args.speaker_user,
+        speaker_moshi=args.speaker_moshi,
+        language=args.language,
+        instruct_user=args.instruct_user,
+        instruct_moshi=args.instruct_moshi,
+        clone_refs=clone_refs,
+        clone_x_vector_only=args.qwen_clone_x_vector_only,
+        clone_max_new_tokens=args.qwen_clone_max_new_tokens,
+    )
+
+
+def file_fingerprint(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def build_opening_greeting_cache_identity(
+    args: argparse.Namespace,
+    *,
+    model_id: str,
+    speaker: str,
+) -> dict[str, Any]:
+    """Return every runtime input that can change the fixed greeting audio."""
+    identity: dict[str, Any] = {
+        "tts_backend": args.tts_backend,
+        "model_id": model_id,
+        "speaker": speaker,
+        "dtype": args.dtype,
+        "language": args.language,
+    }
+    if args.tts_backend != "qwen3":
+        if args.tts_backend == "moss-ttsd":
+            ref_audio_paths, ref_texts = load_moss_references(args)
+            moshi_ref_path = ref_audio_paths["moshi"].resolve()
+            identity.update(
+                {
+                    "codec_model": args.moss_codec_model,
+                    "moss_ref_audio_moshi": str(moshi_ref_path),
+                    "moss_ref_audio_moshi_sha256": file_fingerprint(
+                        moshi_ref_path
+                    ),
+                    "moss_ref_text_moshi": ref_texts["moshi"],
+                }
+            )
+        elif args.tts_backend == "kokoro":
+            identity["kokoro_voice"] = args.kokoro_voice_moshi
+        return identity
+
+    identity.update(
+        {
+            "qwen_engine": args.qwen_engine,
+            "qwen_voice_mode": args.qwen_voice_mode_resolved,
+            "attn_impl": args.attn_impl,
+            "vllm_max_new_tokens": args.vllm_max_new_tokens,
+            "clone_max_new_tokens": args.qwen_clone_max_new_tokens,
+            "tts_batch_size": args.tts_batch_size,
+        }
+    )
+    if args.qwen_engine == "vllm-omni":
+        stage_path = Path(args.vllm_stage_config).resolve()
+        identity["vllm_stage_config"] = str(stage_path)
+        identity["vllm_stage_config_sha256"] = (
+            file_fingerprint(stage_path) if stage_path.is_file() else None
+        )
+
+    ref_path_raw = getattr(args, "qwen_clone_ref_audio_moshi", None)
+    if getattr(args, "qwen_clone_enabled", False) and ref_path_raw:
+        ref_path = Path(ref_path_raw).resolve()
+        identity.update(
+            {
+                "clone_ref_audio_moshi": str(ref_path),
+                "clone_ref_audio_moshi_sha256": file_fingerprint(ref_path),
+                "clone_ref_text_moshi": args.qwen_clone_ref_text_moshi,
+                "clone_x_vector_only": bool(args.qwen_clone_x_vector_only),
+            }
+        )
+    return identity
+
+
+def mixed_role_cache_config(args: argparse.Namespace) -> dict[str, Any]:
+    stage_path = Path(args.vllm_stage_config).resolve()
+    return {
+        "voice_mode": "mixed",
+        "engine": args.qwen_engine,
+        "customvoice_model": args.model,
+        "clone_model": args.qwen_clone_model,
+        "dtype": args.dtype,
+        "language": args.language,
+        "attn_impl": args.attn_impl,
+        "tts_batch_size": args.tts_batch_size,
+        "dialogue_batch_size": args.dialogue_batch_size,
+        "speaker_user": args.speaker_user,
+        "speaker_other": args.speaker_other,
+        "speaker_background": args.speaker_background,
+        "user_speaker_pool": list(args.user_speaker_pool_list),
+        "instruct_user": args.instruct_user,
+        "instruct_moshi": args.instruct_moshi,
+        "clone_ref_audio_moshi": str(
+            Path(args.qwen_clone_ref_audio_moshi).resolve()
+        ),
+        "clone_ref_audio_moshi_sha256": file_fingerprint(
+            args.qwen_clone_ref_audio_moshi
+        ),
+        "clone_ref_text_moshi": args.qwen_clone_ref_text_moshi,
+        "clone_x_vector_only": bool(args.qwen_clone_x_vector_only),
+        "whole_utterance_max_chars": args.whole_utterance_max_chars,
+        "vllm_stage_config": str(stage_path),
+        "vllm_stage_config_sha256": (
+            file_fingerprint(stage_path)
+            if args.qwen_engine == "vllm-omni" and stage_path.is_file()
+            else None
+        ),
+        "vllm_max_new_tokens": args.vllm_max_new_tokens,
+        "clone_max_new_tokens": args.qwen_clone_max_new_tokens,
+    }
 
 
 def main() -> None:
@@ -2715,7 +3492,7 @@ def main() -> None:
     # クローン参照はエンジン非依存。vllm-omni と transformers のどちらの
     # バックエンドも同じ dict を受け取る。
     clone_refs = None
-    if args.qwen_clone_enabled:
+    if args.qwen_full_clone_enabled:
         clone_refs = {
             "user": CloneReference(
                 ref_audio=args.qwen_clone_ref_audio_user,
@@ -2726,8 +3503,33 @@ def main() -> None:
                 ref_text=args.qwen_clone_ref_text_moshi,
             ),
         }
+    elif args.qwen_mixed_role_enabled:
+        clone_refs = {
+            "moshi": CloneReference(
+                ref_audio=args.qwen_clone_ref_audio_moshi,
+                ref_text=args.qwen_clone_ref_text_moshi,
+            ),
+        }
+
+    completed_stems = {
+        f"sample_{idx:03d}_{safe_stem(tmpl['id'], f'dialogue_{idx:03d}')}"
+        for idx, tmpl in enumerate(templates, start=1)
+    } & done_stems
+    success_count = len(completed_stems) if args.resume else 0
+    failed_count = 0
+    fa_failed_count = 0
+    if success_count:
+        logger.info("resume: %d/%d dialogue(s) already complete", success_count, len(templates))
+    success_goal = (
+        args.success_target if args.success_target is not None else len(templates)
+    )
+    work_needed = success_count < success_goal
 
     tts: Any
+    mixed_user_tts: Any | None = None
+    mixed_cache: MixedRoleAudioCache | None = None
+    mixed_jobs: list[DialogueRenderJob] = []
+    mixed_stage_failures: dict[str, str] = {}
     if args.tts_backend == "moss-ttsd":
         ref_audio_paths, ref_texts = load_moss_references(args)
         tts = MossTTSD(
@@ -2753,47 +3555,143 @@ def main() -> None:
             voice_background=args.kokoro_voice_background,
             model_id=args.kokoro_model,
         )
-    elif args.qwen_engine == "vllm-omni":
-        tts = VLLMQwen3TTS(
+    elif args.qwen_mixed_role_enabled:
+        mixed_user_tts = create_qwen_backend(
+            args,
             model_id=args.model,
-            dtype_str=args.dtype,
-            speaker_user=args.speaker_user,
-            speaker_moshi=args.speaker_moshi,
-            language=args.language,
-            instruct_user=args.instruct_user,
-            instruct_moshi=args.instruct_moshi,
-            batch_size=args.tts_batch_size,
-            stage_configs_path=args.vllm_stage_config,
-            max_new_tokens=args.vllm_max_new_tokens,
+            clone_refs=None,
+        )
+        tts = create_qwen_backend(
+            args,
+            model_id=args.qwen_clone_model,
             clone_refs=clone_refs,
-            clone_x_vector_only=args.qwen_clone_x_vector_only,
         )
     else:
-        tts = Qwen3TTS(
+        tts = create_qwen_backend(
+            args,
             model_id=args.model,
-            device=args.device,
-            dtype_str=args.dtype,
-            attn_impl=args.attn_impl,
-            speaker_user=args.speaker_user,
-            speaker_moshi=args.speaker_moshi,
-            language=args.language,
-            instruct_user=args.instruct_user,
-            instruct_moshi=args.instruct_moshi,
             clone_refs=clone_refs,
-            clone_x_vector_only=args.qwen_clone_x_vector_only,
-            clone_max_new_tokens=args.qwen_clone_max_new_tokens,
         )
-    tts.load()
 
     # 固定挨拶は run の最初に1回だけ合成（またはキャッシュから読み込み）、
     # 全対話で同じ音声を使い回す。声色は --speaker-moshi と
     # --opening-greeting-instruct で固定される。
     greeting_pcm: np.ndarray | None = None
-    if not args.no_opening_greeting and args.opening_greeting:
+    if work_needed and args.qwen_mixed_role_enabled:
+        # Mixed mode deliberately stages every unfinished candidate, including
+        # success-target spares, while each model is loaded exactly once.
+        # Alignment failures are only known after both model passes, so unused
+        # spares trade extra synthesis work for the one-load-per-model guarantee.
+        mixed_jobs = prepare_pending_dialogue_render_jobs(
+            templates, args, emotion_map, done_stems
+        )
+        cache_root = (
+            args.qwen_mixed_cache_dir
+            if args.qwen_mixed_cache_dir is not None
+            else args.out_dir / ".qwen_mixed_cache"
+        )
+        mixed_cache = MixedRoleAudioCache(
+            cache_root,
+            mixed_role_cache_config(args),
+            reset_namespace=not args.resume,
+        )
+        logger.info(
+            "mixed-role cache: %s (namespace=%s)",
+            mixed_cache.namespace_dir,
+            mixed_cache.namespace,
+        )
+
+        assert mixed_user_tts is not None
+        user_stage_failures: dict[str, str] = {}
+        try:
+            # Planning must omit the separately synthesized opening greeting in
+            # both passes. A non-None sentinel keeps every later request index
+            # identical before the real moshi greeting exists.
+            greeting_plan_sentinel = np.zeros(0, dtype=np.float32)
+            user_stage_failures = cache_mixed_role_stage(
+                mixed_jobs,
+                args,
+                mixed_user_tts,
+                mixed_cache,
+                "user",
+                greeting_pcm=greeting_plan_sentinel,
+            )
+        finally:
+            mixed_user_tts.close()
+        mixed_stage_failures.update(user_stage_failures)
+
+        moshi_stage_failures: dict[str, str] = {}
+        try:
+            if not args.no_opening_greeting and args.opening_greeting:
+                greeting_cache_dir = (
+                    args.opening_greeting_cache_dir
+                    if str(args.opening_greeting_cache_dir) not in ("", ".")
+                    else None
+                )
+                greeting_pcm = synthesize_opening_greeting(
+                    tts,
+                    args.opening_greeting,
+                    args.opening_greeting_instruct,
+                    greeting_cache_dir,
+                    backend=args.tts_backend,
+                    model_id=args.qwen_clone_model,
+                    speaker="clone:moshi",
+                    cache_identity=build_opening_greeting_cache_identity(
+                        args,
+                        model_id=args.qwen_clone_model,
+                        speaker="clone:moshi",
+                    ),
+                )
+            moshi_stage_failures = cache_mixed_role_stage(
+                mixed_jobs,
+                args,
+                tts,
+                mixed_cache,
+                "moshi",
+                greeting_pcm=greeting_pcm,
+                skip_stems=set(user_stage_failures),
+            )
+        finally:
+            tts.close()
+        mixed_stage_failures.update(moshi_stage_failures)
+        if mixed_stage_failures:
+            failed_count += len(mixed_stage_failures)
+            mixed_jobs = [
+                job for job in mixed_jobs
+                if job.stem not in mixed_stage_failures
+            ]
+            logger.warning(
+                "mixed-role staging quarantined %d dialogue(s); "
+                "%d remain for alignment/render",
+                len(mixed_stage_failures),
+                len(mixed_jobs),
+            )
+            for failed_stem, reason in sorted(mixed_stage_failures.items()):
+                logger.warning("mixed-role staging failure %s: %s", failed_stem, reason)
+    elif work_needed:
+        tts.load()
+
+    if (
+        work_needed
+        and not args.qwen_mixed_role_enabled
+        and not args.no_opening_greeting
+        and args.opening_greeting
+    ):
         greeting_cache_dir = (
             args.opening_greeting_cache_dir
             if str(args.opening_greeting_cache_dir) not in ("", ".")
             else None
+        )
+        greeting_model_id = (
+            args.moss_model if args.tts_backend == "moss-ttsd"
+            else args.kokoro_model if args.tts_backend == "kokoro"
+            else args.model
+        )
+        greeting_speaker = (
+            "moshi" if args.tts_backend == "moss-ttsd"
+            else args.kokoro_voice_moshi if args.tts_backend == "kokoro"
+            else "clone:moshi" if args.qwen_clone_enabled
+            else args.speaker_moshi
         )
         greeting_pcm = synthesize_opening_greeting(
             tts,
@@ -2801,49 +3699,40 @@ def main() -> None:
             args.opening_greeting_instruct,
             greeting_cache_dir,
             backend=args.tts_backend,
-            model_id=(
-                args.moss_model if args.tts_backend == "moss-ttsd"
-                else args.kokoro_model if args.tts_backend == "kokoro"
-                else args.model
-            ),
-            speaker=(
-                "moshi" if args.tts_backend == "moss-ttsd"
-                else args.kokoro_voice_moshi if args.tts_backend == "kokoro"
-                # クローン時の声は --speaker-moshi ではなく moshi 側の参照で
-                # 決まるので、そちらをキーに含める。含めないと参照だけ差し替えた
-                # 再実行が前の参照で作った挨拶を再利用してしまう。
-                else "|".join([
-                    "clone",
-                    str(args.qwen_clone_ref_audio_moshi),
-                    str(args.qwen_clone_ref_text_moshi or ""),
-                    str(bool(args.qwen_clone_x_vector_only)),
-                ]) if args.qwen_clone_enabled
-                else args.speaker_moshi
+            model_id=greeting_model_id,
+            speaker=greeting_speaker,
+            cache_identity=build_opening_greeting_cache_identity(
+                args,
+                model_id=greeting_model_id,
+                speaker=greeting_speaker,
             ),
         )
 
     fa_aligner: ForcedAligner | None = None
-    if args.whole_utterance:
+    if work_needed and args.whole_utterance:
         fa_aligner = ForcedAligner(
             device=args.device, fallback_mode=args.fa_fallback,
         )
         fa_aligner.load()
 
-    completed_stems = {
-        f"sample_{idx:03d}_{safe_stem(tmpl['id'], f'dialogue_{idx:03d}')}"
-        for idx, tmpl in enumerate(templates, start=1)
-    } & done_stems
-    success_count = len(completed_stems) if args.resume else 0
-    failed_count = 0
-    fa_failed_count = 0
-    if success_count:
-        logger.info("resume: %d/%d dialogue(s) already complete", success_count, len(templates))
-
-    if args.success_target is not None and success_count >= args.success_target:
+    if not work_needed:
         render_jobs = iter(())
         logger.info(
-            "success-target %d is already satisfied; no TTS batches will run",
-            args.success_target,
+            "success goal %d is already satisfied; no TTS batches will run",
+            success_goal,
+        )
+    elif args.qwen_mixed_role_enabled:
+        assert mixed_cache is not None
+        render_jobs = iter_cached_mixed_role_render_jobs(
+            mixed_jobs,
+            args,
+            mixed_cache,
+            greeting_pcm,
+            greeting_sample_rate=(
+                int(getattr(tts, "sample_rate", 0))
+                if greeting_pcm is not None
+                else 0
+            ),
         )
     else:
         render_jobs = iter_dialogue_render_jobs(
@@ -2897,7 +3786,8 @@ def main() -> None:
                     background_speaker_override=background_override,
                     opening_greeting_pcm=greeting_pcm,
                 )
-            if not segments or tts.sample_rate == 0:
+            render_sample_rate = int(getattr(render_tts, "sample_rate", 0))
+            if not segments or render_sample_rate == 0:
                 # 音声ターンが 0 件（沈黙のみ等）の対話。sample_rate が未確定で
                 # ゼロ除算になるため、合成せずスキップする。
                 logger.warning(
@@ -2905,16 +3795,16 @@ def main() -> None:
                     idx, len(templates), dialogue.id,
                 )
                 continue
-            stereo = render_stereo(segments, tts.sample_rate)
+            stereo = render_stereo(segments, render_sample_rate)
             elapsed = time.time() - t0
 
             # stem was computed above for the resume check; reuse it so the
             # written filename matches the done_stems bookkeeping exactly.
             wav_path = data_dir / f"{stem}.wav"
             json_path = wav_path.with_suffix(".json")
-            duration = stereo.shape[-1] / tts.sample_rate
+            duration = stereo.shape[-1] / render_sample_rate
 
-            write_wav(wav_path, stereo, tts.sample_rate)
+            write_wav(wav_path, stereo, render_sample_rate)
 
             # kyutai moshi-finetune の Interleaver は「1 エントリ = 1 単語」を
             # 前提にエントリ開始フレームへトークンを詰めるため、発話単位の
@@ -2945,11 +3835,16 @@ def main() -> None:
                             else "qwen3-tts-scripted"
                         )
                     ),
-                    "sample_rate": tts.sample_rate,
+                    "sample_rate": render_sample_rate,
                     "duration_sec": round(duration, 4),
                     "tts_backend": args.tts_backend,
                     "qwen_engine": (
                         args.qwen_engine if args.tts_backend == "qwen3" else None
+                    ),
+                    "qwen_voice_mode": (
+                        args.qwen_voice_mode_resolved
+                        if args.tts_backend == "qwen3"
+                        else None
                     ),
                     "tts_batch_size": (
                         args.tts_batch_size
@@ -2959,6 +3854,15 @@ def main() -> None:
                     "tts_model": (
                         args.moss_model if args.tts_backend == "moss-ttsd"
                         else args.model
+                    ),
+                    "tts_models_by_role": (
+                        {
+                            "user": args.model,
+                            "moshi": args.qwen_clone_model,
+                        }
+                        if args.tts_backend == "qwen3"
+                        and args.qwen_mixed_role_enabled
+                        else None
                     ),
                     "tts_codec_model": (
                         args.moss_codec_model
@@ -2973,6 +3877,11 @@ def main() -> None:
                     "speaker_background": args.speaker_background,
                     "qwen_clone": (
                         {
+                            "roles": (
+                                ["moshi"]
+                                if args.qwen_mixed_role_enabled
+                                else ["user", "moshi"]
+                            ),
                             "x_vector_only": args.qwen_clone_x_vector_only,
                             "ref_audio_user": args.qwen_clone_ref_audio_user,
                             "ref_text_user": args.qwen_clone_ref_text_user,
@@ -3041,6 +3950,8 @@ def main() -> None:
             if log_progress:
                 logger.info("保存完了: %s (%.2f 秒, wall %.1f 秒)", wav_path, duration, elapsed)
             success_count += 1
+            if mixed_cache is not None:
+                mixed_cache.cleanup_job(job)
             if args.success_target is not None and success_count >= args.success_target:
                 logger.info(
                     "success-target %d に到達したため打ち切ります (処理済み %d/%d, 失敗 %d 件)",
@@ -3069,12 +3980,28 @@ def main() -> None:
         "対話合成完了: 成功 %d 件, 失敗 %d 件 (うち FA 失敗による破棄 %d 件)",
         success_count, failed_count, fa_failed_count,
     )
-    performance_stats = getattr(tts, "performance_stats", None)
-    if callable(performance_stats):
+    perf_sources = (
+        [("user-customvoice", mixed_user_tts), ("moshi-clone", tts)]
+        if args.qwen_mixed_role_enabled
+        else [("all", tts)]
+    )
+    combined_audio_sec = 0.0
+    combined_wall_sec = 0.0
+    combined_batches = 0
+    combined_requests = 0
+    for perf_label, perf_tts in perf_sources:
+        performance_stats = getattr(perf_tts, "performance_stats", None)
+        if not callable(performance_stats):
+            continue
         perf = performance_stats()
+        combined_batches += int(perf["batches"])
+        combined_requests += int(perf["requests"])
+        combined_audio_sec += float(perf["audio_sec"])
+        combined_wall_sec += float(perf["inference_wall_sec"])
         logger.info(
-            "vLLM-Omni performance summary: batches=%d requests=%d "
+            "vLLM-Omni performance summary [%s]: batches=%d requests=%d "
             "audio_sec=%.2f inference_wall_sec=%.2f audio_x=%.3f rtf=%.3f",
+            perf_label,
             perf["batches"],
             perf["requests"],
             perf["audio_sec"],
@@ -3082,9 +4009,34 @@ def main() -> None:
             perf["audio_x"],
             perf["rtf"],
         )
+    if len(perf_sources) > 1 and combined_requests:
+        combined_audio_x = (
+            combined_audio_sec / combined_wall_sec if combined_wall_sec > 0 else 0.0
+        )
+        combined_rtf = (
+            combined_wall_sec / combined_audio_sec if combined_audio_sec > 0 else 0.0
+        )
+        logger.info(
+            "vLLM-Omni performance summary [mixed-total]: batches=%d requests=%d "
+            "audio_sec=%.2f inference_wall_sec=%.2f audio_x=%.3f rtf=%.3f",
+            combined_batches,
+            combined_requests,
+            combined_audio_sec,
+            combined_wall_sec,
+            combined_audio_x,
+            combined_rtf,
+        )
     close_tts = getattr(tts, "close", None)
     if callable(close_tts):
         close_tts()
+    if (
+        mixed_cache is not None
+        and (
+            (args.success_target is not None and success_count >= args.success_target)
+            or (args.success_target is None and failed_count == 0)
+        )
+    ):
+        mixed_cache.cleanup_namespace()
     if args.success_target is not None and success_count < args.success_target:
         raise SystemExit(
             f"success-target {args.success_target} に届きませんでした "

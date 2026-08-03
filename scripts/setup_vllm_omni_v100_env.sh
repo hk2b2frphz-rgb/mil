@@ -62,6 +62,8 @@ VLLM_BUILD_LOG="${VLLM_BUILD_LOG:-$PWD/vllm_build.log}"
 # lands there recompiles from scratch every submit. Pin the CMake build dir and
 # a ccache store here instead, so the sm70 CUDA objects survive across jobs.
 VLLM_BUILD_ROOT="${VLLM_BUILD_ROOT:-$PWD/.vllm-build}"
+V100_QWEN_PATCH="$PWD/scripts/patch_vllm_omni_qwen3_tts_v100.py"
+REINSTALL_VLLM_OMNI=0
 
 if ! command -v module >/dev/null 2>&1; then
     for init in /etc/profile.d/modules.sh /usr/share/Modules/init/bash; do
@@ -183,6 +185,30 @@ echo "CUDA architectures: $TORCH_CUDA_ARCH_LIST"
 echo "Build parallelism: MAX_JOBS=$MAX_JOBS NVCC_THREADS=$NVCC_THREADS"
 echo "Build log: $VLLM_BUILD_LOG (tail -f from a login node to watch progress)"
 
+# vLLM-Omni 0.22.0 hard-codes bfloat16 inside Qwen3-TTS even when its stage
+# config selects float16. V100/sm70 cannot execute those casts. Apply the
+# version-pinned source patch before the resume check so an already-completed
+# environment is upgraded in seconds without rebuilding vLLM (FRESH is not
+# required). A missing/half-installed package is expected on a first run and is
+# patched after installation below.
+if [[ "${FRESH:-0}" != "1" && -x "$VLLM_PYTHON" ]] \
+   && EXPECT_OMNI_VERSION="$VLLM_OMNI_VERSION" "$VLLM_PYTHON" -c \
+        'import importlib.metadata, os; raise SystemExit(0 if importlib.metadata.version("vllm-omni") == os.environ["EXPECT_OMNI_VERSION"] else 1)' \
+        >/dev/null 2>&1; then
+    if ! "$VLLM_PYTHON" "$V100_QWEN_PATCH"; then
+        echo "WARNING: the existing vLLM-Omni source could not be patched;" >&2
+        echo "         continuing so the pinned wheel can be reinstalled." >&2
+        REINSTALL_VLLM_OMNI=1
+    fi
+fi
+
+verify_vllm_runtime() {
+    EXPECT_TRANSFORMERS="$TRANSFORMERS_VERSION" "$VLLM_PYTHON" - <<'PY'
+import os, transformers, vllm, vllm_omni  # noqa: F401
+assert transformers.__version__ == os.environ["EXPECT_TRANSFORMERS"], transformers.__version__
+PY
+}
+
 # Fast resume: if a previous run already produced a complete, valid env, do
 # nothing. Re-submitting the (long) build job is then cheap. FRESH=1 forces a
 # full clean rebuild.
@@ -190,11 +216,8 @@ echo "Build log: $VLLM_BUILD_LOG (tail -f from a login node to watch progress)"
 # build steps use, so an env whose torch was swapped is never treated as valid.
 if [[ "${FRESH:-0}" != "1" && -x "$VLLM_PYTHON" ]] && \
    verify_torch_stack "resume check" >/dev/null 2>&1 && \
-   EXPECT_TRANSFORMERS="$TRANSFORMERS_VERSION" \
-   "$VLLM_PYTHON" - >/dev/null 2>&1 <<'PY'
-import os, transformers, vllm, vllm_omni  # noqa: F401
-assert transformers.__version__ == os.environ["EXPECT_TRANSFORMERS"], transformers.__version__
-PY
+   verify_vllm_runtime >/dev/null 2>&1 && \
+   "$VLLM_PYTHON" "$V100_QWEN_PATCH" --check >/dev/null 2>&1
 then
     echo "vLLM-Omni environment already complete and valid: $VLLM_ENV_DIR"
     echo "Nothing to do. Set FRESH=1 to rebuild from scratch."
@@ -358,11 +381,22 @@ sed 's/^/  /' "$TORCH_CONSTRAINTS"
 # the verified cu126 one -- leaving torchaudio and the source-built vLLM on
 # cu126. The +$CUDA_WHEEL_TAG constraint plus the exported PyTorch index keep it
 # pinned, and the check below fails loudly if anything still moves it.
+if [[ "$REINSTALL_VLLM_OMNI" == "1" ]]; then
+    # A same-version `uv pip install` is otherwise a no-op, leaving a partial
+    # source patch or damaged wheel in place. Removal makes the recovery path
+    # deterministic without forcing a vLLM CUDA rebuild.
+    uv pip uninstall --python "$VLLM_PYTHON" vllm-omni
+fi
 uv pip install --python "$VLLM_PYTHON" --constraint "$TORCH_CONSTRAINTS" \
     "vllm-omni==$VLLM_OMNI_VERSION" \
     numpy soundfile sphn uroman scipy PyYAML more-itertools
 
 verify_torch_stack "vllm-omni install"
+
+# The wheel install above restores upstream files, so (re)apply the V100 dtype
+# patch here even if an older environment had already been patched.
+"$VLLM_PYTHON" "$V100_QWEN_PATCH"
+"$VLLM_PYTHON" "$V100_QWEN_PATCH" --check
 
 # Force transformers to the vllm-omni-compatible version last, overriding the
 # newer one vllm pulls in. Done as a separate step (rather than a constraint on
@@ -372,6 +406,7 @@ uv pip install --python "$VLLM_PYTHON" --constraint "$TORCH_CONSTRAINTS" \
     "transformers==$TRANSFORMERS_VERSION"
 
 verify_torch_stack "transformers pin"
+"$VLLM_PYTHON" "$V100_QWEN_PATCH" --check
 
 # Final end-to-end check: importing vllm loads the C extension that was compiled
 # against the torch above, so this is where a surviving torch/CUDA mismatch

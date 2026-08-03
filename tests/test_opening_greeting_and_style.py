@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -13,6 +17,7 @@ from scripts.generate_qwen3_tts_data import (
     AIZUCHI_OVERLAP_TEXTS,
     OPENING_GREETING_INSTRUCT,
     OPENING_GREETING_TEXT,
+    build_opening_greeting_cache_identity,
     resolve_auto_style_preset,
     synthesize_opening_greeting,
 )
@@ -74,6 +79,221 @@ def test_greeting_cache_key_depends_on_voice_parameters(tmp_path) -> None:
         backend="qwen3", model_id="m", speaker="Vivian",
     )
     assert tts.calls == 2  # 話者が違えば別キャッシュ
+
+
+def test_greeting_cache_key_depends_on_canonical_runtime_identity(tmp_path) -> None:
+    tts = FakeTTS()
+    common = (
+        OPENING_GREETING_TEXT,
+        OPENING_GREETING_INSTRUCT,
+        tmp_path,
+    )
+    synthesize_opening_greeting(
+        tts,
+        *common,
+        backend="qwen3",
+        model_id="base",
+        speaker="clone:moshi",
+        cache_identity={"clone_ref_sha256": "old", "qwen_engine": "transformers"},
+    )
+    synthesize_opening_greeting(
+        tts,
+        *common,
+        backend="qwen3",
+        model_id="base",
+        speaker="clone:moshi",
+        cache_identity={"qwen_engine": "transformers", "clone_ref_sha256": "old"},
+    )
+    assert tts.calls == 1  # dict順が違っても canonical JSON は同一
+
+    synthesize_opening_greeting(
+        tts,
+        *common,
+        backend="qwen3",
+        model_id="base",
+        speaker="clone:moshi",
+        cache_identity={"clone_ref_sha256": "new", "qwen_engine": "transformers"},
+    )
+    assert tts.calls == 2
+
+
+def test_greeting_cache_recovers_from_corrupt_npz_atomically(tmp_path) -> None:
+    identity = {"clone_ref_sha256": "same"}
+    first_tts = FakeTTS()
+    synthesize_opening_greeting(
+        first_tts,
+        OPENING_GREETING_TEXT,
+        OPENING_GREETING_INSTRUCT,
+        tmp_path,
+        backend="qwen3",
+        model_id="base",
+        speaker="clone:moshi",
+        cache_identity=identity,
+    )
+    cache_path = next(tmp_path.glob("greeting_*.npz"))
+    cache_path.write_bytes(b"not a zip archive")
+
+    recovery_tts = FakeTTS()
+    recovered = synthesize_opening_greeting(
+        recovery_tts,
+        OPENING_GREETING_TEXT,
+        OPENING_GREETING_INSTRUCT,
+        tmp_path,
+        backend="qwen3",
+        model_id="base",
+        speaker="clone:moshi",
+        cache_identity=identity,
+    )
+    assert recovery_tts.calls == 1
+    assert not list(tmp_path.glob("*.tmp"))
+    assert not list(tmp_path.glob("*.lock"))
+
+    cached_tts = FakeTTS()
+    cached = synthesize_opening_greeting(
+        cached_tts,
+        OPENING_GREETING_TEXT,
+        OPENING_GREETING_INSTRUCT,
+        tmp_path,
+        backend="qwen3",
+        model_id="base",
+        speaker="clone:moshi",
+        cache_identity=identity,
+    )
+    assert cached_tts.calls == 0
+    np.testing.assert_array_equal(recovered, cached)
+
+
+def test_greeting_shared_cache_has_one_cross_thread_writer(tmp_path) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[int] = []
+    calls_lock = threading.Lock()
+
+    class BlockingTTS(FakeTTS):
+        def synthesize(self, text, speaker_role, instruct=None, speaker_override=None):
+            with calls_lock:
+                calls.append(1)
+            started.set()
+            assert release.wait(timeout=5)
+            return super().synthesize(
+                text,
+                speaker_role,
+                instruct=instruct,
+                speaker_override=speaker_override,
+            )
+
+    def render(tts):
+        return synthesize_opening_greeting(
+            tts,
+            OPENING_GREETING_TEXT,
+            OPENING_GREETING_INSTRUCT,
+            tmp_path,
+            backend="qwen3",
+            model_id="base",
+            speaker="clone:moshi",
+            cache_identity={"clone_ref_sha256": "shared"},
+        )
+
+    first_tts = BlockingTTS()
+    second_tts = BlockingTTS()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(render, first_tts)
+        assert started.wait(timeout=5)
+        second_future = executor.submit(render, second_tts)
+        release.set()
+        first = first_future.result(timeout=5)
+        second = second_future.result(timeout=5)
+
+    assert len(calls) == 1
+    assert first_tts.calls + second_tts.calls == 1
+    np.testing.assert_array_equal(first, second)
+
+
+def test_opening_identity_fingerprints_clone_ref_and_stage_config(tmp_path) -> None:
+    ref = tmp_path / "moshi.wav"
+    stage = tmp_path / "stage.yaml"
+    ref.write_bytes(b"voice-a")
+    stage.write_text("temperature: 0.9\n", encoding="utf-8")
+    args = SimpleNamespace(
+        tts_backend="qwen3",
+        dtype="float16",
+        language="Japanese",
+        qwen_engine="vllm-omni",
+        qwen_voice_mode_resolved="mixed",
+        attn_impl="default",
+        vllm_max_new_tokens=2048,
+        qwen_clone_max_new_tokens=4096,
+        tts_batch_size=16,
+        vllm_stage_config=stage,
+        qwen_clone_enabled=True,
+        qwen_clone_ref_audio_moshi=str(ref),
+        qwen_clone_ref_text_moshi="参照文",
+        qwen_clone_x_vector_only=False,
+    )
+
+    first = build_opening_greeting_cache_identity(
+        args, model_id="base", speaker="clone:moshi"
+    )
+    ref.write_bytes(b"voice-b")
+    second = build_opening_greeting_cache_identity(
+        args, model_id="base", speaker="clone:moshi"
+    )
+    stage.write_text("temperature: 0.7\n", encoding="utf-8")
+    third = build_opening_greeting_cache_identity(
+        args, model_id="base", speaker="clone:moshi"
+    )
+
+    assert first["model_id"] == "base"
+    assert first["qwen_engine"] == "vllm-omni"
+    assert first["vllm_max_new_tokens"] == 2048
+    assert first["clone_max_new_tokens"] == 4096
+    assert first["clone_ref_audio_moshi_sha256"] != second[
+        "clone_ref_audio_moshi_sha256"
+    ]
+    assert second["vllm_stage_config_sha256"] != third[
+        "vllm_stage_config_sha256"
+    ]
+
+
+def test_opening_identity_fingerprints_effective_moss_moshi_reference(
+    tmp_path,
+) -> None:
+    roles: dict[str, dict[str, str]] = {}
+    for role in ("user", "moshi", "other", "background"):
+        ref = tmp_path / f"{role}.wav"
+        ref.write_bytes(f"{role}-voice-a".encode())
+        roles[role] = {
+            "path": ref.name,
+            "transcript": f"{role} reference text",
+        }
+    refs_json = tmp_path / "refs.json"
+    refs_json.write_text(
+        json.dumps({"roles": roles}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    args = SimpleNamespace(
+        tts_backend="moss-ttsd",
+        dtype="float16",
+        language="Japanese",
+        moss_codec_model="moss-codec",
+        moss_refs_json=refs_json,
+    )
+
+    first = build_opening_greeting_cache_identity(
+        args, model_id="moss-model", speaker="moshi"
+    )
+    (tmp_path / "moshi.wav").write_bytes(b"moshi-voice-b")
+    second = build_opening_greeting_cache_identity(
+        args, model_id="moss-model", speaker="moshi"
+    )
+
+    assert first["moss_ref_audio_moshi"] == str(
+        (tmp_path / "moshi.wav").resolve()
+    )
+    assert first["moss_ref_text_moshi"] == "moshi reference text"
+    assert first["moss_ref_audio_moshi_sha256"] != second[
+        "moss_ref_audio_moshi_sha256"
+    ]
 
 
 def test_auto_style_preset_prefers_explicit_emotional_state() -> None:

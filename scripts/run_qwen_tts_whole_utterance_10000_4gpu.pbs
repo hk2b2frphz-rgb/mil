@@ -59,13 +59,104 @@ command -v uv >/dev/null 2>&1 || {
 # freshly generated batch is picked up automatically. Bump DIALOGUES_VERSION
 # (or set SOURCE_BATCH_ID) to point at another batch.
 export SOURCE_BATCH_ID="${SOURCE_BATCH_ID:-qwen_dialogues_10000_${DIALOGUES_VERSION:-v1}}"
+
+# Default to Kokoro at this scale: Qwen3-TTS is too slow to finish 10000
+# dialogues within realistic walltimes. Kokoro ignores emotion/style instructs
+# (STYLE_PRESET becomes a no-op) but is an order of magnitude faster.
+# Set TTS_BACKEND=qwen3 to restore the old behavior.
+export TTS_BACKEND="${TTS_BACKEND:-kokoro}"
+
+# Clone references are meaningful only to Qwen3. Reject them before resolving
+# the Qwen voice mode so a direct Kokoro submission cannot infer mixed/clone,
+# skip reference resolution, and fail later while fingerprinting an empty path.
+requested_qwen_voice_mode="${QWEN_VOICE_MODE:-auto}"
+if [[ "$TTS_BACKEND" != "qwen3" ]]; then
+    if [[ "$requested_qwen_voice_mode" == "clone" \
+          || "$requested_qwen_voice_mode" == "mixed" \
+          || -n "${CLONE_OUT_DIR_MOSHI:-}${MOSHI_REF_WAV:-}${MOSHI_REF_TEXT:-}" \
+          || -n "${CLONE_OUT_DIR_USER:-}${USER_REF_WAV:-}${USER_REF_TEXT:-}" ]]; then
+        echo "ERROR: Qwen clone/mixed voices require TTS_BACKEND=qwen3 (got $TTS_BACKEND)" >&2
+        exit 1
+    fi
+fi
+
+# The vLLM wrapper resolves this before exec, but keep the production script
+# safe when it is submitted directly as well.
+resolve_qwen_voice_mode() {
+    local requested="${QWEN_VOICE_MODE:-auto}"
+    local moshi_audio=0 user_audio=0 moshi_any=0 user_any=0
+    [[ -n "${CLONE_OUT_DIR_MOSHI:-}${MOSHI_REF_WAV:-}" ]] && moshi_audio=1
+    [[ -n "${CLONE_OUT_DIR_USER:-}${USER_REF_WAV:-}" ]] && user_audio=1
+    [[ "$moshi_audio" == "1" || -n "${MOSHI_REF_TEXT:-}" ]] && moshi_any=1
+    [[ "$user_audio" == "1" || -n "${USER_REF_TEXT:-}" ]] && user_any=1
+
+    if [[ "$moshi_any" == "1" && "$moshi_audio" == "0" ]]; then
+        echo "ERROR: MOSHI_REF_TEXT was set without CLONE_OUT_DIR_MOSHI or MOSHI_REF_WAV" >&2
+        return 1
+    fi
+    if [[ "$user_any" == "1" && "$user_audio" == "0" ]]; then
+        echo "ERROR: USER_REF_TEXT was set without CLONE_OUT_DIR_USER or USER_REF_WAV" >&2
+        return 1
+    fi
+
+    case "$requested" in
+        auto)
+            if [[ "$moshi_audio" == "1" && "$user_audio" == "1" ]]; then
+                printf 'clone'
+            elif [[ "$moshi_audio" == "1" ]]; then
+                printf 'mixed'
+            elif [[ "$user_audio" == "1" ]]; then
+                echo "ERROR: a user clone source without a moshi clone source is unsupported" >&2
+                return 1
+            else
+                printf 'customvoice'
+            fi
+            ;;
+        customvoice)
+            if [[ "$moshi_any" == "1" || "$user_any" == "1" ]]; then
+                echo "ERROR: QWEN_VOICE_MODE=customvoice conflicts with clone reference variables" >&2
+                return 1
+            fi
+            printf 'customvoice'
+            ;;
+        mixed)
+            if [[ "$moshi_audio" == "0" || "$user_any" == "1" ]]; then
+                echo "ERROR: QWEN_VOICE_MODE=mixed needs only a moshi clone source" >&2
+                return 1
+            fi
+            printf 'mixed'
+            ;;
+        clone)
+            if [[ "$moshi_audio" == "0" || "$user_audio" == "0" ]]; then
+                echo "ERROR: QWEN_VOICE_MODE=clone needs both moshi and user clone sources" >&2
+                return 1
+            fi
+            printf 'clone'
+            ;;
+        *)
+            echo "ERROR: QWEN_VOICE_MODE must be auto, customvoice, clone, or mixed: $requested" >&2
+            return 1
+            ;;
+    esac
+}
+export QWEN_VOICE_MODE="$(resolve_qwen_voice_mode)"
+
 # Stable (non-timestamped) batch id so re-submitting the same job resumes into
 # the same output dir instead of starting a brand-new run. Pass FRESH=1 to
 # force a clean, uniquely-timestamped run instead.
+case "$QWEN_VOICE_MODE" in
+    customvoice) default_batch_id="${SOURCE_BATCH_ID}_tts_whole_4gpu" ;;
+    clone)       default_batch_id="${SOURCE_BATCH_ID}_tts_whole_clone_4gpu" ;;
+    mixed)       default_batch_id="${SOURCE_BATCH_ID}_tts_whole_mixed_4gpu" ;;
+esac
 if [[ "${FRESH:-0}" == "1" ]]; then
-    export BATCH_ID="${BATCH_ID:-$(default_run_id "${SOURCE_BATCH_ID}_tts_whole_4gpu")}"
+    export BATCH_ID="${BATCH_ID:-$(default_run_id "$default_batch_id")}"
 else
-    export BATCH_ID="${BATCH_ID:-${SOURCE_BATCH_ID}_tts_whole_4gpu}"
+    export BATCH_ID="${BATCH_ID:-$default_batch_id}"
+fi
+if ! [[ "$BATCH_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "ERROR: BATCH_ID may contain only letters, digits, dot, underscore, hyphen." >&2
+    exit 1
 fi
 export RUN_ID="$BATCH_ID"
 export DIALOGUES_JSONL="${DIALOGUES_JSONL:-$PWD/data/runs/${SOURCE_BATCH_ID}/llm_dialogues/dialogues.jsonl}"
@@ -79,7 +170,8 @@ export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/$BATCH_ID}"
 # jobs (e.g. walltime=24:00:00) and re-submit until the merge step succeeds.
 export RESUME="${RESUME:-auto}"
 if [[ "$RESUME" == "auto" ]]; then
-    if compgen -G "$OUT_ROOT/shard_*/training_set/synthetic_moshi_train.jsonl" >/dev/null 2>&1; then
+    if compgen -G "$OUT_ROOT/shard_*/training_set/synthetic_moshi_train.jsonl" >/dev/null 2>&1 \
+       || compgen -G "$OUT_ROOT/shard_*/training_set/.qwen_mixed_cache/*/config.json" >/dev/null 2>&1; then
         RESUME=1
     else
         RESUME=0
@@ -99,14 +191,28 @@ export GAP_SEC="${GAP_SEC:-0.2}"
 export STYLE_PRESET="${STYLE_PRESET:-none}"
 # Default STYLE_PRESET=none uses raw tempo without a style instruct.
 # Set STYLE_PRESET=auto for the former domain-C-style slower tone.
-# Default to Kokoro at this scale: Qwen3-TTS is too slow to finish 10000
-# dialogues within realistic walltimes. Kokoro ignores emotion/style instructs
-# (STYLE_PRESET becomes a no-op) but is an order of magnitude faster.
-# Set TTS_BACKEND=qwen3 to restore the old behavior.
-export TTS_BACKEND="${TTS_BACKEND:-kokoro}"
 export QWEN_ENGINE="${QWEN_ENGINE:-transformers}"
+if [[ "$QWEN_VOICE_MODE" == "clone" ]]; then
+    export QWEN_TTS_MODEL="${QWEN_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-Base}"
+else
+    export QWEN_TTS_MODEL="${QWEN_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
+fi
+export QWEN_CLONE_MODEL="${QWEN_CLONE_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-Base}"
+export USER_SPEAKER_POOL="${USER_SPEAKER_POOL:-Ono_Anna,Sohee,Vivian,Dylan,Eric,Aiden}"
+export SPEAKER_USER="${SPEAKER_USER:-Ono_Anna}"
+export SPEAKER_MOSHI="${SPEAKER_MOSHI:-Serena}"
+export SPEAKER_OTHER="${SPEAKER_OTHER:-Dylan}"
+export SPEAKER_BACKGROUND="${SPEAKER_BACKGROUND:-Ryan}"
+export INSTRUCT_USER="${INSTRUCT_USER:-}"
+export INSTRUCT_MOSHI="${INSTRUCT_MOSHI:-}"
+export TTS_LANGUAGE="${TTS_LANGUAGE:-Japanese}"
+export CLONE_MODE="${CLONE_MODE:-in-context}"
+export REF_RANK="${REF_RANK:-0}"
 export TTS_BATCH_SIZE="${TTS_BATCH_SIZE:-16}"
 export DIALOGUE_BATCH_SIZE="${DIALOGUE_BATCH_SIZE:-16}"
+export VLLM_MAX_NEW_TOKENS="${VLLM_MAX_NEW_TOKENS:-2048}"
+export QWEN_CLONE_MAX_NEW_TOKENS="${QWEN_CLONE_MAX_NEW_TOKENS:-4096}"
+export WHOLE_UTTERANCE_MAX_CHARS="${WHOLE_UTTERANCE_MAX_CHARS:-150}"
 export VLLM_STAGE_CONFIG="${VLLM_STAGE_CONFIG:-$PWD/configs/qwen3_tts_v100_batch16.yaml}"
 export VLLM_PYTHON="${VLLM_PYTHON:-$PWD/.venv-vllm-omni/bin/python}"
 export KOKORO_VOICE_MOSHI="${KOKORO_VOICE_MOSHI:-jf_alpha}"
@@ -121,8 +227,9 @@ export VERBOSE="${VERBOSE:-0}"
 # per-dialogue synthesis/CTC-alignment failures (e.g. "target_length is too
 # long for CTC") can be compensated without the final merged training set
 # falling short of NUM_DIALOGUES. Spares are only consumed when a primary
-# dialogue in the shard fails; unused spares cost no extra compute because
-# generate_qwen3_tts_data.py stops once --success-target is reached.
+# dialogue in the shard fails. Non-mixed backends synthesize spares only after
+# a primary failure. Mixed mode must finish both model passes before alignment,
+# so it pre-synthesizes the spare set too (up to this additional fraction).
 export SPARE_RATIO="${SPARE_RATIO:-0.15}"
 
 if ! [[ "$NUM_SHARDS" =~ ^[0-9]+$ ]] || [[ "$NUM_SHARDS" -lt 1 ]]; then
@@ -135,6 +242,26 @@ if [[ "$NUM_DIALOGUES" != "all" ]]; then
         exit 1
     fi
 fi
+if [[ "$QWEN_VOICE_MODE" != "customvoice" \
+      && "$QWEN_VOICE_MODE" != "clone" && "$QWEN_VOICE_MODE" != "mixed" ]]; then
+    echo "ERROR: resolved QWEN_VOICE_MODE is invalid: $QWEN_VOICE_MODE" >&2
+    exit 1
+fi
+if [[ "$CLONE_MODE" != "in-context" && "$CLONE_MODE" != "x-vector" ]]; then
+    echo "ERROR: CLONE_MODE must be in-context or x-vector: $CLONE_MODE" >&2
+    exit 1
+fi
+if ! [[ "$REF_RANK" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: REF_RANK must be a non-negative integer: $REF_RANK" >&2
+    exit 1
+fi
+for numeric_setting in \
+    "$VLLM_MAX_NEW_TOKENS" "$QWEN_CLONE_MAX_NEW_TOKENS" "$WHOLE_UTTERANCE_MAX_CHARS"; do
+    if ! [[ "$numeric_setting" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: token/character limits must be positive integers: $numeric_setting" >&2
+        exit 1
+    fi
+done
 IFS=',' read -r -a GPU_IDS <<< "$CUDA_VISIBLE_DEVICES"
 if [[ "${#GPU_IDS[@]}" -lt "$NUM_SHARDS" ]]; then
     echo "ERROR: CUDA_VISIBLE_DEVICES has ${#GPU_IDS[@]} GPU(s), but NUM_SHARDS=$NUM_SHARDS" >&2
@@ -157,6 +284,9 @@ echo "job_id:        ${PBS_JOBID:-n/a}"
 echo "host:          $(hostname)"
 echo "tts_backend:   $TTS_BACKEND"
 echo "qwen_engine:   $QWEN_ENGINE"
+echo "qwen_voice:    $QWEN_VOICE_MODE"
+echo "qwen_model:    $QWEN_TTS_MODEL"
+echo "clone_model:   $QWEN_CLONE_MODEL"
 echo "tts_batch:     $TTS_BATCH_SIZE (dialogues=$DIALOGUE_BATCH_SIZE)"
 echo "source_batch:  $SOURCE_BATCH_ID"
 echo "out_root:      $OUT_ROOT"
@@ -227,6 +357,11 @@ elif [[ "$QWEN_ENGINE" == "vllm-omni" ]]; then
         echo "ERROR: vLLM stage config not found: $VLLM_STAGE_CONFIG" >&2
         exit 1
     fi
+    if ! "$VLLM_PYTHON" scripts/patch_vllm_omni_qwen3_tts_v100.py --check; then
+        echo "ERROR: the vLLM-Omni Qwen3-TTS V100 patch is missing or stale." >&2
+        echo "Re-run scripts/setup_vllm_omni_v100_env.sh, then submit this job again." >&2
+        exit 1
+    fi
     "$VLLM_PYTHON" - <<'PY'
 import numpy  # noqa: F401
 import soundfile  # noqa: F401
@@ -258,6 +393,218 @@ except Exception as exc:
 print("uv/qwen_tts/torchaudio preflight ok")
 PY
 fi
+
+# Resolve clone_voice_examples.py output folders once in the parent process.
+# This keeps Japanese transcripts out of qsub's comma-separated -v syntax.
+if [[ "$TTS_BACKEND" == "qwen3" \
+      && ( "$QWEN_VOICE_MODE" == "clone" || "$QWEN_VOICE_MODE" == "mixed" ) ]]; then
+    resolve_clone_ref() {  # resolve_clone_ref <field> <role>
+        local field="$1" role="$2" clone_out
+        if [[ "$role" == "moshi" ]]; then
+            clone_out="${CLONE_OUT_DIR_MOSHI:-}"
+        else
+            clone_out="${CLONE_OUT_DIR_USER:-}"
+        fi
+        if [[ -z "$clone_out" ]]; then
+            echo "ERROR: CLONE_OUT_DIR_${role^^} is required when an explicit ${role^^}_REF_* is absent" >&2
+            return 1
+        fi
+        uv run python scripts/resolve_clone_refs.py \
+            --clone-out-dir "$clone_out" \
+            --rank "$REF_RANK" \
+            --mode "$CLONE_MODE" \
+            --field "$field"
+    }
+
+    MOSHI_REF_WAV="${MOSHI_REF_WAV:-$(resolve_clone_ref wav moshi)}"
+    if [[ "$CLONE_MODE" == "in-context" ]]; then
+        MOSHI_REF_TEXT="${MOSHI_REF_TEXT:-$(resolve_clone_ref text moshi)}"
+    fi
+    if [[ "$QWEN_VOICE_MODE" == "clone" ]]; then
+        USER_REF_WAV="${USER_REF_WAV:-$(resolve_clone_ref wav user)}"
+        if [[ "$CLONE_MODE" == "in-context" ]]; then
+            USER_REF_TEXT="${USER_REF_TEXT:-$(resolve_clone_ref text user)}"
+        fi
+    fi
+    echo "clone mode:     $CLONE_MODE (rank=$REF_RANK)"
+    echo "moshi ref:      $MOSHI_REF_WAV"
+    if [[ "$QWEN_VOICE_MODE" == "clone" ]]; then
+        echo "user ref:       $USER_REF_WAV"
+    else
+        echo "user voices:    $USER_SPEAKER_POOL (CustomVoice)"
+    fi
+fi
+
+# Lock every output-affecting generation setting to OUT_ROOT.  Request-level
+# mixed caches already have their own fingerprints, but completed WAVs are
+# skipped by --resume; without this run-level lock, changing a reference or
+# voice pool would silently mix old and new voices in one training set.
+export MOSHI_REF_WAV="${MOSHI_REF_WAV:-}"
+export MOSHI_REF_TEXT="${MOSHI_REF_TEXT:-}"
+export USER_REF_WAV="${USER_REF_WAV:-}"
+export USER_REF_TEXT="${USER_REF_TEXT:-}"
+GENERATION_CONFIG_LOCK="$OUT_ROOT/generation_config.json"
+export GENERATION_CONFIG_LOCK
+uv run python - "$GENERATION_CONFIG_LOCK" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+
+LOCK_VERSION = 1
+lock_path = Path(sys.argv[1])
+out_root = lock_path.parent
+
+
+def sha256_file(raw_path: str) -> str:
+    path = Path(raw_path)
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def resolved_file(raw_path: str) -> str:
+    return str(Path(raw_path).resolve()) if raw_path else ""
+
+
+env = os.environ
+dialogues = env["DIALOGUES_JSONL"]
+stage_config = env["VLLM_STAGE_CONFIG"]
+generator = "scripts/generate_qwen3_tts_data.py"
+qwen_backend = "scripts/qwen3_tts_vllm_backend.py"
+config: dict[str, object] = {
+    "source_batch_id": env["SOURCE_BATCH_ID"],
+    "dialogues_path": resolved_file(dialogues),
+    "dialogues_sha256": sha256_file(dialogues),
+    "selected_num_dialogues": env["NUM_DIALOGUES"],
+    "num_shards": env["NUM_SHARDS"],
+    "spare_ratio": env["SPARE_RATIO"],
+    "tts_backend": env["TTS_BACKEND"],
+    "qwen_engine": env["QWEN_ENGINE"],
+    "qwen_voice_mode": env["QWEN_VOICE_MODE"],
+    "qwen_model": env["QWEN_TTS_MODEL"],
+    "qwen_clone_model": env["QWEN_CLONE_MODEL"],
+    "dtype": env["TTS_DTYPE"],
+    "device": env["TTS_DEVICE"],
+    "language": env["TTS_LANGUAGE"],
+    "speaker_user": env["SPEAKER_USER"],
+    "speaker_moshi": env["SPEAKER_MOSHI"],
+    "speaker_other": env["SPEAKER_OTHER"],
+    "speaker_background": env["SPEAKER_BACKGROUND"],
+    "user_speaker_pool": env["USER_SPEAKER_POOL"],
+    "instruct_user": env["INSTRUCT_USER"],
+    "instruct_moshi": env["INSTRUCT_MOSHI"],
+    "style_preset": env["STYLE_PRESET"],
+    "no_emotion": True,
+    "auto_overlap_aizuchi": True,
+    "whole_utterance": True,
+    "lead_in_sec": env["LEAD_IN_SEC"],
+    "gap_sec": env["GAP_SEC"],
+    "whole_utterance_max_chars": env["WHOLE_UTTERANCE_MAX_CHARS"],
+    "tts_batch_size": env["TTS_BATCH_SIZE"],
+    "dialogue_batch_size": env["DIALOGUE_BATCH_SIZE"],
+    "vllm_max_new_tokens": env["VLLM_MAX_NEW_TOKENS"],
+    "qwen_clone_max_new_tokens": env["QWEN_CLONE_MAX_NEW_TOKENS"],
+    "vllm_stage_config": resolved_file(stage_config),
+    "vllm_stage_config_sha256": sha256_file(stage_config),
+    "generator_sha256": sha256_file(generator),
+    "kokoro_voice_moshi": env["KOKORO_VOICE_MOSHI"],
+    "kokoro_user_voices": env["KOKORO_USER_VOICES"],
+}
+
+if env["TTS_BACKEND"] == "qwen3":
+    config.update({
+        "qwen3_tts_vllm_backend_path": resolved_file(qwen_backend),
+        "qwen3_tts_vllm_backend_sha256": sha256_file(qwen_backend),
+    })
+
+if (
+    env["TTS_BACKEND"] == "qwen3"
+    and env["QWEN_VOICE_MODE"] in {"clone", "mixed"}
+):
+    moshi_ref = env["MOSHI_REF_WAV"]
+    config.update({
+        "clone_mode": env["CLONE_MODE"],
+        "clone_ref_rank": env["REF_RANK"],
+        "moshi_ref_wav": resolved_file(moshi_ref),
+        "moshi_ref_wav_sha256": sha256_file(moshi_ref),
+        "moshi_ref_text": env["MOSHI_REF_TEXT"],
+    })
+if env["TTS_BACKEND"] == "qwen3" and env["QWEN_VOICE_MODE"] == "clone":
+    user_ref = env["USER_REF_WAV"]
+    config.update({
+        "user_ref_wav": resolved_file(user_ref),
+        "user_ref_wav_sha256": sha256_file(user_ref),
+        "user_ref_text": env["USER_REF_TEXT"],
+    })
+
+canonical = json.dumps(
+    {"lock_version": LOCK_VERSION, "config": config},
+    ensure_ascii=False,
+    sort_keys=True,
+    separators=(",", ":"),
+)
+fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+payload = {
+    "lock_version": LOCK_VERSION,
+    "fingerprint": fingerprint,
+    "config": config,
+}
+
+if lock_path.is_file():
+    try:
+        previous = json.loads(lock_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise SystemExit(
+            f"ERROR: unreadable generation config lock: {lock_path}: {exc}\n"
+            "Use FRESH=1 or choose a new BATCH_ID; do not resume this output blindly."
+        )
+    old_config = previous.get("config")
+    if old_config != config:
+        old_config = old_config if isinstance(old_config, dict) else {}
+        changed = sorted(
+            key for key in set(old_config) | set(config)
+            if old_config.get(key) != config.get(key)
+        )
+        preview = ", ".join(changed[:20]) or "(unknown)"
+        raise SystemExit(
+            "ERROR: generation settings differ from the existing run at "
+            f"{out_root}\nChanged keys: {preview}\n"
+            "Keep every setting/reference identical when resuming, or use "
+            "FRESH=1 / a new BATCH_ID."
+        )
+    print(f"generation config lock matched: {fingerprint[:16]} ({lock_path})")
+    raise SystemExit(0)
+
+legacy_material = (
+    any(out_root.glob("shard_*/training_set/synthetic_moshi_train.jsonl"))
+    or any(out_root.glob("shard_*/training_set/data_stereo/*.wav"))
+    or any(out_root.glob(
+        "shard_*/training_set/.qwen_mixed_cache/*/config.json"
+    ))
+)
+if legacy_material:
+    print(
+        "WARNING: existing legacy output has no generation config lock; "
+        "adopting the current settings. Verify them before continuing.",
+        file=sys.stderr,
+    )
+
+lock_path.parent.mkdir(parents=True, exist_ok=True)
+tmp = lock_path.with_name(f".{lock_path.name}.{os.getpid()}.tmp")
+tmp.write_text(
+    json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8",
+)
+os.replace(tmp, lock_path)
+print(f"generation config lock created: {fingerprint[:16]} ({lock_path})")
+PY
 
 echo "===== step 1/3: split dialogues ====="
 uv run python - "$DIALOGUES_JSONL" "$OUT_ROOT" "$NUM_SHARDS" "$NUM_DIALOGUES" "$SPARE_RATIO" <<'PY'
@@ -368,15 +715,55 @@ for ((i = 0; i < NUM_SHARDS; i++)); do
             --out-dir "$shard_training"
             --device "$TTS_DEVICE"
             --dtype "$TTS_DTYPE"
+            --language "$TTS_LANGUAGE"
             --tts-batch-size "$TTS_BATCH_SIZE"
             --dialogue-batch-size "$DIALOGUE_BATCH_SIZE"
             --vllm-stage-config "$VLLM_STAGE_CONFIG"
+            --vllm-max-new-tokens "$VLLM_MAX_NEW_TOKENS"
+            --qwen-clone-max-new-tokens "$QWEN_CLONE_MAX_NEW_TOKENS"
+            --whole-utterance-max-chars "$WHOLE_UTTERANCE_MAX_CHARS"
             --lead-in-sec "$LEAD_IN_SEC"
             --gap-sec "$GAP_SEC"
             --no-emotion
             --style-preset "$STYLE_PRESET"
             --log-every "$LOG_EVERY"
         )
+        if [[ "$TTS_BACKEND" == "qwen3" ]]; then
+            tts_args+=(
+                --qwen-voice-mode "$QWEN_VOICE_MODE"
+                --model "$QWEN_TTS_MODEL"
+                --qwen-clone-model "$QWEN_CLONE_MODEL"
+                --speaker-user "$SPEAKER_USER"
+                --speaker-moshi "$SPEAKER_MOSHI"
+                --speaker-other "$SPEAKER_OTHER"
+                --speaker-background "$SPEAKER_BACKGROUND"
+            )
+            if [[ -n "$INSTRUCT_USER" ]]; then
+                tts_args+=(--instruct-user "$INSTRUCT_USER")
+            fi
+            if [[ -n "$INSTRUCT_MOSHI" ]]; then
+                tts_args+=(--instruct-moshi "$INSTRUCT_MOSHI")
+            fi
+            if [[ "$QWEN_VOICE_MODE" == "clone" || "$QWEN_VOICE_MODE" == "mixed" ]]; then
+                tts_args+=(--qwen-clone-ref-audio-moshi "$MOSHI_REF_WAV")
+                if [[ "$CLONE_MODE" == "in-context" ]]; then
+                    tts_args+=(--qwen-clone-ref-text-moshi "$MOSHI_REF_TEXT")
+                else
+                    tts_args+=(--qwen-clone-x-vector-only)
+                fi
+            fi
+            if [[ "$QWEN_VOICE_MODE" == "clone" ]]; then
+                tts_args+=(
+                    --user-speaker-pool ''
+                    --qwen-clone-ref-audio-user "$USER_REF_WAV"
+                )
+                if [[ "$CLONE_MODE" == "in-context" ]]; then
+                    tts_args+=(--qwen-clone-ref-text-user "$USER_REF_TEXT")
+                fi
+            else
+                tts_args+=(--user-speaker-pool "$USER_SPEAKER_POOL")
+            fi
+        fi
         if [[ "$TTS_BACKEND" == "kokoro" ]]; then
             tts_args+=(
                 --kokoro-voice-moshi "$KOKORO_VOICE_MOSHI"

@@ -25,6 +25,10 @@
 #   qsub -v 'CLONE_OUT_DIR_USER=data/clone_examples/<a>,CLONE_OUT_DIR_MOSHI=data/clone_examples/<b>' \
 #        scripts/run_clone_dialogue_pilot.pbs
 #
+# Mixed production check (user=CustomVoice, moshi=clone):
+#   qsub -v 'QWEN_VOICE_MODE=mixed,CLONE_OUT_DIR_MOSHI=data/clone_examples/<b>,USER_SPEAKER_POOL=Ono_Anna' \
+#        scripts/run_clone_dialogue_pilot.pbs
+#
 # Optional:
 #   USER_SPEAKER=A / MOSHI_SPEAKER=B  which diarized speaker plays which role.
 #                                     CHECK THIS -- A/B is assigned by total
@@ -58,7 +62,75 @@ USER_SPEAKER="${USER_SPEAKER:-A}"
 MOSHI_SPEAKER="${MOSHI_SPEAKER:-B}"
 REF_RANK="${REF_RANK:-0}"
 CLONE_MODE="${CLONE_MODE:-in-context}"
-MODEL="${MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-Base}"
+QWEN_VOICE_MODE="${QWEN_VOICE_MODE:-auto}"
+
+# ANALYSIS_DIR can supply both role references. Role-specific folders/WAVs are
+# otherwise used to infer auto: moshi-only=mixed, both=full clone.
+resolve_pilot_voice_mode() {
+    local requested="$QWEN_VOICE_MODE"
+    local analysis=0 moshi_audio=0 user_audio=0
+    local moshi_any=0 user_any=0 user_explicit=0
+    [[ -n "${ANALYSIS_DIR:-}" ]] && analysis=1
+    [[ "$analysis" == "1" || -n "${CLONE_OUT_DIR_MOSHI:-}${MOSHI_REF_WAV:-}" ]] \
+        && moshi_audio=1
+    [[ "$analysis" == "1" || -n "${CLONE_OUT_DIR_USER:-}${USER_REF_WAV:-}" ]] \
+        && user_audio=1
+    [[ "$moshi_audio" == "1" || -n "${MOSHI_REF_TEXT:-}" ]] && moshi_any=1
+    [[ "$user_audio" == "1" || -n "${USER_REF_TEXT:-}" ]] && user_any=1
+    [[ -n "${CLONE_OUT_DIR_USER:-}${USER_REF_WAV:-}${USER_REF_TEXT:-}" ]] \
+        && user_explicit=1
+
+    if [[ "$moshi_any" == "1" && "$moshi_audio" == "0" ]]; then
+        echo "ERROR: MOSHI_REF_TEXT was set without a moshi reference source" >&2
+        return 1
+    fi
+    if [[ "$user_any" == "1" && "$user_audio" == "0" ]]; then
+        echo "ERROR: USER_REF_TEXT was set without a user reference source" >&2
+        return 1
+    fi
+
+    case "$requested" in
+        auto)
+            if [[ "$moshi_audio" == "1" && "$user_audio" == "1" ]]; then
+                printf 'clone'
+            elif [[ "$moshi_audio" == "1" ]]; then
+                printf 'mixed'
+            elif [[ "$user_audio" == "1" ]]; then
+                echo "ERROR: a user clone source without a moshi clone source is unsupported" >&2
+                return 1
+            else
+                echo "ERROR: set ANALYSIS_DIR or at least a moshi clone reference source" >&2
+                return 1
+            fi
+            ;;
+        mixed)
+            if [[ "$moshi_audio" == "0" || "$user_explicit" == "1" ]]; then
+                echo "ERROR: QWEN_VOICE_MODE=mixed needs only a moshi clone source" >&2
+                return 1
+            fi
+            printf 'mixed'
+            ;;
+        clone)
+            if [[ "$moshi_audio" == "0" || "$user_audio" == "0" ]]; then
+                echo "ERROR: QWEN_VOICE_MODE=clone needs both role references" >&2
+                return 1
+            fi
+            printf 'clone'
+            ;;
+        *)
+            echo "ERROR: QWEN_VOICE_MODE must be auto, clone, or mixed: $requested" >&2
+            return 1
+            ;;
+    esac
+}
+QWEN_VOICE_MODE="$(resolve_pilot_voice_mode)"
+if [[ "$QWEN_VOICE_MODE" == "mixed" ]]; then
+    QWEN_TTS_MODEL="${QWEN_TTS_MODEL:-${MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}}"
+else
+    QWEN_TTS_MODEL="${QWEN_TTS_MODEL:-${MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-Base}}"
+fi
+QWEN_CLONE_MODEL="${QWEN_CLONE_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-Base}"
+USER_SPEAKER_POOL="${USER_SPEAKER_POOL:-Ono_Anna}"
 DIALOGUE_INDEX="${DIALOGUE_INDEX:-0}"
 NUM_DIALOGUES="${NUM_DIALOGUES:-3}"
 
@@ -75,9 +147,16 @@ if [[ "$CLONE_MODE" != "in-context" && "$CLONE_MODE" != "x-vector" ]]; then
     echo "ERROR: CLONE_MODE must be in-context or x-vector: $CLONE_MODE" >&2
     exit 1
 fi
-if [[ -z "${ANALYSIS_DIR:-}" && ( -z "${CLONE_OUT_DIR_USER:-}" || -z "${CLONE_OUT_DIR_MOSHI:-}" ) ]]; then
-    echo "ERROR: set ANALYSIS_DIR, or both CLONE_OUT_DIR_USER and CLONE_OUT_DIR_MOSHI" >&2
-    exit 1
+if [[ "$CLONE_MODE" == "in-context" ]]; then
+    if [[ -n "${MOSHI_REF_WAV:-}" && -z "${MOSHI_REF_TEXT:-}" ]]; then
+        echo "ERROR: MOSHI_REF_TEXT is required with an explicit MOSHI_REF_WAV in in-context mode" >&2
+        exit 1
+    fi
+    if [[ "$QWEN_VOICE_MODE" == "clone" \
+          && -n "${USER_REF_WAV:-}" && -z "${USER_REF_TEXT:-}" ]]; then
+        echo "ERROR: USER_REF_TEXT is required with an explicit USER_REF_WAV in in-context mode" >&2
+        exit 1
+    fi
 fi
 
 JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
@@ -99,14 +178,20 @@ resolve() {  # resolve <field> <role>
     if [[ -n "$clone_out" ]]; then
         src=(--clone-out-dir "$clone_out" --mode "$CLONE_MODE")
     else
+        if [[ -z "${ANALYSIS_DIR:-}" ]]; then
+            echo "ERROR: no $role source is available to resolve $field" >&2
+            return 1
+        fi
         src=(--analysis-dir "$ANALYSIS_DIR" --speaker "$speaker")
     fi
     uv run python scripts/resolve_clone_refs.py "${src[@]}" \
         --rank "$REF_RANK" --field "$field"
 }
 
-REF_WAV_USER="${USER_REF_WAV:-$(resolve wav user)}"
 REF_WAV_MOSHI="${MOSHI_REF_WAV:-$(resolve wav moshi)}"
+if [[ "$QWEN_VOICE_MODE" == "clone" ]]; then
+    REF_WAV_USER="${USER_REF_WAV:-$(resolve wav user)}"
+fi
 
 gen_args=(
     uv run python scripts/generate_qwen3_tts_data.py
@@ -114,16 +199,23 @@ gen_args=(
     --tts-backend qwen3
     --qwen-engine transformers
     --whole-utterance
-    --model "$MODEL"
+    --qwen-voice-mode "$QWEN_VOICE_MODE"
+    --model "$QWEN_TTS_MODEL"
+    --qwen-clone-model "$QWEN_CLONE_MODEL"
     --device cuda
     --dtype float16
     --num-dialogues "$NUM_DIALOGUES"
-    # Clone mode has one reference per role, so the per-dialogue preset rotation
-    # must be off; an empty pool is what generate_qwen3_tts_data.py requires.
-    --user-speaker-pool ''
-    --qwen-clone-ref-audio-user "$REF_WAV_USER"
     --qwen-clone-ref-audio-moshi "$REF_WAV_MOSHI"
 )
+if [[ "$QWEN_VOICE_MODE" == "clone" ]]; then
+    # Full clone has one reference per role, so preset rotation must be off.
+    gen_args+=(
+        --user-speaker-pool ''
+        --qwen-clone-ref-audio-user "$REF_WAV_USER"
+    )
+else
+    gen_args+=(--user-speaker-pool "$USER_SPEAKER_POOL")
+fi
 # Production caches the greeting so every shard emits a bit-identical opening
 # line. For a listening check that only hides things: a cache entry rendered
 # with an earlier reference (or with a preset voice) keeps being replayed in
@@ -135,12 +227,12 @@ fi
 if [[ "$CLONE_MODE" == "x-vector" ]]; then
     gen_args+=(--qwen-clone-x-vector-only)
 else
-    REF_TEXT_USER="${USER_REF_TEXT:-$(resolve text user)}"
     REF_TEXT_MOSHI="${MOSHI_REF_TEXT:-$(resolve text moshi)}"
-    gen_args+=(
-        --qwen-clone-ref-text-user "$REF_TEXT_USER"
-        --qwen-clone-ref-text-moshi "$REF_TEXT_MOSHI"
-    )
+    gen_args+=(--qwen-clone-ref-text-moshi "$REF_TEXT_MOSHI")
+    if [[ "$QWEN_VOICE_MODE" == "clone" ]]; then
+        REF_TEXT_USER="${USER_REF_TEXT:-$(resolve text user)}"
+        gen_args+=(--qwen-clone-ref-text-user "$REF_TEXT_USER")
+    fi
 fi
 
 # --num-dialogues takes the FIRST n, so DIALOGUE_INDEX is honoured by handing
@@ -169,9 +261,15 @@ export PYTHONUNBUFFERED=1
     echo "job:        ${JOB_ID_RAW}"
     echo "started:    $(date -Is)"
     echo "mode:       $CLONE_MODE (rank=$REF_RANK)"
+    echo "voice_mode: $QWEN_VOICE_MODE"
     echo "dialogues:  $NUM_DIALOGUES from index $DIALOGUE_INDEX"
-    echo "model:      $MODEL"
-    echo "user  ref:  $REF_WAV_USER"
+    echo "model:      $QWEN_TTS_MODEL"
+    echo "clone_model:$QWEN_CLONE_MODEL"
+    if [[ "$QWEN_VOICE_MODE" == "clone" ]]; then
+        echo "user  ref:  $REF_WAV_USER"
+    else
+        echo "user voices:$USER_SPEAKER_POOL (CustomVoice)"
+    fi
     echo "moshi ref:  $REF_WAV_MOSHI"
     echo "out_dir:    $OUT_DIR"
 } | tee "$LOG_FILE"

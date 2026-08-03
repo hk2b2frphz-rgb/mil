@@ -19,7 +19,11 @@ connectors:
       codec_left_context_frames: 72
       initial_codec_chunk_frames: 1
       decode_cudagraph_capture_sizes: [25, 73, 97, 169, 325]
-      decode_cudagraph_batch_sizes: [1, 2, 4, 8, 16]
+      # Keep Code2Wav CUDA graphs at B=1 on a 32 GB V100. Capture shapes are
+      # the Cartesian product of these two lists, and B=4 x 325 exhausts VRAM.
+      # The outer talker/request batch remains 16; only decoder work is split.
+      decode_cudagraph_batch_sizes: [1]
+      decode_batch_max_size: 1
 
 stages:
   - stage_id: 0

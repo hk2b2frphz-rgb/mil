@@ -7,9 +7,13 @@ jobs can opt into a separate vLLM-Omni Python 3.12 environment.
 
 from __future__ import annotations
 
+import copy
+import gc
 import logging
+import math
 import os
 import time
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -62,6 +66,8 @@ class VLLMQwen3TTS:
     ) -> None:
         if batch_size < 1 or batch_size & (batch_size - 1):
             raise ValueError("vLLM-Omni batch_size must be a positive power of two")
+        if max_new_tokens < 1:
+            raise ValueError("vLLM-Omni max_new_tokens must be positive")
         if dtype_str != "float16":
             raise ValueError(
                 "The V100 production backend requires --dtype float16 "
@@ -80,9 +86,8 @@ class VLLMQwen3TTS:
                     "Voice clone (clone_refs) requires a Qwen3-TTS Base model, "
                     f"e.g. Qwen/Qwen3-TTS-12Hz-1.7B-Base; got {model_id!r}"
                 )
-            missing = [role for role in ("user", "moshi") if role not in self.clone_refs]
-            if missing:
-                raise ValueError(f"clone_refs is missing role reference(s): {missing}")
+            if not self.clone_refs:
+                raise ValueError("clone_refs must contain at least one role reference")
             if not self.clone_x_vector_only:
                 no_text = [
                     name for name, ref in self.clone_refs.items()
@@ -114,6 +119,7 @@ class VLLMQwen3TTS:
         self._omni: Any = None
         self._tokenizer: Any = None
         self._talker_config: Any = None
+        self._ref_code_len_cache: dict[str, int | None] = {}
         self._perf_batches = 0
         self._perf_requests = 0
         self._perf_audio_sec = 0.0
@@ -164,11 +170,42 @@ class VLLMQwen3TTS:
         logger.info("Qwen3-TTS vLLM-Omni engine ready")
 
     def close(self) -> None:
-        if self._omni is not None:
-            close = getattr(self._omni, "close", None)
+        self._ref_code_len_cache.clear()
+        omni = self._omni
+        if omni is None:
+            return
+        shutdown_error: RuntimeError | None = None
+        try:
+            close = getattr(omni, "close", None)
             if callable(close):
                 close()
+            engine = getattr(omni, "engine", None)
+            is_alive = getattr(engine, "is_alive", None)
+            still_alive = is_alive() if callable(is_alive) else bool(is_alive)
+            if still_alive:
+                shutdown_error = RuntimeError(
+                    "vLLM-Omni engine is still alive after close(); "
+                    "refusing to load the next mixed-role model"
+                )
+        finally:
             self._omni = None
+            self._tokenizer = None
+            self._talker_config = None
+            del omni
+            gc.collect()
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    ipc_collect = getattr(torch.cuda, "ipc_collect", None)
+                    if callable(ipc_collect):
+                        ipc_collect()
+            except Exception:
+                logger.debug("CUDA cleanup after vLLM-Omni close failed", exc_info=True)
+        logger.info("Qwen3-TTS vLLM-Omni engine released: %s", self.model_id)
+        if shutdown_error is not None:
+            raise shutdown_error
 
     def resolve_instruct(self, speaker_role: str, instruct: str | None) -> str | None:
         if instruct:
@@ -221,6 +258,68 @@ class VLLMQwen3TTS:
             "additional_information": additional_information,
         }
 
+    def _estimate_ref_code_len(self, ref_audio: object) -> int | None:
+        """Estimate Base ICL codec frames from a reference WAV's duration."""
+        item = ref_audio
+        while isinstance(item, (list, tuple)) and len(item) == 1:
+            item = item[0]
+        if not isinstance(item, (str, os.PathLike)):
+            return None
+
+        path = Path(os.fsdecode(os.fspath(item))).expanduser()
+        try:
+            cache_key = str(path.resolve(strict=False))
+        except OSError:
+            cache_key = str(path.absolute())
+        if cache_key in self._ref_code_len_cache:
+            return self._ref_code_len_cache[cache_key]
+
+        duration: float | None = None
+        try:
+            import soundfile
+
+            info = soundfile.info(str(path))
+            duration = float(info.duration)
+        except Exception:
+            duration = None
+        if (
+            duration is None
+            or not math.isfinite(duration)
+            or duration <= 0
+        ):
+            try:
+                with wave.open(str(path), "rb") as wav_file:
+                    sample_rate = wav_file.getframerate()
+                    if sample_rate > 0:
+                        duration = wav_file.getnframes() / sample_rate
+            except (OSError, EOFError, wave.Error):
+                logger.debug(
+                    "Could not read clone reference duration: %s",
+                    path,
+                    exc_info=True,
+                )
+
+        codec_frame_rate_raw = getattr(
+            self._talker_config, "codec_frame_rate", 12
+        )
+        try:
+            codec_frame_rate = float(codec_frame_rate_raw)
+        except (TypeError, ValueError):
+            codec_frame_rate = 12.0
+        if not math.isfinite(codec_frame_rate) or codec_frame_rate <= 0:
+            codec_frame_rate = 12.0
+
+        if (
+            duration is None
+            or not math.isfinite(duration)
+            or duration <= 0
+        ):
+            estimate = None
+        else:
+            estimate = max(1, int(duration * codec_frame_rate))
+        self._ref_code_len_cache[cache_key] = estimate
+        return estimate
+
     def _estimate_prompt_len(self, additional_information: dict[str, Any]) -> int:
         try:
             from vllm_omni.model_executor.models.qwen3_tts.prompt_embeds_builder import (
@@ -233,11 +332,35 @@ class VLLMQwen3TTS:
                 tokenize_prompt=lambda text: self._tokenizer(text, padding=False)["input_ids"],
                 codec_language_id=getattr(self._talker_config, "codec_language_id", None),
                 spk_is_dialect=getattr(self._talker_config, "spk_is_dialect", None),
-                estimate_ref_code_len=lambda _audio: None,
+                estimate_ref_code_len=self._estimate_ref_code_len,
             )
         except Exception as exc:
             logger.warning("Prompt length estimation failed; using 2048: %s", exc)
             return 2048
+
+    def _sampling_params_list(self) -> list[Any] | None:
+        """Copy Omni defaults and apply the configured talker token limit."""
+        assert self._omni is not None
+        defaults = getattr(self._omni, "default_sampling_params_list", None)
+        if not defaults:
+            # vLLM-Omni 0.22 always exposes these. Keeping this fallback makes
+            # lightweight test doubles and older versions remain usable.
+            logger.warning(
+                "vLLM-Omni exposes no default_sampling_params_list; "
+                "max_new_tokens=%d cannot be applied through SamplingParams",
+                self.max_new_tokens,
+            )
+            return None
+
+        params = copy.deepcopy(list(defaults))
+        try:
+            params[0].max_tokens = self.max_new_tokens
+        except (AttributeError, IndexError, TypeError) as exc:
+            raise RuntimeError(
+                "Could not apply max_new_tokens to vLLM-Omni stage-0 "
+                "SamplingParams"
+            ) from exc
+        return params
 
     @staticmethod
     def _request_output(stage_output: Any) -> Any:
@@ -275,7 +398,27 @@ class VLLMQwen3TTS:
         assert self._omni is not None
         prompts = [self._to_prompt(request) for request in requests]
         started = time.perf_counter()
-        stage_outputs = self._omni.generate(prompts, use_tqdm=False)
+        sampling_params_list = self._sampling_params_list()
+        try:
+            if sampling_params_list is None:
+                stage_outputs = self._omni.generate(prompts, use_tqdm=False)
+            else:
+                stage_outputs = self._omni.generate(
+                    prompts,
+                    sampling_params_list=sampling_params_list,
+                    use_tqdm=False,
+                )
+        except Exception:
+            # Omni.generate() shuts down its own engine on failure, but this
+            # wrapper must also drop the stale Omni object so a caller retry
+            # enters load() and creates a fresh engine.
+            try:
+                self.close()
+            except Exception:
+                logger.exception(
+                    "Failed to release vLLM-Omni after generation failure"
+                )
+            raise
         ordered: list[np.ndarray | None] = [None] * len(requests)
 
         for stage_output in stage_outputs:

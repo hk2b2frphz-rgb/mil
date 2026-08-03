@@ -159,6 +159,11 @@ PROXY_URL=http://<proxy-host>:<port> \
 PROXY_URL=http://<proxy-host>:<port> \
   qsub -V scripts/setup_vllm_omni_v100_env.pbs
 
+# 以前のbuildが完了済みでも、V100向けQwen3-TTS dtype patchを既存環境へ
+# 適用するため一度だけ再投入する（FRESHは付けない）。vLLMは再buildされず、
+# 通常はpatch確認まで数秒程度で終わる。
+qsub -V scripts/setup_vllm_omni_v100_env.pbs
+
 # まず100対話で速度・VRAM・音質を確認
 NUM_DIALOGUES=100 FRESH=1 qsub -V scripts/run_qwen_tts_vllm_10000_4gpu.pbs
 
@@ -186,8 +191,57 @@ uv run python scripts/generate_qwen3_tts_data.py \
 `clone_voice_examples.py` の聴き比べで決める）。クローン時は `--user-speaker-pool`
 などプリセット話者の混在は使えない。
 
+moshiだけをcloneし、user（other/backgroundを含む）をCustomVoiceにする場合は
+mixedモードを使う。`CLONE_OUT_DIR_MOSHI` には、聴き比べで採用した
+`clone_voice_examples.py` の出力フォルダ（`ref00_in-context/` などを含む親）を渡す。
+`QWEN_VOICE_MODE=auto`（既定）でも、moshi参照だけならmixed、userとmoshiの
+両参照ならclone、参照なしならCustomVoiceに解決される。誤投入を避けるため、
+以下では意図を明示している。
+
+```bash
+# まず3対話のproduction-renderer pilot
+QWEN_VOICE_MODE=mixed \
+CLONE_OUT_DIR_MOSHI=data/clone_examples/<moshi-result> \
+USER_SPEAKER_POOL=Ono_Anna \
+qsub -V scripts/run_clone_dialogue_pilot.pbs
+
+# 100対話のvLLMスモークテスト
+QWEN_VOICE_MODE=mixed \
+CLONE_OUT_DIR_MOSHI=data/clone_examples/<moshi-result> \
+USER_SPEAKER_POOL=Ono_Anna \
+NUM_DIALOGUES=100 FRESH=1 \
+qsub -V scripts/run_qwen_tts_vllm_10000_4gpu.pbs
+
+# 10,000対話のmixed本番。以後も同じ4変数で再投入すれば途中から再開する
+export QWEN_VOICE_MODE=mixed
+export CLONE_OUT_DIR_MOSHI=data/clone_examples/<moshi-result>
+export USER_SPEAKER_POOL=Ono_Anna
+export BATCH_ID=qwen_dialogues_10000_v1_tts_vllm_mixed_4gpu
+qsub -V scripts/run_qwen_tts_vllm_10000_4gpu.pbs
+
+# walltime終了後も、設定を一切変えず同じコマンドを再投入
+qsub -V scripts/run_qwen_tts_vllm_10000_4gpu.pbs
+```
+
+mixedモードは各シャードで、全user発話をCustomVoiceモデルで生成して永続
+キャッシュへ保存し、モデルを解放してから全moshi発話をBaseモデルのcloneで
+生成する。両モデルを同時にVRAMへ載せず、ターンごとのモデル切替も行わない。
+途中結果は各 `training_set/.qwen_mixed_cache/` に残り、PBS再投入時に再利用される。
+両パス完了後にMMS_FA alignmentとステレオ合成を行い、完了した対話の一時キャッシュ
+は削除される。`CLONE_MODE=x-vector`、`REF_RANK=1` などで参照モード・順位を変更できる。
+ただしmixedはalignment前に両モデルのpassを完了する必要があるため、既定の
+`SPARE_RATIO=0.15`では予備対話も最大15%ぶん先に合成する。
+
+同じ`BATCH_ID`を再投入するときは、参照フォルダ・`REF_RANK`・`CLONE_MODE`・
+user話者pool・モデル・batch/token設定をすべて同一に保つ。出力先の
+`generation_config.json`が対話JSONL、参照WAV内容、stage YAMLを含む設定を照合し、
+相違時は混在防止のため停止する。音声設定を変える場合は`FRESH=1`、または新しい
+`BATCH_ID`を使用する。
+
 既定は `TTS_BATCH_SIZE=16`、`DIALOGUE_BATCH_SIZE=16`、`float16`。
-V100はbfloat16非対応なので変更しない。OOM時は両方を8に下げる。専用環境は
+V100はbfloat16非対応なので変更しない。Code2WavはCUDA Graph warmupの
+`batch=4, length=325` OOMを避けるため内部だけmicrobatch 1で実行するが、
+外側の対話・talker batch 16は維持される。それでもOOMする場合だけ両方を8に下げる。専用環境は
 `cuda12.6_cudnn9.7.1_nccl2.24.3` module と PyTorch 2.11の `cu126` wheelを使う。
 cu128/cu129 wheelはV100のsm70 kernelを含まないため使わない。セットアップは
 PyTorchのsm70対応とCUDA実行を先に検査し、そのPyTorchに対してvLLM 0.22.0を
