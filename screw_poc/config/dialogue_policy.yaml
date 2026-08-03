@@ -1,0 +1,178 @@
+version: 1
+seed: 20260803
+
+voices:
+  system: Ono_Anna
+  users:
+    - Serena
+    - Sohee
+    - Vivian
+    - Dylan
+    - Eric
+    - Aiden
+    - Uncle_Fu
+    - Ryan
+
+dataset:
+  train_dialogues: 1000
+  evaluation_dialogues: 200
+  core_dialogues_per_knowledge: 30
+  out_of_scope_train: 100
+  target_seconds_per_dialogue: [20, 45]
+  flows_per_knowledge:
+    direct: 8
+    clarify: 12
+    varied: 6
+    unresolved: 4
+
+response_patterns:
+  CONFIRM: "確認すると、{slot_label}は{value}ですね。"
+  ESCALATE: "規定値を特定できません。作業を進めず、作業指示書か責任者を確認してください。"
+  OUT_OF_SCOPE: "その内容は、このねじ問い合わせシステムには登録されていません。作業指示書か責任者を確認してください。"
+  NOT_HEARD: "聞き取れませんでした。もう一度、見える数字や文字をそのまま教えてください。"
+
+question_templates:
+  train:
+    - "{question}"
+    - "すみません、{question}"
+    - "ちょっと確認です。{question}"
+    - "作業中なんですが、{question}"
+    - "これについて、{question}"
+    - "先輩、{question}"
+  evaluation:
+    - "今ちょっと困っていて、{question}"
+    - "念のため聞きたいんですが、{question}"
+    - "現場で確認したいです。{question}"
+    - "これ、どう判断すればいいですか。{question}"
+
+vague_questions:
+  pitch:
+    - "このねじのピッチを知りたいです。"
+    - "ねじ山の間隔はどれですか。"
+  identification:
+    - "このねじを使ってよいか確認したいです。"
+    - "どの工具を使えばいいですか。"
+  torque:
+    - "このボルト、どれくらいで締めますか。"
+    - "締付けトルクを教えてください。"
+  pilot_hole:
+    - "このねじの下穴を教えてください。"
+    - "下穴はこれで合っていますか。"
+  trouble:
+    - "ねじ締めで異常が出ました。"
+    - "このまま締めてよいですか。"
+
+unknown_replies:
+  train:
+    - "分かりません。"
+    - "そこは見ていません。"
+    - "どこを見ればいいですか。"
+    - "表示がよく分かりません。"
+  evaluation:
+    - "ちょっと判断できないです。"
+    - "手元では確認できません。"
+    - "そういう番号は分からないです。"
+
+acknowledgements:
+  train:
+    - "{value}です。"
+    - "見たら、{value}でした。"
+    - "表示は{value}です。"
+    - "たぶん{value}です。"
+  evaluation:
+    - "手元では{value}となっています。"
+    - "書いてあるのは{value}です。"
+    - "確認すると{value}でした。"
+
+slots:
+  process_id:
+    label: "工程"
+    questions:
+      - "どの設備・工程の、どの部分ですか？"
+      - "作業指示書に工程名や設備名はありますか？"
+      - "見える工程番号や設備名を、そのまま教えてください。"
+  part_number:
+    label: "部品番号"
+    questions:
+      - "部品番号は分かりますか？"
+      - "箱や作業指示書に番号はありますか？"
+      - "見える英数字を、そのまま教えてください。"
+  head_marking:
+    label: "頭部の刻印"
+    questions:
+      - "ボルト頭部の刻印を教えてください。"
+      - "ボルトの頭に数字や文字はありますか？"
+      - "『8.8』や『10.9』のような表示があれば、そのまま読んでください。"
+  nominal_diameter:
+    label: "ねじサイズ"
+    questions:
+      - "ねじの呼び径を教えてください。"
+      - "M6やM8などのサイズは分かりますか？"
+      - "箱や指示書に『M』で始まる表示はありますか？"
+  thread_designation:
+    label: "ねじの表示"
+    questions:
+      - "ねじの規格表示を教えてください。"
+      - "M8かM8かける1のような表示はありますか？"
+      - "『M』で始まる文字と数字を、そのまま読んでください。"
+  pitch:
+    label: "ピッチ"
+    questions:
+      - "ピッチを教えてください。"
+      - "並目か細目か分かりますか？"
+      - "箱や指示書に、1.0や1.25のような表示はありますか？"
+  drive_type:
+    label: "頭部形状"
+    questions:
+      - "ねじの駆動部形状を教えてください。"
+      - "頭は外側が六角ですか、穴が六角ですか、十字ですか？"
+      - "工具を当てる部分の形を、見たまま教えてください。"
+  screw_type:
+    label: "ねじ種類"
+    questions:
+      - "ねじの種類を教えてください。"
+      - "小ねじですか、タッピンねじですか？"
+      - "先端がとがっているか、見たまま教えてください。"
+  lubrication:
+    label: "表面状態"
+    questions:
+      - "潤滑状態を教えてください。"
+      - "油やグリスは付いていますか？"
+      - "表面は乾いていますか、それとも油で濡れていますか？"
+  mating_material:
+    label: "相手材"
+    questions:
+      - "締付け先の材質を教えてください。"
+      - "締める相手は、鉄、アルミ、樹脂のどれですか？"
+      - "磁石が付く金属ですか、軽い金属ですか、プラスチックですか？"
+  plate_thickness:
+    label: "板厚"
+    questions:
+      - "相手材の板厚を教えてください。"
+      - "材料の厚さは何ミリですか？"
+      - "図面や指示書に書かれた厚さを、そのまま教えてください。"
+  washer:
+    label: "座金"
+    questions:
+      - "座金の条件を教えてください。"
+      - "平たいワッシャーは入っていますか？"
+      - "ねじ頭の下に、薄い輪の部品がありますか？"
+  symptom:
+    label: "症状"
+    questions:
+      - "発生している症状を教えてください。"
+      - "途中で固い、空回り、頭が滑る、のどれですか？"
+      - "ねじが今どう動くか、見たまま教えてください。"
+
+out_of_scope_questions:
+  train:
+    - "今日の食堂メニューは何ですか？"
+    - "この機械の電気配線を変更していいですか？"
+    - "休暇申請はどこから出しますか？"
+    - "溶接条件を教えてください。"
+    - "薬品が手に付いたけど大丈夫ですか？"
+  evaluation:
+    - "フォークリフトの免許更新はいつですか？"
+    - "旋盤の回転数を決めてください。"
+    - "社内Wi-Fiのパスワードを教えてください。"
+    - "この薬を飲んでも大丈夫ですか？"
