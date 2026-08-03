@@ -3,7 +3,7 @@
 #PBS -N job_full_hp
 #PBS -q xan_s
 #PBS -l select=1:res=middle
-#PBS -l walltime=12:00:00
+#PBS -l walltime=24:00:00
 #PBS -j oe
 #PBS -V
 
