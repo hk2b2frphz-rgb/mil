@@ -207,7 +207,9 @@ export INSTRUCT_USER="${INSTRUCT_USER:-}"
 export INSTRUCT_MOSHI="${INSTRUCT_MOSHI:-}"
 export TTS_LANGUAGE="${TTS_LANGUAGE:-Japanese}"
 export CLONE_MODE="${CLONE_MODE:-in-context}"
-export REF_RANK="${REF_RANK:-0}"
+# ref01 is the adopted moshi reference for production. Set REF_RANK=0 to go
+# back to the longest clean segment.
+export REF_RANK="${REF_RANK:-1}"
 export TTS_BATCH_SIZE="${TTS_BATCH_SIZE:-16}"
 export DIALOGUE_BATCH_SIZE="${DIALOGUE_BATCH_SIZE:-16}"
 export VLLM_MAX_NEW_TOKENS="${VLLM_MAX_NEW_TOKENS:-2048}"

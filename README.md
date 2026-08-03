@@ -228,7 +228,8 @@ mixedモードは各シャードで、全user発話をCustomVoiceモデルで生
 生成する。両モデルを同時にVRAMへ載せず、ターンごとのモデル切替も行わない。
 途中結果は各 `training_set/.qwen_mixed_cache/` に残り、PBS再投入時に再利用される。
 両パス完了後にMMS_FA alignmentとステレオ合成を行い、完了した対話の一時キャッシュ
-は削除される。`CLONE_MODE=x-vector`、`REF_RANK=1` などで参照モード・順位を変更できる。
+は削除される。参照順位の既定は`REF_RANK=1`(ref01)で、`REF_RANK=0`にすると
+最長のクリーン区間(ref00)に戻る。`CLONE_MODE=x-vector`で参照モードも変更できる。
 ただしmixedはalignment前に両モデルのpassを完了する必要があるため、既定の
 `SPARE_RATIO=0.15`では予備対話も最大15%ぶん先に合成する。
 
