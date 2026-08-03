@@ -169,7 +169,17 @@ NUM_DIALOGUES=100 FRESH=1 qsub -V scripts/run_qwen_tts_vllm_10000_4gpu.pbs
 
 # 10,000対話本番。同じBATCH_IDで再投入すると途中から再開する
 qsub -V scripts/run_qwen_tts_vllm_10000_4gpu.pbs
+
+# 1,000 / 3,000 対話も同じ経路。対話コーパスの既定が違うだけで、
+# vLLM設定・音声モード・resumeの挙動は10000と完全に同一
+qsub -V scripts/run_qwen_tts_vllm_1000_4gpu.pbs
+qsub -V scripts/run_qwen_tts_vllm_3000_4gpu.pbs
 ```
+
+3本のラッパはPBSディレクティブと`SOURCE_BATCH_ID`の既定だけを持ち、本体は
+`scripts/run_qwen_tts_vllm_common.sh`に一本化されている。音声モードの判定や
+エンジン設定を直すとどの規模にも同時に効く。別のコーパスを食わせたいときは
+`SOURCE_BATCH_ID`を渡せばよく、ラッパを増やす必要はない。
 
 vLLM-Omni 0.22.0 からは Base モデルのボイスクローンも同じバッチ経路で使える。
 `generate_qwen3_tts_data.py` に以下を渡すと、プリセット話者の代わりに

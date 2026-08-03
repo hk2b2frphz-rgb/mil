@@ -10,6 +10,14 @@ import pytest
 
 from scripts.run_experiment_dag import build_context, load_yaml, stage_env
 
+VLLM_COMMON = Path("scripts/run_qwen_tts_vllm_common.sh")
+# Every scale runs the same body; only the corpus default differs.
+VLLM_WRAPPERS = {
+    1000: Path("scripts/run_qwen_tts_vllm_1000_4gpu.pbs"),
+    3000: Path("scripts/run_qwen_tts_vllm_3000_4gpu.pbs"),
+    10000: Path("scripts/run_qwen_tts_vllm_10000_4gpu.pbs"),
+}
+
 
 def test_example_dag_uses_v100_vllm_environment_and_real_stage_paths() -> None:
     config_path = Path("configs/experiment.example.yaml")
@@ -41,14 +49,17 @@ def test_example_dag_uses_v100_vllm_environment_and_real_stage_paths() -> None:
     assert eval_env["FDB_OUT_DIR"] == "data/runs/exp01/eval"
 
     wrapper = Path(tts["pbs"]).read_text(encoding="utf-8")
-    assert "cuda12.6_cudnn9.7.1_nccl2.24.3" in wrapper
-    assert ".venv-vllm-omni/bin/python" in wrapper
-    assert "QWEN_VOICE_MODE" in wrapper
-    assert "tts_vllm_mixed_4gpu" in wrapper
-    assert "tts_vllm_clone_4gpu" in wrapper
-    assert 'default_run_id "$default_batch_id"' in wrapper
-    assert 'export QWEN_VOICE_MODE="$(resolve_qwen_voice_mode)"' in wrapper
-    assert "a user clone source without a moshi clone source is unsupported" in wrapper
+    assert "run_qwen_tts_vllm_common.sh" in wrapper
+
+    shared = VLLM_COMMON.read_text(encoding="utf-8")
+    assert "cuda12.6_cudnn9.7.1_nccl2.24.3" in shared
+    assert ".venv-vllm-omni/bin/python" in shared
+    assert "QWEN_VOICE_MODE" in shared
+    assert "tts_vllm_mixed_4gpu" in shared
+    assert "tts_vllm_clone_4gpu" in shared
+    assert 'default_run_id "$default_batch_id"' in shared
+    assert 'export QWEN_VOICE_MODE="$(resolve_qwen_voice_mode)"' in shared
+    assert "a user clone source without a moshi clone source is unsupported" in shared
 
     production = Path(
         "scripts/run_qwen_tts_whole_utterance_10000_4gpu.pbs"
@@ -100,16 +111,30 @@ def test_v100_profile_caps_code2wav_without_reducing_outer_batch() -> None:
         1: 16,
     }
 
-    wrapper = Path("scripts/run_qwen_tts_vllm_10000_4gpu.pbs").read_text(
-        encoding="utf-8"
-    )
+    shared = VLLM_COMMON.read_text(encoding="utf-8")
     production = Path(
         "scripts/run_qwen_tts_whole_utterance_10000_4gpu.pbs"
     ).read_text(encoding="utf-8")
-    assert 'TTS_BATCH_SIZE="${TTS_BATCH_SIZE:-16}"' in wrapper
-    assert 'DIALOGUE_BATCH_SIZE="${DIALOGUE_BATCH_SIZE:-16}"' in wrapper
+    assert 'TTS_BATCH_SIZE="${TTS_BATCH_SIZE:-16}"' in shared
+    assert 'DIALOGUE_BATCH_SIZE="${DIALOGUE_BATCH_SIZE:-16}"' in shared
     assert 'TTS_BATCH_SIZE="${TTS_BATCH_SIZE:-16}"' in production
     assert 'DIALOGUE_BATCH_SIZE="${DIALOGUE_BATCH_SIZE:-16}"' in production
+
+
+def test_every_scale_has_a_vllm_wrapper_over_the_shared_body() -> None:
+    for scale, path in VLLM_WRAPPERS.items():
+        wrapper = path.read_text(encoding="utf-8")
+        assert (
+            f'SOURCE_BATCH_ID:-qwen_dialogues_{scale}_${{DIALOGUES_VERSION:-v1}}'
+            in wrapper
+        ), path
+        assert "exec bash scripts/run_qwen_tts_vllm_common.sh" in wrapper, path
+        # The body must not be copied into the wrappers, or a fix to the voice
+        # mode rules would have to be made once per scale.
+        assert "resolve_qwen_voice_mode() {" not in wrapper, path
+
+    shared = VLLM_COMMON.read_text(encoding="utf-8")
+    assert "SOURCE_BATCH_ID must be set" in shared
 
 
 def _bash_executable() -> str | None:
@@ -136,7 +161,8 @@ def test_changed_pbs_scripts_pass_bash_syntax_check() -> None:
     if bash is None:
         pytest.skip("bash is unavailable")
     scripts = [
-        "scripts/run_qwen_tts_vllm_10000_4gpu.pbs",
+        *(str(path) for path in VLLM_WRAPPERS.values()),
+        str(VLLM_COMMON),
         "scripts/run_qwen_tts_whole_utterance_10000_4gpu.pbs",
         "scripts/run_clone_dialogue_pilot.pbs",
     ]
@@ -320,12 +346,10 @@ def test_vllm_wrapper_voice_mode_resolution_harness(
     bash = _bash_executable()
     if bash is None:
         pytest.skip("bash is unavailable")
-    wrapper = Path("scripts/run_qwen_tts_vllm_10000_4gpu.pbs").read_text(
-        encoding="utf-8"
-    )
-    start = wrapper.index("resolve_qwen_voice_mode() {")
-    end = wrapper.index("\n}\nexport QWEN_VOICE_MODE=", start) + 3
-    function_source = wrapper[start:end]
+    shared = VLLM_COMMON.read_text(encoding="utf-8")
+    start = shared.index("resolve_qwen_voice_mode() {")
+    end = shared.index("\n}\nexport QWEN_VOICE_MODE=", start) + 3
+    function_source = shared[start:end]
 
     env = dict(os.environ)
     for name in (
