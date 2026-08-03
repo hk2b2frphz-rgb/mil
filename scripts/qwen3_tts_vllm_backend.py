@@ -316,7 +316,15 @@ class VLLMQwen3TTS:
         ):
             estimate = None
         else:
-            estimate = max(1, int(duration * codec_frame_rate))
+            # This predicts how many frames the codec encoder will emit for the
+            # reference, and vLLM-Omni validates nothing: the estimate only
+            # sizes the stage-0 placeholder, while build_prompt_embeds writes
+            # the encoder's real frame count into those slots. One frame short
+            # overruns the allocation and aborts the CUDA context with a
+            # device-side assert; one frame long only pads. Round up so the
+            # unknown rounding convention on the encoder side can never land on
+            # the fatal side.
+            estimate = max(1, math.ceil(duration * codec_frame_rate))
         self._ref_code_len_cache[cache_key] = estimate
         return estimate
 
@@ -325,7 +333,14 @@ class VLLMQwen3TTS:
             from vllm_omni.model_executor.models.qwen3_tts.prompt_embeds_builder import (
                 Qwen3TTSPromptEmbedsBuilder,
             )
+        except ImportError as exc:
+            # Only reachable outside the vLLM-Omni environment (unit tests, and
+            # the plain project env). Production always imports vllm_omni in the
+            # PBS preflight before this module is used.
+            logger.warning("vLLM-Omni prompt builder unavailable; using 2048: %s", exc)
+            return 2048
 
+        try:
             return Qwen3TTSPromptEmbedsBuilder.estimate_prompt_len_from_additional_information(
                 additional_information=additional_information,
                 task_type=additional_information["task_type"][0],
@@ -335,8 +350,16 @@ class VLLMQwen3TTS:
                 estimate_ref_code_len=self._estimate_ref_code_len,
             )
         except Exception as exc:
-            logger.warning("Prompt length estimation failed; using 2048: %s", exc)
-            return 2048
+            # Never substitute a guess here. The builder raises when it cannot
+            # determine the reference frame length, and vLLM-Omni does not
+            # check the placeholder against the embeds it later writes, so a
+            # made-up length silently corrupts the prompt and surfaces much
+            # later as a device-side assert with no usable context.
+            raise RuntimeError(
+                "vLLM-Omni could not estimate the prompt length for "
+                f"task_type={additional_information.get('task_type')} "
+                f"ref_audio={additional_information.get('ref_audio')}: {exc}"
+            ) from exc
 
     def _sampling_params_list(self) -> list[Any] | None:
         """Copy Omni defaults and apply the configured talker token limit."""

@@ -52,8 +52,10 @@ def test_ref_code_len_uses_nested_path_and_caches_soundfile_info(
     )
     ref_path = tmp_path / "reference.wav"
 
-    assert backend._estimate_ref_code_len([[str(ref_path)]]) == 12
-    assert backend._estimate_ref_code_len(str(ref_path)) == 12
+    # 1.01s x 12Hz = 12.12 frames. Rounded up: under-estimating the reference
+    # overruns the stage-0 placeholder and aborts the CUDA context.
+    assert backend._estimate_ref_code_len([[str(ref_path)]]) == 13
+    assert backend._estimate_ref_code_len(str(ref_path)) == 13
     assert calls == [str(ref_path)]
 
     # close() clears cached path metadata even when the engine was not loaded.
@@ -128,6 +130,45 @@ def test_prompt_length_builder_receives_reference_length_estimator(
 
     assert backend._estimate_prompt_len(info) == 37
     assert captured["callback"] is backend._estimate_ref_code_len
+
+
+def test_prompt_length_failure_raises_instead_of_guessing(
+    tmp_path, monkeypatch
+) -> None:
+    """A builder failure must not be replaced by a fabricated length.
+
+    vLLM-Omni never checks the stage-0 placeholder against the embeds it
+    writes into those slots, so a guessed length surfaces as a device-side
+    assert far from its cause.
+    """
+
+    class RefusingPromptBuilder:
+        @staticmethod
+        def estimate_prompt_len_from_additional_information(**_kwargs):
+            raise ValueError(
+                "Base in-context voice cloning requires a readable ref_audio"
+            )
+
+    package_names = [
+        "vllm_omni",
+        "vllm_omni.model_executor",
+        "vllm_omni.model_executor.models",
+        "vllm_omni.model_executor.models.qwen3_tts",
+    ]
+    for package_name in package_names:
+        package = ModuleType(package_name)
+        package.__path__ = []  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, package_name, package)
+    module_name = (
+        "vllm_omni.model_executor.models.qwen3_tts.prompt_embeds_builder"
+    )
+    builder_module = ModuleType(module_name)
+    builder_module.Qwen3TTSPromptEmbedsBuilder = RefusingPromptBuilder
+    monkeypatch.setitem(sys.modules, module_name, builder_module)
+
+    backend = _make_backend(tmp_path)
+    with pytest.raises(RuntimeError, match="could not estimate the prompt length"):
+        backend._estimate_prompt_len({"task_type": ["Base"], "ref_audio": ["a.wav"]})
 
 
 def test_generate_passes_copied_stage_zero_token_limit(
