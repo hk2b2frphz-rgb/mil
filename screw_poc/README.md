@@ -93,25 +93,43 @@ qsub -V screw_poc/pbs/run_tts_smoke.pbs
 qsub -V screw_poc/pbs/run_tts_1000_4gpu.pbs
 ```
 
-TTS終了後、Moshi LoRA学習を投入します。
+TTS終了後、Moshi LoRAとFull Fine-tuningをそれぞれ投入できます。
 
 ```bash
 qsub -V screw_poc/pbs/run_train.pbs
+qsub -V screw_poc/pbs/run_train_full.pbs
 ```
 
-TTS成功後に学習を自動開始する依存関係付き投入は、次の1コマンドです。
+TTS成功後にLoRAとFull FTの両方を自動開始する依存関係付き投入は、次の1コマンドです。
 
 ```bash
 bash screw_poc/pbs/submit_pipeline.sh
 ```
 
-この場合、`afterok` 依存を使うため、TTSが失敗した場合に学習は始まりません。出力先は `screw_poc/artifacts/tts_1000/`、PBSログは `screw_poc/artifacts/pbs_logs/`、学習結果は `screw_poc/experiments/lora_base_config/` です。
+この場合、`afterok` 依存を使うため、TTSが失敗した場合に学習は始まりません。LoRAとFull FTは同じ音声データを読み、互いに独立して実行されます。
+
+すでにTTSが完成している場合は、次のコマンドで両方の学習だけを投入できます。
+
+```bash
+bash screw_poc/pbs/submit_train_both.sh
+```
+
+出力先は次のように分かれます。
+
+- TTS: `screw_poc/artifacts/tts_1000/`
+- LoRA: `screw_poc/experiments/lora_base_config/`
+- Full FT: `screw_poc/experiments/fullft_base_config/`
+- PBSログ: `screw_poc/artifacts/pbs_logs/`
+- Full FT前処理データ: `screw_poc/artifacts/nu_fullft/`
+
+Full FTは既存のnu-dialogue経路を使い、既定でA100 2 GPU、学習率`1e-5`、12 epochです。LoRAより計算時間とチェックポイント容量が大きくなります。
 
 100・300対話の比較実験では、たとえば300対話を次のように投入できます。
 
 ```bash
 qsub -V -v DIALOGUES_JSONL=screw_poc/artifacts/subsets/train_0300.jsonl,NUM_DIALOGUES=300,OUT_ROOT=screw_poc/artifacts/tts_0300 screw_poc/pbs/run_tts_1000_4gpu.pbs
 qsub -V -v TTS_RUN_DIR=screw_poc/artifacts/tts_0300/merged screw_poc/pbs/run_train.pbs
+qsub -V -v TTS_RUN_DIR=screw_poc/artifacts/tts_0300/merged screw_poc/pbs/run_train_full.pbs
 ```
 
 ## 4. テスト
