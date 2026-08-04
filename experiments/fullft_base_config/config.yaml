@@ -22,7 +22,9 @@ lora:
 first_codebook_weight_multiplier: 100.
 text_padding_weight: 0.5
 
-duration_sec: 100
+# lora_base_config と同じ理由で 170。100 のままだと対話の 23.2% が均等分割
+# され、2 個目以降のチャンクが「冒頭挨拶なしで始まる」教師データになる。
+duration_sec: 170
 batch_size: 1           # フル FT は optimizer state が巨大。A100 80GB では per-forward を最小化する。
 num_microbatches: 8     # 実効 batch = 1 × 8 = 8 (lora_base_config と同等の曝露量)
 max_steps: 500          # lora_base_config と同じ step 数で比較
@@ -44,6 +46,11 @@ do_ckpt: true
 
 do_eval: true
 eval_freq: 25
+
+# eval loss が改善しない評価回数で打ち切る（0 で無効）。フル FT はこのデータ量
+# だと過学習が先に来るので、max_steps を上限として機能させる役。
+early_stopping_patience: 4
+early_stopping_min_delta: 0.001
 
 run_dir: ""
 overwrite_run_dir: true

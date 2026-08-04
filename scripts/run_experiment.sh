@@ -189,6 +189,8 @@ TOP_LEVEL = {
     "HP_DO_EVAL": "do_eval",
     "HP_EVAL_FREQ": "eval_freq",
     "HP_KEEP_BEST_ONLY": "keep_best_only",
+    "HP_EARLY_STOPPING_PATIENCE": "early_stopping_patience",
+    "HP_EARLY_STOPPING_MIN_DELTA": "early_stopping_min_delta",
 }
 SECTIONS = {
     "lora": {

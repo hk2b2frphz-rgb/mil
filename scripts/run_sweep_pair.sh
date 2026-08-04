@@ -35,13 +35,20 @@ clear_hp_env() {
     unset HP_BATCH_SIZE HP_NUM_MICROBATCHES HP_MAX_STEPS
     unset HP_CKPT_FREQ HP_EVAL_FREQ HP_LOG_FREQ HP_MAX_NORM
     unset HP_DURATION_SEC HP_GRADIENT_CHECKPOINTING HP_PARAM_DTYPE HP_SEED
+    unset HP_EARLY_STOPPING_PATIENCE HP_EARLY_STOPPING_MIN_DELTA
 }
 
 apply_pattern() {
     local pattern="$1"
     clear_hp_env
 
-    HP_LR=2e-6
+    # 2e-6 / 1200 steps left the run undertrained: eval loss was still falling
+    # at the end, and the fixed opening greeting -- a single ~3s decision per
+    # sample, unlike voice and aizuchi which get signal on every frame -- never
+    # got installed at all while the broader style transferred fine. 5e-6 with
+    # 2400 steps is the same amount of movement as 2e-6 for ~3600 steps at this
+    # constant LR, at a shorter walltime.
+    HP_LR=5e-6
     HP_WEIGHT_DECAY=0.1
     HP_PCT_START=0.05
     HP_LR_SCHEDULER=warmup_constant
@@ -49,18 +56,34 @@ apply_pattern() {
     HP_LORA_SCALING=2.0
     HP_BATCH_SIZE=8
     HP_NUM_MICROBATCHES=1
-    HP_MAX_STEPS=1200
+    HP_MAX_STEPS=2400
+    # Set explicitly (rather than left to the experiment's config.yaml) so a
+    # dialogue is never split into multiple training samples: moshi-finetune
+    # crops duration_sec per sample, and any chunk after the first starts
+    # mid-conversation without the fixed opening greeting, teaching the model
+    # not to greet from an empty context. The corpus sits under 150s except
+    # for a single 240s outlier, which is not worth padding every other
+    # sample for.
+    HP_DURATION_SEC=170
     HP_CKPT_FREQ=120
     HP_EVAL_FREQ=60
     HP_LOG_FREQ=5
+    # Early stopping on eval loss, counted in evaluations: 6 x eval_freq = 360
+    # steps without improvement before stopping. Generous on purpose -- the LoRA
+    # runs have been undertrained rather than overfitted, so this is a ceiling
+    # that stops a run once it is genuinely flat, not a tight leash.
+    HP_EARLY_STOPPING_PATIENCE=6
+    HP_EARLY_STOPPING_MIN_DELTA=0.001
 
     case "$pattern" in
-        h01) HP_MAX_STEPS=2400 ;;                    # fixed 2e-6 after 5% warmup;
-                                                      # eval loss hadn't converged by
-                                                      # step 1200, so double exposure
-        h01_long) HP_MAX_STEPS=3600 ;;               # h01 with even more exposure,
-                                                      # if 2400 steps still isn't enough
-        h02) HP_LR=5e-6 ;;                           # higher learning rate
+        # h01/h01_long/lr_* predate the 5e-6 default and pin their own LR (and
+        # step count) so a rerun reproduces the run that was originally made
+        # under that name instead of silently inheriting the new baseline.
+        h01) HP_LR=2e-6 ;;                           # fixed 2e-6 after 5% warmup,
+                                                      # 2400 steps (now the default
+                                                      # step count)
+        h01_long) HP_LR=2e-6; HP_MAX_STEPS=3600 ;;   # h01 with even more exposure
+        h02) HP_LR=5e-6 ;;                           # higher learning rate (== current default)
         h03) HP_LR=1e-6 ;;                           # lower learning rate
         h04) HP_LORA_RANK=64 ;;                      # larger adapter
         h05) HP_LORA_RANK=16 ;;                      # smaller adapter
@@ -69,16 +92,18 @@ apply_pattern() {
         h08) HP_BATCH_SIZE=4; HP_NUM_MICROBATCHES=2 ;; # same effective batch, lower per-step memory
         h09) HP_PCT_START=0.10 ;;                    # longer warmup
         h10) HP_WEIGHT_DECAY=0.01 ;;                 # weaker regularization
-        lr_2e-6) ;;                                  # Kyutai example default LR
-        lr_1p5e-6) HP_LR=1.5e-6 ;;                   # slightly lower LR
-        lr_1e-6) HP_LR=1e-6 ;;                       # lower LR
-        lr_5e-7) HP_LR=5e-7 ;;                       # conservative LR
+        lr_2e-6) HP_LR=2e-6; HP_MAX_STEPS=1200 ;;    # Kyutai example default LR
+        lr_1p5e-6) HP_LR=1.5e-6; HP_MAX_STEPS=1200 ;; # slightly lower LR
+        lr_1e-6) HP_LR=1e-6; HP_MAX_STEPS=1200 ;;    # lower LR
+        lr_5e-7) HP_LR=5e-7; HP_MAX_STEPS=1200 ;;    # conservative LR
         fixed_1e-6)
             HP_LR=1e-6
+            HP_MAX_STEPS=1200
             HP_LR_SCHEDULER=warmup_constant
             ;;                                        # 5% warmup, then fixed LR
         onecycle_2e-6)
             HP_LR=2e-6
+            HP_MAX_STEPS=1200
             HP_LR_SCHEDULER=one_cycle
             ;;                                        # previous baseline reference
         *)
@@ -89,7 +114,8 @@ apply_pattern() {
 
     export HP_LR HP_WEIGHT_DECAY HP_PCT_START HP_LR_SCHEDULER
     export HP_LORA_RANK HP_LORA_SCALING HP_BATCH_SIZE HP_NUM_MICROBATCHES
-    export HP_MAX_STEPS HP_CKPT_FREQ HP_EVAL_FREQ HP_LOG_FREQ
+    export HP_MAX_STEPS HP_CKPT_FREQ HP_EVAL_FREQ HP_LOG_FREQ HP_DURATION_SEC
+    export HP_EARLY_STOPPING_PATIENCE HP_EARLY_STOPPING_MIN_DELTA
 }
 
 echo "===== sweep ====="

@@ -1394,8 +1394,14 @@ class LLMDialogueGenerator:
                 pair_index + 1,
                 user_text,
             )
-            user_turn = DialogueTurn("user", user_text)
-            core_turns.append(user_turn)
+            # The pauses userAI wrote inline become real silence turns, so the
+            # transcript moshi sees below already shows `silence|3.4` and it can
+            # answer the pause rather than the words.
+            if case_allows_pauses(use_case):
+                user_turns = split_user_text_on_pauses(user_text)
+            else:
+                user_turns = [DialogueTurn("user", strip_residual_tags(user_text))]
+            core_turns.extend(user_turns)
 
             moshi_prompt = build_moshi_agent_prompt(use_case, core_turns)
             moshi_text = self.call_agent_utterance(
@@ -1409,14 +1415,27 @@ class LLMDialogueGenerator:
             )
             moshi_turn = DialogueTurn("moshi", moshi_text)
             core_turns.append(moshi_turn)
-            surface_pair_turns = self.add_aizuchi_for_user_turn(
-                use_case=use_case,
-                visible_turns=surface_turns,
-                user_turn=user_turn,
-                moshi_turn=moshi_turn,
-                case_id=case_id,
-                pair_index=pair_index + 1,
-            )
+            # Splitting on pauses must not multiply the backchannel budget, so
+            # the cap is spent across the whole utterance, not per segment.
+            aizuchi_budget = int(self.args.multi_agent_max_aizuchi_per_user)
+            surface_pair_turns: list[DialogueTurn] = []
+            for turn in user_turns:
+                if turn.speaker != "user":
+                    surface_pair_turns.append(turn)
+                    continue
+                segment_turns = self.add_aizuchi_for_user_turn(
+                    use_case=use_case,
+                    visible_turns=surface_turns + surface_pair_turns,
+                    user_turn=turn,
+                    moshi_turn=moshi_turn,
+                    case_id=case_id,
+                    pair_index=pair_index + 1,
+                    max_insertions=aizuchi_budget,
+                )
+                aizuchi_budget -= sum(
+                    1 for item in segment_turns if item.speaker == "moshi"
+                )
+                surface_pair_turns.extend(segment_turns)
             surface_pair_turns.append(moshi_turn)
             surface_turns.extend(surface_pair_turns)
             if self.args.multi_agent_aizuchi_mode == "inline":
@@ -1497,11 +1516,14 @@ class LLMDialogueGenerator:
         moshi_turn: DialogueTurn,
         case_id: str,
         pair_index: int,
+        max_insertions: int | None = None,
     ) -> list[DialogueTurn]:
+        if max_insertions is None:
+            max_insertions = int(self.args.multi_agent_max_aizuchi_per_user)
         if (
             self.args.no_multi_agent_aizuchi
             or len(user_turn.text) < self.args.multi_agent_aizuchi_min_chars
-            or self.args.multi_agent_max_aizuchi_per_user <= 0
+            or max_insertions <= 0
         ):
             return [user_turn]
         clauses = split_text_into_clauses(user_turn.text)
@@ -1512,7 +1534,7 @@ class LLMDialogueGenerator:
             visible_turns,
             user_turn.text,
             moshi_turn.text,
-            self.args.multi_agent_max_aizuchi_per_user,
+            max_insertions,
         )
         raw = self.call_agent(
             prompt,
@@ -1520,11 +1542,7 @@ class LLMDialogueGenerator:
             max_tokens=120,
             role_name="aizuchiAI",
         )
-        insertions = parse_aizuchi_insertions(
-            raw,
-            clauses,
-            self.args.multi_agent_max_aizuchi_per_user,
-        )
+        insertions = parse_aizuchi_insertions(raw, clauses, max_insertions)
         self.trace_event(
             {
                 "event": "aizuchi_decision",
@@ -1769,6 +1787,15 @@ JSONだけを出力してください: {"insertions":[{"after_clause": 1, "text"
 """.strip()
 
 
+def annotated_field(key: str, use_case: dict[str, Any], hint_key: str) -> str:
+    """`key: value（hint）` -- empty when the value itself is missing."""
+    value = str(use_case.get(key) or "").strip()
+    if not value:
+        return ""
+    hint = str(use_case.get(hint_key) or "").strip()
+    return f"{key}: {value}（{hint}）" if hint else f"{key}: {value}"
+
+
 def case_brief(use_case: dict[str, Any]) -> str:
     talking_points = use_case.get("talking_points") or []
     if isinstance(talking_points, list):
@@ -1781,11 +1808,19 @@ def case_brief(use_case: dict[str, Any]) -> str:
         f"risk_level: {use_case.get('risk_level', 'low')}",
         f"situation: {use_case.get('situation', '')}",
         f"user_profile: {use_case.get('user_profile', '')}",
+        # personality / emotional_state / conversation_type are what make two
+        # cases with the same demographics different dialogues. emotional_state
+        # additionally drives the TTS voice preset, so the text has to be
+        # written knowing it or the audio ends up tearful over neutral lines.
+        annotated_field("personality", use_case, "personality_guidance"),
+        annotated_field("emotional_state", use_case, "emotional_state_hint"),
+        annotated_field("conversation_type", use_case, "conversation_guidance"),
+        f"time_of_day: {use_case.get('time_of_day', '')}",
         f"opening_hint: {use_case.get('opening', '')}",
         f"topic: {use_case.get('topic', '')}",
         f"talking_points: {points}",
     ]
-    return "\n".join(line for line in lines if not line.endswith(": "))
+    return "\n".join(line for line in lines if line and not line.endswith(": "))
 
 
 def build_user_agent_profile(
@@ -1839,6 +1874,89 @@ def dialogue_turns_to_transcript(turns: list[DialogueTurn]) -> str:
     return dialogue_dict_to_transcript({"turns": rows})
 
 
+# userAI writes its own pauses inline, because the speaker is the one who knows
+# where the words stopped coming. `<<pause:3.4>>` matches the `<<...>>` tag shape
+# the duplex prompts already use. Anything outside MIN/MAX seconds is dropped
+# rather than clamped -- a model writing `<<pause:0.2>>` is not describing a
+# silence, it is describing a comma.
+PAUSE_MARKER_RE = re.compile(r"<<\s*pause\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)\s*>>")
+PAUSE_MIN_SEC = 2.0
+PAUSE_MAX_SEC = 6.0
+# Belt and braces: whatever tag shape survives parsing must never reach the TTS,
+# which would happily read "<<pause:3.4>>" out loud.
+RESIDUAL_TAG_RE = re.compile(r"<<[^>]*>>")
+
+# States where falling silent mid-sentence reads as natural. A high-tension or
+# settled speaker who keeps stopping for four seconds does not.
+PAUSE_PRONE_STATES = {"涙ぐんでいる", "ふさぎ込んでいる", "不安が強い", "気分が沈んでいる"}
+
+
+def strip_residual_tags(text: str) -> str:
+    return RESIDUAL_TAG_RE.sub("", text).strip()
+
+
+def split_user_text_on_pauses(text: str) -> list[DialogueTurn]:
+    """`前半<<pause:3.4>>後半` -> [user(前半), silence(3.4), user(後半)].
+
+    A marker at the very start becomes a leading silence: the user was asked
+    something and could not get the words out for a few seconds. A marker at the
+    very end is dropped -- moshi's reply already follows, so a trailing silence
+    would just be a gap before someone else speaks.
+    """
+    turns: list[DialogueTurn] = []
+    cursor = 0
+    for match in PAUSE_MARKER_RE.finditer(text):
+        seconds = float(match.group(1))
+        if not PAUSE_MIN_SEC <= seconds <= PAUSE_MAX_SEC:
+            # Not a split point. Leave the cursor alone so the words on both
+            # sides stay in one segment; strip_residual_tags drops the tag.
+            continue
+        segment = strip_residual_tags(text[cursor : match.start()])
+        cursor = match.end()
+        if segment:
+            turns.append(DialogueTurn("user", segment))
+        elif turns and turns[-1].speaker == "silence":
+            continue  # two markers in a row: one silence is enough
+        turns.append(
+            DialogueTurn("silence", duration_sec=seconds, note="userが言葉に詰まる")
+        )
+    rest = strip_residual_tags(text[cursor:])
+    if rest:
+        turns.append(DialogueTurn("user", rest))
+    while turns and turns[-1].speaker == "silence":
+        turns.pop()
+    if not any(turn.speaker == "user" for turn in turns):
+        return [DialogueTurn("user", strip_residual_tags(text))]
+    return turns
+
+
+def case_allows_pauses(use_case: dict[str, Any]) -> bool:
+    """Whether this use case was commissioned with silences at all."""
+    return str(use_case.get("silence_pattern") or "none").strip() in {
+        "occasional",
+        "heavy",
+    }
+
+
+def build_pause_directive(use_case: dict[str, Any]) -> str:
+    """Silence instructions for userAI, or "" when this case wants none."""
+    pattern = str(use_case.get("silence_pattern") or "none").strip()
+    if not case_allows_pauses(use_case):
+        return ""
+    emphasis = (
+        "言葉が出てこない場面が何度かあります。"
+        if pattern == "heavy"
+        else "言葉に詰まる場面がときどきあります。"
+    )
+    if str(use_case.get("emotional_state") or "").strip() in PAUSE_PRONE_STATES:
+        emphasis += "今日の状態からして、言いにくいことの直前で止まりやすいです。"
+    return (
+        f"\n- {emphasis}本当に言葉が続かない位置にだけ、発話の途中に "
+        f"<<pause:3.5>> と書いてください（秒数は {PAUSE_MIN_SEC:.0f}〜{PAUSE_MAX_SEC:.0f}）。\n"
+        "  読点の代わりには使いません。無理に入れず、詰まらない発話には1つも書きません。"
+    )
+
+
 def build_user_agent_prompt(
     use_case: dict[str, Any],
     profile: dict[str, str],
@@ -1847,6 +1965,7 @@ def build_user_agent_prompt(
     max_pairs: int,
 ) -> AgentPrompt:
     transcript = dialogue_turns_to_transcript(turns) or "(まだ会話は始まっていません)"
+    pause_directive = build_pause_directive(use_case)
     prompt = f"""
 相談ケース:
 {case_brief(use_case)}
@@ -1865,8 +1984,9 @@ def build_user_agent_prompt(
 条件:
 - {pair_index + 1}/{max_pairs} 回目の user 発話です。
 - 相談者として自然に、短すぎず長すぎず 1〜3 文で話します。
-- 最終盤なら、少し区切りがつく発話や感謝も自然に入れてよいです。
+- 最終盤なら、少し区切りがつく発話や感謝も自然に入れてよいです。{pause_directive}
 - moshi の発話、話者名、相づち指示、JSONは書きません。
+- 改行せず、1行で書きます。
 """.strip()
     return AgentPrompt(system=USER_AGENT_SYSTEM_PROMPT, user=prompt)
 
@@ -2360,6 +2480,16 @@ moshi|内容を受け止める応答。
         f"- user の性格: {personality}（{personality_guidance}）",
         f"- user の今日の状態: {emotional_state}。{emotional_state_hint}",
     ]
+    conversation_type = str(use_case.get("conversation_type") or "").strip()
+    if conversation_type:
+        conversation_guidance = str(use_case.get("conversation_guidance") or "").strip()
+        case_lines.append(
+            f"- 会話の種類: {conversation_type}。{conversation_guidance}".rstrip("。")
+            + "。"
+        )
+    time_of_day = str(use_case.get("time_of_day") or "").strip()
+    if time_of_day:
+        case_lines.append(f"- 時間帯: {time_of_day}")
     topic = str(use_case.get("topic") or "").strip()
     if topic:
         case_lines.append(f"- 話題の手がかり: {topic}")

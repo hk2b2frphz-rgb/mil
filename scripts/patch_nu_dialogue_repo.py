@@ -151,6 +151,135 @@ def _safe_mean(values):
     return True
 
 
+def patch_finetune_early_stopping(path: Path) -> bool:
+    src = path.read_text(encoding="utf-8")
+    if "AUTO_PATCH_EARLY_STOPPING" in src:
+        return False
+
+    old_args = '''        "--eval_steps",
+        type=int,
+        default=None,
+        help="Run evaluation every X updates steps.",
+    )
+'''
+    new_args = '''        "--eval_steps",
+        type=int,
+        default=None,
+        help="Run evaluation every X updates steps.",
+    )
+    # AUTO_PATCH_EARLY_STOPPING:
+    # Patience is counted in evaluations rather than steps so it keeps its
+    # meaning when --eval_steps changes.
+    parser.add_argument(
+        "--early_stopping_patience",
+        type=int,
+        default=0,
+        help=(
+            "Stop training after this many consecutive evaluations without an "
+            "improvement in eval loss. 0 disables early stopping."
+        ),
+    )
+    parser.add_argument(
+        "--early_stopping_min_delta",
+        type=float,
+        default=0.0,
+        help="Minimum eval-loss decrease that counts as an improvement.",
+    )
+'''
+    if old_args not in src:
+        raise RuntimeError(f"Could not locate --eval_steps argument block in {path}")
+    src = src.replace(old_args, new_args, 1)
+
+    old_loop = '''    for epoch in range(starting_epoch, args.num_train_epochs):
+'''
+    new_loop = '''    # AUTO_PATCH_EARLY_STOPPING: eval metrics are gathered across processes by
+    # _metric_buffer_to_scalars, so every rank observes the same eval loss and
+    # reaches the same stop decision without extra synchronization.
+    early_stopping_patience = int(getattr(args, "early_stopping_patience", 0) or 0)
+    early_stopping_min_delta = float(getattr(args, "early_stopping_min_delta", 0.0) or 0.0)
+    best_eval_loss = float("inf")
+    best_eval_step = 0
+    evals_without_improvement = 0
+    early_stop = False
+
+    for epoch in range(starting_epoch, args.num_train_epochs):
+'''
+    if old_loop not in src:
+        raise RuntimeError(f"Could not locate epoch loop in {path}")
+    src = src.replace(old_loop, new_loop, 1)
+
+    # Anchored on the eval-only tracking block rather than the
+    # _log_miltoka_metrics call above it, because patch_finetune_keep_best_only
+    # runs first and inserts its own line between the two.
+    old_eval_tail = '''                    if args.with_tracking:
+                        accelerator.log(
+                            {f"evaluation_{key}": value for key, value in eval_metrics_for_log.items()},
+                            step=current_steps,
+                        )
+'''
+    new_eval_tail = '''                    if args.with_tracking:
+                        accelerator.log(
+                            {f"evaluation_{key}": value for key, value in eval_metrics_for_log.items()},
+                            step=current_steps,
+                        )
+
+                    # AUTO_PATCH_EARLY_STOPPING
+                    if early_stopping_patience > 0:
+                        this_eval_loss = float(
+                            eval_metrics_for_log.get("loss/total", float("inf"))
+                        )
+                        if this_eval_loss < best_eval_loss - early_stopping_min_delta:
+                            best_eval_loss = this_eval_loss
+                            best_eval_step = current_steps
+                            evals_without_improvement = 0
+                        else:
+                            evals_without_improvement += 1
+                            logger.info(
+                                "[early-stopping] no improvement for "
+                                f"{evals_without_improvement}/{early_stopping_patience} "
+                                f"eval(s): eval_loss={this_eval_loss:.5f} "
+                                f"best={best_eval_loss:.5f} at step {best_eval_step}"
+                            )
+                            if evals_without_improvement >= early_stopping_patience:
+                                early_stop = True
+                                logger.info(
+                                    "[early-stopping] stopping at step "
+                                    f"{current_steps}: eval loss has not improved "
+                                    f"for {early_stopping_patience} consecutive "
+                                    f"eval(s); best={best_eval_loss:.5f} at step "
+                                    f"{best_eval_step}"
+                                )
+'''
+    if old_eval_tail not in src:
+        raise RuntimeError(f"Could not locate eval logging tail in {path}")
+    src = src.replace(old_eval_tail, new_eval_tail, 1)
+
+    old_stop = '''                # Stop training
+                if args.max_train_steps is not None and current_steps >= args.max_train_steps:
+                    break
+'''
+    new_stop = '''                # Stop training
+                if args.max_train_steps is not None and current_steps >= args.max_train_steps:
+                    break
+
+                # AUTO_PATCH_EARLY_STOPPING: leave both the batch loop and the
+                # epoch loop. The unconditional save_state after the loops then
+                # writes the stopping step's weights, so no checkpoint is lost
+                # by stopping off a save_steps boundary.
+                if early_stop:
+                    break
+
+        if early_stop:
+            break
+'''
+    if old_stop not in src:
+        raise RuntimeError(f"Could not locate training stop block in {path}")
+    src = src.replace(old_stop, new_stop, 1)
+
+    path.write_text(src, encoding="utf-8")
+    return True
+
+
 def patch_finetune_mlflow_stdout_metrics(path: Path) -> bool:
     src = path.read_text(encoding="utf-8")
     if "AUTO_PATCH_MILTO_MLFLOW_STDOUT_METRICS_V2" in src:
@@ -473,6 +602,8 @@ def main() -> int:
         changes.append("finetune.py:mlflow-stdout-metrics")
     if patch_finetune_keep_best_only(nu_repo / "finetune.py"):
         changes.append("finetune.py:keep-best-only")
+    if patch_finetune_early_stopping(nu_repo / "finetune.py"):
+        changes.append("finetune.py:early-stopping")
     if patch_utils_data(nu_repo / "utils" / "data.py"):
         changes.append("utils/data.py")
 

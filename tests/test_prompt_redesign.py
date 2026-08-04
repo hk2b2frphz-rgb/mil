@@ -12,8 +12,10 @@ from scripts.generate_synthetic_moshi_training_data import (
     build_judge_agent_prompt,
     build_llm_prompt,
     build_moshi_agent_prompt,
+    build_pause_directive,
     build_user_agent_profile,
     build_user_agent_prompt,
+    case_brief,
     clean_agent_utterance,
     fallback_moshi_utterance,
     messages_to_completion_prompt,
@@ -21,6 +23,7 @@ from scripts.generate_synthetic_moshi_training_data import (
     openai_models_url,
     parse_aizuchi_insertions,
     split_text_into_clauses,
+    split_user_text_on_pauses,
     user_turns_with_aizuchi,
 )
 
@@ -68,6 +71,124 @@ class PromptRedesignTests(unittest.TestCase):
                         casual,
                         f"{path}:{line_number} teaches casual moshi backchannel",
                     )
+
+    def test_case_brief_carries_the_per_case_diversity_fields(self) -> None:
+        # emotional_state also selects the TTS voice preset, so the text agents
+        # must see it or the audio's tone contradicts the written lines.
+        use_case = {
+            "id": "case",
+            "category": "loneliness_deep",
+            "risk_level": "medium",
+            "personality": "人見知り",
+            "personality_guidance": "最初は言葉少なで、安心すると話す。",
+            "emotional_state": "涙ぐんでいる",
+            "emotional_state_hint": "声が震えがちで、間が長い。",
+            "conversation_type": "listening",
+            "conversation_guidance": "相談というより聞いてほしい。",
+            "time_of_day": "夜",
+        }
+        brief = case_brief(use_case)
+
+        for expected in (
+            "personality: 人見知り（最初は言葉少なで、安心すると話す。）",
+            "emotional_state: 涙ぐんでいる（声が震えがちで、間が長い。）",
+            "conversation_type: listening（相談というより聞いてほしい。）",
+            "time_of_day: 夜",
+        ):
+            self.assertIn(expected, brief)
+
+        profile = build_user_agent_profile(use_case, Random(0))
+        self.assertIn("涙ぐんでいる", build_user_agent_prompt(
+            use_case, profile, [], 0, 5
+        ).user)
+
+    def test_case_brief_omits_fields_the_use_case_does_not_have(self) -> None:
+        brief = case_brief({"id": "minimal", "category": "x", "risk_level": "low"})
+
+        self.assertNotIn("personality", brief)
+        self.assertNotIn("emotional_state", brief)
+        self.assertNotIn("（）", brief)
+        self.assertEqual(brief.splitlines(), [line for line in brief.splitlines() if line])
+
+    def test_single_prompt_carries_conversation_type_and_time_of_day(self) -> None:
+        prompt = build_llm_prompt(
+            {
+                "id": "case",
+                "conversation_type": "listening",
+                "conversation_guidance": "相談というより聞いてほしい。",
+                "time_of_day": "夜",
+            },
+            Random(0),
+        )
+
+        self.assertIn("会話の種類: listening", prompt)
+        self.assertIn("時間帯: 夜", prompt)
+
+    def test_inline_pause_marker_becomes_a_silence_turn(self) -> None:
+        turns = split_user_text_on_pauses(
+            "実は、母が施設に入っていて、<<pause:3.4>>…会いに行けてないんです。"
+        )
+
+        self.assertEqual(
+            [(t.speaker, t.text, t.duration_sec) for t in turns],
+            [
+                ("user", "実は、母が施設に入っていて、", None),
+                ("silence", "", 3.4),
+                ("user", "…会いに行けてないんです。", None),
+            ],
+        )
+
+    def test_leading_pause_becomes_a_silence_before_the_user_speaks(self) -> None:
+        turns = split_user_text_on_pauses("<<pause:4.0>>…すみません、うまく言えなくて。")
+
+        self.assertEqual([t.speaker for t in turns], ["silence", "user"])
+        self.assertEqual(turns[0].duration_sec, 4.0)
+
+    def test_out_of_range_pause_is_dropped_but_the_words_survive(self) -> None:
+        # 0.3s is a comma, not a silence; 30s is a hallucination.
+        for text in (
+            "夜になると、<<pause:0.3>>静かになるんです。",
+            "夜になると、<<pause:30>>静かになるんです。",
+        ):
+            turns = split_user_text_on_pauses(text)
+            self.assertEqual([t.speaker for t in turns], ["user"], text)
+            self.assertEqual(turns[0].text, "夜になると、静かになるんです。", text)
+
+    def test_trailing_pause_is_dropped(self) -> None:
+        # moshi's reply follows immediately, so a trailing silence is just a gap.
+        turns = split_user_text_on_pauses("もう、どうしたらいいか。<<pause:3.0>>")
+
+        self.assertEqual([t.speaker for t in turns], ["user"])
+
+    def test_no_marker_leaks_into_the_spoken_text(self) -> None:
+        # Anything left in `text` would be read aloud by the TTS verbatim.
+        turns = split_user_text_on_pauses(
+            "<<pause:2.5>>あの、<<overlap=1.0>>うまく言えないんですが<<pause:9>>。"
+        )
+
+        for turn in turns:
+            self.assertNotIn("<<", turn.text)
+            self.assertNotIn(">>", turn.text)
+
+    def test_pause_directive_follows_the_commissioned_silence_pattern(self) -> None:
+        self.assertEqual(build_pause_directive({"silence_pattern": "none"}), "")
+        self.assertEqual(build_pause_directive({}), "")
+        self.assertIn("<<pause:", build_pause_directive({"silence_pattern": "occasional"}))
+        self.assertIn("何度か", build_pause_directive({"silence_pattern": "heavy"}))
+        self.assertIn(
+            "言いにくいこと",
+            build_pause_directive(
+                {"silence_pattern": "heavy", "emotional_state": "涙ぐんでいる"}
+            ),
+        )
+
+    def test_user_prompt_stays_clean_when_the_case_wants_no_silence(self) -> None:
+        use_case = {"id": "case", "silence_pattern": "none"}
+        profile = build_user_agent_profile(use_case, Random(0))
+        prompt = build_user_agent_prompt(use_case, profile, [], 0, 5).user
+
+        self.assertNotIn("pause", prompt)
+        self.assertNotIn("\n\n-", prompt)
 
     def test_multi_agent_prompts_keep_randomness_on_user_side(self) -> None:
         use_case = {

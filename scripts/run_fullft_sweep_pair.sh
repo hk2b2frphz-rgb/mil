@@ -38,6 +38,7 @@ clear_hp_env() {
     unset HP_MAX_EPOCHS HP_EVAL_EVERY_EPOCH HP_CKPT_EVERY_EPOCH HP_WARMUP_EPOCHS
     unset HP_DURATION_SEC HP_GRADIENT_CHECKPOINTING HP_PARAM_DTYPE HP_SEED
     unset HP_LORA_RANK HP_LORA_SCALING HP_LORA_ENABLE HP_LORA_FT_EMBED
+    unset HP_EARLY_STOPPING_PATIENCE HP_EARLY_STOPPING_MIN_DELTA
 }
 
 apply_pattern() {
@@ -49,17 +50,29 @@ apply_pattern() {
     # from the real train-chunk count (steps_per_epoch). With train~225 and
     # global batch 16 -> ~15 steps/epoch, so e.g. 12 epochs ~= 180 steps.
     #
-    # LR is 1e-5 (not the nu-dialogue 3e-5 default): on this data volume full
+    # LR is 7e-6 (not the nu-dialogue 3e-5 default): on this data volume full
     # fine-tuning at 3e-5 overfits almost immediately. The 3e-5 reference is
-    # kept in the lr_* patterns below.
-    HP_LR=1e-5
+    # kept in the lr_* patterns below. Nudged down from 1e-5 -- full FT has far
+    # more capacity than the LoRA path, so the failure mode here is memorising
+    # the training text rather than the LoRA path's undertraining, and early
+    # stopping (below) now supplies the exposure control instead of the LR.
+    HP_LR=7e-6
     HP_WEIGHT_DECAY=0.1
     HP_PCT_START=0
     HP_BATCH_SIZE=1
     HP_NUM_MICROBATCHES=8
     HP_LOG_FREQ=5
     HP_MAX_NORM=1.0
-    HP_DURATION_SEC=60
+    # Long enough that no dialogue gets split into multiple training chunks.
+    # The runner turns this into max_length = duration_sec * 12.5 frames, and
+    # a dialogue longer than that is np.array_split into equal chunks -- every
+    # chunk after the first then starts mid-conversation with no opening
+    # greeting, which directly contradicts the "greet when the context is
+    # empty" target the fixed opening line depends on. The corpus sits under
+    # 150s except for a single 240s outlier, so 170s keeps every dialogue but
+    # that one in a single piece. Sizing for the outlier instead would pad
+    # every other sample with dead air for no gain.
+    HP_DURATION_SEC=170
 
     # Data-matched, epoch-denominated schedule (converted to steps by the
     # runner). Initial-experiment tuning: short total exposure, warmup ~1
@@ -70,9 +83,16 @@ apply_pattern() {
     HP_EVAL_EVERY_EPOCH=0.5   # dense eval to locate the loss inflection
     HP_CKPT_EVERY_EPOCH=1     # one checkpoint per epoch -> best epoch is kept
 
+    # Early stopping on eval loss, counted in evaluations. At 0.5 epochs per
+    # eval, 4 evals = 2 epochs without improvement before stopping. Full FT is
+    # the path that overfits on this data volume, so this is the exposure
+    # control that lets HP_MAX_EPOCHS stay an upper bound rather than a guess.
+    HP_EARLY_STOPPING_PATIENCE=4
+    HP_EARLY_STOPPING_MIN_DELTA=0.001
+
     case "$pattern" in
         f01) ;;                                      # data-matched fixed-LR baseline
-        f02) HP_DURATION_SEC=80 ;;                   # longer context, more memory
+        f02) HP_DURATION_SEC=80 ;;                   # shorter context, less memory (splits long dialogues)
         f03) HP_DURATION_SEC=40 ;;                   # shorter context, lower activation memory
         f04) HP_WEIGHT_DECAY=0.01 ;;                 # weaker regularization
         f05) HP_WEIGHT_DECAY=0.2 ;;                  # stronger regularization
@@ -95,6 +115,7 @@ apply_pattern() {
     export HP_BATCH_SIZE HP_NUM_MICROBATCHES HP_DURATION_SEC
     export HP_LOG_FREQ HP_MAX_NORM
     export HP_MAX_EPOCHS HP_WARMUP_EPOCHS HP_EVAL_EVERY_EPOCH HP_CKPT_EVERY_EPOCH
+    export HP_EARLY_STOPPING_PATIENCE HP_EARLY_STOPPING_MIN_DELTA
 }
 
 echo "===== full-ft sweep ====="

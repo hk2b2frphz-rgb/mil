@@ -13,6 +13,9 @@ Patches applied (all idempotent, run at every experiment launch):
 - train: rebuild the finite eval generator for every evaluation. The upstream
   code creates it once, so only the first evaluation sees data and every later
   evaluation silently records zero samples.
+- args/train: optional early stopping on eval loss (patience counted in
+  evaluations, not steps), which saves a checkpoint at the stopping step and
+  leaves the loop.
 """
 
 from __future__ import annotations
@@ -75,6 +78,28 @@ def patch_args_keep_best_only(path: Path) -> bool:
 '''
     if old not in src:
         raise RuntimeError(f"expected num_ckpt_keep block not found in {path}")
+    path.write_text(src.replace(old, new, 1))
+    return True
+
+
+def patch_args_early_stopping(path: Path) -> bool:
+    src = path.read_text()
+    if "AUTO_PATCH_EARLY_STOPPING" in src:
+        return False
+
+    old = '''    keep_best_only: bool = False
+'''
+    new = '''    keep_best_only: bool = False
+    # AUTO_PATCH_EARLY_STOPPING: stop training once eval loss has failed to
+    # improve for this many consecutive evaluations (0 disables it). Patience is
+    # counted in evaluations rather than steps so it stays meaningful when
+    # eval_freq changes. An evaluation counts as an improvement only if it beats
+    # the best seen so far by more than early_stopping_min_delta.
+    early_stopping_patience: int = 0
+    early_stopping_min_delta: float = 0.0
+'''
+    if old not in src:
+        raise RuntimeError(f"expected keep_best_only field not found in {path}")
     path.write_text(src.replace(old, new, 1))
     return True
 
@@ -761,6 +786,103 @@ def patch_train(path: Path) -> bool:
         src = src.replace(old_checkpointer, new_checkpointer, 1)
         changed = True
 
+    if "AUTO_PATCH_EARLY_STOPPING" not in src:
+        old_loop_start = '''    # 11. train!
+    model.train()
+    torch.cuda.empty_cache()
+
+    while state.step < args.max_steps:
+'''
+        new_loop_start = '''    # 11. train!
+    model.train()
+    torch.cuda.empty_cache()
+
+    # AUTO_PATCH_EARLY_STOPPING: eval loss is all-reduced inside evaluate(), so
+    # every rank sees the same value and reaches the same stop decision. No
+    # extra synchronization is needed to keep the ranks from diverging.
+    early_stopping_patience = int(getattr(args, "early_stopping_patience", 0) or 0)
+    early_stopping_min_delta = float(
+        getattr(args, "early_stopping_min_delta", 0.0) or 0.0
+    )
+    best_eval_loss = float("inf")
+    best_eval_step = 0
+    evals_without_improvement = 0
+    early_stop = False
+
+    while state.step < args.max_steps:
+'''
+        if old_loop_start not in src:
+            raise RuntimeError(f"expected training loop header not found in {path}")
+        src = src.replace(old_loop_start, new_loop_start, 1)
+
+        old_eval_log = '''            main_logger_info(eval_log_msg(eval_logs))
+            eval_logger.log(eval_logs, step=state.step)
+'''
+        new_eval_log = '''            main_logger_info(eval_log_msg(eval_logs))
+            eval_logger.log(eval_logs, step=state.step)
+
+            # AUTO_PATCH_EARLY_STOPPING
+            if early_stopping_patience > 0:
+                this_eval_loss = float(state.this_eval_loss)
+                if this_eval_loss < best_eval_loss - early_stopping_min_delta:
+                    best_eval_loss = this_eval_loss
+                    best_eval_step = state.step
+                    evals_without_improvement = 0
+                else:
+                    evals_without_improvement += 1
+                    main_logger_info(
+                        "[early-stopping] no improvement for "
+                        f"{evals_without_improvement}/{early_stopping_patience} "
+                        f"eval(s): eval_loss={this_eval_loss:.4f} "
+                        f"best={best_eval_loss:.4f} at step {best_eval_step}"
+                    )
+                    if evals_without_improvement >= early_stopping_patience:
+                        early_stop = True
+                        main_logger_info(
+                            "[early-stopping] stopping at step "
+                            f"{state.step}: eval loss has not improved for "
+                            f"{early_stopping_patience} consecutive eval(s); "
+                            f"best={best_eval_loss:.4f} at step {best_eval_step}"
+                        )
+'''
+        if old_eval_log not in src:
+            raise RuntimeError(f"expected eval log block not found in {path}")
+        src = src.replace(old_eval_log, new_eval_log, 1)
+
+        old_ckpt = '''        if args.do_ckpt and (
+            (args.ckpt_freq > 0 and state.step % args.ckpt_freq == 0) or is_last_step
+        ):
+            checkpointer.save_checkpoint(
+                save_only_lora=not args.full_finetuning and args.save_adapters,
+                dtype=param_dtype,
+            )
+
+    main_logger_info("done!")
+'''
+        new_ckpt = '''        if args.do_ckpt and (
+            (args.ckpt_freq > 0 and state.step % args.ckpt_freq == 0)
+            or is_last_step
+            # AUTO_PATCH_EARLY_STOPPING: the stopping step is the last one that
+            # will ever run, so it must be checkpointed even when it does not
+            # land on ckpt_freq -- otherwise the run can end with its most
+            # recent weights unsaved.
+            or early_stop
+        ):
+            checkpointer.save_checkpoint(
+                save_only_lora=not args.full_finetuning and args.save_adapters,
+                dtype=param_dtype,
+            )
+
+        if early_stop:
+            break
+
+    main_logger_info("done!")
+'''
+        if old_ckpt not in src:
+            raise RuntimeError(f"expected checkpoint block not found in {path}")
+        src = src.replace(old_ckpt, new_ckpt, 1)
+        changed = True
+
     if changed:
         path.write_text(src)
     return changed
@@ -794,6 +916,7 @@ def main() -> None:
         ("data_loader", patch_data_loader, required[4]),
         ("args", patch_args, required[5]),
         ("args:keep-best-only", patch_args_keep_best_only, required[5]),
+        ("args:early-stopping", patch_args_early_stopping, required[5]),
         ("checkpointing:keep-best-only", patch_checkpointing, required[6]),
     ]:
         if func(path):

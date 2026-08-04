@@ -452,6 +452,12 @@ fi
 if [[ "${NU_KEEP_BEST_ONLY:-1}" == "1" ]]; then
     LAUNCH_CMD+=(--keep_best_only)
 fi
+# Early stopping on eval loss, with patience counted in evaluations (so it
+# tracks HP_EVAL_EVERY_EPOCH rather than a raw step count). 0 disables it.
+if [[ "${HP_EARLY_STOPPING_PATIENCE:-0}" != "0" ]]; then
+    LAUNCH_CMD+=(--early_stopping_patience "$HP_EARLY_STOPPING_PATIENCE")
+    LAUNCH_CMD+=(--early_stopping_min_delta "${HP_EARLY_STOPPING_MIN_DELTA:-0.0}")
+fi
 
 echo "[nu-fullft] launching nu-dialogue full fine-tuning"
 echo "  exp:       $EXP_NAME"

@@ -30,7 +30,12 @@ lora:
 first_codebook_weight_multiplier: 100.
 text_padding_weight: 0.5
 
-duration_sec: 100       # 1 サンプル 100 秒上限。公式 example と同じ。
+# 1 サンプル 170 秒上限。公式 example は 100 だが、この対話コーパスは
+# 23.2% が 100 秒を超える（ほぼ 150 秒以内、240 秒が 1 本）。上限を超えると
+# moshi-finetune は対話を均等分割し、2 個目以降のチャンクは「会話の途中から・
+# 冒頭挨拶なし」で始まる教師データになる。モデルから見て開始直後と区別が
+# つかない状態に逆の正解を与えることになり、固定の冒頭挨拶が学習されない。
+duration_sec: 170
 batch_size: 8           # A100 80GB 1GPU 想定。公式 16 の半分を安全マージン込みで。
 num_microbatches: 1     # 実 batch_size = 8 × 1 = 8。grad_accum 不要。
 max_steps: 500          # 90 train sample / bs 8 = 11.25 step/epoch → ~44 epoch。
@@ -39,7 +44,11 @@ gradient_checkpointing: true   # 80GB あっても安定性のため ON。OFF �
 param_dtype: "bfloat16"
 
 optim:
-  lr: 2e-6              # 公式 example と同値（OneCycleLR の peak）
+  # 公式 example は 2e-6 だが、その値では eval loss が下がりきらないまま
+  # 終わり、固定の冒頭挨拶（1 サンプルに 1 回だけの決定）が入らなかった。
+  # 声質や相槌は全フレームに信号が入るので 2e-6 でも移る。sweep 側の
+  # 既定値 (run_sweep_pair.sh) と揃えている。
+  lr: 5e-6
   weight_decay: 0.1     # 公式と同値
   pct_start: 0.05       # OneCycleLR warmup 比率（全体の 5%）
 
@@ -53,6 +62,12 @@ do_ckpt: true
 # 過学習監視
 do_eval: true
 eval_freq: 25           # step 50 ごとに ckpt が出るので、その半分の間隔で eval
+
+# eval loss が改善しない「評価回数」で打ち切る（0 で無効）。step 数ではなく
+# 評価回数なので、eval_freq を変えても意味が保たれる。6 × eval_freq 25 =
+# 150 step 相当。停止した step は ckpt_freq の境界に乗らなくても必ず保存される。
+early_stopping_patience: 6
+early_stopping_min_delta: 0.001
 
 # run dir は launcher が埋める
 run_dir: ""
