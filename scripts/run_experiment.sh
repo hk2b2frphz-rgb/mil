@@ -60,7 +60,10 @@ EXP_TRAIN_SET="$EXP_DATA_DIR/training_set"
 # 空 dataset になり、最初の next(iter(dataset)) で StopIteration を出す。
 EXP_TRAIN_MF="$EXP_TRAIN_SET/train.jsonl"
 EXP_EVAL_MF="$EXP_TRAIN_SET/eval.jsonl"
-RUN_TS="$(date +%Y-%m-%d_%H%M%S)"
+# Overridable so a chained run (scripts/run_train_chain.pbs) can name each
+# job's directory deterministically and locate the previous job's checkpoint
+# without globbing.
+RUN_TS="${RUN_TS:-$(date +%Y-%m-%d_%H%M%S)}"
 EXP_CKPT_DIR="$EXP_DIR/checkpoints/$RUN_TS"
 EXP_LOG="$EXP_DIR/run_${RUN_TS}.log"
 RESOLVED_CONFIG="$EXP_DIR/_resolved.yaml"
@@ -191,6 +194,12 @@ TOP_LEVEL = {
     "HP_KEEP_BEST_ONLY": "keep_best_only",
     "HP_EARLY_STOPPING_PATIENCE": "early_stopping_patience",
     "HP_EARLY_STOPPING_MIN_DELTA": "early_stopping_min_delta",
+    # Chained runs (scripts/run_train_chain.pbs). max_steps stays the total for
+    # the whole chain -- it is what the LR schedule is built from -- and each
+    # job covers [resume_step, stop_at_step].
+    "HP_RESUME_FROM": "resume_from",
+    "HP_RESUME_STEP": "resume_step",
+    "HP_STOP_AT_STEP": "stop_at_step",
 }
 SECTIONS = {
     "lora": {

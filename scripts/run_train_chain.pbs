@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N lora_chain
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII characters anywhere in this file
+# (not even in comments) -- the job dies immediately at submission.
+#
+# Run a LoRA training schedule that is longer than one walltime, by chaining
+# jobs. Each job trains a slice and, if there is more to do, submits the next
+# one itself with the checkpoint it just wrote.
+#
+# 2400 steps fits comfortably in a 24h walltime, so that is the default slice.
+#
+#   TOTAL_STEPS=7200 STEPS_PER_JOB=2400  ->  3 jobs: 0-2400, 2400-4800, 4800-7200
+#
+# max_steps is set to TOTAL_STEPS in every job. That matters: the LR schedule is
+# built from max_steps, so keeping it fixed makes the whole chain follow one
+# continuous schedule instead of restarting the warmup in each job.
+#
+# Submit:
+#   qsub -v 'EXP_NAME=lora_base_config,SRC_RUN_DIR=data/runs/<RUN_ID>,TOTAL_STEPS=7200' \
+#     scripts/run_train_chain.pbs
+#
+# Optional:
+#   STEPS_PER_JOB=2400     steps per job (keep at/below what fits the walltime)
+#   CHAIN_ID=<name>        run directory prefix (default: chain_<jobid>)
+#   NPROC=1
+#   any HP_* override      forwarded to the next job automatically
+#
+# Runaway guards (a self-submitting job must not be able to flood the queue):
+#   MAX_CHAIN_JOBS=<n>     hard cap on the number of jobs in one chain.
+#                          Defaults to exactly what TOTAL_STEPS/STEPS_PER_JOB
+#                          needs, so a miscomputed slice cannot extend it.
+#   MIN_JOB_SEC=600        refuse to submit the next job if this one finished
+#                          faster than this. A real 2400-step slice takes hours;
+#                          finishing in seconds means training died without
+#                          failing loudly, and chaining on would just resubmit
+#                          the same failure. Set CHAIN_ALLOW_FAST=1 to override
+#                          (the check harness does this).
+#
+# Not for the first job only -- the same file is what each subsequent job
+# re-submits, with CHAIN_INDEX and RESUME_FROM filled in. Do not set those by
+# hand unless you are deliberately restarting a chain partway.
+#
+# Limitation: upstream moshi-finetune saves model weights only, never optimizer
+# state, so each hand-off restarts AdamW's moment estimates from zero. With
+# warmup_constant the LR is flat by then and the moments re-accumulate within a
+# few tens of steps, so this costs a short transient per hand-off, not a broken
+# schedule. Prefer fewer, longer jobs over many short ones.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+EXP_NAME="${EXP_NAME:?Set EXP_NAME (e.g. lora_base_config)}"
+SRC_RUN_DIR="${SRC_RUN_DIR:?Set SRC_RUN_DIR to the dataset dir (data/runs/<RUN_ID>)}"
+TOTAL_STEPS="${TOTAL_STEPS:?Set TOTAL_STEPS to the total number of steps for the whole chain}"
+STEPS_PER_JOB="${STEPS_PER_JOB:-2400}"
+CHAIN_INDEX="${CHAIN_INDEX:-1}"
+
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+CHAIN_ID="${CHAIN_ID:-chain_${JOB_ID_SHORT}}"
+
+for value in "$TOTAL_STEPS" "$STEPS_PER_JOB" "$CHAIN_INDEX"; do
+    if ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: TOTAL_STEPS / STEPS_PER_JOB / CHAIN_INDEX must be positive integers." >&2
+        exit 1
+    fi
+done
+
+# Number of jobs this chain legitimately needs, and the cap derived from it.
+# Computed from the inputs rather than carried between jobs, so a later job
+# cannot inherit an inflated cap.
+EXPECTED_JOBS=$(( (TOTAL_STEPS + STEPS_PER_JOB - 1) / STEPS_PER_JOB ))
+MAX_CHAIN_JOBS="${MAX_CHAIN_JOBS:-$EXPECTED_JOBS}"
+if [[ "$CHAIN_INDEX" -gt "$MAX_CHAIN_JOBS" ]]; then
+    echo "ERROR: CHAIN_INDEX=$CHAIN_INDEX exceeds MAX_CHAIN_JOBS=$MAX_CHAIN_JOBS." >&2
+    echo "       Refusing to run. This is the runaway guard: the chain should" >&2
+    echo "       have finished after $EXPECTED_JOBS job(s)." >&2
+    exit 1
+fi
+
+RESUME_STEP=$(( (CHAIN_INDEX - 1) * STEPS_PER_JOB ))
+STOP_AT_STEP=$(( CHAIN_INDEX * STEPS_PER_JOB ))
+if [[ "$STOP_AT_STEP" -gt "$TOTAL_STEPS" ]]; then
+    STOP_AT_STEP="$TOTAL_STEPS"
+fi
+if [[ "$RESUME_STEP" -ge "$TOTAL_STEPS" ]]; then
+    echo "ERROR: CHAIN_INDEX=$CHAIN_INDEX starts at step $RESUME_STEP, which is not" >&2
+    echo "       below TOTAL_STEPS=$TOTAL_STEPS. Nothing left to run." >&2
+    exit 1
+fi
+
+# One run directory per job, named deterministically so this script can find
+# the previous job's checkpoint without globbing (RUN_TS is honoured by
+# scripts/run_experiment.sh).
+export RUN_TS="${CHAIN_ID}_job$(printf '%02d' "$CHAIN_INDEX")"
+EXP_CKPT_DIR="experiments/${EXP_NAME}/checkpoints/${RUN_TS}"
+
+export HP_MAX_STEPS="$TOTAL_STEPS"
+export HP_RESUME_STEP="$RESUME_STEP"
+export HP_STOP_AT_STEP="$STOP_AT_STEP"
+export NPROC="${NPROC:-1}"
+
+if [[ "$CHAIN_INDEX" -gt 1 ]]; then
+    RESUME_FROM="${RESUME_FROM:?CHAIN_INDEX>1 requires RESUME_FROM (normally set by the previous job)}"
+    if [[ ! -f "$RESUME_FROM" ]]; then
+        echo "ERROR: RESUME_FROM does not exist: $RESUME_FROM" >&2
+        exit 1
+    fi
+    export HP_RESUME_FROM="$RESUME_FROM"
+fi
+
+mkdir -p experiments/pbs_logs
+LOG_FILE="experiments/pbs_logs/${CHAIN_ID}_job$(printf '%02d' "$CHAIN_INDEX").log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "===== LoRA training chain ====="
+echo "job_id:        ${PBS_JOBID:-n/a}"
+echo "host:          $(hostname)"
+echo "chain_id:      $CHAIN_ID"
+echo "chain_index:   $CHAIN_INDEX / $MAX_CHAIN_JOBS"
+echo "exp_name:      $EXP_NAME"
+echo "src_run_dir:   $SRC_RUN_DIR"
+echo "total_steps:   $TOTAL_STEPS"
+echo "this job runs: ${RESUME_STEP} -> ${STOP_AT_STEP}"
+echo "resume_from:   ${HP_RESUME_FROM:-<fresh start>}"
+echo "run_ts:        $RUN_TS"
+echo "log:           $LOG_FILE"
+echo "started_at:    $(date -Iseconds)"
+echo "==============================="
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+fi
+
+JOB_START_SEC="$(date +%s)"
+bash scripts/run_experiment.sh "$EXP_NAME" "$SRC_RUN_DIR"
+JOB_ELAPSED_SEC=$(( $(date +%s) - JOB_START_SEC ))
+echo "[chain] training step took ${JOB_ELAPSED_SEC}s"
+
+# ---------------------------------------------------------------- chain step
+if [[ "$STOP_AT_STEP" -ge "$TOTAL_STEPS" ]]; then
+    echo "[chain] reached TOTAL_STEPS=$TOTAL_STEPS. Chain complete."
+    echo "finished_at: $(date -Iseconds)"
+    exit 0
+fi
+
+NEXT_CKPT="${EXP_CKPT_DIR}/checkpoints/checkpoint_$(printf '%06d' "$STOP_AT_STEP")/consolidated/lora.safetensors"
+if [[ ! -f "$NEXT_CKPT" ]]; then
+    # The slice ends with is_last_step, which always checkpoints, so a missing
+    # file here means training stopped before reaching STOP_AT_STEP. Early
+    # stopping is the expected reason: eval loss went flat, and continuing the
+    # chain would only burn walltime. Stop and say so rather than failing.
+    echo "[chain] no checkpoint at step $STOP_AT_STEP:"
+    echo "[chain]   $NEXT_CKPT"
+    echo "[chain] training ended before the end of this slice -- most likely"
+    echo "[chain] early stopping. Not submitting the next job."
+    echo "[chain] Checkpoints that do exist:"
+    ls -1 "${EXP_CKPT_DIR}/checkpoints" 2>/dev/null || echo "[chain]   (none)"
+    echo "finished_at: $(date -Iseconds)"
+    exit 0
+fi
+
+MIN_JOB_SEC="${MIN_JOB_SEC:-600}"
+if [[ "$JOB_ELAPSED_SEC" -lt "$MIN_JOB_SEC" && "${CHAIN_ALLOW_FAST:-0}" != "1" ]]; then
+    echo "[chain] this job's training finished in ${JOB_ELAPSED_SEC}s, under" >&2
+    echo "[chain] MIN_JOB_SEC=${MIN_JOB_SEC}. A real slice takes hours, so this" >&2
+    echo "[chain] almost certainly means training exited without doing the work." >&2
+    echo "[chain] Not submitting the next job (set CHAIN_ALLOW_FAST=1 to force)." >&2
+    exit 1
+fi
+
+NEXT_INDEX=$(( CHAIN_INDEX + 1 ))
+if [[ "$NEXT_INDEX" -gt "$MAX_CHAIN_JOBS" ]]; then
+    echo "[chain] next index $NEXT_INDEX would exceed MAX_CHAIN_JOBS=$MAX_CHAIN_JOBS." >&2
+    echo "[chain] Not submitting. (Runaway guard -- this should be unreachable" >&2
+    echo "[chain] when STOP_AT_STEP < TOTAL_STEPS.)" >&2
+    exit 1
+fi
+echo "[chain] submitting job $NEXT_INDEX (steps ${STOP_AT_STEP} -> next slice)"
+echo "[chain]   resume_from: $NEXT_CKPT"
+
+# -V carries this job's environment, so any HP_* the user set at the top of the
+# chain reaches every later job. -v wins for the values that change per job.
+NEXT_JOB_ID="$(qsub -V \
+    -v "EXP_NAME=${EXP_NAME},SRC_RUN_DIR=${SRC_RUN_DIR},TOTAL_STEPS=${TOTAL_STEPS},STEPS_PER_JOB=${STEPS_PER_JOB},CHAIN_ID=${CHAIN_ID},CHAIN_INDEX=${NEXT_INDEX},RESUME_FROM=${NEXT_CKPT}" \
+    scripts/run_train_chain.pbs)"
+echo "[chain] submitted: $NEXT_JOB_ID"
+echo "finished_at: $(date -Iseconds)"

@@ -16,6 +16,10 @@ Patches applied (all idempotent, run at every experiment launch):
 - args/train: optional early stopping on eval loss (patience counted in
   evaluations, not steps), which saves a checkpoint at the stopping step and
   leaves the loop.
+- args/wrapped_model/train: resume a LoRA run from a previous run's adapter so a
+  training schedule longer than one PBS walltime can be split across chained
+  jobs. Upstream saves only model weights (never optimizer state), so this is a
+  weights-only resume; see patch_train_resume for what that costs.
 """
 
 from __future__ import annotations
@@ -100,6 +104,120 @@ def patch_args_early_stopping(path: Path) -> bool:
 '''
     if old not in src:
         raise RuntimeError(f"expected keep_best_only field not found in {path}")
+    path.write_text(src.replace(old, new, 1))
+    return True
+
+
+def patch_args_resume(path: Path) -> bool:
+    src = path.read_text()
+    if "AUTO_PATCH_RESUME" in src:
+        return False
+
+    old = '''    early_stopping_patience: int = 0
+    early_stopping_min_delta: float = 0.0
+'''
+    new = '''    early_stopping_patience: int = 0
+    early_stopping_min_delta: float = 0.0
+    # AUTO_PATCH_RESUME: continue a LoRA run across chained jobs, for schedules
+    # longer than one PBS walltime.
+    #
+    # max_steps stays the TOTAL for the whole chain and must be identical in
+    # every job, because it is what defines the LR schedule. Each job then
+    # covers the slice [resume_step, stop_at_step].
+    #
+    #   job 1: resume_from=""      resume_step=0     stop_at_step=2400
+    #   job 2: resume_from=<ckpt>  resume_step=2400  stop_at_step=4800
+    #
+    # resume_from points at a previous job's lora.safetensors. Empty means a
+    # fresh run. stop_at_step is an absolute step number; 0 means run to
+    # max_steps.
+    resume_from: str = ""
+    resume_step: int = 0
+    stop_at_step: int = 0
+'''
+    if old not in src:
+        raise RuntimeError(f"expected early stopping fields not found in {path}")
+    path.write_text(src.replace(old, new, 1))
+    return True
+
+
+def patch_wrapped_model_resume(path: Path) -> bool:
+    """Load a previous run's LoRA adapter before the model is sharded.
+
+    This has to happen inside get_fsdp_model's rank-0 branch, right after
+    initialize_lora_parameters. At that point the model is still a plain
+    LMModel whose state-dict keys match what checkpointing.retrieve_save_states
+    wrote. After FSDP wrapping the keys carry shard prefixes and would silently
+    match nothing under strict=False.
+    """
+    src = path.read_text()
+    if "AUTO_PATCH_RESUME_FROM_LORA" in src:
+        return False
+
+    old = '''        if args.lora.enable and not args.full_finetuning:
+            logger.info("Initializing lora layers ...")
+            # initialize LoRA layers
+            initialize_lora_parameters(model, param_dtype)
+'''
+    new = '''        if args.lora.enable and not args.full_finetuning:
+            logger.info("Initializing lora layers ...")
+            # initialize LoRA layers
+            initialize_lora_parameters(model, param_dtype)
+
+            # AUTO_PATCH_RESUME_FROM_LORA: overwrite the freshly initialized
+            # adapter with a previous run's weights so a chained job continues
+            # instead of restarting. Deliberately loud on a miss: a typo in the
+            # path, or a checkpoint whose rank/scaling differ from this config,
+            # would otherwise train from scratch while the logs still look like
+            # a resume.
+            resume_from = str(getattr(args, "resume_from", "") or "")
+            if resume_from:
+                logger.info(f"Resuming LoRA adapter from {resume_from} ...")
+                resume_state = safetensors.torch.load_file(resume_from)
+                for k, v in resume_state.items():
+                    resume_state[k] = v.to(param_dtype)
+
+                current = model.state_dict()
+                matched = [k for k in resume_state if k in current]
+                shape_mismatch = [
+                    k for k in matched if current[k].shape != resume_state[k].shape
+                ]
+                if not matched:
+                    raise RuntimeError(
+                        f"resume_from={resume_from!r} shares no parameter names "
+                        "with this model. Wrong file, or it was saved by a "
+                        "different architecture."
+                    )
+                if shape_mismatch:
+                    raise RuntimeError(
+                        f"resume_from={resume_from!r} has {len(shape_mismatch)} "
+                        "tensor(s) whose shapes differ from this model, e.g. "
+                        f"{shape_mismatch[0]}: checkpoint "
+                        f"{tuple(resume_state[shape_mismatch[0]].shape)} vs model "
+                        f"{tuple(current[shape_mismatch[0]].shape)}. lora.rank "
+                        "probably differs from the run being resumed."
+                    )
+
+                lora_in_ckpt = [k for k in resume_state if "lora" in k]
+                if not lora_in_ckpt:
+                    raise RuntimeError(
+                        f"resume_from={resume_from!r} contains no LoRA tensors. "
+                        "Expected a lora.safetensors written with "
+                        "save_adapters: true."
+                    )
+                lora_missing = [
+                    k for k in current if "lora" in k and k not in resume_state
+                ]
+
+                model.load_state_dict(resume_state, strict=False)
+                logger.info(
+                    f"Resumed {len(matched)} tensor(s) "
+                    f"({len(lora_in_ckpt)} LoRA); "
+                    f"{len(lora_missing)} LoRA tensor(s) left at init"
+                )
+'''
+    if old not in src:
+        raise RuntimeError(f"expected lora initialization block not found in {path}")
     path.write_text(src.replace(old, new, 1))
     return True
 
@@ -888,6 +1006,84 @@ def patch_train(path: Path) -> bool:
     return changed
 
 
+def patch_train_resume(path: Path) -> bool:
+    """Start the step counter and the LR schedule where the last job stopped.
+
+    Upstream never saves optimizer state (checkpointing.py writes model tensors
+    only), so this is a weights-only resume: AdamW's moment estimates restart
+    from zero at each hand-off. With warmup_constant the LR is flat by then and
+    the moments re-accumulate within a few tens of steps, so the cost is a short
+    transient rather than a schedule discontinuity. It is still a real seam --
+    prefer fewer, longer jobs over many short ones.
+    """
+    src = path.read_text()
+    if "AUTO_PATCH_RESUME_STATE" in src:
+        return False
+
+    old = '''    state = TrainState(args.max_steps)
+'''
+    new = '''    state = TrainState(args.max_steps)
+
+    # AUTO_PATCH_RESUME_STATE: chained-job bookkeeping. max_steps is the total
+    # for the whole chain and is what the scheduler above was built from; this
+    # job runs only the slice [resume_step, stop_at_step].
+    resume_step = int(getattr(args, "resume_step", 0) or 0)
+    stop_at_step = int(getattr(args, "stop_at_step", 0) or 0)
+
+    if resume_step > 0:
+        if resume_step >= args.max_steps:
+            raise ValueError(
+                f"resume_step ({resume_step}) must be below max_steps "
+                f"({args.max_steps}); there would be nothing left to run."
+            )
+        if not str(getattr(args, "resume_from", "") or ""):
+            raise ValueError(
+                f"resume_step is {resume_step} but resume_from is empty: this "
+                "would skip the LR warmup while training a freshly initialized "
+                "adapter."
+            )
+        state.step = resume_step
+
+        # Advance the schedule to where the previous job left it. Both
+        # supported schedulers derive their LR from a step counter, so stepping
+        # is the only way to move them; the warning this emits is about calling
+        # scheduler.step() before optimizer.step(), which is exactly what we are
+        # doing on purpose here.
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for _ in range(resume_step):
+                scheduler.step()
+        main_logger_info(
+            f"[resume] starting at step {resume_step}/{args.max_steps} "
+            f"with lr={scheduler.get_last_lr()[0]:.3g}"
+        )
+
+    if stop_at_step > 0:
+        if stop_at_step <= resume_step:
+            raise ValueError(
+                f"stop_at_step ({stop_at_step}) must be above resume_step "
+                f"({resume_step})."
+            )
+        # Safe to narrow here and not earlier: the scheduler was constructed
+        # from the original max_steps a few lines above, so its warmup length
+        # and total span still describe the whole chain. From this point on
+        # max_steps is only the loop bound and the is_last_step test, and
+        # is_last_step firing at stop_at_step is what forces a checkpoint at
+        # the hand-off point.
+        args.max_steps = min(args.max_steps, stop_at_step)
+        state.max_steps = args.max_steps
+        main_logger_info(
+            f"[resume] this job stops at step {args.max_steps}"
+        )
+'''
+    if old not in src:
+        raise RuntimeError(f"expected TrainState construction not found in {path}")
+    path.write_text(src.replace(old, new, 1))
+    return True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ft-repo", required=True, type=Path)
@@ -902,6 +1098,7 @@ def main() -> None:
         repo / "finetune" / "data" / "data_loader.py",
         repo / "finetune" / "args.py",
         repo / "finetune" / "checkpointing.py",
+        repo / "finetune" / "wrapped_model.py",
     ]
     missing = [str(path) for path in required if not path.exists()]
     if missing:
@@ -917,7 +1114,10 @@ def main() -> None:
         ("args", patch_args, required[5]),
         ("args:keep-best-only", patch_args_keep_best_only, required[5]),
         ("args:early-stopping", patch_args_early_stopping, required[5]),
+        ("args:resume", patch_args_resume, required[5]),
         ("checkpointing:keep-best-only", patch_checkpointing, required[6]),
+        ("wrapped_model:resume", patch_wrapped_model_resume, required[7]),
+        ("train:resume", patch_train_resume, required[3]),
     ]:
         if func(path):
             changed.append(label)
