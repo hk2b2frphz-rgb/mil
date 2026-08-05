@@ -79,6 +79,10 @@ fi
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export MASTER_PORT="${MASTER_PORT:-29500}"
 export NO_TORCH_COMPILE="${NO_TORCH_COMPILE:-1}"
+# 出力が端末でないと tqdm は 1 イテレーションごとに 1 行書く。ここは tee へ
+# パイプしているので常にその条件で、pbs_logs が開けない大きさになる主因。
+# logging_steps の定期出力に同じ情報が出るので、進捗バーは止めてよい。
+export TQDM_DISABLE="${TQDM_DISABLE:-1}"
 
 TORCH_CUDA_VERSION="$(cd "$NU_MOSHI_FT_REPO" && uv run python - <<'PY' 2>/dev/null || true
 import torch
@@ -537,7 +541,7 @@ set +e
     MASTER_PORT="$MASTER_PORT" \
     NO_TORCH_COMPILE="$NO_TORCH_COMPILE" \
     "${LAUNCH_CMD[@]}"
-) 2>&1 | tee "$EXP_LOG"
+) 2>&1 | python3 -u "$REPO_ROOT/scripts/compact_log.py" "${EXP_LOG%.log}.raw.log" | tee "$EXP_LOG"
 TRAIN_STATUS=${PIPESTATUS[0]}
 set -e
 

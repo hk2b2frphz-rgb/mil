@@ -8,8 +8,11 @@
     "params": {
       "lr": "auto",
       "weight_decay": "auto",
-      "betas": [0.9, 0.95],
-      "eps": 1e-5
+      "betas": [
+        0.9,
+        0.95
+      ],
+      "eps": 1e-05
     }
   },
   "scheduler": {
@@ -26,8 +29,8 @@
     "stage": 2,
     "overlap_comm": true,
     "contiguous_gradients": true,
-    "reduce_bucket_size": 2e7,
-    "sub_group_size": 1e9
+    "reduce_bucket_size": 20000000.0,
+    "sub_group_size": 1000000000.0
   },
   "gradient_accumulation_steps": "auto",
   "gradient_clipping": "auto",
@@ -36,5 +39,6 @@
   "wall_clock_breakdown": false,
   "activation_checkpointing": {
     "partition_activations": true
-  }
+  },
+  "steps_per_print": 2000
 }

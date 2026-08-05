@@ -8,8 +8,11 @@
     "params": {
       "lr": "auto",
       "weight_decay": "auto",
-      "betas": [0.9, 0.95],
-      "eps": 1e-5
+      "betas": [
+        0.9,
+        0.95
+      ],
+      "eps": 1e-05
     }
   },
   "scheduler": {
@@ -30,12 +33,12 @@
     },
     "overlap_comm": true,
     "contiguous_gradients": true,
-    "reduce_bucket_size": 2e7,
-    "stage3_prefetch_bucket_size": 2e7,
-    "stage3_param_persistence_threshold": 5e4,
-    "sub_group_size": 5e8,
-    "stage3_max_live_parameters": 5e8,
-    "stage3_max_reuse_distance": 5e8,
+    "reduce_bucket_size": 20000000.0,
+    "stage3_prefetch_bucket_size": 20000000.0,
+    "stage3_param_persistence_threshold": 50000.0,
+    "sub_group_size": 500000000.0,
+    "stage3_max_live_parameters": 500000000.0,
+    "stage3_max_reuse_distance": 500000000.0,
     "stage3_gather_16bit_weights_on_model_save": "auto"
   },
   "gradient_accumulation_steps": "auto",
@@ -45,5 +48,6 @@
   "wall_clock_breakdown": false,
   "activation_checkpointing": {
     "partition_activations": true
-  }
+  },
+  "steps_per_print": 2000
 }

@@ -56,7 +56,16 @@ export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-sqlite:///$PWD/mlruns/mlflow.
 export MLFLOW_ARTIFACT_ROOT="${MLFLOW_ARTIFACT_ROOT:-file:$PWD/mlruns/artifacts}"
 export MLFLOW_LIVE_SYNC_INTERVAL="${MLFLOW_LIVE_SYNC_INTERVAL:-120}"
 
+# tqdm writes one line per iteration when stdout is not a terminal, which is
+# exactly the case here (the stream is piped into tee). That alone produced
+# pbs_logs files too large to open. Silence it at the source; the periodic
+# logging_steps lines carry the same information in a readable amount.
+export TQDM_DISABLE="${TQDM_DISABLE:-1}"
+
 mkdir -p experiments/pbs_logs
-exec > >(tee -a "experiments/pbs_logs/${RUN_ID}.log") 2>&1
+# Full stream to .raw.log for debugging, compacted stream to the file people
+# actually open (and to the PBS .o file). See scripts/compact_log.py.
+exec > >(python3 -u scripts/compact_log.py "experiments/pbs_logs/${RUN_ID}.raw.log" \
+    | tee -a "experiments/pbs_logs/${RUN_ID}.log") 2>&1
 
 bash scripts/run_fullft_sweep_pair.sh
