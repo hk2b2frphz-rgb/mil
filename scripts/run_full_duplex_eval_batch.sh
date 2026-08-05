@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
-# Runs scripts/run_full_duplex_eval.sh once per model listed in MODELS_FILE,
-# writing each model's results under BATCH_OUT_DIR/<output_name>/ and a final
+# Runs scripts/run_real_eval.sh once per model listed in MODELS_FILE, writing
+# each model's results under BATCH_OUT_DIR/<output_name>/ and a final
 # combined_summary.json comparing every model side by side. See
 # scripts/models_manifest.example.txt for the manifest format.
+#
+# The evaluation is the hand-annotated real dialogue test set: response rate,
+# response latency, and speech quality (UTMOS). A row with model_id=gold is the
+# real counselor's own response and lands in the same table as the ceiling.
+#
+# The synthetic Full-Duplex-Bench-JA route is still reachable per row with
+# FDB_SYSTEM=moshi / FDB_SYSTEM=cascade in extra_env, but is no longer the
+# default. Those scores belong to a different track -- do not read them in the
+# same table as the real-data ones.
 #
 # Deliberately not `set -e`: one model's failure must not abort the rest of
 # the batch. Per-model failures are recorded in the summary table printed at
@@ -25,7 +34,7 @@ mkdir -p "$BATCH_OUT_DIR"
 # A reused BATCH_ID must not mix this run with an older batch log.
 exec > >(tee "$BATCH_OUT_DIR/batch.log") 2>&1
 
-echo "===== Full-Duplex-Bench-JA batch eval ====="
+echo "===== Real dialogue response batch eval ====="
 echo "batch_id:    $BATCH_ID"
 echo "models_file: $MODELS_FILE"
 echo "out_dir:     $BATCH_OUT_DIR"
@@ -36,6 +45,32 @@ command -v uv >/dev/null 2>&1 || {
     echo "ERROR: uv is not available on PATH." >&2
     exit 1
 }
+
+# 実データ評価のデータセットは全モデルで共有する。ワーカーは並列に走るので、
+# ここで一度だけ作る。各ワーカー任せにすると、片方が書いている最中にもう片方が
+# 読む競合が起きる。
+TEST_DATA_DIR="${TEST_DATA_DIR:-$REPO_ROOT/data/test_data/real_dialogue}"
+REAL_DATASET_DIR="${REAL_DATASET_DIR:-$REPO_ROOT/data/eval_sets/real_response}"
+export TEST_DATA_DIR REAL_DATASET_DIR
+if [[ ! -f "$REAL_DATASET_DIR/manifest.json" || "${REBUILD_REAL_DATASET:-0}" == "1" ]]; then
+    echo "[batch] building shared real-dialogue dataset -> $REAL_DATASET_DIR"
+    build_args=(
+        uv run python eval/build_real_test_dataset.py
+        --test-data-dir "$TEST_DATA_DIR"
+        --out-dir "$REAL_DATASET_DIR"
+        --context-sec "${REAL_CONTEXT_SEC:-0}"
+    )
+    [[ "${REBUILD_REAL_DATASET:-0}" == "1" ]] && build_args+=(--overwrite)
+    if ! "${build_args[@]}"; then
+        echo "ERROR: failed to build the real-dialogue dataset. Run" >&2
+        echo "       scripts/build_test_wav_from_tsv.py first." >&2
+        exit 1
+    fi
+else
+    echo "[batch] reusing dataset: $REAL_DATASET_DIR (REBUILD_REAL_DATASET=1 to rebuild)"
+fi
+# Workers must not rebuild it underneath each other.
+export REBUILD_REAL_DATASET=0
 
 RESULT_LINES=()
 OUTPUT_NAMES=()
@@ -137,16 +172,24 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
         "MODEL_ID=$model_id"
         "RUN_ID=$output_name"
         "FDB_OUT_DIR=$BATCH_OUT_DIR/$output_name"
+        "REAL_OUT_DIR=$BATCH_OUT_DIR/$output_name"
     )
     [[ -n "$model_weight" ]] && run_env+=("MODEL_WEIGHT=$model_weight")
     [[ -n "$model_config" ]] && run_env+=("MODEL_CONFIG=$model_config")
     [[ -n "$hf_repo" ]] && run_env+=("HF_REPO=$hf_repo")
-    # Which eval pipeline to run for this row. Default "moshi" runs the Moshi
-    # full-duplex script; "cascade" (set via FDB_SYSTEM=cascade in extra_env)
-    # runs the local ASR->LLM->TTS baseline instead. Both write the same
-    # $FDB_OUT_DIR/benchmark_results/summary.json, so combine_full_duplex_
-    # summaries.py lists them side by side with no special-casing.
-    row_system="moshi"
+    # Which eval pipeline to run for this row. Default "real" evaluates on the
+    # hand-annotated real dialogue test set (scripts/run_real_eval.sh). The
+    # synthetic Full-Duplex-Bench-JA route is still reachable per row with
+    # FDB_SYSTEM=moshi or FDB_SYSTEM=cascade in extra_env, but it is no longer
+    # the default -- its scores are a different track and must not be put in
+    # the same table as the real-data ones.
+    #
+    # model_id=gold is the real counselor's own response, not a model. It gets
+    # its own runner and lands in the same table as the ceiling.
+    row_system="real"
+    if [[ "$model_id" == "gold" ]]; then
+        row_system="gold"
+    fi
     if [[ -n "$extra_env" ]]; then
         IFS=';' read -ra pairs <<< "$extra_env"
         for pair in "${pairs[@]}"; do
@@ -159,9 +202,19 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
             run_env+=("$pair")
         done
     fi
-    if [[ "$row_system" != "moshi" && "$row_system" != "cascade" ]]; then
-        echo "[batch] WARN: unknown FDB_SYSTEM='$row_system' for $model_id, treating as moshi" >&2
-        row_system="moshi"
+    case "$row_system" in
+        real|gold|moshi|cascade) ;;
+        *)
+            echo "[batch] WARN: unknown FDB_SYSTEM='$row_system' for $model_id, treating as real" >&2
+            row_system="real"
+            ;;
+    esac
+    # gold is decided by model_id, never by extra_env: a row claiming to be
+    # gold while pointing at a checkpoint would silently report model output
+    # as the human ceiling.
+    if [[ "$model_id" == "gold" && "$row_system" != "gold" ]]; then
+        echo "[batch] WARN: model_id=gold overrides FDB_SYSTEM='$row_system'." >&2
+        row_system="gold"
     fi
 
     # Precedence for FDB_OPENING_GREETING, highest first:
@@ -193,11 +246,27 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
         fi
     fi
 
-    if [[ "$row_system" == "cascade" ]]; then
-        eval_script="scripts/run_full_duplex_cascade_eval.sh"
-    else
-        eval_script="scripts/run_full_duplex_eval.sh"
-    fi
+    # expected_system is what the runner must record in run_config.json.
+    # run_real_eval.sh delegates to run_full_duplex_bench.py, which writes
+    # "moshi"; the gold runner writes "gold".
+    case "$row_system" in
+        real)
+            eval_script="scripts/run_real_eval.sh"
+            expected_system="moshi"
+            ;;
+        gold)
+            eval_script="scripts/run_real_eval.sh"
+            expected_system="gold"
+            ;;
+        cascade)
+            eval_script="scripts/run_full_duplex_cascade_eval.sh"
+            expected_system="cascade"
+            ;;
+        *)
+            eval_script="scripts/run_full_duplex_eval.sh"
+            expected_system="moshi"
+            ;;
+    esac
 
     echo
     echo "===== [$TOTAL] model_id=$model_id output_name=$output_name ====="
@@ -236,10 +305,10 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
         echo "[batch] runner=$eval_script model_id=$model_id output_name=$output_name system=$row_system gpu=$gpu_id"
         if env CUDA_VISIBLE_DEVICES="$gpu_id" "${run_env[@]}" bash "$eval_script"; then
             run_config="$BATCH_OUT_DIR/$output_name/inference/run_config.json"
-            if [[ -f "$run_config" ]] && grep -q "\"system\": \"$row_system\"" "$run_config"; then
+            if [[ -f "$run_config" ]] && grep -q "\"system\": \"$expected_system\"" "$run_config"; then
                 status="ok"
             else
-                echo "[batch] ERROR: expected system=$row_system in $run_config" >&2
+                echo "[batch] ERROR: expected system=$expected_system in $run_config" >&2
                 status="FAILED"
             fi
         else
@@ -300,7 +369,7 @@ for line in "${RESULT_LINES[@]}"; do
     printf '%-24s %-24s %-8s %s\n' "$m" "$o" "$s" "$e"
 done
 
-if ! uv run python eval/combine_full_duplex_summaries.py \
+if ! uv run python eval/combine_real_summaries.py \
     --batch-dir "$BATCH_OUT_DIR" \
     --status-file "$BATCH_STATUS_FILE" \
     --out "$BATCH_OUT_DIR/combined_summary.json"; then

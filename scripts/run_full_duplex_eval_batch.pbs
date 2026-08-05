@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
 #PBS -S /bin/bash
-#PBS -N fdb_ja_batch
+#PBS -N real_eval_batch
 #PBS -q xvn_s
 #PBS -l select=1:res=middle2
 #PBS -l walltime=08:00:00
 #PBS -j oe
 #PBS -V
 
-# Runs scripts/run_full_duplex_eval.sh once per model listed in MODELS_FILE,
-# in parallel across the four allocated GPUs, writing each model's results under
+# ASCII ONLY. Non-ASCII anywhere in this file (comments included) makes the
+# job die immediately at submission.
+#
+# Real dialogue response evaluation, one model per line of MODELS_FILE, in
+# parallel across the four allocated GPUs. Each model's results land under
 # BATCH_OUT_DIR/<output_name>/ plus a combined_summary.json comparing every
-# model side by side (eval/combine_full_duplex_summaries.py). One model's
-# failure does not stop the remaining models -- see the summary table at the
-# end of the log / <BATCH_OUT_DIR>/batch.log. This job never calls
-# OpenAI/Azure APIs (same rule as run_full_duplex_eval.pbs).
+# model side by side (eval/combine_real_summaries.py). One model's failure does
+# not stop the rest -- see the summary table at the end of the log /
+# <BATCH_OUT_DIR>/batch.log. This job never calls OpenAI/Azure APIs; it only
+# writes the LLM-as-a-judge input for scoring later on a local machine.
+#
+# Metrics: response rate, response latency, speech quality (UTMOS).
 #
 #   qsub -v MODELS_FILE=scripts/models_manifest.txt \
 #     scripts/run_full_duplex_eval_batch.pbs
@@ -22,31 +27,38 @@
 #   model_id|model_weight|model_config|hf_repo|extra_env|opening_greeting|output_name
 # See scripts/models_manifest.example.txt for details and an example.
 #
+# A row with model_id=gold runs no model: it places the real counselor's own
+# response as the output and scores it with the same code, so the human sits in
+# the same table as the ceiling. Put it in the manifest as:
+#   gold||||||
+#
+# Prerequisite: the test set must already exist (scripts/build_test_wav_from_tsv.py,
+# default data/test_data/real_dialogue). The batch turns it into an evaluation
+# dataset once, before any worker starts, and all workers share it.
+#
 # Useful overrides (batch-wide defaults; a manifest row's own extra_env
 # column overrides these for that row only):
 #   BATCH_ID=my_batch_label        Defaults to batch_<PBS job id>.
 #   BATCH_OUT_DIR=...              Defaults to eval_runs/full_duplex_batches/<BATCH_ID>.
+#   TEST_DATA_DIR=data/test_data/real_dialogue
+#   REAL_DATASET_DIR=data/eval_sets/real_response
+#   REBUILD_REAL_DATASET=1         Rebuild the shared dataset before running.
+#   REAL_SEEDS=0,1,2
+#   REAL_TAIL_SEC=8                How long the model is given to answer.
+#   REAL_CASES_PER_TASK=1          Smoke: first N cases only.
+#   REAL_CONTEXT_SEC=0             Audio prepended before the user utterance.
+#                                  Above 0 leaks the counselor's voice into the
+#                                  input -- leave at 0 unless you mean it.
+#   REAL_MOS_BACKEND=utmos         "none" skips speech quality.
+#   REAL_MOS_DEVICE=cpu            UTMOS device; cpu keeps it off the model GPU.
+#   REAL_MAX_LATENCY_SEC=          Answers later than this count as no answer.
 #   FDB_BATCH_GPUS=0,1,2,3         GPU IDs assigned to model workers.
 #   FDB_BATCH_PARALLELISM=4        Number of concurrent models (max: visible GPUs).
-#   FDB_TASKS=pause_handling,smooth_turn_taking,user_interruption
-#   FDB_CASES_PER_TASK=1           Smoke: first N cases per selected task.
-#   FDB_SEEDS=0,1,2
-#   FDB_TAIL_SEC=8
-#   FDB_TTS_BACKEND=qwen3
-#   FDB_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
-#   FDB_TTS_SPEAKER=Ono_Anna
-#   FDB_TTS_BACKGROUND_SPEAKER=Uncle_Fu
-#   FDB_DEVICE=cuda
-#   FDB_DTYPE=float16
-#   FDB_WHOLE_UTTERANCE=1 (default)
-#   FDB_WHOLE_UTTERANCE_MAX_CHARS=150
-#   FDB_BACKCHANNEL_GT=eval_sets/full_duplex_ja/backchannel_gt.json (default if present)
-#   FDB_OPENING_GREETING=1 (default; set to 0 for base Moshi / llm-jp baselines --
-#     the dataset dir name encodes this flag, so it is safe to mix rows with
-#     different opening-greeting settings across the same batch by putting
-#     FDB_OPENING_GREETING=0 in that row's extra_env column)
-#   FDB_OPENING_GREETING_GAP_SEC=0.4
-#   REFRESH_FDB_DATA=1
+#
+# The synthetic Full-Duplex-Bench-JA route still exists per row via
+# FDB_SYSTEM=moshi / FDB_SYSTEM=cascade in extra_env, along with its FDB_* and
+# TTS settings. Those scores are a different track: do not read them in the
+# same table as the real-data ones.
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
@@ -95,6 +107,8 @@ echo "batch_id:    $BATCH_ID"
 echo "models_file: $MODELS_FILE"
 echo "cuda:        $CUDA_VISIBLE_DEVICES"
 echo "parallelism: $FDB_BATCH_PARALLELISM"
+echo "eval:        real dialogue response (rate / latency / UTMOS)"
+echo "test_data:   ${TEST_DATA_DIR:-data/test_data/real_dialogue}"
 
 if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi

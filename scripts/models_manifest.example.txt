@@ -1,4 +1,10 @@
-# Full-Duplex-Bench-JA batch evaluation manifest.
+# Batch evaluation manifest.
+#
+# Used by scripts/run_full_duplex_eval_batch.pbs, which now evaluates on the
+# hand-annotated real dialogue test set (response rate / latency / UTMOS).
+# model_id=gold is a special row: it runs no model and places the real
+# counselor's response as the output, giving the ceiling for every metric.
+#
 #
 # One model per line, "|"-delimited (NOT comma -- FDB_SEEDS=0,1,2 needs commas
 # inside a field):
@@ -55,6 +61,10 @@
 #   qsub -v MODELS_FILE=scripts/models_manifest.txt \
 #     scripts/run_full_duplex_eval_batch.pbs
 
+# gold = the real counselor's own response. No model is run; the annotated
+# reply is placed as the output and scored by the same code. Keep this row
+# first so the table shows the ceiling before the models.
+gold||||||
 base||||||
 lora_h01|/path/to/lora_h01/consolidated.safetensors|||||v1
 lora_h01|/path/to/lora_h01_v2/consolidated.safetensors|||||v2
