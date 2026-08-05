@@ -80,19 +80,35 @@ echo "stub.$count"
 STUB
     chmod +x "$SANDBOX/work/bin/qsub" "$SANDBOX/work/scripts/run_experiment.sh"
 
+    # 実行環境には本物の qsub がある。スタブが先に解決されていることを確認して
+    # から進む。ここを飛ばすと、検証のつもりで本物のジョブを投げかねない。
+    local resolved
+    resolved="$(PATH="$SANDBOX/work/bin:$PATH" command -v qsub || true)"
+    if [[ "$resolved" != "$SANDBOX/work/bin/qsub" ]]; then
+        echo "ERROR: qsub スタブが有効になっていません(解決先: ${resolved:-なし})。" >&2
+        echo "       本物の qsub を叩く恐れがあるため中止します。" >&2
+        exit 1
+    fi
+
     : > "$SANDBOX/submit.log"
     : > "$SANDBOX/run.log"
 }
 
 run_chain() {
-    # 残りの引数はチェーンへ渡す環境変数
+    # 引数はすべてチェーンへ渡す環境変数(KEY=VALUE)。
+    #
+    # PBS_O_WORKDIR をサンドボックスに固定するのが要点。run_train_chain.pbs は
+    # 冒頭で `cd "${PBS_O_WORKDIR:-$(pwd)}"` するので、これを外から与えないと
+    # PBS 上で実行したときだけ実リポジトリへ移動してしまい、スタブではなく
+    # 本物の run_experiment.sh を呼ぶ。ローカルでは PBS_O_WORKDIR が未設定
+    # なので再現せず、キュー上でだけ壊れる。
     (
-        cd "$SANDBOX/work"
+        cd "$SANDBOX/work" || exit 1
         export PATH="$SANDBOX/work/bin:$PATH"
+        export PBS_O_WORKDIR="$SANDBOX/work"
         export SUBMIT_LOG="$SANDBOX/submit.log"
         export RUN_LOG="$SANDBOX/run.log"
-        export CHAIN_ALLOW_FAST=1
-        env "$@" PBS_JOBID="100.pbs" bash scripts/run_train_chain.pbs
+        env "$@" bash scripts/run_train_chain.pbs
     ) >> "$SANDBOX/run.log" 2>&1
     echo $?
 }
@@ -120,7 +136,7 @@ echo "=================================================================="
 echo ""
 echo "[1] TOTAL_STEPS=7200 / STEPS_PER_JOB=2400 -> 3 ジョブ"
 setup_sandbox "$STUB_OK"
-status="$(run_chain EXP_NAME=e SRC_RUN_DIR=d TOTAL_STEPS=7200 STEPS_PER_JOB=2400)"
+status="$(run_chain EXP_NAME=e SRC_RUN_DIR=d TOTAL_STEPS=7200 STEPS_PER_JOB=2400 CHAIN_ALLOW_FAST=1 PBS_JOBID=100.pbs)"
 check "終了コード 0" "[[ '$status' == '0' ]]"
 
 submits="$(grep -c '^SUBMIT ' "$SANDBOX/submit.log" || true)"
@@ -147,7 +163,7 @@ check "投入が暴走していない(上限 20 に達していない)" \
 echo ""
 echo "[2] TOTAL_STEPS=5000 / STEPS_PER_JOB=2400 -> 3 ジョブ(最後は端数)"
 setup_sandbox "$STUB_OK"
-status="$(run_chain EXP_NAME=e SRC_RUN_DIR=d TOTAL_STEPS=5000 STEPS_PER_JOB=2400)"
+status="$(run_chain EXP_NAME=e SRC_RUN_DIR=d TOTAL_STEPS=5000 STEPS_PER_JOB=2400 CHAIN_ALLOW_FAST=1 PBS_JOBID=100.pbs)"
 check "終了コード 0" "[[ '$status' == '0' ]]"
 check "最終ジョブは 4800->5000 で打ち切られる" \
     "grep -q 'resume=4800 stop=5000' '$SANDBOX/run.log'"
@@ -158,7 +174,7 @@ check "stop_at_step が TOTAL_STEPS を超えない" \
 echo ""
 echo "[3] 早期終了(stop_at_step のチェックポイントが無い)"
 setup_sandbox "$STUB_EARLY_STOP"
-status="$(run_chain EXP_NAME=e SRC_RUN_DIR=d TOTAL_STEPS=7200 STEPS_PER_JOB=2400)"
+status="$(run_chain EXP_NAME=e SRC_RUN_DIR=d TOTAL_STEPS=7200 STEPS_PER_JOB=2400 CHAIN_ALLOW_FAST=1 PBS_JOBID=100.pbs)"
 check "終了コード 0(失敗ではなく正常終了)" "[[ '$status' == '0' ]]"
 submits="$(grep -c '^SUBMIT ' "$SANDBOX/submit.log" || true)"
 check "次のジョブを投げない" "[[ '$submits' == '0' ]]"
@@ -169,15 +185,7 @@ check "理由がログに出る" \
 echo ""
 echo "[4] 学習が一瞬で終わった場合の投入抑止"
 setup_sandbox "$STUB_OK"
-status="$(
-    cd "$SANDBOX/work"
-    export PATH="$SANDBOX/work/bin:$PATH"
-    export SUBMIT_LOG="$SANDBOX/submit.log" RUN_LOG="$SANDBOX/run.log"
-    env EXP_NAME=e SRC_RUN_DIR=d TOTAL_STEPS=7200 STEPS_PER_JOB=2400 \
-        MIN_JOB_SEC=600 PBS_JOBID=100.pbs \
-        bash scripts/run_train_chain.pbs >> "$SANDBOX/run.log" 2>&1
-    echo $?
-)"
+status="$(run_chain EXP_NAME=e SRC_RUN_DIR=d TOTAL_STEPS=7200 STEPS_PER_JOB=2400 MIN_JOB_SEC=600 PBS_JOBID=100.pbs)"
 check "終了コード 1(異常として落とす)" "[[ '$status' == '1' ]]"
 submits="$(grep -c '^SUBMIT ' "$SANDBOX/submit.log" || true)"
 check "次のジョブを投げない" "[[ '$submits' == '0' ]]"
@@ -187,15 +195,7 @@ check "理由がログに出る" "grep -q 'MIN_JOB_SEC' '$SANDBOX/run.log'"
 echo ""
 echo "[5] CHAIN_INDEX が上限を超えたら走らない"
 setup_sandbox "$STUB_OK"
-status="$(
-    cd "$SANDBOX/work"
-    export PATH="$SANDBOX/work/bin:$PATH"
-    export SUBMIT_LOG="$SANDBOX/submit.log" RUN_LOG="$SANDBOX/run.log"
-    env EXP_NAME=e SRC_RUN_DIR=d TOTAL_STEPS=4800 STEPS_PER_JOB=2400 \
-        CHAIN_INDEX=5 CHAIN_ID=x RESUME_FROM=/dev/null CHAIN_ALLOW_FAST=1 \
-        PBS_JOBID=100.pbs bash scripts/run_train_chain.pbs >> "$SANDBOX/run.log" 2>&1
-    echo $?
-)"
+status="$(run_chain EXP_NAME=e SRC_RUN_DIR=d TOTAL_STEPS=4800 STEPS_PER_JOB=2400 CHAIN_INDEX=5 CHAIN_ID=x RESUME_FROM=/dev/null CHAIN_ALLOW_FAST=1 PBS_JOBID=100.pbs)"
 check "終了コード 1" "[[ '$status' == '1' ]]"
 check "上限超過として弾く" \
     "grep -q 'exceeds MAX_CHAIN_JOBS' '$SANDBOX/run.log'"
@@ -205,36 +205,13 @@ echo ""
 echo "[6] 不正な指定の拒否"
 setup_sandbox "$STUB_OK"
 
-status="$(
-    cd "$SANDBOX/work"
-    export PATH="$SANDBOX/work/bin:$PATH"
-    export SUBMIT_LOG="$SANDBOX/submit.log" RUN_LOG="$SANDBOX/run.log"
-    env EXP_NAME=e SRC_RUN_DIR=d TOTAL_STEPS=2400 STEPS_PER_JOB=2400 \
-        CHAIN_INDEX=2 CHAIN_ID=x RESUME_FROM=/dev/null CHAIN_ALLOW_FAST=1 \
-        PBS_JOBID=100.pbs bash scripts/run_train_chain.pbs >> "$SANDBOX/run.log" 2>&1
-    echo $?
-)"
+status="$(run_chain EXP_NAME=e SRC_RUN_DIR=d TOTAL_STEPS=2400 STEPS_PER_JOB=2400 CHAIN_INDEX=2 CHAIN_ID=x RESUME_FROM=/dev/null CHAIN_ALLOW_FAST=1 PBS_JOBID=100.pbs)"
 check "走る余地が無い CHAIN_INDEX を拒否" "[[ '$status' == '1' ]]"
 
-status="$(
-    cd "$SANDBOX/work"
-    export PATH="$SANDBOX/work/bin:$PATH"
-    export SUBMIT_LOG="$SANDBOX/submit.log" RUN_LOG="$SANDBOX/run.log"
-    env EXP_NAME=e SRC_RUN_DIR=d TOTAL_STEPS=7200 STEPS_PER_JOB=2400 \
-        CHAIN_INDEX=2 CHAIN_ID=x RESUME_FROM=/does/not/exist CHAIN_ALLOW_FAST=1 \
-        PBS_JOBID=100.pbs bash scripts/run_train_chain.pbs >> "$SANDBOX/run.log" 2>&1
-    echo $?
-)"
+status="$(run_chain EXP_NAME=e SRC_RUN_DIR=d TOTAL_STEPS=7200 STEPS_PER_JOB=2400 CHAIN_INDEX=2 CHAIN_ID=x RESUME_FROM=/does/not/exist CHAIN_ALLOW_FAST=1 PBS_JOBID=100.pbs)"
 check "存在しない RESUME_FROM を拒否" "[[ '$status' == '1' ]]"
 
-status="$(
-    cd "$SANDBOX/work"
-    export PATH="$SANDBOX/work/bin:$PATH"
-    export SUBMIT_LOG="$SANDBOX/submit.log" RUN_LOG="$SANDBOX/run.log"
-    env EXP_NAME=e SRC_RUN_DIR=d TOTAL_STEPS=abc STEPS_PER_JOB=2400 \
-        PBS_JOBID=100.pbs bash scripts/run_train_chain.pbs >> "$SANDBOX/run.log" 2>&1
-    echo $?
-)"
+status="$(run_chain EXP_NAME=e SRC_RUN_DIR=d TOTAL_STEPS=abc STEPS_PER_JOB=2400 PBS_JOBID=100.pbs)"
 check "数値でない TOTAL_STEPS を拒否" "[[ '$status' == '1' ]]"
 
 # --- 結果 ---------------------------------------------------------------------
