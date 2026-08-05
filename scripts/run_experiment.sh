@@ -194,6 +194,14 @@ TOP_LEVEL = {
     "HP_KEEP_BEST_ONLY": "keep_best_only",
     "HP_EARLY_STOPPING_PATIENCE": "early_stopping_patience",
     "HP_EARLY_STOPPING_MIN_DELTA": "early_stopping_min_delta",
+    # Loss balance. text_loss and audio_loss are each normalized by their own
+    # weight sum and then simply added, so these shift what the run spends its
+    # capacity on -- which matters for the fixed opening greeting, a ~3s text
+    # decision that is a couple of percent of the gradient in a 170s sample.
+    # Lowering text_padding_weight raises the relative share of real text
+    # tokens; first_codebook_weight_multiplier only rebalances within audio.
+    "HP_TEXT_PADDING_WEIGHT": "text_padding_weight",
+    "HP_FIRST_CODEBOOK_WEIGHT_MULTIPLIER": "first_codebook_weight_multiplier",
     # Chained runs (scripts/run_train_chain.pbs). max_steps stays the total for
     # the whole chain -- it is what the LR schedule is built from -- and each
     # job covers [resume_step, stop_at_step].
