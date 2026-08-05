@@ -30,7 +30,7 @@
 #   WHISPER_MODEL=large-v3
 #   DIAR_UV_WITH                       extra --with args for the uv env
 #   DIAR_EXTRA_ARGS                    extra CLI args for analyze_real_dialogue.py:
-#                                        --turn-gap-sec 1.0    merge gap for test_wav
+#                                        --turn-gap-sec 3.0    merge gap for test_wav
 #                                        --turn-max-sec 30.0   cap on one clip
 #                                        --turn-min-sec 0.5    drop clips shorter than this
 #                                        --min-segment-sec 0.02
@@ -160,9 +160,10 @@ echo "   voice bleeds through -- the recording is 1ch and nothing removes it."
 echo "   Drop those if the other voice would leak the answer."
 echo ""
 echo "2) Apply the edits. The TSV is the source of truth, the wavs are output."
-echo "   No GPU needed, and it does not need the original recording."
+echo "   rebuild.py sits next to the TSV, takes no arguments, needs no GPU,"
+echo "   and does not need the original recording."
 for d in "${analysis_dirs[@]}"; do
-    echo "     uv run python scripts/rebuild_test_wav.py $d"
+    echo "     uv run python $d/test_wav/rebuild.py"
 done
 echo "   Add --dry-run first to see how many clips survive."
 echo ""

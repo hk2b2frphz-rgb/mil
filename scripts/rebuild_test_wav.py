@@ -3,7 +3,7 @@
 手で直した test_wav/turns_review.tsv から test_wav/ を作り直す。
 
 analyze_real_dialogue.py の塊まとめは自動なので、境界がずれたり話者を取り違えたり
-することがある。それを TSV 上で直して、この スクリプトで WAV に反映させる。
+することがある。それを TSV 上で直して、このスクリプトで WAV に反映させる。
 **TSV が正、WAV はその出力**という関係にする。
 
 GPU も NeMo も Whisper も要らない(numpy と soundfile だけ)。切り出し元は
@@ -21,11 +21,25 @@ TSV でできること:
 空いている番号を自動で振る)。並び順も見ない。
 
 使い方:
+    # 出力ディレクトリに置かれたコピー(test_wav/rebuild.py)。引数不要。
+    uv run python data/real_dialogue/pilot/対話1/test_wav/rebuild.py
+
+    # リポジトリ側の本体。分析ディレクトリを渡す(複数可)。
     uv run python scripts/rebuild_test_wav.py data/real_dialogue/pilot/対話1
-    uv run python scripts/rebuild_test_wav.py data/real_dialogue/pilot/*  --dry-run
+    uv run python scripts/rebuild_test_wav.py data/real_dialogue/pilot/* --dry-run
 
 既存の test_wav/<話者>/*.wav は消して作り直す。turns_review.tsv 自体は
 書き換えない(手で直したものが正なので、上書きしてはいけない)。
+
+--------------------------------------------------------------------------
+このファイルは analyze_real_dialogue.py によって各出力ディレクトリの
+test_wav/rebuild.py へコピーされ、**リポジトリから切り離された状態で単体
+実行される**。そのため他の自作モジュールを import してはいけない。
+
+その制約の裏返しとして、test_wav の形式定義(Turn とファイル名の規則)は
+このファイルが正であり、analyze_real_dialogue.py 側がここから import する。
+定義を 2 箇所に分けると、コピーされた側とリポジトリ側が静かにずれる。
+--------------------------------------------------------------------------
 """
 
 from __future__ import annotations
@@ -33,32 +47,80 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
+import re
+import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-try:
-    from scripts.analyze_real_dialogue import CLIP_MARGIN_SEC, Turn, turn_filename
-except ImportError:  # スクリプト直接実行時（scripts/ が sys.path 先頭）
-    from analyze_real_dialogue import (  # type: ignore[no-redef]
-        CLIP_MARGIN_SEC,
-        Turn,
-        turn_filename,
-    )
-
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+# クリップ切り出し時に前後へ足すマージン(語頭・語尾の欠け防止)。
+CLIP_MARGIN_SEC = 0.08
+
+# 相槌パターン照合やファイル名生成の前に除去する記号類。
+_STRIP_RE = re.compile(r"[\s、。！？!?,.…・「」『』()（）]")
+# Windows で使えない文字などファイル名に入れない文字。
+_FNAME_RE = re.compile(r"[\\/:*?\"<>|\s]+")
+
 REVIEW_NAME = "turns_review.tsv"
+TURNS_NAME = "turns.jsonl"
+# 出力ディレクトリへコピーされるときの名前。
+COPY_NAME = "rebuild.py"
+
 # keep 列がこれらのいずれかなら除外。空欄も除外扱いにする(残すつもりなら 1 を
 # 書くはずなので、空欄を採用にすると消し忘れが黙って混入する)。
 DROP_VALUES = {"", "0", "0.0", "no", "false", "n", "x"}
+
+
+@dataclass
+class Turn:
+    """テスト入力用に同一話者の連続発話をまとめた塊。"""
+
+    speaker: str
+    start: float
+    end: float
+    text: str = ""
+    n_segments: int = 0
+    overlap_sec: float = 0.0
+    aizuchi_count: int = 0
+    segment_indices: list[int] = field(default_factory=list)
+
+    @property
+    def duration(self) -> float:
+        return self.end - self.start
+
+
+def turn_filename(index: int, turn: Turn) -> str:
+    """<通し番号>_<話者>_<開始>_<長さ>_<セグメント数>[_ov]_<テキスト先頭>.wav"""
+    flags = "_ov" if turn.overlap_sec > 0 else ""
+    name = (
+        f"{index:04d}_{turn.speaker}"
+        f"_{int(turn.start // 60):02d}m{turn.start % 60:04.1f}s"
+        f"_{turn.duration:.1f}s_{turn.n_segments}seg{flags}"
+    )
+    text = _FNAME_RE.sub("", _STRIP_RE.sub("", turn.text))[:16]
+    if text:
+        name += f"_{text}"
+    return name + ".wav"
+
+
+def install_copy(test_dir: Path) -> Path | None:
+    """このスクリプトを test_wav/rebuild.py としてコピーする。
+
+    TSV を直した人がリポジトリの場所を知らなくても、隣にある rebuild.py を
+    そのまま実行すれば反映できるようにするため。
+    """
+    source = Path(__file__).resolve()
+    target = test_dir / COPY_NAME
+    if source == target:
+        return None
+    test_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
+    return target
 
 
 class RowError(Exception):
@@ -195,7 +257,8 @@ def clear_existing_clips(test_dir: Path) -> int:
 
 
 def rebuild(analysis_dir: Path, dry_run: bool) -> int:
-    review = analysis_dir / "test_wav" / REVIEW_NAME
+    test_dir = analysis_dir / "test_wav"
+    review = test_dir / REVIEW_NAME
     if not review.is_file():
         raise SystemExit(
             f"{review} がありません。\n"
@@ -242,14 +305,11 @@ def rebuild(analysis_dir: Path, dry_run: bool) -> int:
 
     if dry_run:
         for index, turn in kept[:10]:
-            logger.info(
-                "  [dry-run] %s", turn_filename(index, turn)
-            )
+            logger.info("  [dry-run] %s", turn_filename(index, turn))
         if len(kept) > 10:
             logger.info("  [dry-run] ... 他 %d 件", len(kept) - 10)
         return len(kept)
 
-    test_dir = analysis_dir / "test_wav"
     removed = clear_existing_clips(test_dir)
     logger.info("既存クリップ %d 件を削除して作り直します。", removed)
 
@@ -268,7 +328,7 @@ def rebuild(analysis_dir: Path, dry_run: bool) -> int:
         seg_dir.mkdir(parents=True, exist_ok=True)
         path = seg_dir / turn_filename(index, turn)
         sf.write(path, track[lo:hi], sr)
-        row = {
+        written.append({
             "speaker": turn.speaker,
             "start": turn.start,
             "end": turn.end,
@@ -278,10 +338,9 @@ def rebuild(analysis_dir: Path, dry_run: bool) -> int:
             "aizuchi_count": turn.aizuchi_count,
             "index": index,
             "wav": path.name,
-        }
-        written.append(row)
+        })
 
-    turns_path = test_dir / "turns.jsonl"
+    turns_path = test_dir / TURNS_NAME
     with turns_path.open("w", encoding="utf-8") as f:
         for row in written:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -291,11 +350,25 @@ def rebuild(analysis_dir: Path, dry_run: bool) -> int:
     return len(written)
 
 
+def default_analysis_dirs() -> list[Path]:
+    """引数なしで実行されたときの対象。
+
+    出力ディレクトリへコピーされた test_wav/rebuild.py として実行された場合は、
+    その親(分析ディレクトリ)を対象にする。TSV を直した人が、パスを打たずに
+    隣のスクリプトを実行するだけで済むようにするため。
+    """
+    here = Path(__file__).resolve().parent
+    if here.name == "test_wav":
+        return [here.parent]
+    return []
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument(
-        "analysis_dirs", nargs="+", type=Path,
-        help="分析ディレクトリ(test_wav/ を含むもの)",
+        "analysis_dirs", nargs="*", type=Path,
+        help="分析ディレクトリ(test_wav/ を含むもの)。"
+             "test_wav/rebuild.py として実行する場合は省略できる",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -303,8 +376,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    targets = list(args.analysis_dirs) or default_analysis_dirs()
+    if not targets:
+        parser.error(
+            "分析ディレクトリを指定してください "
+            "(例: data/real_dialogue/pilot/dialogue1)。"
+        )
+
     total = 0
-    for analysis_dir in args.analysis_dirs:
+    for analysis_dir in targets:
         if not analysis_dir.is_dir():
             raise SystemExit(f"ディレクトリではありません: {analysis_dir}")
         total += rebuild(analysis_dir, args.dry_run)

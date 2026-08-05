@@ -20,10 +20,15 @@
 ダイアライゼーションは息継ぎごとに区間を切るので、そのままではテスト入力として
 細かすぎる。`test_wav/` には**同一話者の連続発話をまとめ直した塊**を出す。
 
-- 間隔が `--turn-gap-sec`（既定 1.0 秒）以下の同一話者セグメントを繋ぐ
+- 間隔が `--turn-gap-sec`（既定 3.0 秒）以下の同一話者セグメントを繋ぐ
 - **間に相手の相槌が挟まっても繋ぐ**。相手の相槌でこちらのターンは切れない
 - `--turn-max-sec`（既定 30 秒）を超えたらそこで切る
 - `--turn-min-sec`（既定 0.5 秒）未満の塊は出さない
+
+既定を 3.0 秒にしているのは、相談の対話では考え込む間や言い淀みで 1〜2 秒空くのが
+普通で、そこで切るとテスト入力として細切れになりすぎるため。間隔的には繋がるのに
+`--turn-max-sec` で切った箇所は件数をログに出すので、長い塊が欲しければ上限の方を
+上げる。
 
 切り出し元は `speaker_<話者>_solo.wav`（その話者の区間以外を無音化したトラック）
 なので、塊の途中に入る相手の相槌はここで無音になる。
@@ -94,8 +99,18 @@ data/real_dialogue/pilot/対話1/counselor_B.txt   ← 中身は空でよい
 塊まとめは自動なので、境界がずれたり話者を取り違えたりする。TSV で直してから
 作り直す。**TSV が正、WAV はその出力**という関係にしてある。
 
+反映用のスクリプトは **TSV と同じフォルダに置かれる**（`test_wav/rebuild.py`）。
+リポジトリの場所を知らなくても、TSV を直したらその隣を実行すればよい。引数も
+要らない（自分の親ディレクトリを対象にする）。
+
 ```bash
-uv run python scripts/rebuild_test_wav.py data/real_dialogue/pilot/対話1
+uv run python data/real_dialogue/pilot/対話1/test_wav/rebuild.py
+```
+
+リポジトリ側から複数まとめて処理することもできる。中身は同じもの。
+
+```bash
+uv run python scripts/rebuild_test_wav.py data/real_dialogue/pilot/*
 ```
 
 GPU も NeMo も Whisper も要らない（numpy と soundfile だけ）。切り出し元は分析
@@ -223,7 +238,7 @@ MODEL_ID=lora_h01 MODEL_WEIGHT=/path/model.safetensors ANALYSIS_DIRS="data/real_
 |---|---|---|
 | `REAL_CONTEXT_SEC` | `30` | 評価点の手前に付ける文脈の長さ。短いほど比較は公平、長いほど自然 |
 | `REAL_BC_TOLERANCE_SEC` | `1.5` | 相槌一致とみなす開始時刻の許容差 |
-| `--turn-gap-sec` | `1.0` | test_wav の塊にまとめる間隔 |
+| `--turn-gap-sec` | `3.0` | test_wav の塊にまとめる間隔 |
 | `--turn-max-sec` | `30.0` | 1 塊の上限。超えたら切る |
 | `--turn-min-sec` | `0.5` | これ未満の塊は test_wav に出さない |
 | `--min-segment-sec` | `0.02` | これ未満のダイアライゼーション断片は捨てる |

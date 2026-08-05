@@ -63,8 +63,26 @@ if str(REPO_ROOT) not in sys.path:
 
 try:
     from scripts.analyze_backchannels import AIZUCHI_PATTERNS
+    # test_wav の形式定義は rebuild_test_wav.py が正。あちらは出力ディレクトリへ
+    # コピーされて単体実行されるので、こちらを import できない。逆向きにする。
+    from scripts.rebuild_test_wav import (
+        CLIP_MARGIN_SEC,
+        _FNAME_RE,
+        _STRIP_RE,
+        Turn,
+        install_copy,
+        turn_filename,
+    )
 except ImportError:  # スクリプト直接実行時（scripts/ が sys.path 先頭）
-    from analyze_backchannels import AIZUCHI_PATTERNS
+    from analyze_backchannels import AIZUCHI_PATTERNS  # type: ignore[no-redef]
+    from rebuild_test_wav import (  # type: ignore[no-redef]
+        CLIP_MARGIN_SEC,
+        _FNAME_RE,
+        _STRIP_RE,
+        Turn,
+        install_copy,
+        turn_filename,
+    )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -105,22 +123,19 @@ COMPILED_AIZUCHI = [(name, re.compile(pat)) for name, pat in AIZUCHI_PATTERNS]
 
 # 相槌判定: この秒数以下の短いセグメントのみ対象にする。
 AIZUCHI_MAX_SEC = 3.0
-# クリップ切り出し時に前後へ足すマージン(語頭・語尾の欠け防止)。
-CLIP_MARGIN_SEC = 0.08
 
 # --- テスト入力用の塊(Turn)まとめ ---
 # 同一話者の連続発話をこの秒数以下の間隔で繋ぐ。間に相手の相槌が入っていても
 # 繋ぐ(相槌でターンは切れないため)。
-TURN_GAP_SEC = 1.0
+#
+# 3.0 にしているのは、相談の対話では考え込む間や言い淀みで 1-2 秒空くのが普通で、
+# そこで切るとテスト入力として細切れになりすぎるため。話者交替の gap は
+# stats.json の turn_gap_sec で確認できる。
+TURN_GAP_SEC = 3.0
 # 1 塊の上限。これを超えたら区切る。テスト入力として長すぎると扱いにくい。
 TURN_MAX_SEC = 30.0
 # まとめた後にこの秒数未満の塊は test_wav に出さない。
 TURN_MIN_SEC = 0.5
-
-# 相槌パターン照合の前に除去する記号類。
-_STRIP_RE = re.compile(r"[\s、。！？!?,.…・「」『』()（）]")
-# Windows で使えない文字などファイル名に入れない文字。
-_FNAME_RE = re.compile(r"[\\/:*?\"<>|\s]+")
 
 
 @dataclass
@@ -133,24 +148,6 @@ class Segment:
     is_aizuchi: bool = False
     aizuchi_labels: list[str] = field(default_factory=list)
     hallucination: str = ""   # 空でなければ Whisper 定型文。test_wav から除外される。
-
-    @property
-    def duration(self) -> float:
-        return self.end - self.start
-
-
-@dataclass
-class Turn:
-    """テスト入力用に同一話者の連続発話をまとめた塊。"""
-
-    speaker: str
-    start: float
-    end: float
-    text: str = ""
-    n_segments: int = 0
-    overlap_sec: float = 0.0
-    aizuchi_count: int = 0
-    segment_indices: list[int] = field(default_factory=list)
 
     @property
     def duration(self) -> float:
@@ -518,6 +515,7 @@ def merge_turns(
     まとめる前に除く。
     """
     turns: list[Turn] = []
+    capped = 0
     for speaker in sorted({s.speaker for s in segments}):
         indexed = [
             (i, s) for i, s in enumerate(segments)
@@ -526,12 +524,13 @@ def merge_turns(
         indexed.sort(key=lambda pair: pair[1].start)
         cur: Turn | None = None
         for index, seg in indexed:
-            extends = (
-                cur is not None
-                and seg.start - cur.end <= gap_sec
-                and seg.end - cur.start <= max_sec
-            )
+            within_gap = cur is not None and seg.start - cur.end <= gap_sec
+            extends = within_gap and seg.end - cur.start <= max_sec
             if not extends:
+                if within_gap:
+                    # gap 的には繋がるのに max_sec で切った。多いようなら
+                    # --turn-max-sec を上げる判断材料になる。
+                    capped += 1
                 if cur is not None:
                     turns.append(cur)
                 cur = Turn(speaker=speaker, start=seg.start, end=seg.end)
@@ -545,21 +544,13 @@ def merge_turns(
         if cur is not None:
             turns.append(cur)
     turns.sort(key=lambda t: (t.start, t.speaker))
+    if capped:
+        logger.info(
+            "%d 箇所は間隔的には繋がるが上限 %.1f 秒で切りました"
+            "(長い塊が欲しければ --turn-max-sec を上げる)。",
+            capped, max_sec,
+        )
     return turns
-
-
-def turn_filename(index: int, turn: Turn) -> str:
-    """<通し番号>_<話者>_<開始>_<長さ>_<セグメント数>[_ov]_<テキスト先頭>.wav"""
-    flags = "_ov" if turn.overlap_sec > 0 else ""
-    name = (
-        f"{index:04d}_{turn.speaker}"
-        f"_{int(turn.start // 60):02d}m{turn.start % 60:04.1f}s"
-        f"_{turn.duration:.1f}s_{turn.n_segments}seg{flags}"
-    )
-    text = _FNAME_RE.sub("", _STRIP_RE.sub("", turn.text))[:16]
-    if text:
-        name += f"_{text}"
-    return name + ".wav"
 
 
 def export_test_wavs(
@@ -801,6 +792,12 @@ def process_wav(wav_path: Path, out_root: Path, args: argparse.Namespace) -> Pat
     )
     logger.info("レビュー表: %s", review)
 
+    # TSV を直す人がリポジトリの場所を知らなくても済むよう、反映用スクリプトを
+    # 出力先に置いておく。TSV の隣で python rebuild.py を実行するだけでよい。
+    copied = install_copy(out_dir / "test_wav")
+    if copied is not None:
+        logger.info("反映用スクリプト: %s (TSV を直したらこれを実行)", copied)
+
     return out_dir
 
 
@@ -849,7 +846,8 @@ def main() -> None:
     for d in out_dirs:
         print(f"{d.resolve()}")
         print("  【テスト入力】 test_wav\\A\\ / test_wav\\B\\  (塊にまとめたもの)")
-        print("                 test_wav\\turns_review.tsv  keep 列を 0 にして間引く")
+        print("                 test_wav\\turns_review.tsv  手で直す(間引き・境界・話者)")
+        print("                 test_wav\\rebuild.py        直したらこれを実行して反映")
         print("  solo:          speaker_A_solo.wav / speaker_B_solo.wav")
         print("  stereo:        stereo_diarized.wav (L=A / R=B)")
         print("  発話ごと(生):  segments\\A\\ / segments\\B\\")
