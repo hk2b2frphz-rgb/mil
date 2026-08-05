@@ -7,32 +7,36 @@
 #PBS -j oe
 #PBS -V
 
-# 実対話 1ch WAV の前処理を通しで実行する。WAV を指定するだけでよい。
+# ASCII ONLY. Do not add non-ASCII characters anywhere in this file
+# (not even in comments) -- the job dies immediately at submission.
 #
-#   ステージ1: ダイアライゼーション + 書き起こし   (analyze_real_dialogue.py)
-#   ステージ2: 音源分離 + 分離トラックで再書き起こし (separate_real_dialogue.py)
+# End-to-end preprocessing for a real-dialogue 1ch WAV. Just point it at a WAV.
 #
-# ここまでで「2 話者に分ける」作業は完了する。この後の人手作業と評価ジョブの
-# 投げ方は、ジョブ末尾に実際のパス入りで出力される。
+#   Stage 1: diarization + transcription            (analyze_real_dialogue.py)
+#   Stage 2: source separation + re-transcription   (separate_real_dialogue.py)
 #
-# 使い方(これだけ):
+# After stage 2 the "split into 2 speakers" work is done. The manual steps and
+# the eval job command are printed with real paths at the end of the job.
+#
+# Usage (this is all you need):
 #   qsub -v 'WAVS=/path/dialogue1.wav' scripts/run_real_dialogue_pipeline.pbs
 #
-# 複数ファイル(カンマ区切り、glob 可):
+# Multiple files (comma separated, glob ok):
 #   qsub -v 'WAVS=/path/a.wav,/path/b.wav' scripts/run_real_dialogue_pipeline.pbs
 #   qsub -v 'WAVS=/path/sessions/*.wav'    scripts/run_real_dialogue_pipeline.pbs
 #
-# 任意:
-#   OUT_DIR=data/real_dialogue/<name>  出力ルート(既定: data/real_dialogue/<jobid>)
-#   SKIP_ANALYSIS=1                    ステージ1 が済んでいる場合に飛ばす
-#   SKIP_SEPARATION=1                  ステージ1 だけ回す
+# Optional:
+#   OUT_DIR=data/real_dialogue/<name>  output root (default: data/real_dialogue/<jobid>)
+#   SKIP_ANALYSIS=1                    skip stage 1 if already done
+#   SKIP_SEPARATION=1                  run stage 1 only
 #   WHISPER_MODEL=large-v3
 #   SEP_MODEL=speechbrain/sepformer-whamr16k
-#   SEP_SKIP_ASR=1                     分離結果だけ先に聴きたいとき(再書き起こし省略)
-#   DIAR_UV_WITH / SEP_UV_WITH         各 uv 環境への追加 --with 引数
+#   SEP_SKIP_ASR=1                     separation only, skip re-transcription
+#   DIAR_UV_WITH / SEP_UV_WITH         extra --with args for each uv env
 #
-# ステージ1 と 2 は依存が衝突する(NeMo は numpy<2 と古い transformers を要求し、
-# SpeechBrain は別系統)ため、同じジョブ内でも別々の隔離 uv 環境で実行する。
+# Stage 1 and 2 have conflicting deps (NeMo wants numpy<2 and old transformers,
+# SpeechBrain wants another line), so each runs in its own isolated uv env even
+# though they are in the same job.
 
 set -euo pipefail
 
@@ -45,7 +49,7 @@ JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
 JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
 OUT_DIR="${OUT_DIR:-data/real_dialogue/${JOB_ID_SHORT}}"
 
-# カンマ区切り -> 配列。glob はここで展開される。
+# comma separated -> array. globs are expanded here.
 IFS=',' read -r -a wav_patterns <<< "$WAVS"
 wav_files=()
 for pat in "${wav_patterns[@]}"; do
@@ -74,11 +78,11 @@ banner() {
     echo ""
     echo "=================================================================="
     echo "$1"
-    echo "  時刻: $(date -Is)"
+    echo "  time: $(date -Is)"
     echo "=================================================================="
 }
 
-banner "実対話 前処理パイプライン 開始"
+banner "real dialogue preprocessing pipeline - start"
 echo "job:      ${JOB_ID_RAW}"
 echo "host:     $(hostname)"
 echo "inputs:   ${wav_files[*]}"
@@ -88,7 +92,7 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi --query-gpu=name,memory.total --format=csv
 fi
 
-# WAV ごとの出力ディレクトリ。以降の案内で実パスを出すために先に作っておく。
+# per-WAV output dirs. Created up front so the guidance below can print real paths.
 analysis_dirs=()
 for f in "${wav_files[@]}"; do
     stem="$(basename "$f")"
@@ -96,13 +100,13 @@ for f in "${wav_files[@]}"; do
     analysis_dirs+=("$OUT_DIR/$stem")
 done
 
-# ---------------------------------------------------------------- ステージ1
+# ------------------------------------------------------------------- stage 1
 if [[ "${SKIP_ANALYSIS:-0}" == "1" ]]; then
-    banner "ステージ1: スキップ (SKIP_ANALYSIS=1)"
+    banner "stage 1: skipped (SKIP_ANALYSIS=1)"
 else
-    banner "ステージ1/2: ダイアライゼーション + 書き起こし"
-    echo "使用モデル: nvidia/diar_streaming_sortformer_4spk-v2 (CC-BY-4.0, トークン不要)"
-    echo "長い音声ではここが最も時間を要します。"
+    banner "stage 1/2: diarization + transcription"
+    echo "model: nvidia/diar_streaming_sortformer_4spk-v2 (CC-BY-4.0, no token needed)"
+    echo "This is the slowest part for long recordings."
 
     # shellcheck disable=SC2086
     uv run --no-project --python 3.11 \
@@ -122,32 +126,32 @@ else
         --out-dir "$OUT_DIR" \
         ${WHISPER_MODEL:+--whisper-model "$WHISPER_MODEL"}
 
-    banner "ステージ1 完了 — ここで一度聴けます"
+    banner "stage 1 done -- you can listen now"
     for d in "${analysis_dirs[@]}"; do
         echo "$d"
-        echo "  時間マスクの solo:  speaker_A_solo.wav / speaker_B_solo.wav"
-        echo "  L/R プレビュー:     stereo_diarized.wav"
-        echo "  発話ごと:           segments/A/ , segments/B/"
-        echo "  統計:               stats.json"
+        echo "  time-masked solo:  speaker_A_solo.wav / speaker_B_solo.wav"
+        echo "  L/R preview:       stereo_diarized.wav"
+        echo "  per utterance:     segments/A/ , segments/B/"
+        echo "  stats:             stats.json"
     done
     echo ""
-    echo "注意: この段階の solo トラックは「相手の区間を無音化」しただけです。"
-    echo "      1ch 録音なので重畳区間には相手の声が残っています。それを消すのが"
-    echo "      次のステージ2 です。"
+    echo "NOTE: the solo tracks at this stage only mute the other speaker's spans."
+    echo "      The recording is 1ch, so the other voice still bleeds through in"
+    echo "      overlap regions. Removing that is what stage 2 does."
 fi
 
-# ---------------------------------------------------------------- ステージ2
+# ------------------------------------------------------------------- stage 2
 if [[ "${SKIP_SEPARATION:-0}" == "1" ]]; then
-    banner "ステージ2: スキップ (SKIP_SEPARATION=1)"
+    banner "stage 2: skipped (SKIP_SEPARATION=1)"
 else
-    banner "ステージ2/2: 音源分離 + 分離トラックで再書き起こし"
-    echo "使用モデル: ${SEP_MODEL:-speechbrain/sepformer-whamr16k} (Apache-2.0)"
-    echo "チャネルの帰属はステージ1 のダイアライゼーション結果で決めます。"
+    banner "stage 2/2: source separation + re-transcription of separated tracks"
+    echo "model: ${SEP_MODEL:-speechbrain/sepformer-whamr16k} (Apache-2.0)"
+    echo "Channel-to-speaker assignment comes from the stage 1 diarization."
 
     sep_extra=""
     if [[ "${SEP_SKIP_ASR:-0}" == "1" ]]; then
         sep_extra="--skip-asr"
-        echo "SEP_SKIP_ASR=1: 再書き起こしは省略します。"
+        echo "SEP_SKIP_ASR=1: skipping re-transcription."
     fi
 
     # shellcheck disable=SC2086
@@ -169,11 +173,11 @@ else
         ${WHISPER_MODEL:+--whisper-model "$WHISPER_MODEL"} \
         $sep_extra
 
-    banner "ステージ2 完了 — 2 話者への分離まで終わりました"
+    banner "stage 2 done -- separation into 2 speakers is complete"
 fi
 
-# ---------------------------------------------------------------- 結果の案内
-banner "結果と次の手順"
+# ------------------------------------------------------------- results / next
+banner "results and next steps"
 
 for d in "${analysis_dirs[@]}"; do
     echo "------------------------------------------------------------------"
@@ -181,40 +185,40 @@ for d in "${analysis_dirs[@]}"; do
     if [[ -f "$d/separation_report.json" ]]; then
         chunks=$(grep -o '"chunks":[[:space:]]*[0-9]*' "$d/separation_report.json" | head -1 | tr -dc '0-9')
         inherited=$(grep -o '"inherited_assignments":[[:space:]]*[0-9]*' "$d/separation_report.json" | head -1 | tr -dc '0-9')
-        echo "  分離チャンク数: ${chunks:-?} (割り当て継承: ${inherited:-?})"
-        echo "    継承が多い場合は手がかりが弱い区間が多かったということです。"
-        echo "    気になるときは SEP_UV_WITH ではなく --chunk-sec を短くして再実行します。"
+        echo "  separated chunks: ${chunks:-?} (inherited assignments: ${inherited:-?})"
+        echo "    A high inherited count means many chunks had weak assignment cues."
+        echo "    If that worries you, re-run with a shorter --chunk-sec."
     fi
-    echo "  【聴くもの】"
-    echo "    分離トラック: $d/separated/A.wav , $d/separated/B.wav"
-    echo "    L/R 同時確認: $d/separated/stereo.wav"
-    echo "    発話ごと:     $d/segments_separated/A/ , $d/segments_separated/B/"
-    echo "  【特に確認してほしい点】"
-    echo "    ファイル名に _ov が付いた発話 = 重畳区間。ここで相手の相槌が"
-    echo "    消えているかが分離成否の判定点です。"
-    echo "    重畳のない単独発話がこもったり金属的になっていないかも見てください。"
+    echo "  [what to listen to]"
+    echo "    separated tracks: $d/separated/A.wav , $d/separated/B.wav"
+    echo "    L/R side by side: $d/separated/stereo.wav"
+    echo "    per utterance:    $d/segments_separated/A/ , $d/segments_separated/B/"
+    echo "  [what to check specifically]"
+    echo "    Files with _ov in the name are overlap spans. Whether the other"
+    echo "    speaker's backchannel is gone there is the pass/fail point."
+    echo "    Also check that non-overlapping utterances are not muffled or metallic."
 done
 
 echo ""
 echo "=================================================================="
-echo "次にやること(人手)"
+echo "next steps (manual)"
 echo "=================================================================="
 echo ""
-echo "1) 相談員側の話者を決めて、空ファイルを置く"
+echo "1) Decide which speaker is the counselor and drop an empty marker file"
 for d in "${analysis_dirs[@]}"; do
-    echo "     touch $d/counselor_B.txt     # 相談員が B の場合"
-    echo "     touch $d/counselor_A.txt     # 相談員が A の場合(どちらか一方だけ)"
+    echo "     touch $d/counselor_B.txt     # counselor is B"
+    echo "     touch $d/counselor_A.txt     # counselor is A (exactly one of the two)"
 done
 echo ""
-echo "2) テストデータを間引く(keep 列を 0 にした行が評価から外れる)"
+echo "2) Prune the test data (rows with keep=0 are excluded from eval)"
 for d in "${analysis_dirs[@]}"; do
     echo "     $d/A_segments_review.tsv"
     echo "     $d/B_segments_review.tsv"
 done
 echo ""
-echo "3) 評価ジョブを投げる。ANALYSIS_DIRS には下のパスをそのまま渡す"
-echo "   (複数ある場合はスペース区切り。qsub -v はカンマを変数区切りとして"
-echo "    解釈するので、カンマにしてはいけません)"
+echo "3) Submit the eval job. Pass the paths below to ANALYSIS_DIRS as-is."
+echo "   (Separate multiple dirs with SPACES. qsub -v treats a comma as a"
+echo "    variable separator, so commas must not be used here.)"
 echo ""
 printf '     qsub -v '\''MODEL_ID=lora_h01,MODEL_WEIGHT=/path/model.safetensors,ANALYSIS_DIRS=%s'\'' \\\n' "${analysis_dirs[*]}"
 echo "       scripts/run_real_dialogue_eval.pbs"

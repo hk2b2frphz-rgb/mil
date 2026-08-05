@@ -7,24 +7,28 @@
 #PBS -j oe
 #PBS -V
 
-# 実対話 1ch WAV のステージ2: 音源分離 + 分離トラックでの再書き起こし
-# (scripts/separate_real_dialogue.py)。
+# ASCII ONLY. Do not add non-ASCII characters anywhere in this file
+# (not even in comments) -- the job dies immediately at submission.
 #
-# ステージ1 (scripts/run_real_dialogue_analysis.pbs) を同じ OUT_DIR で
-# 済ませてあることが前提。timeline.jsonl を分離チャネルの帰属判定に使う。
+# Stage 2 for a real-dialogue 1ch WAV: source separation + re-transcription of
+# the separated tracks (scripts/separate_real_dialogue.py).
 #
-# 必須:
+# Requires stage 1 (scripts/run_real_dialogue_analysis.pbs) to have been run
+# with the same OUT_DIR. timeline.jsonl is used to assign separated channels
+# to speakers.
+#
+# Required:
 #   qsub -v 'WAVS=/path/dialogue1.wav,OUT_DIR=data/real_dialogue/pilot' \
 #     scripts/run_real_dialogue_separation.pbs
 #
-# 任意:
+# Optional:
 #   SEP_MODEL=speechbrain/sepformer-whamr16k
 #   WHISPER_MODEL=large-v3
-#   EXTRA_ARGS="--skip-asr"        (分離結果だけ先に聴く)
+#   EXTRA_ARGS="--skip-asr"        (listen to the separation first, no ASR)
 #   SEP_UV_WITH="--with torch==2.5.1"
 #
-# ステージ1 と同じく、分離も独立した uv env で回す。SpeechBrain は本体 env の
-# transformers/numpy と衝突しうるため。
+# Like stage 1, separation runs in its own uv env: SpeechBrain can conflict
+# with the transformers/numpy pinned in the main env.
 
 set -euo pipefail
 
@@ -85,8 +89,8 @@ uv run --no-project --python 3.11 \
 
 echo "done: $OUT_DIR (log: $LOG_FILE)" | tee -a "$LOG_FILE"
 echo ""
-echo "次の手順(人手):"
-echo "  1) segments_separated/ を聴いて分離品質を確認"
-echo "  2) 相談員側を決めて counselor_A.txt か counselor_B.txt を置く"
-echo "  3) <話者>_segments_review.tsv の keep 列を 0 にして間引く"
+echo "next steps (manual):"
+echo "  1) listen to segments_separated/ and judge the separation quality"
+echo "  2) decide which speaker is the counselor, touch counselor_A.txt or counselor_B.txt"
+echo "  3) prune rows by setting keep=0 in <speaker>_segments_review.tsv"
 echo "  4) MODEL_ID=... ANALYSIS_DIRS=... bash scripts/run_real_dialogue_eval.sh"

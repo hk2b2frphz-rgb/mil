@@ -7,42 +7,49 @@
 #PBS -j oe
 #PBS -V
 
-# 実対話リプレイ評価のサーバ側実行。OpenAI/Azure API は一切呼ばない。
+# ASCII ONLY. Do not add non-ASCII characters anywhere in this file
+# (not even in comments) -- the job dies immediately at submission.
 #
-# 前提: 対象の対話ディレクトリで以下が済んでいること。
-#   1) scripts/run_real_dialogue_analysis.pbs    (ダイアライゼーション)
-#   2) scripts/run_real_dialogue_separation.pbs  (音源分離 + 再書き起こし)
-#   3) counselor_A.txt か counselor_B.txt を置く
-#   4) <話者>_segments_review.tsv の keep 列で間引く
+# Server-side run of the real-dialogue replay evaluation. No OpenAI/Azure API
+# calls at all.
 #
-# ベースモデル:
+# Prerequisites, per target dialogue dir:
+#   1) scripts/run_real_dialogue_analysis.pbs    (diarization)
+#   2) scripts/run_real_dialogue_separation.pbs  (separation + re-transcription)
+#   3) touch counselor_A.txt or counselor_B.txt
+#   4) prune rows via the keep column in <speaker>_segments_review.tsv
+#
+# Base model:
 #   qsub -v 'MODEL_ID=base,ANALYSIS_DIRS=data/real_dialogue/pilot/dialogue1' \
 #     scripts/run_real_dialogue_eval.pbs
 #
-# merge 済み LoRA / export 済み full-FT:
+# Merged LoRA / exported full-FT:
 #   qsub -v 'MODEL_ID=lora_h01,MODEL_WEIGHT=/path/model.safetensors,ANALYSIS_DIRS=data/real_dialogue/pilot/dialogue1' \
 #     scripts/run_real_dialogue_eval.pbs
 #
-# 複数対話をまとめて 1 データセットにする場合はスペース区切り。qsub -v は値中の
-# カンマを変数区切りとして解釈するため、ここは必ずスペースで渡すこと:
+# To combine several dialogues into one dataset, separate them with SPACES.
+# qsub -v treats a comma inside a value as a variable separator, so commas
+# must not be used here:
 #   qsub -v 'MODEL_ID=base,ANALYSIS_DIRS=data/real_dialogue/pilot/d1 data/real_dialogue/pilot/d2' \
 #     scripts/run_real_dialogue_eval.pbs
 #
-# 主な上書き:
-#   REAL_CONTEXT_SEC=30        評価点の手前に付ける文脈の長さ。開ループの
-#                              トレードオフを動かす唯一のつまみ。値を変えたら
-#                              必ず別 RUN_ID にすること(混ぜると比較が壊れる)。
+# Main overrides:
+#   REAL_CONTEXT_SEC=30        length of context prepended to each eval point.
+#                              The single knob that moves the open-loop
+#                              trade-off. If you change it, use a different
+#                              RUN_ID -- mixing values breaks comparability.
 #   REAL_TASKS=backchannel,pause_handling,smooth_turn_taking
-#   REAL_CASES_PER_TASK=1      スモーク(各タスク先頭 N 件だけ)
+#   REAL_CASES_PER_TASK=1      smoke test (first N cases per task only)
 #   REAL_SEEDS=0,1,2
 #   REAL_TAIL_SEC=8
-#   REAL_BC_TOLERANCE_SEC=1.5  相槌一致とみなす開始時刻の許容差
+#   REAL_BC_TOLERANCE_SEC=1.5  start-time tolerance for counting a backchannel match
 #   MODEL_CONFIG=/path/moshi_lm_kwargs.json
-#                              (MODEL_WEIGHT の隣にあれば自動検出されるので通常不要)
+#                              (auto-detected next to MODEL_WEIGHT, normally unneeded)
 #
-# 合成 Full-Duplex-Bench-JA (scripts/run_full_duplex_eval.pbs) とは別トラック。
-# 開ループ・非 v1.5 プロトコルなので、両者のスコアを同じ表に並べてはいけない。
-# 詳細は docs/real_dialogue_evaluation.md を参照。
+# This is a separate track from the synthetic Full-Duplex-Bench-JA
+# (scripts/run_full_duplex_eval.pbs). It is open-loop and not the v1.5
+# protocol, so the two score sets must never share a table.
+# See docs/real_dialogue_evaluation.md for details.
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
@@ -68,22 +75,22 @@ export TORCHINDUCTOR_DISABLE=1
 export NO_TORCH_COMPILE="${NO_TORCH_COMPILE:-1}"
 export TORCH_COMPILE_DISABLE=1
 
-# 人手の前工程が終わっていないまま流すと、間引き無しの全セグメントで
-# データセットが出来てしまい、しかも普通に完走する。ここで落とす。
+# Running before the manual prep is finished would silently build a dataset
+# from every un-pruned segment and still complete normally. Fail here instead.
 for dir in $ANALYSIS_DIRS; do
     if [[ ! -d "$dir" ]]; then
         echo "ERROR: analysis dir not found: $dir" >&2
         exit 1
     fi
     if [[ ! -f "$dir/timeline_separated.jsonl" ]]; then
-        echo "ERROR: $dir/timeline_separated.jsonl がありません。" >&2
-        echo "       先に scripts/run_real_dialogue_separation.pbs を実行してください。" >&2
+        echo "ERROR: $dir/timeline_separated.jsonl is missing." >&2
+        echo "       Run scripts/run_real_dialogue_separation.pbs first." >&2
         exit 1
     fi
     marker_count=$(find "$dir" -maxdepth 1 -name 'counselor_*.txt' | wc -l)
     if [[ "$marker_count" -ne 1 ]]; then
-        echo "ERROR: $dir の相談員マーカーが $marker_count 個です(1 個である必要があります)。" >&2
-        echo "       counselor_A.txt か counselor_B.txt をどちらか一方だけ置いてください。" >&2
+        echo "ERROR: $dir has $marker_count counselor markers (exactly 1 required)." >&2
+        echo "       Place either counselor_A.txt or counselor_B.txt, not both." >&2
         exit 1
     fi
 done
