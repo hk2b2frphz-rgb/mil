@@ -33,6 +33,9 @@
 #   SEP_MODEL=speechbrain/sepformer-whamr16k
 #   SEP_SKIP_ASR=1                     separation only, skip re-transcription
 #   DIAR_UV_WITH / SEP_UV_WITH         extra --with args for each uv env
+#   DIAR_EXTRA_ARGS / SEP_EXTRA_ARGS   extra CLI args for the stage 1 / 2 python
+#                                      scripts, e.g. --min-segment-sec 0.05
+#                                      (default is 0.02) or --num-speakers 3
 #
 # Stage 1 and 2 have conflicting deps (NeMo wants numpy<2 and old transformers,
 # SpeechBrain wants another line), so each runs in its own isolated uv env even
@@ -124,7 +127,8 @@ else
         python -u scripts/analyze_real_dialogue.py \
         "${wav_files[@]}" \
         --out-dir "$OUT_DIR" \
-        ${WHISPER_MODEL:+--whisper-model "$WHISPER_MODEL"}
+        ${WHISPER_MODEL:+--whisper-model "$WHISPER_MODEL"} \
+        ${DIAR_EXTRA_ARGS:-}
 
     banner "stage 1 done -- you can listen now"
     for d in "${analysis_dirs[@]}"; do
@@ -171,7 +175,7 @@ else
         --out-dir "$OUT_DIR" \
         ${SEP_MODEL:+--sep-model "$SEP_MODEL"} \
         ${WHISPER_MODEL:+--whisper-model "$WHISPER_MODEL"} \
-        $sep_extra
+        $sep_extra ${SEP_EXTRA_ARGS:-}
 
     banner "stage 2 done -- separation into 2 speakers is complete"
 fi

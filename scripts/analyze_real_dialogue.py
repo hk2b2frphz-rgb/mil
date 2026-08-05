@@ -224,13 +224,44 @@ def diarization_to_segments(
             {lab: round(totals[lab], 1) for lab in dropped},
         )
     rename = {label: chr(ord("A") + i) for i, label in enumerate(order[:num_speakers])}
-    segments = [
-        Segment(speaker=rename[label], start=s, end=e)
-        for label, s, e in raw
+    kept = [
+        (label, s, e) for label, s, e in raw
         if label in rename and (e - s) >= min_duration
     ]
+
+    # min_duration による破棄は「ところどころ音が欠ける」の原因になりうるので、
+    # 捨てた量を必ず出す。件数だけでなく秒数も出さないと、閾値を下げた効果を
+    # 判断できない。
+    short = [
+        (e - s) for label, s, e in raw
+        if label in rename and (e - s) < min_duration
+    ]
+    if short:
+        logger.warning(
+            "min_segment_sec=%.3f 未満の断片 %d 件(計 %.2f 秒 / 最長 %.3f 秒)を破棄。"
+            "欠損が気になる場合は --min-segment-sec を下げる。",
+            min_duration, len(short), sum(short), max(short),
+        )
+
+    segments = [Segment(speaker=rename[label], start=s, end=e) for label, s, e in kept]
     segments.sort(key=lambda seg: seg.start)
     return segments
+
+
+def merged_duration(spans: list[tuple[float, float]]) -> float:
+    """重なりを潰した区間長の合計。話者をまたいだ発話被覆の算出に使う。"""
+    total = 0.0
+    cur_lo = cur_hi = None
+    for lo, hi in sorted(spans):
+        if cur_hi is None or lo > cur_hi:
+            if cur_hi is not None:
+                total += cur_hi - cur_lo
+            cur_lo, cur_hi = lo, hi
+        else:
+            cur_hi = max(cur_hi, hi)
+    if cur_hi is not None:
+        total += cur_hi - cur_lo
+    return total
 
 
 def annotate_overlaps(segments: list[Segment]) -> list[tuple[float, float]]:
@@ -461,7 +492,13 @@ def process_wav(wav_path: Path, out_root: Path, args: argparse.Namespace) -> Pat
     raw = run_diarization(audio, sr, args.device)
     segments = diarization_to_segments(raw, args.min_segment_sec, args.num_speakers)
     overlaps = annotate_overlaps(segments)
-    logger.info("セグメント %d 件 / 重畳 %d 区間", len(segments), len(overlaps))
+    covered = merged_duration([(s.start, s.end) for s in segments])
+    logger.info(
+        "セグメント %d 件 / 重畳 %d 区間 / 発話被覆 %.1f 秒 (%.1f%%、残り %.1f 秒は無音扱い)",
+        len(segments), len(overlaps), covered,
+        100.0 * covered / total_sec if total_sec else 0.0,
+        total_sec - covered,
+    )
 
     # --- 分離結果を ASR より先に保存(遅い書き起こしを待たずに耳チェックできる) ---
     tracks = build_solo_tracks(audio, sr, segments)
@@ -503,8 +540,10 @@ def main() -> None:
     parser.add_argument("--whisper-model", default=None,
                         help="faster-whisper モデル名(既定: cuda なら large-v3, cpu なら small)")
     parser.add_argument("--device", default=None, help="cuda / cpu(既定: 自動判定)")
-    parser.add_argument("--min-segment-sec", type=float, default=0.15,
-                        help="これ未満のダイアライゼーション断片は捨てる")
+    parser.add_argument("--min-segment-sec", type=float, default=0.02,
+                        help="これ未満のダイアライゼーション断片は捨てる"
+                             "(既定 0.02: 欠損を減らす側に振っている。誤検出の"
+                             "断片が増えたら上げる)")
     parser.add_argument("--skip-asr", action="store_true",
                         help="書き起こしを省略して切り出しだけ素早く確認する")
     args = parser.parse_args()
