@@ -42,21 +42,28 @@ apply_pattern() {
     local pattern="$1"
     clear_hp_env
 
-    # 2e-6 / 1200 steps left the run undertrained: eval loss was still falling
-    # at the end, and the fixed opening greeting -- a single ~3s decision per
-    # sample, unlike voice and aizuchi which get signal on every frame -- never
-    # got installed at all while the broader style transferred fine. 5e-6 with
-    # 2400 steps is the same amount of movement as 2e-6 for ~3600 steps at this
-    # constant LR, at a shorter walltime.
-    HP_LR=5e-6
+    # Baseline is now the kyutai example (moshi-finetune/example/moshi_7B.yaml)
+    # verbatim, except duration_sec (see below).
+    #
+    # We had drifted: rank 32 against the example's 128, batch 8 against 16, lr
+    # raised to 5e-6, and warmup_constant instead of the upstream one_cycle. The
+    # LR was raised to get the fixed opening greeting to stick; it did not, and
+    # the greeting instead came out as a degenerate repeated syllable while the
+    # timing and voice were fine. That points at adapter capacity rather than
+    # step count, and rank 32 was the largest single deviation from the example.
+    # So: go back to the published combination and re-measure from there,
+    # re-applying deviations one at a time instead of carrying four at once.
+    HP_LR=2e-6
     HP_WEIGHT_DECAY=0.1
     HP_PCT_START=0.05
-    HP_LR_SCHEDULER=warmup_constant
-    HP_LORA_RANK=32
+    # No HP_LR_SCHEDULER: the example does not set one, so this falls through to
+    # the upstream one_cycle default. warmup_constant is a local addition.
+    HP_LORA_RANK=128
     HP_LORA_SCALING=2.0
-    HP_BATCH_SIZE=8
+    HP_BATCH_SIZE=16
     HP_NUM_MICROBATCHES=1
-    HP_MAX_STEPS=2400
+    HP_MAX_STEPS=2000
+    # The one value deliberately kept away from the example (which uses 100).
     # Set explicitly (rather than left to the experiment's config.yaml) so a
     # dialogue is never split into multiple training samples: moshi-finetune
     # crops duration_sec per sample, and any chunk after the first starts
@@ -65,28 +72,30 @@ apply_pattern() {
     # for a single 240s outlier, which is not worth padding every other
     # sample for.
     HP_DURATION_SEC=170
-    HP_CKPT_FREQ=120
-    HP_EVAL_FREQ=60
-    HP_LOG_FREQ=5
-    # Early stopping on eval loss, counted in evaluations: 6 x eval_freq = 360
+    HP_CKPT_FREQ=100
+    HP_EVAL_FREQ=100
+    HP_LOG_FREQ=1
+    # Early stopping on eval loss, counted in evaluations: 6 x eval_freq = 600
     # steps without improvement before stopping. Generous on purpose -- the LoRA
     # runs have been undertrained rather than overfitted, so this is a ceiling
     # that stops a run once it is genuinely flat, not a tight leash.
+    # The example has no equivalent (it sets do_eval: false); this and
+    # keep_best_only are local additions kept on top of the example's values.
     HP_EARLY_STOPPING_PATIENCE=6
     HP_EARLY_STOPPING_MIN_DELTA=0.001
 
     case "$pattern" in
-        # h01/h01_long/lr_* predate the 5e-6 default and pin their own LR (and
-        # step count) so a rerun reproduces the run that was originally made
-        # under that name instead of silently inheriting the new baseline.
-        h01) HP_LR=2e-6 ;;                           # fixed 2e-6 after 5% warmup,
-                                                      # 2400 steps (now the default
-                                                      # step count)
-        h01_long) HP_LR=2e-6; HP_MAX_STEPS=3600 ;;   # h01 with even more exposure
-        h02) HP_LR=5e-6 ;;                           # higher learning rate (== current default)
+        # These patterns pin their own values so a rerun reproduces the run made
+        # under that name rather than silently inheriting a changed baseline.
+        # Everything they do not pin now comes from the kyutai example, so a
+        # pattern re-run after the baseline change is NOT comparable to the same
+        # pattern run before it -- use a fresh RUN_ID.
+        h01) HP_LR=2e-6 ;;                           # == the example LR (now also the default)
+        h01_long) HP_LR=2e-6; HP_MAX_STEPS=3600 ;;   # h01 with more exposure
+        h02) HP_LR=5e-6 ;;                           # higher learning rate
         h03) HP_LR=1e-6 ;;                           # lower learning rate
-        h04) HP_LORA_RANK=64 ;;                      # larger adapter
-        h05) HP_LORA_RANK=16 ;;                      # smaller adapter
+        h04) HP_LORA_RANK=64 ;;                      # smaller adapter than the example's 128
+        h05) HP_LORA_RANK=16 ;;                      # much smaller adapter
         h06) HP_LORA_SCALING=1.0 ;;                  # lower LoRA alpha/r
         h07) HP_LORA_SCALING=4.0 ;;                  # higher LoRA alpha/r
         h08) HP_BATCH_SIZE=4; HP_NUM_MICROBATCHES=2 ;; # same effective batch, lower per-step memory
