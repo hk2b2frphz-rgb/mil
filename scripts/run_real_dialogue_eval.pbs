@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N real_dialogue_eval
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# 実対話リプレイ評価のサーバ側実行。OpenAI/Azure API は一切呼ばない。
+#
+# 前提: 対象の対話ディレクトリで以下が済んでいること。
+#   1) scripts/run_real_dialogue_analysis.pbs    (ダイアライゼーション)
+#   2) scripts/run_real_dialogue_separation.pbs  (音源分離 + 再書き起こし)
+#   3) counselor_A.txt か counselor_B.txt を置く
+#   4) <話者>_segments_review.tsv の keep 列で間引く
+#
+# ベースモデル:
+#   qsub -v 'MODEL_ID=base,ANALYSIS_DIRS=data/real_dialogue/pilot/dialogue1' \
+#     scripts/run_real_dialogue_eval.pbs
+#
+# merge 済み LoRA / export 済み full-FT:
+#   qsub -v 'MODEL_ID=lora_h01,MODEL_WEIGHT=/path/model.safetensors,ANALYSIS_DIRS=data/real_dialogue/pilot/dialogue1' \
+#     scripts/run_real_dialogue_eval.pbs
+#
+# 複数対話をまとめて 1 データセットにする場合はスペース区切り。qsub -v は値中の
+# カンマを変数区切りとして解釈するため、ここは必ずスペースで渡すこと:
+#   qsub -v 'MODEL_ID=base,ANALYSIS_DIRS=data/real_dialogue/pilot/d1 data/real_dialogue/pilot/d2' \
+#     scripts/run_real_dialogue_eval.pbs
+#
+# 主な上書き:
+#   REAL_CONTEXT_SEC=30        評価点の手前に付ける文脈の長さ。開ループの
+#                              トレードオフを動かす唯一のつまみ。値を変えたら
+#                              必ず別 RUN_ID にすること(混ぜると比較が壊れる)。
+#   REAL_TASKS=backchannel,pause_handling,smooth_turn_taking
+#   REAL_CASES_PER_TASK=1      スモーク(各タスク先頭 N 件だけ)
+#   REAL_SEEDS=0,1,2
+#   REAL_TAIL_SEC=8
+#   REAL_BC_TOLERANCE_SEC=1.5  相槌一致とみなす開始時刻の許容差
+#   MODEL_CONFIG=/path/moshi_lm_kwargs.json
+#                              (MODEL_WEIGHT の隣にあれば自動検出されるので通常不要)
+#
+# 合成 Full-Duplex-Bench-JA (scripts/run_full_duplex_eval.pbs) とは別トラック。
+# 開ループ・非 v1.5 プロトコルなので、両者のスコアを同じ表に並べてはいけない。
+# 詳細は docs/real_dialogue_evaluation.md を参照。
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+MODEL_ID="${MODEL_ID:?Set MODEL_ID (e.g. base, lora_h01, full_f01)}"
+ANALYSIS_DIRS="${ANALYSIS_DIRS:?Set ANALYSIS_DIRS to one or more separated dialogue dirs}"
+
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+export RUN_ID="${RUN_ID:-${MODEL_ID}_${JOB_ID_SHORT}}"
+export MODEL_ID ANALYSIS_DIRS
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export HALF="${HALF:-1}"
+export REAL_CONTEXT_SEC="${REAL_CONTEXT_SEC:-30}"
+export REAL_TASKS="${REAL_TASKS:-all}"
+export REAL_SEEDS="${REAL_SEEDS:-0}"
+export REAL_TAIL_SEC="${REAL_TAIL_SEC:-8}"
+export REAL_BC_TOLERANCE_SEC="${REAL_BC_TOLERANCE_SEC:-1.5}"
+
+# Disable Triton / torch.compile -- V100 lacks support for many Triton kernels.
+export TORCHINDUCTOR_DISABLE=1
+export NO_TORCH_COMPILE="${NO_TORCH_COMPILE:-1}"
+export TORCH_COMPILE_DISABLE=1
+
+# 人手の前工程が終わっていないまま流すと、間引き無しの全セグメントで
+# データセットが出来てしまい、しかも普通に完走する。ここで落とす。
+for dir in $ANALYSIS_DIRS; do
+    if [[ ! -d "$dir" ]]; then
+        echo "ERROR: analysis dir not found: $dir" >&2
+        exit 1
+    fi
+    if [[ ! -f "$dir/timeline_separated.jsonl" ]]; then
+        echo "ERROR: $dir/timeline_separated.jsonl がありません。" >&2
+        echo "       先に scripts/run_real_dialogue_separation.pbs を実行してください。" >&2
+        exit 1
+    fi
+    marker_count=$(find "$dir" -maxdepth 1 -name 'counselor_*.txt' | wc -l)
+    if [[ "$marker_count" -ne 1 ]]; then
+        echo "ERROR: $dir の相談員マーカーが $marker_count 個です(1 個である必要があります)。" >&2
+        echo "       counselor_A.txt か counselor_B.txt をどちらか一方だけ置いてください。" >&2
+        exit 1
+    fi
+done
+
+mkdir -p experiments/pbs_logs
+exec > >(tee -a "experiments/pbs_logs/real_dialogue_${RUN_ID}.log") 2>&1
+
+echo "job_id:       ${PBS_JOBID:-n/a}"
+echo "queue:        xvn_s"
+echo "host:         $(hostname)"
+echo "workdir:      $(pwd)"
+echo "run_id:       $RUN_ID"
+echo "model_id:     $MODEL_ID"
+echo "analysis:     $ANALYSIS_DIRS"
+echo "context_sec:  $REAL_CONTEXT_SEC"
+echo "cuda:         $CUDA_VISIBLE_DEVICES"
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+fi
+
+bash scripts/run_real_dialogue_eval.sh

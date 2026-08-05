@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N real_dialogue_sep
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#PBS -V
+
+# 実対話 1ch WAV のステージ2: 音源分離 + 分離トラックでの再書き起こし
+# (scripts/separate_real_dialogue.py)。
+#
+# ステージ1 (scripts/run_real_dialogue_analysis.pbs) を同じ OUT_DIR で
+# 済ませてあることが前提。timeline.jsonl を分離チャネルの帰属判定に使う。
+#
+# 必須:
+#   qsub -v 'WAVS=/path/dialogue1.wav,OUT_DIR=data/real_dialogue/pilot' \
+#     scripts/run_real_dialogue_separation.pbs
+#
+# 任意:
+#   SEP_MODEL=speechbrain/sepformer-whamr16k
+#   WHISPER_MODEL=large-v3
+#   EXTRA_ARGS="--skip-asr"        (分離結果だけ先に聴く)
+#   SEP_UV_WITH="--with torch==2.5.1"
+#
+# ステージ1 と同じく、分離も独立した uv env で回す。SpeechBrain は本体 env の
+# transformers/numpy と衝突しうるため。
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+WAVS="${WAVS:?Set WAVS to one or more input wav paths (comma separated, glob ok)}"
+OUT_DIR="${OUT_DIR:?Set OUT_DIR to the same directory used by the stage-1 analysis}"
+
+if [[ ! -d "$OUT_DIR" ]]; then
+    echo "ERROR: OUT_DIR does not exist: $OUT_DIR" >&2
+    echo "       Run scripts/run_real_dialogue_analysis.pbs first." >&2
+    exit 1
+fi
+
+IFS=',' read -r -a wav_patterns <<< "$WAVS"
+wav_files=()
+for pat in "${wav_patterns[@]}"; do
+    for f in $pat; do
+        wav_files+=("$f")
+    done
+done
+if [[ ${#wav_files[@]} -eq 0 ]]; then
+    echo "ERROR: no wav files matched: $WAVS" >&2
+    exit 1
+fi
+
+LOG_FILE="${LOG_FILE:-$OUT_DIR/separation.log}"
+{
+    echo "===== real dialogue separation (stage 2) ====="
+    echo "job:     ${PBS_JOBID:-manual}"
+    echo "started: $(date -Is)"
+    echo "inputs:  ${wav_files[*]}"
+    echo "out_dir: $OUT_DIR"
+    echo "model:   ${SEP_MODEL:-speechbrain/sepformer-whamr16k}"
+} | tee "$LOG_FILE"
+
+export PYTHONUNBUFFERED=1
+
+# shellcheck disable=SC2086
+uv run --no-project --python 3.11 \
+    --index-url https://download.pytorch.org/whl/cu121 \
+    --extra-index-url https://pypi.org/simple \
+    --with 'torch==2.5.1' \
+    --with 'torchaudio==2.5.1' \
+    --with 'speechbrain>=1.0.0' \
+    --with faster-whisper \
+    --with librosa \
+    --with soundfile \
+    --with 'numpy<2' \
+    ${SEP_UV_WITH:-} \
+    python -u scripts/separate_real_dialogue.py \
+    "${wav_files[@]}" \
+    --out-dir "$OUT_DIR" \
+    ${SEP_MODEL:+--sep-model "$SEP_MODEL"} \
+    ${WHISPER_MODEL:+--whisper-model "$WHISPER_MODEL"} \
+    ${EXTRA_ARGS:-} 2>&1 | tee -a "$LOG_FILE"
+
+echo "done: $OUT_DIR (log: $LOG_FILE)" | tee -a "$LOG_FILE"
+echo ""
+echo "次の手順(人手):"
+echo "  1) segments_separated/ を聴いて分離品質を確認"
+echo "  2) 相談員側を決めて counselor_A.txt か counselor_B.txt を置く"
+echo "  3) <話者>_segments_review.tsv の keep 列を 0 にして間引く"
+echo "  4) MODEL_ID=... ANALYSIS_DIRS=... bash scripts/run_real_dialogue_eval.sh"

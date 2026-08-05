@@ -2,6 +2,11 @@
 
 For durable judge resumption and the OpenAI-only asynchronous Batch API workflow, see [`evaluation_hardening.md`](evaluation_hardening.md).
 
+For the separate real-dialogue replay track (real user audio as input, the real
+counselor's response as the reference), see
+[`real_dialogue_evaluation.md`](real_dialogue_evaluation.md). Its scores are not
+comparable with the synthetic Full-Duplex-Bench-JA numbers below.
+
 This project evaluates Japanese Moshi dialogue models in two separated phases:
 
 1. **Server / GPU phase**
