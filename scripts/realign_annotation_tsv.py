@@ -5,6 +5,9 @@
 前提: **書き起こし・話者ラベル・発話の順番は正しく、時刻だけが合っていない**。
 その条件なら時刻は音声から復元できる。テキストが正、時刻はその出力になる。
 
+**Start / End は空でよい**。時刻はこれから作るものなので、空の行も、End <= Start
+の行も、形式が壊れた行も止めずに読む(警告だけ出して作り直す)。
+
   1. faster-whisper で全体を書き起こす(単語タイムスタンプ付き)。
   2. 人手 TSV と ASR の**読み**(pyopenjtalk で katakana 化)を話者ごとに
      文字列アライメントし、一意な k-gram 一致を anchor にして概算時刻を出す。
@@ -46,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import csv
 import json
 import logging
 import re
@@ -65,23 +69,27 @@ for _extra in (REPO_ROOT, REPO_ROOT / "scripts", REPO_ROOT / "eval"):
 
 try:
     from scripts.build_test_wav_from_tsv import (  # noqa: E402
+        _DEFAULT_ORDER,
         _FNAME_RE,
         _STRIP_RE,
-        Utterance,
+        AnnotationError,
         annotation_for,
         collect_inputs,
-        read_annotation,
+        detect_columns,
+        parse_timestamp,
         require_annotations,
         write_tsv,
     )
 except ImportError:  # scripts/ を直接 sys.path に持つ場合(直接実行・環境差)
     from build_test_wav_from_tsv import (  # type: ignore[no-redef]  # noqa: E402
+        _DEFAULT_ORDER,
         _FNAME_RE,
         _STRIP_RE,
-        Utterance,
+        AnnotationError,
         annotation_for,
         collect_inputs,
-        read_annotation,
+        detect_columns,
+        parse_timestamp,
         require_annotations,
         write_tsv,
     )
@@ -107,22 +115,105 @@ _SEC_PER_KANA = 0.12
 
 @dataclass
 class Line:
-    """アノテーション 1 行と、その再アライメント結果。"""
+    """アノテーション 1 行と、その再アライメント結果。
+
+    old_start / old_end は None を取る。**時刻は空でもよい**(これから作る
+    ものなので)。正しいのは話者・書き起こし・並び順のほう。
+    """
 
     index: int          # TSV 上の並び順(0 始まり)
-    utt: Utterance
+    lineno: int         # TSV の行番号(報告用)
+    speaker: str
+    text: str
     reading: str
+    old_start: float | None = None
+    old_end: float | None = None
     est_start: float | None = None   # anchor 補間による概算
     est_end: float | None = None
     new_start: float = 0.0
     new_end: float = 0.0
     coverage: float = 0.0            # anchor が張れた文字の割合
-    method: str = "none"             # anchor / fa / fa+vad / original
+    method: str = "none"             # anchor / fa / fa+vad / original / filled
     flags: tuple[str, ...] = ()
 
     @property
     def confident(self) -> bool:
         return not self.flags and self.coverage > 0.0
+
+    @property
+    def has_old(self) -> bool:
+        return self.old_start is not None and self.old_end is not None
+
+
+def read_annotation_loose(path: Path) -> list[Line]:
+    """アノテーション TSV を、時刻が空でも欠けていても読む。
+
+    build_test_wav_from_tsv.read_annotation は正しい TSV を前提に、時刻が空なら
+    行番号を出して停止する。あれは切り出し用なので正しい。こちらは**時刻を
+    作り直す側**なので、空でも End <= Start でも警告だけ出して先へ進む。
+    """
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.reader(f, delimiter="\t"))
+    rows = [row for row in rows if any(cell.strip() for cell in row)]
+    if not rows:
+        raise SystemExit(f"{path}: 空です。")
+
+    columns = detect_columns(rows[0])
+    if columns is not None:
+        body, first_lineno = rows[1:], 2
+    else:
+        columns = {role: i for i, role in enumerate(_DEFAULT_ORDER)}
+        body, first_lineno = rows, 1
+        logger.info(
+            "ヘッダ行が無いので Speaker / Transcription / Start / End の順とみなします。"
+        )
+
+    def cell(row: list[str], role: str) -> str:
+        i = columns.get(role, -1)
+        return row[i].strip() if 0 <= i < len(row) else ""
+
+    def optional_time(row: list[str], role: str, lineno: int, label: str) -> float | None:
+        raw = cell(row, role)
+        if not raw:
+            return None
+        try:
+            return parse_timestamp(raw, lineno, label)
+        except AnnotationError as exc:
+            logger.warning("%s 時刻は作り直すので続けます。", exc)
+            return None
+
+    lines: list[Line] = []
+    for offset, row in enumerate(body):
+        lineno = first_lineno + offset
+        start = optional_time(row, "start", lineno, "Start")
+        end = optional_time(row, "end", lineno, "End")
+        if start is not None and end is not None and end <= start:
+            logger.warning(
+                "%d 行目: End <= Start です。時刻は作り直すので無視します。", lineno
+            )
+            start = end = None
+        text = cell(row, "text")
+        lines.append(Line(
+            index=len(lines),
+            lineno=lineno,
+            speaker=cell(row, "speaker"),
+            text=text,
+            reading=to_reading(text),
+            old_start=start,
+            old_end=end,
+        ))
+
+    if not any(l.speaker for l in lines):
+        raise SystemExit(
+            f"{path}: 話者ラベルが 1 行も読めません。列の並びを確認してください。"
+        )
+    missing = sum(1 for l in lines if not l.has_old)
+    if missing:
+        logger.info(
+            "%s: 時刻の無い(または読めない)行が %d 行あります。作り直します。",
+            path.name, missing,
+        )
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -501,8 +592,8 @@ def label_text(line: Line, use_new: bool = True) -> str:
     Audacity のラベルはタブ区切りなので、テキスト中のタブ・改行は潰す。
     """
     flags = f"[{'/'.join(line.flags)}]" if (use_new and line.flags) else ""
-    text = _LABEL_SANITIZE.sub(" ", line.utt.text).strip()
-    return f"{line.utt.speaker}{flags}: {text}"
+    text = _LABEL_SANITIZE.sub(" ", line.text).strip()
+    return f"{line.speaker}{flags}: {text}"
 
 
 def write_label_file(path: Path, rows: list[tuple[float, float, str]]) -> None:
@@ -533,8 +624,8 @@ def write_audacity_labels(out_dir: Path, lines: list[Line]) -> list[str]:
             return
         rows = [
             (
-                (l.new_start if use_new else l.utt.start),
-                (l.new_end if use_new else l.utt.end),
+                (l.new_start if use_new else l.old_start),
+                (l.new_end if use_new else l.old_end),
                 label_text(l, use_new),
             )
             for l in picked
@@ -544,12 +635,13 @@ def write_audacity_labels(out_dir: Path, lines: list[Line]) -> list[str]:
         written.append(f"{name}.txt")
 
     dump("all", lines)
-    for speaker in sorted({l.utt.speaker for l in lines}):
+    for speaker in sorted({l.speaker for l in lines}):
         safe = _FNAME_RE.sub("_", speaker) or "speaker"
-        dump(safe, [l for l in lines if l.utt.speaker == speaker])
+        dump(safe, [l for l in lines if l.speaker == speaker])
     dump("flagged", [l for l in lines if l.flags])
     # 旧ラベルも出しておく。新旧を別トラックで並べれば、ずれ方が一目で分かる。
-    dump("original", lines, use_new=False)
+    # 元の時刻が空の行はここには出ない(出しようがない)。
+    dump("original", [l for l in lines if l.has_old], use_new=False)
     return written
 
 
@@ -559,11 +651,12 @@ def diagnose(lines: list[Line]) -> dict:
     定数オフセットや線形ドリフト(録音の頭切れ、サンプリングレート違い)なら
     原因が別にあるということなので、そちらを直したほうが確実に直る。
     """
-    usable = [l for l in lines if l.confident]
+    # 元の時刻が無い行は比べようがないので外す。
+    usable = [l for l in lines if l.confident and l.has_old]
     if len(usable) < 3:
         return {"kind": "unknown", "usable_lines": len(usable)}
-    old = np.array([l.utt.start for l in usable], dtype=float)
-    delta = np.array([l.new_start - l.utt.start for l in usable], dtype=float)
+    old = np.array([l.old_start for l in usable], dtype=float)
+    delta = np.array([l.new_start - l.old_start for l in usable], dtype=float)
     slope, intercept = np.polyfit(old, delta, 1)
     residual = delta - (slope * old + intercept)
     residual_std = float(np.std(residual))
@@ -632,10 +725,10 @@ def write_review_clips(
         hi = min(audio.size, int((line.new_end + pad) * sr))
         if hi <= lo:
             continue
-        text = _FNAME_RE.sub("", _STRIP_RE.sub("", line.utt.text))[:16]
+        text = _FNAME_RE.sub("", _STRIP_RE.sub("", line.text))[:16]
         flag = "_" + "-".join(line.flags) if line.flags else ""
         name = (
-            f"{line.index:04d}_{line.utt.speaker}"
+            f"{line.index:04d}_{line.speaker}"
             f"_{int(line.new_start // 60):02d}m{line.new_start % 60:04.1f}s"
             f"_cov{int(round(line.coverage * 100)):03d}{flag}_{text}.wav"
         )
@@ -653,13 +746,9 @@ def process_wav(
     holder: WhisperHolder, refiner: Refiner,
 ) -> dict:
     annotation = args.annotation or annotation_for(wav_path)
-    # read_annotation は start でソートするが、いま start は信用できない。
-    # 正しいのは TSV の並び順なので、行番号で並べ直す。
-    utterances = sorted(read_annotation(annotation), key=lambda u: u.lineno)
-    lines = [
-        Line(index=i, utt=u, reading=to_reading(u.text))
-        for i, u in enumerate(utterances)
-    ]
+    # 時刻でソートしない。いま start は信用できず、正しいのは TSV の並び順。
+    # 時刻は空でもよい(read_annotation_loose がそのまま None で読む)。
+    lines = read_annotation_loose(annotation)
 
     audio, sr = sf.read(wav_path, dtype="float32")
     if audio.ndim > 1:
@@ -677,10 +766,10 @@ def process_wav(
     if not asr_text:
         raise SystemExit(f"{wav_path.name}: ASR から照合できる読みが取れませんでした。")
 
-    speakers = sorted({l.utt.speaker for l in lines})
+    speakers = sorted({l.speaker for l in lines})
     anchor_total = 0
     for speaker in speakers:
-        group = [l for l in lines if l.utt.speaker == speaker]
+        group = [l for l in lines if l.speaker == speaker]
         found = coarse_align_speaker(group, asr_text, asr_times, args.kgram)
         anchor_total += found
         logger.info("  %s: %d 発話 / anchor %d", speaker, len(group), found)
@@ -693,9 +782,14 @@ def process_wav(
 
     for line in lines:
         if line.est_start is None or line.est_end is None:
-            line.new_start = line.utt.start
-            line.new_end = line.utt.end
-            line.method = "original"
+            # 照合できる読みが取れなかった行(記号だけ等)。元の時刻があれば
+            # それを残し、無ければ後段で前後の行から埋める。
+            if line.has_old:
+                line.new_start = float(line.old_start)
+                line.new_end = float(line.old_end)
+                line.method = "original"
+            else:
+                line.method = "pending"
             line.flags = ("NOTEXT",)
             continue
 
@@ -706,7 +800,7 @@ def process_wav(
             flags.append("LOWCOV")
 
         if not args.check_only and args.refine:
-            refined = refiner.refine(audio, sr, line.utt.text, start, end)
+            refined = refiner.refine(audio, sr, line.text, start, end)
             if refined is not None:
                 start, end = refined
                 method = "fa"
@@ -729,9 +823,28 @@ def process_wav(
         line.method = method
         line.flags = tuple(flags)
 
+    # 読みも元の時刻も無い行を、前後の確定した行のあいだへ置く。位置は仮なので
+    # NOTEXT の印が付いたまま残る(耳と目で入れ直す前提)。
+    for i, line in enumerate(lines):
+        if line.method != "pending":
+            continue
+        before = max(
+            (l.new_end for l in lines[:i] if l.method != "pending"), default=0.0
+        )
+        after = next(
+            (l.new_start for l in lines[i + 1:] if l.method != "pending"), total_sec
+        )
+        start = min(before + 0.05, max(0.0, total_sec - 0.25))
+        end = start + 0.2
+        if after > start + 0.1:
+            end = min(end, after - 0.05)
+        line.new_start = start
+        line.new_end = max(end, start + 0.05)
+        line.method = "filled"
+
     # 同一話者内で発話が重ならないよう最小限だけ均す(重なるのは異話者間だけ)。
     for speaker in speakers:
-        group = [l for l in lines if l.utt.speaker == speaker]
+        group = [l for l in lines if l.speaker == speaker]
         for previous, current in zip(group, group[1:]):
             if current.new_start < previous.new_end:
                 middle = (previous.new_end + current.new_start) / 2
@@ -744,19 +857,26 @@ def process_wav(
     # 確信度の低い行を元の時刻へ戻す運用も選べる。既定は推定値のまま(印を残す)。
     if args.fallback == "original":
         for line in lines:
-            if line.flags:
-                line.new_start = line.utt.start
-                line.new_end = line.utt.end
+            # 元の時刻が無い行は戻す先が無いので、推定値のまま残す。
+            if line.flags and line.has_old:
+                line.new_start = float(line.old_start)
+                line.new_end = float(line.old_end)
                 line.method = "original"
+
+    def number(value: float | None, spec: str = "{:.3f}") -> str:
+        """元の時刻が無い行は空欄で出す(0.000 と書くと嘘になる)。"""
+        return "" if value is None else spec.format(value)
 
     report_rows = [
         [
-            str(l.index), str(l.utt.lineno), l.utt.speaker, str(len(l.reading)),
-            f"{l.utt.start:.3f}", f"{l.utt.end:.3f}",
+            str(l.index), str(l.lineno), l.speaker, str(len(l.reading)),
+            number(l.old_start), number(l.old_end),
             f"{l.new_start:.3f}", f"{l.new_end:.3f}",
-            f"{l.new_start - l.utt.start:+.3f}", f"{l.new_end - l.utt.end:+.3f}",
-            f"{l.utt.end - l.utt.start:.3f}", f"{l.new_end - l.new_start:.3f}",
-            f"{l.coverage:.2f}", l.method, ",".join(l.flags), l.utt.text,
+            number(None if l.old_start is None else l.new_start - l.old_start, "{:+.3f}"),
+            number(None if l.old_end is None else l.new_end - l.old_end, "{:+.3f}"),
+            number(None if not l.has_old else l.old_end - l.old_start),
+            f"{l.new_end - l.new_start:.3f}",
+            f"{l.coverage:.2f}", l.method, ",".join(l.flags), l.text,
         ]
         for l in lines
     ]
@@ -777,7 +897,7 @@ def process_wav(
             out_dir / "aligned.tsv",
             ["Speaker", "Transcription", "Start", "End"],
             [
-                [l.utt.speaker, l.utt.text,
+                [l.speaker, l.text,
                  format_time(l.new_start), format_time(l.new_end)]
                 for l in lines
             ],
@@ -793,6 +913,7 @@ def process_wav(
         "annotation": str(annotation),
         "audio_sec": round(total_sec, 1),
         "lines": len(lines),
+        "lines_without_old_time": sum(1 for l in lines if not l.has_old),
         "speakers": speakers,
         "anchors": anchor_total,
         "coverage_median": round(coverage_median, 3),
