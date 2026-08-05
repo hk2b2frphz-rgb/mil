@@ -3,19 +3,26 @@
 人手アノテーション TSV から User 側のテスト音声を切り出す。
 
 ダイアライゼーションも ASR も使わない。正解は人が付けた TSV であり、この
-スクリプトはそれを WAV に切り出すだけ。**TSV が正、WAV はその出力**。
+スクリプトはそれを WAV に切り出すだけ。**アノテーションが正、WAV はその出力**。
 
-アノテーション TSV は音声と同じ名前で拡張子だけ .tsv にしたもの:
+アノテーションは音声と同じ名前で拡張子だけ .tsv か .txt にしたもの:
 
-    /path/dialogue1.wav  ->  /path/dialogue1.tsv
+    /path/dialogue1.wav  ->  /path/dialogue1.tsv  または  /path/dialogue1.txt
 
-列は Speaker / Transcription / Start / End。話者ラベルは Staff と User。
+**Audacity のラベル書き出し(.txt)をそのまま読める。** 話者はコロンの前。
+
+    15.500000	21.200000	User: もしもし、あの、ちょっと相談したいことがあって
+    21.000000	21.600000	Staff: はい
+
+TSV の列は Speaker / Transcription / Start / End。話者ラベルは Staff と User。
 時刻は 00:00:15.500 形式(HH:MM:SS.mmm)。ヘッダ行はあってもなくてもよく、
 無ければこの順に並んでいるものとして読む。
 
     Speaker	Transcription	Start	End
     User	もしもし、あの、ちょっと相談したいことがあって	00:00:15.500	00:00:21.200
     Staff	はい	00:00:21.000	00:00:21.600
+
+どちらの形式かは拡張子ではなく**中身**で見分ける(先頭 2 列が数値ならラベル)。
 
 「はい」のような相槌も 1 発話として書かれているので、既定では**記号を除いた
 文字数が 5 未満の発話を落とす**(--min-chars)。落としたものは dropped.tsv に
@@ -47,6 +54,7 @@ import csv
 import json
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -86,6 +94,11 @@ _COLUMN_ALIASES = {
     "終了": "end",
 }
 _DEFAULT_ORDER = ["speaker", "text", "start", "end"]
+
+# アノテーションとして受け付ける拡張子。.txt は Audacity のラベル書き出し。
+ANNOTATION_SUFFIXES = (".tsv", ".txt")
+# Audacity のラベルは「話者: 本文」。全角コロンも受ける。
+_LABEL_COLONS = (":", "：")
 
 
 @dataclass
@@ -144,29 +157,127 @@ def detect_columns(row: list[str]) -> dict[str, int] | None:
     return None
 
 
+def is_number(value: str) -> bool:
+    try:
+        float(value.strip().replace(",", "."))
+    except ValueError:
+        return False
+    return True
+
+
+def split_label(label: str) -> tuple[str, str]:
+    """Audacity のラベル「話者: 本文」を割る。
+
+    最初のコロンでしか切らないので、本文に入った「10:30 に」のようなコロンは
+    そのまま残る。全角コロンも受ける。
+    """
+    found = [label.find(colon) for colon in _LABEL_COLONS if colon in label]
+    if not found:
+        return "", label.strip()
+    at = min(found)
+    return label[:at].strip(), label[at + 1:].strip()
+
+
+def is_label_format(rows: list[list[str]]) -> bool:
+    """Audacity のラベル書き出しかどうか。
+
+    ラベルは「開始秒 終了秒 本文」の 3 列。アノテーション TSV は 1 列目が話者
+    なので、先頭 2 列が数値かどうかで割り切れる。
+    """
+    for row in rows:
+        if row and row[0].lstrip().startswith("\\"):
+            continue  # スペクトル選択付きで書き出したときの付随行
+        return len(row) >= 3 and is_number(row[0]) and is_number(row[1])
+    return False
+
+
+def read_label_annotation(
+    numbered: list[tuple[int, list[str]]], path: Path
+) -> list[Utterance]:
+    """Audacity のラベルを Utterance にする。
+
+        15.500000	21.200000	User: もしもし、あの、相談したいことがありまして
+
+    話者はコロンの前。ここで拾えなかった行を黙って落とすと、テストデータが
+    静かに数発話ぶん足りない状態になるので、行番号付きで報告して止める。
+    """
+    utterances: list[Utterance] = []
+    errors: list[str] = []
+    for lineno, row in numbered:
+        if row and row[0].lstrip().startswith("\\"):
+            continue  # 周波数の付随行
+        if len(row) < 3:
+            errors.append(
+                f"{lineno} 行目: 列が {len(row)} 個しかありません(3 個必要)。 内容: {row}"
+            )
+            continue
+        try:
+            start = parse_timestamp(row[0], lineno, "開始")
+            end = parse_timestamp(row[1], lineno, "終了")
+        except AnnotationError as exc:
+            errors.append(str(exc))
+            continue
+        if end <= start:
+            errors.append(
+                f"{lineno} 行目: 終了 <= 開始 です ({row[0]!r} -> {row[1]!r})。"
+                "点ラベル(長さ 0)は区間にしてください。"
+            )
+            continue
+        # ラベル本文にタブは入らないが、貼り付け由来で混ざっていても拾う。
+        speaker, text = split_label(" ".join(cell for cell in row[2:] if cell))
+        if not speaker:
+            errors.append(
+                f"{lineno} 行目: 話者がありません(「話者: 本文」の形): {row[2]!r}"
+            )
+            continue
+        if not text:
+            errors.append(f"{lineno} 行目: 書き起こしが空です: {row[2]!r}")
+            continue
+        utterances.append(
+            Utterance(speaker=speaker, text=text, start=start, end=end, lineno=lineno)
+        )
+
+    if errors:
+        for message in errors:
+            logger.error("%s", message)
+        raise SystemExit(
+            f"{path}: {len(errors)} 行に問題があります。直してから再実行してください。"
+        )
+    logger.info("%s: Audacity のラベルとして読みました。", path.name)
+    utterances.sort(key=lambda u: u.start)
+    return utterances
+
+
 def read_annotation(path: Path) -> list[Utterance]:
     if not path.is_file():
         raise SystemExit(
-            f"アノテーション TSV が見つかりません: {path}\n"
-            "音声と同じ名前で拡張子を .tsv にしたファイルを置いてください。"
+            f"アノテーションが見つかりません: {path}\n"
+            "音声と同じ名前で拡張子を .tsv か .txt にしたファイルを置いてください。"
         )
 
     with path.open("r", encoding="utf-8-sig", newline="") as f:
-        rows = list(csv.reader(f, delimiter="\t"))
+        raw_rows = list(csv.reader(f, delimiter="\t"))
 
-    rows = [r for r in rows if any(cell.strip() for cell in r)]
+    # 行番号は元のファイルのものを保つ(空行を飛ばしても報告がずれないように)。
+    numbered = [
+        (lineno, row) for lineno, row in enumerate(raw_rows, start=1)
+        if any(cell.strip() for cell in row)
+    ]
+    rows = [row for _, row in numbered]
     if not rows:
         raise SystemExit(f"{path}: 空です。")
 
+    # 中身で見分ける。拡張子ではなく形式が正。
+    if is_label_format(rows):
+        return read_label_annotation(numbered, path)
+
     columns = detect_columns(rows[0])
     if columns is not None:
-        body = rows[1:]
-        first_lineno = 2
+        body = numbered[1:]
         logger.info("ヘッダ行を検出: %s", {k: rows[0][v] for k, v in columns.items()})
     else:
         columns = {role: i for i, role in enumerate(_DEFAULT_ORDER)}
-        body = rows
-        first_lineno = 1
+        body = numbered
         logger.info(
             "ヘッダ行が無いので Speaker / Transcription / Start / End の順とみなします。"
         )
@@ -174,8 +285,7 @@ def read_annotation(path: Path) -> list[Utterance]:
     need = max(columns.values()) + 1
     utterances: list[Utterance] = []
     errors: list[str] = []
-    for offset, row in enumerate(body):
-        lineno = first_lineno + offset
+    for lineno, row in body:
         if len(row) < need:
             errors.append(
                 f"{lineno} 行目: 列が {len(row)} 個しかありません({need} 個必要)。"
@@ -277,8 +387,16 @@ DEFAULT_OUT_DIR = Path("data/test_data/real_dialogue")
 
 
 def annotation_for(wav_path: Path) -> Path:
-    """WAV に対応するアノテーション TSV(同じ名前で拡張子だけ .tsv)。"""
-    return wav_path.with_suffix(".tsv")
+    """WAV に対応するアノテーション(同じ名前で拡張子だけ .tsv か .txt)。
+
+    .txt は Audacity のラベル書き出し。両方あれば .tsv を採る。無いときは
+    .tsv のパスを返す(見つからない旨の報告に使う)。
+    """
+    for suffix in ANNOTATION_SUFFIXES:
+        candidate = wav_path.with_suffix(suffix)
+        if candidate.is_file():
+            return candidate
+    return wav_path.with_suffix(ANNOTATION_SUFFIXES[0])
 
 
 def collect_inputs(inputs: list[Path], recursive: bool) -> list[Path]:
@@ -328,10 +446,13 @@ def require_annotations(wavs: list[Path], override: Path | None) -> None:
     if not missing:
         return
     for wav in missing:
-        logger.error("%s に対応する %s がありません。", wav.name, annotation_for(wav).name)
+        logger.error(
+            "%s に対応する %s がありません(.txt でも可)。",
+            wav.name, annotation_for(wav).name,
+        )
     raise SystemExit(
-        f"アノテーション TSV が {len(missing)} 件足りません。"
-        "音声と同じ名前で拡張子を .tsv にしたファイルを隣に置いてください。"
+        f"アノテーションが {len(missing)} 件足りません。"
+        "音声と同じ名前で拡張子を .tsv か .txt にしたファイルを隣に置いてください。"
     )
 
 
@@ -339,9 +460,13 @@ def process_wav(wav_path: Path, out_root: Path, args: argparse.Namespace) -> dic
     annotation = args.annotation or annotation_for(wav_path)
     utterances = read_annotation(annotation)
 
-    labels = sorted({u.speaker for u in utterances})
+    # 件数付きで出す。1 件しかないラベルは綴り間違い(Usre など)が疑わしい。
+    counts = Counter(u.speaker for u in utterances)
+    labels = sorted(counts)
     logger.info(
-        "%s: %d 発話 / 話者ラベル %s", annotation.name, len(utterances), labels
+        "%s: %d 発話 / 話者ラベル %s",
+        annotation.name, len(utterances),
+        ", ".join(f"{label}:{counts[label]}" for label in labels),
     )
 
     matched = [u for u in utterances if u.speaker.lower() == args.speaker.lower()]
