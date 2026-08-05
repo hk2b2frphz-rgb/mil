@@ -59,20 +59,32 @@ import numpy as np
 import soundfile as sf
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-for _extra in (REPO_ROOT, REPO_ROOT / "eval"):
+for _extra in (REPO_ROOT, REPO_ROOT / "scripts", REPO_ROOT / "eval"):
     if str(_extra) not in sys.path:
         sys.path.insert(0, str(_extra))
 
-from scripts.build_test_wav_from_tsv import (  # noqa: E402
-    _FNAME_RE,
-    _STRIP_RE,
-    Utterance,
-    annotation_for,
-    collect_inputs,
-    read_annotation,
-    require_annotations,
-    write_tsv,
-)
+try:
+    from scripts.build_test_wav_from_tsv import (  # noqa: E402
+        _FNAME_RE,
+        _STRIP_RE,
+        Utterance,
+        annotation_for,
+        collect_inputs,
+        read_annotation,
+        require_annotations,
+        write_tsv,
+    )
+except ImportError:  # scripts/ を直接 sys.path に持つ場合(直接実行・環境差)
+    from build_test_wav_from_tsv import (  # type: ignore[no-redef]  # noqa: E402
+        _FNAME_RE,
+        _STRIP_RE,
+        Utterance,
+        annotation_for,
+        collect_inputs,
+        read_annotation,
+        require_annotations,
+        write_tsv,
+    )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -401,7 +413,10 @@ class Refiner:
     def get(self):
         if self._aligner is None and self._error is None:
             try:
-                from scripts.generate_qwen3_tts_data import ForcedAligner
+                try:
+                    from scripts.generate_qwen3_tts_data import ForcedAligner
+                except ImportError:
+                    from generate_qwen3_tts_data import ForcedAligner  # type: ignore
 
                 self._aligner = ForcedAligner(self._device, fallback_mode="skip")
                 self._aligner.load()
