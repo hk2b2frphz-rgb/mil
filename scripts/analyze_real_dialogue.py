@@ -1,22 +1,33 @@
 #!/usr/bin/env python3
 """
-1ch ロールプレイ実対話 WAV の聴取確認用分析(ステージ1: 分離なし)。
+1ch ロールプレイ実対話 WAV の分析とテスト入力の切り出し。
 
 Sortformer ダイアライゼーション + faster-whisper 書き起こしで話者タイムラインを
-作り、耳で確認できる WAV 群を出力する。音源分離(重畳区間の 2ch 化)は
-ステージ2として別スクリプトに分け、まず solo トラックと発話ごとの切り出しを
-聴いてダイアライゼーション精度を確認する想定。
+作り、耳で確認できる WAV 群と、テスト入力として使える塊単位の WAV を出力する。
+
+ダイアライゼーションは息継ぎごとに切るため、そのままではテスト入力として
+細かすぎる。そこで同一話者の連続発話をまとめ直した塊(Turn)を test_wav/ に
+出す。間に相手の相槌が挟まってもターンは切らない。
 
 入力 WAV ごとに <out_dir>/<wav_stem>/ 配下へ:
+  - test_wav/A/, test_wav/B/
+        【テスト入力】塊にまとめた WAV。切り出し元は solo トラックなので、
+        塊の途中に入る相手の相槌は無音になる。例:
+        0042_A_07m31.2s_12.4s_5seg_ov_それでですね.wav
+  - test_wav/turns.jsonl        塊のメタデータ
+  - test_wav/turns_review.tsv   人手で間引くレビュー表(keep 列、UTF-8 BOM)
   - speaker_A_solo.wav   話者Aの区間だけ残して他を無音化した確認用トラック
   - speaker_B_solo.wav   同・話者B
   - stereo_diarized.wav  L=話者A / R=話者B (重畳区間は両chに混合が残る)
   - segments/A/, segments/B/
-        発話ごとの切り出し WAV。ファイル名に通し番号・開始時刻・長さ・
-        重畳(ov)/相槌(aizuchi)フラグ・ASRテキスト先頭を入れる。例:
-        0042_07m31.2s_0.6s_ov_aizuchi_ええ.wav
-  - timeline.jsonl       {speaker, start, end, text, overlap_sec, is_aizuchi}
+        まとめる前の発話ごとの切り出し WAV(ダイアライゼーション精度の確認用)。
+        例: 0042_07m31.2s_0.6s_ov_aizuchi_ええ.wav
+  - timeline.jsonl       {speaker, start, end, text, overlap_sec, is_aizuchi, ...}
   - stats.json           相槌頻度・応答gap・重畳長の分布(合成側パラメータ校正用)
+
+Whisper が無音区間で吐く動画定型文(「ご視聴ありがとうございました」「次回予告」
+など)は test_wav から除外する。実際に喋られた音ではなく ASR の作話なので、
+残すと塊の境界ごと壊れる。timeline.jsonl には hallucination 印を付けて残す。
 
 使い方:
     uv run python scripts/analyze_real_dialogue.py 対話1.wav [対話2.wav ...] \
@@ -25,6 +36,9 @@ Sortformer ダイアライゼーション + faster-whisper 書き起こしで話
 ダイアライゼーションは nvidia/diar_streaming_sortformer_4spk-v2 (NeMo)。
 gated ではないので HF の同意・トークンは不要。ライセンスは CC-BY-4.0(商用可)。
 NeMo は既存依存 (nemo_toolkit[asr]) に含まれるため追加インストールも不要。
+
+注意: 1ch 録音なので、重畳区間には相手の声が残る(ファイル名の _ov)。完全に
+分けるには音源分離が要るが、本パイプラインでは扱わない。
 """
 
 from __future__ import annotations
@@ -94,6 +108,15 @@ AIZUCHI_MAX_SEC = 3.0
 # クリップ切り出し時に前後へ足すマージン(語頭・語尾の欠け防止)。
 CLIP_MARGIN_SEC = 0.08
 
+# --- テスト入力用の塊(Turn)まとめ ---
+# 同一話者の連続発話をこの秒数以下の間隔で繋ぐ。間に相手の相槌が入っていても
+# 繋ぐ(相槌でターンは切れないため)。
+TURN_GAP_SEC = 1.0
+# 1 塊の上限。これを超えたら区切る。テスト入力として長すぎると扱いにくい。
+TURN_MAX_SEC = 30.0
+# まとめた後にこの秒数未満の塊は test_wav に出さない。
+TURN_MIN_SEC = 0.5
+
 # 相槌パターン照合の前に除去する記号類。
 _STRIP_RE = re.compile(r"[\s、。！？!?,.…・「」『』()（）]")
 # Windows で使えない文字などファイル名に入れない文字。
@@ -109,6 +132,25 @@ class Segment:
     overlap_sec: float = 0.0
     is_aizuchi: bool = False
     aizuchi_labels: list[str] = field(default_factory=list)
+    hallucination: str = ""   # 空でなければ Whisper 定型文。test_wav から除外される。
+
+    @property
+    def duration(self) -> float:
+        return self.end - self.start
+
+
+@dataclass
+class Turn:
+    """テスト入力用に同一話者の連続発話をまとめた塊。"""
+
+    speaker: str
+    start: float
+    end: float
+    text: str = ""
+    n_segments: int = 0
+    overlap_sec: float = 0.0
+    aizuchi_count: int = 0
+    segment_indices: list[int] = field(default_factory=list)
 
     @property
     def duration(self) -> float:
@@ -132,6 +174,68 @@ def is_aizuchi_text(text: str) -> list[str]:
         else:
             return []
     return labels
+
+
+# Whisper が無音・雑音・音楽区間で吐きやすい動画定型文。相談のロールプレイには
+# 現れない語なので、テスト入力から落とす。ここに出るのは ASR の作話であって
+# 実際に誰かが喋った音ではないため、残すとセグメント境界ごと壊れる。
+#
+# 部分一致で落とす: 実対話にまず現れず、混入すれば確実に作話と分かるもの。
+HALLUCINATION_SUBSTRINGS = [
+    "ご視聴",
+    "ご覧いただき",
+    "チャンネル登録",
+    "高評価",
+    "次回予告",
+    "次回もお楽しみ",
+    "本編をお楽しみ",
+    "字幕",
+    "エンディング",
+    "この動画",
+    "この番組",
+    "提供でお送り",
+]
+# 完全一致でのみ落とす: 単独なら定型文だが、長い発話の一部なら本物でありうる。
+HALLUCINATION_EXACT = [
+    "おわり",
+    "終わり",
+    "つづく",
+    "続く",
+    "お楽しみに",
+    "どうもありがとうございました",
+]
+
+_HALLUCINATION_EXACT_SET = {
+    _STRIP_RE.sub("", s) for s in HALLUCINATION_EXACT
+}
+
+
+def hallucination_label(text: str) -> str:
+    """Whisper の定型文らしさ。該当すればその手がかりを返し、無ければ空文字。
+
+    「ありがとうございました」単体は落とさない。相談の締めで実際に使われるため、
+    落とすと本物の発話が消える。定型文と断定できる語だけを対象にする。
+    """
+    s = _STRIP_RE.sub("", text)
+    if not s:
+        return ""
+    for marker in HALLUCINATION_SUBSTRINGS:
+        if _STRIP_RE.sub("", marker) in s:
+            return marker
+    if s in _HALLUCINATION_EXACT_SET:
+        return s
+    return ""
+
+
+def mark_hallucinations(segments: list[Segment]) -> list[Segment]:
+    """定型文セグメントに印を付け、印の付いたものを返す(ログ用)。"""
+    flagged: list[Segment] = []
+    for seg in segments:
+        label = hallucination_label(seg.text)
+        seg.hallucination = label
+        if label:
+            flagged.append(seg)
+    return flagged
 
 
 DIARIZATION_MODEL = "nvidia/diar_streaming_sortformer_4spk-v2"
@@ -396,6 +500,150 @@ def rename_segment_wavs(
             old.rename(new)
 
 
+def merge_turns(
+    segments: list[Segment],
+    gap_sec: float = TURN_GAP_SEC,
+    max_sec: float = TURN_MAX_SEC,
+) -> list[Turn]:
+    """同一話者の連続セグメントを塊にまとめる。
+
+    ダイアライゼーションは息継ぎごとに切るので、そのままではテスト入力として
+    細かすぎる。話者ごとに時間順で見て、間隔が gap_sec 以下なら繋ぐ。
+
+    間に相手の発話があっても繋ぐ。相手の相槌でこちらのターンは切れないため、
+    「A の発話 / B の相槌 / A の発話」を 3 つに割ってはいけない。
+
+    max_sec を超える塊は、そこで一度切る。切らないと相槌の応酬が続く区間で
+    延々と伸びてテスト入力にならない。定型文(hallucination)のセグメントは
+    まとめる前に除く。
+    """
+    turns: list[Turn] = []
+    for speaker in sorted({s.speaker for s in segments}):
+        indexed = [
+            (i, s) for i, s in enumerate(segments)
+            if s.speaker == speaker and not s.hallucination
+        ]
+        indexed.sort(key=lambda pair: pair[1].start)
+        cur: Turn | None = None
+        for index, seg in indexed:
+            extends = (
+                cur is not None
+                and seg.start - cur.end <= gap_sec
+                and seg.end - cur.start <= max_sec
+            )
+            if not extends:
+                if cur is not None:
+                    turns.append(cur)
+                cur = Turn(speaker=speaker, start=seg.start, end=seg.end)
+            assert cur is not None
+            cur.end = max(cur.end, seg.end)
+            cur.text += seg.text
+            cur.n_segments += 1
+            cur.overlap_sec += seg.overlap_sec
+            cur.aizuchi_count += 1 if seg.is_aizuchi else 0
+            cur.segment_indices.append(index)
+        if cur is not None:
+            turns.append(cur)
+    turns.sort(key=lambda t: (t.start, t.speaker))
+    return turns
+
+
+def turn_filename(index: int, turn: Turn) -> str:
+    """<通し番号>_<話者>_<開始>_<長さ>_<セグメント数>[_ov]_<テキスト先頭>.wav"""
+    flags = "_ov" if turn.overlap_sec > 0 else ""
+    name = (
+        f"{index:04d}_{turn.speaker}"
+        f"_{int(turn.start // 60):02d}m{turn.start % 60:04.1f}s"
+        f"_{turn.duration:.1f}s_{turn.n_segments}seg{flags}"
+    )
+    text = _FNAME_RE.sub("", _STRIP_RE.sub("", turn.text))[:16]
+    if text:
+        name += f"_{text}"
+    return name + ".wav"
+
+
+def export_test_wavs(
+    tracks: dict[str, np.ndarray],
+    sr: int,
+    turns: list[Turn],
+    out_dir: Path,
+    min_sec: float = TURN_MIN_SEC,
+) -> dict[int, Path]:
+    """塊ごとの WAV を test_wav/<話者>/ に書き出す。
+
+    切り出し元は話者ごとの solo トラック(その話者の区間以外を無音化したもの)。
+    塊の途中に入る相手の相槌はここで無音になるので、テスト入力として使える。
+    ただし 1ch 録音のため、重畳区間には相手の声が残る(ファイル名の _ov)。
+    """
+    paths: dict[int, Path] = {}
+    for index, turn in enumerate(turns):
+        if turn.duration < min_sec:
+            continue
+        track = tracks.get(turn.speaker)
+        if track is None:
+            continue
+        seg_dir = out_dir / "test_wav" / turn.speaker
+        seg_dir.mkdir(parents=True, exist_ok=True)
+        lo = max(0, int((turn.start - CLIP_MARGIN_SEC) * sr))
+        hi = min(track.size, int((turn.end + CLIP_MARGIN_SEC) * sr))
+        path = seg_dir / turn_filename(index, turn)
+        sf.write(path, track[lo:hi], sr)
+        paths[index] = path
+    return paths
+
+
+def write_turns(out_dir: Path, turns: list[Turn], paths: dict[int, Path]) -> Path:
+    """test_wav/turns.jsonl。書き出した塊だけを記録する。"""
+    path = out_dir / "test_wav" / "turns.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for index, turn in enumerate(turns):
+            if index not in paths:
+                continue
+            row = asdict(turn)
+            row["index"] = index
+            row["wav"] = paths[index].name
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return path
+
+
+def write_turns_review_tsv(
+    out_dir: Path, turns: list[Turn], paths: dict[int, Path]
+) -> Path:
+    """人手で間引くためのレビュー表。keep 列を 0 にした行は評価から外す。
+
+    Excel が素直に開けるよう UTF-8 BOM 付き TSV にする。index 列は
+    test_wav の WAV ファイル名の通し番号と一致する。
+    """
+    path = out_dir / "test_wav" / "turns_review.tsv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = [
+        "keep", "index", "speaker", "start_sec", "end_sec", "duration_sec",
+        "n_segments", "overlap_sec", "aizuchi_count", "text", "wav",
+    ]
+    lines = ["\t".join(header)]
+    for index, turn in enumerate(turns):
+        if index not in paths:
+            continue
+        lines.append(
+            "\t".join([
+                "1",
+                str(index),
+                turn.speaker,
+                f"{turn.start:.3f}",
+                f"{turn.end:.3f}",
+                f"{turn.duration:.3f}",
+                str(turn.n_segments),
+                f"{turn.overlap_sec:.3f}",
+                str(turn.aizuchi_count),
+                turn.text.replace("\t", " ").replace("\n", " "),
+                paths[index].name,
+            ])
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
+    return path
+
+
 def write_timeline(out_dir: Path, segments: list[Segment]) -> None:
     with (out_dir / "timeline.jsonl").open("w", encoding="utf-8") as f:
         for seg in segments:
@@ -522,11 +770,36 @@ def process_wav(wav_path: Path, out_root: Path, args: argparse.Namespace) -> Pat
         logger.info("書き起こし実行中...")
         transcribe_segments(audio, sr, segments, args.whisper_model, args.device)
         mark_aizuchi(segments)
+        flagged = mark_hallucinations(segments)
+        if flagged:
+            logger.warning(
+                "Whisper 定型文と判定した %d 件を test_wav から除外(timeline には残す):",
+                len(flagged),
+            )
+            for seg in flagged[:20]:
+                logger.warning(
+                    "  %6.1fs %s [%s] %s",
+                    seg.start, seg.speaker, seg.hallucination, seg.text[:40],
+                )
+            if len(flagged) > 20:
+                logger.warning("  ... 他 %d 件", len(flagged) - 20)
         # ASR 結果を反映: 発話 WAV をテキスト付き名にリネームし、timeline/stats を更新。
         rename_segment_wavs(segments, seg_paths)
         write_timeline(out_dir, segments)
         write_stats(out_dir, segments, overlaps, total_sec)
         logger.info("書き起こし・相槌ラベルを反映して更新完了: %s", out_dir)
+
+    # --- テスト入力用の塊を test_wav/ へ ---
+    turns = merge_turns(segments, args.turn_gap_sec, args.turn_max_sec)
+    turn_paths = export_test_wavs(tracks, sr, turns, out_dir, args.turn_min_sec)
+    write_turns(out_dir, turns, turn_paths)
+    review = write_turns_review_tsv(out_dir, turns, turn_paths)
+    short = len(turns) - len(turn_paths)
+    logger.info(
+        "test_wav: セグメント %d 件 -> 塊 %d 件(出力 %d 件 / %.1f 秒未満で除外 %d 件)",
+        len(segments), len(turns), len(turn_paths), args.turn_min_sec, short,
+    )
+    logger.info("レビュー表: %s", review)
 
     return out_dir
 
@@ -546,6 +819,13 @@ def main() -> None:
                              "断片が増えたら上げる)")
     parser.add_argument("--skip-asr", action="store_true",
                         help="書き起こしを省略して切り出しだけ素早く確認する")
+    parser.add_argument("--turn-gap-sec", type=float, default=TURN_GAP_SEC,
+                        help=f"test_wav の塊にまとめる間隔(既定: {TURN_GAP_SEC})。"
+                             "同一話者の連続発話がこの秒数以下なら繋ぐ")
+    parser.add_argument("--turn-max-sec", type=float, default=TURN_MAX_SEC,
+                        help=f"1 塊の上限秒数(既定: {TURN_MAX_SEC})")
+    parser.add_argument("--turn-min-sec", type=float, default=TURN_MIN_SEC,
+                        help=f"これ未満の塊は test_wav に出さない(既定: {TURN_MIN_SEC})")
     args = parser.parse_args()
 
     if args.device is None:
@@ -568,9 +848,11 @@ def main() -> None:
     print("\n=== 耳で確認 ===")
     for d in out_dirs:
         print(f"{d.resolve()}")
-        print(f"  solo:     speaker_A_solo.wav / speaker_B_solo.wav")
-        print(f"  stereo:   stereo_diarized.wav (L=A / R=B)")
-        print(f"  発話ごと: segments\\A\\ / segments\\B\\")
+        print("  【テスト入力】 test_wav\\A\\ / test_wav\\B\\  (塊にまとめたもの)")
+        print("                 test_wav\\turns_review.tsv  keep 列を 0 にして間引く")
+        print("  solo:          speaker_A_solo.wav / speaker_B_solo.wav")
+        print("  stereo:        stereo_diarized.wav (L=A / R=B)")
+        print("  発話ごと(生):  segments\\A\\ / segments\\B\\")
 
 
 if __name__ == "__main__":

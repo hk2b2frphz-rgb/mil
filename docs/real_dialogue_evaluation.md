@@ -8,33 +8,51 @@
 
 ```
 1ch WAV
-  └─ ステージ1  scripts/analyze_real_dialogue.py     ダイアライゼーション + 書き起こし
-  └─ ステージ2  scripts/separate_real_dialogue.py    音源分離 + 分離トラックで再書き起こし
-  └─ 人手       counselor_X.txt を置く / review TSV で間引く
+  └─ 前処理     scripts/analyze_real_dialogue.py     ダイアライゼーション + 書き起こし + test_wav
+  └─ 人手       counselor_X.txt を置く / turns_review.tsv で間引く
   └─ 構築       eval/build_real_dialogue_dataset.py  FDB 形状のデータセット
   └─ 推論・評価 scripts/run_real_dialogue_eval.sh    推論 → 決定的評価 → 相槌一致度 → judge 入力
   └─ ローカル   eval/judge_openai.py                 LLM-as-a-judge（ローカル PC のみ）
 ```
 
-## なぜ音源分離が要るか
+## テスト入力（test_wav）
 
-1ch 録音では重畳区間に両者の声が同じ標本へ混ざっている。ステージ1 の
-`speaker_A_solo.wav` は「その話者の区間以外を無音化」しただけなので、重畳区間の
-相手の声は消えない。
+ダイアライゼーションは息継ぎごとに区間を切るので、そのままではテスト入力として
+細かすぎる。`test_wav/` には**同一話者の連続発話をまとめ直した塊**を出す。
 
-これが致命的なのは、その混入音が**まさに相談員の相槌**だからである。モデルへの
+- 間隔が `--turn-gap-sec`（既定 1.0 秒）以下の同一話者セグメントを繋ぐ
+- **間に相手の相槌が挟まっても繋ぐ**。相手の相槌でこちらのターンは切れない
+- `--turn-max-sec`（既定 30 秒）を超えたらそこで切る
+- `--turn-min-sec`（既定 0.5 秒）未満の塊は出さない
+
+切り出し元は `speaker_<話者>_solo.wav`（その話者の区間以外を無音化したトラック）
+なので、塊の途中に入る相手の相槌はここで無音になる。
+
+### Whisper 定型文の除去
+
+Whisper は無音・雑音区間で「ご視聴ありがとうございました」「次回予告」のような
+動画定型文を吐く。実際に喋られた音ではなく ASR の作話なので、残すと塊の境界ごと
+壊れる。`analyze_real_dialogue.py` の `HALLUCINATION_SUBSTRINGS` /
+`HALLUCINATION_EXACT` に該当するものを `test_wav` から除外し、除外した内容は
+ログに出す。`timeline.jsonl` には `hallucination` 印を付けて残すので、後から
+判定の妥当性を確認できる。
+
+「ありがとうございました」単体は**落とさない**。相談の締めで実際に使われるため、
+落とすと本物の発話が消える。
+
+## 重畳区間に相手の声が残る（重要な制約）
+
+1ch 録音では重畳区間に両者の声が同じ標本へ混ざっている。solo トラックは「その
+話者の区間以外を無音化」しただけなので、**重畳区間の相手の声は消えない**。
+
+これが問題になるのは、その混入音が相談員の相槌でありうるからである。モデルへの
 入力に相談員の「ええ」「はい」が残っていると、相槌の打ち方を評価したいのに、
-入力に正解の相槌が入っている状態になる。
+入力に正解が入っている状態になる。
 
-ステージ2 は全区間を分離し、話者ごとの独立トラックを作る。分離器が返すチャネル
-順はチャンクごとに不定（permutation problem）なので、ステージ1 のダイアライ
-ゼーション結果を教師にして毎チャンク並べ直す。信頼度（2 通りの並びのスコア差）
-が低いチャンクは直前の割り当てを引き継ぎ、`separation_report.json` に
-`inherited_assignment` として記録する。
-
-分離器の既定は `speechbrain/sepformer-whamr16k`（Apache-2.0、商用可）。日本語で
-学習されたモデルではないが、話者分離は音響的手がかりが主で言語依存が小さい。
-**採用前に `segments_separated/` を耳で確認すること。**
+以前は音源分離（SepFormer）をステージ2 として挟んでいたが、廃止した。現在は
+**重畳した塊を人手で落とす**運用で対処する。`test_wav` のファイル名に `_ov` が
+付いているものが重畳を含む塊で、`turns_review.tsv` の `overlap_sec` 列にも秒数が
+出る。相手の声が混ざって困るものは `keep=0` にすること。
 
 ## 人手で行う 2 つの作業
 
@@ -55,17 +73,18 @@ data/real_dialogue/pilot/対話1/counselor_B.txt   ← 中身は空でよい
 
 ### 2. テストデータの間引き
 
-ステージ2 が `<話者>_segments_review.tsv` を出す（UTF-8 BOM 付き TSV、Excel で
-そのまま開ける）。
+`test_wav/turns_review.tsv`（UTF-8 BOM 付き TSV、Excel でそのまま開ける）。
 
 | 列 | 意味 |
 |---|---|
 | `keep` | `1` で採用、`0` で除外。ここだけ編集する |
-| `index` | `segments_separated/` の WAV ファイル名の通し番号と一致 |
+| `index` | `test_wav/<話者>/` の WAV ファイル名の通し番号と一致 |
+| `speaker` | `A` / `B` |
 | `start_sec` / `end_sec` / `duration_sec` | 位置と長さ |
-| `overlap_sec` | 相手と重なっていた秒数 |
-| `is_aizuchi` / `aizuchi_labels` | 相槌判定と種類 |
-| `text` | 分離トラックでの書き起こし |
+| `n_segments` | まとめる前のセグメント数 |
+| `overlap_sec` | 相手と重なっていた秒数（0 より大きいものは要確認） |
+| `aizuchi_count` | 塊に含まれる相槌の数 |
+| `text` | 書き起こし（塊内を連結したもの） |
 | `wav` | 対応する切り出し WAV |
 
 ユーザー側の `keep=0` にした行は、評価点の候補から外れる。
@@ -151,11 +170,10 @@ judge はローカル PC でのみ実行する（既存の 2 フェーズ方針�
 ## 実行
 
 ```bash
-qsub -v 'WAVS=/path/dialogue1.wav,OUT_DIR=data/real_dialogue/pilot' scripts/run_real_dialogue_analysis.pbs
-qsub -v 'WAVS=/path/dialogue1.wav,OUT_DIR=data/real_dialogue/pilot' scripts/run_real_dialogue_separation.pbs
+qsub -v 'WAVS=/path/dialogue1.wav,OUT_DIR=data/real_dialogue/pilot' scripts/run_real_dialogue_pipeline.pbs
 ```
 
-人手の作業（`counselor_X.txt` と review TSV）を済ませてから:
+人手の作業（`counselor_X.txt` と `turns_review.tsv`）を済ませてから:
 
 ```bash
 MODEL_ID=lora_h01 MODEL_WEIGHT=/path/model.safetensors ANALYSIS_DIRS="data/real_dialogue/pilot/dialogue1" bash scripts/run_real_dialogue_eval.sh
@@ -173,6 +191,10 @@ MODEL_ID=lora_h01 MODEL_WEIGHT=/path/model.safetensors ANALYSIS_DIRS="data/real_
 |---|---|---|
 | `REAL_CONTEXT_SEC` | `30` | 評価点の手前に付ける文脈の長さ。短いほど比較は公平、長いほど自然 |
 | `REAL_BC_TOLERANCE_SEC` | `1.5` | 相槌一致とみなす開始時刻の許容差 |
+| `--turn-gap-sec` | `1.0` | test_wav の塊にまとめる間隔 |
+| `--turn-max-sec` | `30.0` | 1 塊の上限。超えたら切る |
+| `--turn-min-sec` | `0.5` | これ未満の塊は test_wav に出さない |
+| `--min-segment-sec` | `0.02` | これ未満のダイアライゼーション断片は捨てる |
 | `--pause-min-sec` | `0.8` | ユーザーターン内のこれ以上の無音を pause とみなす |
 | `--backchannel-min-turn-sec` | `6.0` | backchannel タスクに使うユーザー長発話の下限 |
 | `--turn-merge-gap-sec` | `0.4` | 同一話者の連続セグメントを結合する間隔。相槌は結合しない |

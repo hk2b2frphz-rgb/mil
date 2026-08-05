@@ -10,13 +10,13 @@
 # ASCII ONLY. Do not add non-ASCII characters anywhere in this file
 # (not even in comments) -- the job dies immediately at submission.
 #
-# End-to-end preprocessing for a real-dialogue 1ch WAV. Just point it at a WAV.
+# Preprocessing for a real-dialogue 1ch WAV. Just point it at a WAV.
 #
-#   Stage 1: diarization + transcription            (analyze_real_dialogue.py)
-#   Stage 2: source separation + re-transcription   (separate_real_dialogue.py)
+#   diarization + transcription + turn-level test clips
+#   (scripts/analyze_real_dialogue.py)
 #
-# After stage 2 the "split into 2 speakers" work is done. The manual steps and
-# the eval job command are printed with real paths at the end of the job.
+# Source separation used to run here as a second stage. It has been dropped;
+# see docs/real_dialogue_evaluation.md.
 #
 # Usage (this is all you need):
 #   qsub -v 'WAVS=/path/dialogue1.wav' scripts/run_real_dialogue_pipeline.pbs
@@ -27,19 +27,18 @@
 #
 # Optional:
 #   OUT_DIR=data/real_dialogue/<name>  output root (default: data/real_dialogue/<jobid>)
-#   SKIP_ANALYSIS=1                    skip stage 1 if already done
-#   SKIP_SEPARATION=1                  run stage 1 only
 #   WHISPER_MODEL=large-v3
-#   SEP_MODEL=speechbrain/sepformer-whamr16k
-#   SEP_SKIP_ASR=1                     separation only, skip re-transcription
-#   DIAR_UV_WITH / SEP_UV_WITH         extra --with args for each uv env
-#   DIAR_EXTRA_ARGS / SEP_EXTRA_ARGS   extra CLI args for the stage 1 / 2 python
-#                                      scripts, e.g. --min-segment-sec 0.05
-#                                      (default is 0.02) or --num-speakers 3
+#   DIAR_UV_WITH                       extra --with args for the uv env
+#   DIAR_EXTRA_ARGS                    extra CLI args for analyze_real_dialogue.py:
+#                                        --turn-gap-sec 1.0    merge gap for test_wav
+#                                        --turn-max-sec 30.0   cap on one clip
+#                                        --turn-min-sec 0.5    drop clips shorter than this
+#                                        --min-segment-sec 0.02
+#                                        --num-speakers 2
+#                                        --skip-asr
 #
-# Stage 1 and 2 have conflicting deps (NeMo wants numpy<2 and old transformers,
-# SpeechBrain wants another line), so each runs in its own isolated uv env even
-# though they are in the same job.
+# Diarization runs in an isolated uv env (--no-project) because streaming
+# Sortformer v2 needs a newer NeMo than the main project env can hold.
 
 set -euo pipefail
 
@@ -103,82 +102,29 @@ for f in "${wav_files[@]}"; do
     analysis_dirs+=("$OUT_DIR/$stem")
 done
 
-# ------------------------------------------------------------------- stage 1
-if [[ "${SKIP_ANALYSIS:-0}" == "1" ]]; then
-    banner "stage 1: skipped (SKIP_ANALYSIS=1)"
-else
-    banner "stage 1/2: diarization + transcription"
-    echo "model: nvidia/diar_streaming_sortformer_4spk-v2 (CC-BY-4.0, no token needed)"
-    echo "This is the slowest part for long recordings."
+banner "diarization + transcription + test clips"
+echo "diarization: nvidia/diar_streaming_sortformer_4spk-v2 (CC-BY-4.0, no token needed)"
+echo "asr:         faster-whisper ${WHISPER_MODEL:-large-v3}"
+echo "This is the slowest part for long recordings."
 
-    # shellcheck disable=SC2086
-    uv run --no-project --python 3.11 \
-        --index-url https://download.pytorch.org/whl/cu121 \
-        --extra-index-url https://pypi.org/simple \
-        --with 'torch==2.5.1' \
-        --with 'torchvision==0.20.1' \
-        --with 'torchaudio==2.5.1' \
-        --with 'nemo_toolkit[asr]>=2.5.0' \
-        --with faster-whisper \
-        --with librosa \
-        --with soundfile \
-        --with 'numpy<2' \
-        ${DIAR_UV_WITH:-} \
-        python -u scripts/analyze_real_dialogue.py \
-        "${wav_files[@]}" \
-        --out-dir "$OUT_DIR" \
-        ${WHISPER_MODEL:+--whisper-model "$WHISPER_MODEL"} \
-        ${DIAR_EXTRA_ARGS:-}
-
-    banner "stage 1 done -- you can listen now"
-    for d in "${analysis_dirs[@]}"; do
-        echo "$d"
-        echo "  time-masked solo:  speaker_A_solo.wav / speaker_B_solo.wav"
-        echo "  L/R preview:       stereo_diarized.wav"
-        echo "  per utterance:     segments/A/ , segments/B/"
-        echo "  stats:             stats.json"
-    done
-    echo ""
-    echo "NOTE: the solo tracks at this stage only mute the other speaker's spans."
-    echo "      The recording is 1ch, so the other voice still bleeds through in"
-    echo "      overlap regions. Removing that is what stage 2 does."
-fi
-
-# ------------------------------------------------------------------- stage 2
-if [[ "${SKIP_SEPARATION:-0}" == "1" ]]; then
-    banner "stage 2: skipped (SKIP_SEPARATION=1)"
-else
-    banner "stage 2/2: source separation + re-transcription of separated tracks"
-    echo "model: ${SEP_MODEL:-speechbrain/sepformer-whamr16k} (Apache-2.0)"
-    echo "Channel-to-speaker assignment comes from the stage 1 diarization."
-
-    sep_extra=""
-    if [[ "${SEP_SKIP_ASR:-0}" == "1" ]]; then
-        sep_extra="--skip-asr"
-        echo "SEP_SKIP_ASR=1: skipping re-transcription."
-    fi
-
-    # shellcheck disable=SC2086
-    uv run --no-project --python 3.11 \
-        --index-url https://download.pytorch.org/whl/cu121 \
-        --extra-index-url https://pypi.org/simple \
-        --with 'torch==2.5.1' \
-        --with 'torchaudio==2.5.1' \
-        --with 'speechbrain>=1.0.0' \
-        --with faster-whisper \
-        --with librosa \
-        --with soundfile \
-        --with 'numpy<2' \
-        ${SEP_UV_WITH:-} \
-        python -u scripts/separate_real_dialogue.py \
-        "${wav_files[@]}" \
-        --out-dir "$OUT_DIR" \
-        ${SEP_MODEL:+--sep-model "$SEP_MODEL"} \
-        ${WHISPER_MODEL:+--whisper-model "$WHISPER_MODEL"} \
-        $sep_extra ${SEP_EXTRA_ARGS:-}
-
-    banner "stage 2 done -- separation into 2 speakers is complete"
-fi
+# shellcheck disable=SC2086
+uv run --no-project --python 3.11 \
+    --index-url https://download.pytorch.org/whl/cu121 \
+    --extra-index-url https://pypi.org/simple \
+    --with 'torch==2.5.1' \
+    --with 'torchvision==0.20.1' \
+    --with 'torchaudio==2.5.1' \
+    --with 'nemo_toolkit[asr]>=2.5.0' \
+    --with faster-whisper \
+    --with librosa \
+    --with soundfile \
+    --with 'numpy<2' \
+    ${DIAR_UV_WITH:-} \
+    python -u scripts/analyze_real_dialogue.py \
+    "${wav_files[@]}" \
+    --out-dir "$OUT_DIR" \
+    ${WHISPER_MODEL:+--whisper-model "$WHISPER_MODEL"} \
+    ${DIAR_EXTRA_ARGS:-}
 
 # ------------------------------------------------------------- results / next
 banner "results and next steps"
@@ -186,21 +132,19 @@ banner "results and next steps"
 for d in "${analysis_dirs[@]}"; do
     echo "------------------------------------------------------------------"
     echo "$d"
-    if [[ -f "$d/separation_report.json" ]]; then
-        chunks=$(grep -o '"chunks":[[:space:]]*[0-9]*' "$d/separation_report.json" | head -1 | tr -dc '0-9')
-        inherited=$(grep -o '"inherited_assignments":[[:space:]]*[0-9]*' "$d/separation_report.json" | head -1 | tr -dc '0-9')
-        echo "  separated chunks: ${chunks:-?} (inherited assignments: ${inherited:-?})"
-        echo "    A high inherited count means many chunks had weak assignment cues."
-        echo "    If that worries you, re-run with a shorter --chunk-sec."
+    echo "  [test input -- this is the deliverable]"
+    echo "    clips:  $d/test_wav/A/ , $d/test_wav/B/"
+    echo "    review: $d/test_wav/turns_review.tsv"
+    echo "    meta:   $d/test_wav/turns.jsonl"
+    echo "  [for checking diarization quality]"
+    echo "    solo tracks:      $d/speaker_A_solo.wav , $d/speaker_B_solo.wav"
+    echo "    L/R side by side: $d/stereo_diarized.wav"
+    echo "    unmerged pieces:  $d/segments/A/ , $d/segments/B/"
+    echo "    stats:            $d/stats.json"
+    if [[ -f "$d/test_wav/turns_review.tsv" ]]; then
+        clips=$(( $(wc -l < "$d/test_wav/turns_review.tsv") - 1 ))
+        echo "  test clips written: $clips"
     fi
-    echo "  [what to listen to]"
-    echo "    separated tracks: $d/separated/A.wav , $d/separated/B.wav"
-    echo "    L/R side by side: $d/separated/stereo.wav"
-    echo "    per utterance:    $d/segments_separated/A/ , $d/segments_separated/B/"
-    echo "  [what to check specifically]"
-    echo "    Files with _ov in the name are overlap spans. Whether the other"
-    echo "    speaker's backchannel is gone there is the pass/fail point."
-    echo "    Also check that non-overlapping utterances are not muffled or metallic."
 done
 
 echo ""
@@ -208,24 +152,21 @@ echo "=================================================================="
 echo "next steps (manual)"
 echo "=================================================================="
 echo ""
-echo "1) Decide which speaker is the counselor and drop an empty marker file"
+echo "1) Listen to test_wav/ and prune: set keep=0 in turns_review.tsv."
+echo "   Clips with _ov in the name overlap the other speaker, so the other"
+echo "   voice bleeds through -- the recording is 1ch and nothing removes it."
+echo "   Drop those if the other voice would leak the answer."
+echo ""
+echo "2) Decide which speaker is the counselor and drop an empty marker file"
 for d in "${analysis_dirs[@]}"; do
     echo "     touch $d/counselor_B.txt     # counselor is B"
     echo "     touch $d/counselor_A.txt     # counselor is A (exactly one of the two)"
 done
 echo ""
-echo "2) Prune the test data (rows with keep=0 are excluded from eval)"
-for d in "${analysis_dirs[@]}"; do
-    echo "     $d/A_segments_review.tsv"
-    echo "     $d/B_segments_review.tsv"
-done
-echo ""
-echo "3) Submit the eval job. Pass the paths below to ANALYSIS_DIRS as-is."
-echo "   (Separate multiple dirs with SPACES. qsub -v treats a comma as a"
-echo "    variable separator, so commas must not be used here.)"
-echo ""
-printf '     qsub -v '\''MODEL_ID=lora_h01,MODEL_WEIGHT=/path/model.safetensors,ANALYSIS_DIRS=%s'\'' \\\n' "${analysis_dirs[*]}"
-echo "       scripts/run_real_dialogue_eval.pbs"
+echo "3) If the merged clips are too long or too short, re-run with a"
+echo "   different gap. No need to redo the WAV, just the whole job:"
+echo "     qsub -v 'WAVS=...,OUT_DIR=...,DIAR_EXTRA_ARGS=--turn-gap-sec 1.5' \\"
+echo "       scripts/run_real_dialogue_pipeline.pbs"
 echo ""
 echo "log: $LOG_FILE"
 echo "finished_at: $(date -Iseconds)"
