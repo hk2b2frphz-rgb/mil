@@ -37,20 +37,47 @@ Staff	はい、お伺いします	00:00:21.000	00:00:23.000
 
 ## 実行
 
+音声フォルダを渡すと、中の WAV を全部処理する。
+
 ```bash
-uv run python scripts/build_test_wav_from_tsv.py /path/dialogue1.wav \
-    --out-dir data/real_dialogue/test
+uv run python scripts/build_test_wav_from_tsv.py /path/dialogues/
+```
+
+出力先の既定は **`data/test_data/real_dialogue`**（本番用テストデータの置き場）。
+テストデータは固定で使うものなので、既定を決め打ちにして毎回同じ場所へ出す。
+別の場所に出したいときだけ `--out-dir` を付ける。
+
+WAV を個別に指定してもよい。フォルダと個別指定を混ぜても、同じ WAV が二重に
+処理されることはない。
+
+```bash
+uv run python scripts/build_test_wav_from_tsv.py /path/d1.wav /path/d2.wav
 ```
 
 GPU も NeMo も Whisper も要らない（numpy と soundfile だけ）。ジョブ投入も不要。
 
-出力は `<out-dir>/<wav_stem>/` に:
+```
+data/test_data/real_dialogue/
+├── manifest.json            全対話の内訳と合計
+├── dialogue1/
+│   ├── User/0000_00m15.5s_5.7s_ov_もしもしあの相談したいことがあり.wav
+│   ├── clips.tsv            採用したもの一覧
+│   └── dropped.tsv          落としたもの一覧（理由付き）
+└── dialogue2/
+    └── ...
+```
+
+`manifest.json` には対話ごとの件数・秒数・重畳件数と、適用したフィルタ条件、
+生成時刻が入る。テストデータが変わっていないことの確認に使える。
+
+実行の最後に一覧が出る。
 
 ```
-dialogue1/
-├── User/0000_00m15.5s_5.7s_ov_もしもしあの相談したいことがあり.wav
-├── clips.tsv     採用したもの一覧
-└── dropped.tsv   落としたもの一覧（理由付き）
+=== テストデータ ===
+data/test_data/real_dialogue
+  dialogue1                  47 件   312.4 秒  (除外 23, 重畳 5)
+  dialogue2                  38 件   256.1 秒  (除外 19, 重畳 3)
+  合計                       85 件   568.5 秒  (除外 42, 重畳 8)
 ```
 
 ## 相槌の除去
@@ -82,7 +109,8 @@ dialogue1/
 
 | オプション | 既定 | 意味 |
 |---|---|---|
-| `--out-dir` | `data/real_dialogue/test` | 出力先ルート |
+| `--out-dir` | `data/test_data/real_dialogue` | 出力先ルート |
+| `--recursive` | off | フォルダを再帰的に探す |
 | `--speaker` | `User` | 切り出す話者ラベル。大文字小文字は区別しない |
 | `--min-chars` | `5` | 記号を除いた文字数がこれ未満なら落とす。0 で無効 |
 | `--min-sec` | `0.0` | これより短い発話を落とす。0 で無効 |
@@ -101,7 +129,11 @@ dialogue1/
 - 時刻の形式が不正な行
 - 列数が足りない行
 - 指定した話者ラベルの発話が 1 件も無い（TSV にあるラベル一覧を出す）
-- アノテーション TSV が見つからない
+- 対応するアノテーション TSV が無い WAV がある
+
+最後のものは、**1 件でも欠けていれば何も書く前に**欠けているものを全部挙げて
+止まる。1 件ずつ処理しながら落ちると、テストデータが中途半端に出来た状態で
+止まってしまうため。
 
 TSV の最終時刻が音声長を超えている場合は、音声と TSV の組み合わせ違いを疑って
 警告を出す（停止はしない）。

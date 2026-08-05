@@ -25,10 +25,16 @@
   - User/0000_00m15.5s_5.7s_もしもしあのちょっと.wav
   - clips.tsv     切り出したもの一覧(index / 時刻 / 重畳秒 / 書き起こし / wav)
   - dropped.tsv   落としたもの一覧(理由付き)
+加えて <out-dir> 直下に manifest.json(全対話の内訳と合計)。
 
-使い方:
-    uv run python scripts/build_test_wav_from_tsv.py 対話1.wav \\
-        --out-dir data/real_dialogue/test
+使い方(フォルダを渡すと中の WAV を全部処理する):
+    uv run python scripts/build_test_wav_from_tsv.py /path/dialogues/
+
+    # WAV を個別に指定してもよい
+    uv run python scripts/build_test_wav_from_tsv.py /path/d1.wav /path/d2.wav
+
+出力先の既定は本番用テストデータの置き場 (data/test_data/real_dialogue)。
+テストデータは固定で使うものなので、既定を決め打ちにして毎回同じ場所へ出す。
 
 GPU も NeMo も Whisper も要らない(numpy と soundfile だけ)。ジョブ投入も不要。
 TSV を直したらもう一度実行すれば作り直される。
@@ -38,10 +44,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import re
-import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -266,8 +273,70 @@ def write_tsv(path: Path, header: list[str], rows: list[list[str]]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
 
 
-def process_wav(wav_path: Path, out_root: Path, args: argparse.Namespace) -> Path:
-    annotation = args.annotation or wav_path.with_suffix(".tsv")
+DEFAULT_OUT_DIR = Path("data/test_data/real_dialogue")
+
+
+def annotation_for(wav_path: Path) -> Path:
+    """WAV に対応するアノテーション TSV(同じ名前で拡張子だけ .tsv)。"""
+    return wav_path.with_suffix(".tsv")
+
+
+def collect_inputs(inputs: list[Path], recursive: bool) -> list[Path]:
+    """ファイルとフォルダの混在を受けて、処理対象の WAV 一覧にする。
+
+    フォルダを渡された場合は中の WAV を全部対象にする。テストデータを一式
+    作り直すのが通常の使い方なので、フォルダ指定が主で個別指定が補助。
+    """
+    wavs: list[Path] = []
+    for item in inputs:
+        if item.is_dir():
+            pattern = "**/*.wav" if recursive else "*.wav"
+            found = sorted(p for p in item.glob(pattern) if p.is_file())
+            if not found:
+                raise SystemExit(
+                    f"{item}: WAV がありません"
+                    f"{'(--recursive を付けても)' if recursive else ''}。"
+                )
+            logger.info("%s: WAV %d 件", item, len(found))
+            wavs.extend(found)
+        elif item.is_file():
+            wavs.append(item)
+        else:
+            raise SystemExit(f"見つかりません: {item}")
+
+    # 同じ WAV を二重に処理しない(フォルダと個別指定が重なった場合)。
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for wav in wavs:
+        resolved = wav.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(wav)
+    return unique
+
+
+def require_annotations(wavs: list[Path], override: Path | None) -> None:
+    """対応する TSV が揃っているか先に全部見る。
+
+    1 件ずつ処理しながら落ちると、テストデータが中途半端に出来た状態で
+    止まる。欠けているものを全部挙げてから止める。
+    """
+    if override is not None:
+        return
+    missing = [wav for wav in wavs if not annotation_for(wav).is_file()]
+    if not missing:
+        return
+    for wav in missing:
+        logger.error("%s に対応する %s がありません。", wav.name, annotation_for(wav).name)
+    raise SystemExit(
+        f"アノテーション TSV が {len(missing)} 件足りません。"
+        "音声と同じ名前で拡張子を .tsv にしたファイルを隣に置いてください。"
+    )
+
+
+def process_wav(wav_path: Path, out_root: Path, args: argparse.Namespace) -> dict:
+    annotation = args.annotation or annotation_for(wav_path)
     utterances = read_annotation(annotation)
 
     labels = sorted({u.speaker for u in utterances})
@@ -373,14 +442,32 @@ def process_wav(wav_path: Path, out_root: Path, args: argparse.Namespace) -> Pat
             "1ch 録音なので相手の声が残ります。",
             overlapped,
         )
-    return out_dir
+    return {
+        "name": wav_path.stem,
+        "wav": str(wav_path),
+        "annotation": str(annotation),
+        "audio_sec": round(total_sec, 1),
+        "speaker": target,
+        "speaker_labels": labels,
+        "utterances_total": len(utterances),
+        "utterances_target": len(matched),
+        "clips": len(kept_rows),
+        "clips_sec": round(kept_sec, 1),
+        "clips_overlapped": overlapped,
+        "dropped": len(dropped_rows),
+        "out_dir": str(out_dir),
+    }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("wavs", nargs="+", type=Path, help="入力 WAV(複数可)")
-    parser.add_argument("--out-dir", type=Path, default=Path("data/real_dialogue/test"),
-                        help="出力先ルート(既定: data/real_dialogue/test)")
+    parser.add_argument("inputs", nargs="+", type=Path,
+                        help="音声フォルダ、または WAV(混在可)。"
+                             "フォルダなら中の WAV を全部処理する")
+    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR,
+                        help=f"出力先ルート(既定: {DEFAULT_OUT_DIR})")
+    parser.add_argument("--recursive", action="store_true",
+                        help="フォルダを再帰的に探す")
     parser.add_argument("--annotation", type=Path, default=None,
                         help="アノテーション TSV を明示指定(既定: WAV と同名 .tsv)。"
                              "WAV を 1 つだけ渡すときに使う")
@@ -395,26 +482,56 @@ def main() -> None:
                         help="切り出した区間のうち相手だけが喋っている部分を無音化する")
     args = parser.parse_args()
 
-    if args.annotation is not None and len(args.wavs) > 1:
+    wavs = collect_inputs(args.inputs, args.recursive)
+    if not wavs:
+        raise SystemExit("処理対象の WAV がありません。")
+    if args.annotation is not None and len(wavs) > 1:
         parser.error("--annotation は WAV を 1 つだけ渡すときに使ってください。")
 
-    out_dirs = []
-    for wav in args.wavs:
-        if not wav.is_file():
-            logger.error("見つかりません: %s", wav)
-            continue
-        out_dirs.append(process_wav(wav, args.out_dir, args))
+    # 途中で落ちてテストデータが中途半端に出来ないよう、先に全部確認する。
+    require_annotations(wavs, args.annotation)
 
-    if not out_dirs:
-        raise SystemExit("処理できた WAV がありません。")
+    summaries = [process_wav(wav, args.out_dir, args) for wav in wavs]
 
-    print("\n=== 出力 ===")
-    for d in out_dirs:
-        print(d.resolve())
-        print(f"  テスト音声: {args.speaker}\\")
-        print("  採用一覧:   clips.tsv")
-        print("  除外一覧:   dropped.tsv  ← 閾値が妥当か確認できる")
-    print("\nTSV を直したら、同じコマンドをもう一度実行すれば作り直されます。")
+    manifest = {
+        "generated_at": datetime.now(timezone.utc).astimezone().isoformat(),
+        "speaker": args.speaker,
+        "filters": {
+            "min_chars": args.min_chars,
+            "min_sec": args.min_sec,
+            "mute_other": args.mute_other,
+        },
+        "totals": {
+            "dialogues": len(summaries),
+            "clips": sum(s["clips"] for s in summaries),
+            "clips_sec": round(sum(s["clips_sec"] for s in summaries), 1),
+            "clips_overlapped": sum(s["clips_overlapped"] for s in summaries),
+            "dropped": sum(s["dropped"] for s in summaries),
+        },
+        "dialogues": summaries,
+    }
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = args.out_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+    totals = manifest["totals"]
+    print("\n=== テストデータ ===")
+    print(f"{args.out_dir.resolve()}")
+    for summary in summaries:
+        print(
+            f"  {summary['name']:<24} {summary['clips']:>4} 件 "
+            f"{summary['clips_sec']:>7.1f} 秒"
+            f"  (除外 {summary['dropped']}, 重畳 {summary['clips_overlapped']})"
+        )
+    print(
+        f"  {'合計':<24} {totals['clips']:>4} 件 {totals['clips_sec']:>7.1f} 秒"
+        f"  (除外 {totals['dropped']}, 重畳 {totals['clips_overlapped']})"
+    )
+    print(f"\n内訳: {manifest_path}")
+    print("各対話の clips.tsv / dropped.tsv で中身を確認できます。")
+    print("TSV を直したら、同じコマンドをもう一度実行すれば作り直されます。")
 
 
 if __name__ == "__main__":
