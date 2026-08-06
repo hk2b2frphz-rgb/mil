@@ -106,6 +106,10 @@ def parse_args() -> argparse.Namespace:
                              "0 より大きくすると相談員の声が入力に混ざる")
     parser.add_argument("--gold-window-sec", type=float, default=30.0,
                         help="Staff の応答として拾う最大秒数(既定 30)")
+    parser.add_argument("--lead-in-sec", type=float, default=3.0,
+                        help="User の発話の前に置く無音の秒数(既定 3)。モデルが"
+                             "冒頭の固定挨拶(もしもし…)を言う場所。0 にすると"
+                             "挨拶の途中で User が話し始める")
     parser.add_argument("--backchannel-max-sec", type=float, default=3.0,
                         help="相槌とみなす最大長。これを超える割り込みは相槌に"
                              "数えない(Full-Duplex-Bench の time_threshold と同じ)")
@@ -233,11 +237,16 @@ def build_dialogue(
         hi = min(audio.size, int((end + CLIP_MARGIN_SEC) * sr))
         if hi <= lo:
             continue
-        sf.write(case_dir / "input.wav", audio[lo:hi], sr)
-        input_sec = (hi - lo) / sr
+        # 先頭に無音を置く。モデルは毎回まっさらなセッションとして始まるので、
+        # 訓練どおり冒頭の挨拶を言おうとする。その場所が無いと、挨拶している
+        # 最中に User が話し始めてしまう。
+        lead_in = np.zeros(int(round(args.lead_in_sec * sr)), dtype=np.float32)
+        sf.write(case_dir / "input.wav", np.concatenate([lead_in, audio[lo:hi]]), sr)
+        input_sec = (lead_in.size + hi - lo) / sr
         # output.wav の時計。0 秒 = 入力再生の開始。相槌の指標はこの時計で測る
-        # (応答速度だけは User 発話終了を 0 とする別の起点を使う)。
-        input_start_sec = lo / sr
+        # (応答速度だけは User 発話終了を 0 とする別の起点を使う)。元録音の
+        # 絶対時刻から相対時刻へ直すときは、リードインぶんを足す。
+        input_start_sec = lo / sr - args.lead_in_sec
 
         backchannels = [
             (u, "during_turn") for u in backchannels_during(
@@ -286,7 +295,11 @@ def build_dialogue(
                 "context_sec": args.context_sec,
                 "input_duration_sec": round(input_sec, 4),
                 # output.wav の 0 秒に対応する元録音の絶対時刻。
-                "input_start_sec": round(input_start_sec, 4),
+                "input_start_sec": round(lo / sr, 4),
+                # 挨拶用に先頭へ置いた無音。相槌の評価はここを対象外にする
+                # (挨拶を相槌と数えないため)。
+                "lead_in_sec": round(args.lead_in_sec, 4),
+                "user_start_rel_sec": round(start - input_start_sec, 4),
                 # User の発話終了を output.wav の時計で表したもの。相槌の
                 # 評価区間はここまで。
                 "user_end_rel_sec": round(end - input_start_sec, 4),

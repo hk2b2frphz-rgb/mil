@@ -102,6 +102,8 @@ def extract_predictions(
 ) -> list[dict[str, Any]]:
     predictions: list[dict[str, Any]] = []
     for start, end in speech_segments(audio, sr, min_sec):
+        if end <= region[0]:
+            continue  # リードイン中(挨拶)。相槌ではない。
         after_turn = start >= region[1]
         if not after_turn and end > region[1]:
             # User の発話終了をまたいで続いている = 相槌ではなく応答(または
@@ -198,7 +200,11 @@ def main() -> int:
             continue
         # 相槌は User の発話中だけでなく、発話終了後にも起きる。区間は出力全体
         # とし、region_end(発話終了)の前後で扱いを変える。
-        region = (0.0, region_end)
+        #
+        # 先頭のリードイン(挨拶用の無音)は対象外。そこでモデルが言うのは訓練
+        # された冒頭の挨拶であって相槌ではない。
+        region_start = float(source.get("user_start_rel_sec") or 0.0)
+        region = (region_start, region_end)
 
         audio, sr = sf.read(trial_dir / "output.wav", dtype="float32")
         if audio.ndim > 1:
@@ -242,7 +248,7 @@ def main() -> int:
 
         # 頻度の分母は観測できた全区間。相槌は発話終了後にも起きるので、
         # 発話中の長さだけで割ると水増しになる。
-        observed_sec = len(audio) / sr
+        observed_sec = max(1e-9, len(audio) / sr - region_start)
         model_rates.append(per_minute(len(pred), observed_sec))
         human_rates.append(per_minute(len(gt), observed_sec))
 

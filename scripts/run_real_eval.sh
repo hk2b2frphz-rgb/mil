@@ -105,6 +105,7 @@ if [[ ! -f "$REAL_DATASET_DIR/manifest.json" || "$REBUILD_REAL_DATASET" == "1" ]
         --test-data-dir "$TEST_DATA_DIR"
         --out-dir "$REAL_DATASET_DIR"
         --context-sec "$REAL_CONTEXT_SEC"
+        --lead-in-sec "${REAL_LEAD_IN_SEC:-3.0}"
     )
     [[ "$REBUILD_REAL_DATASET" == "1" ]] && build_args+=(--overwrite)
     "${build_args[@]}"
