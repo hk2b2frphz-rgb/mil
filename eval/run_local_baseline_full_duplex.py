@@ -253,6 +253,18 @@ def process_variant(
                 round(output_start_sec + float(start), 4),
                 round(output_start_sec + float(end), 4),
             ]
+    elif args.system == "cascade" and has_response:
+        # --skip-output-alignment. 単語ごとの時刻は無いが、応答全体を覆う 1 つの
+        # チャンクは置ける。相槌の種類判定は「その音声区間に重なるテキスト」を
+        # 見るだけなので、これがあれば種類までは付く。時刻の精度が要る指標
+        # (単語単位のアライメント)だけが失われる。
+        alignment_chunks = [{
+            "text": response_text,
+            "timestamp": [
+                round(output_start_sec, 4),
+                round(output_start_sec + len(response_pcm) / sample_rate, 4),
+            ],
+        }]
     output_json = {
         "text": alignment_text,
         "chunks": alignment_chunks,
