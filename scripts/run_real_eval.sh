@@ -125,6 +125,11 @@ if [[ "$MODEL_ID" == "gold" ]]; then
         --tail-sec "$REAL_TAIL_SEC"
         --overwrite
     )
+    # 既定では tail と同じ窓で打ち切る(モデル側と揃える)。あえて人間の応答を
+    # 全部残したいときだけ明示する。
+    if [[ -n "${REAL_MAX_RESPONSE_SEC:-}" ]]; then
+        gold_args+=(--max-response-sec "$REAL_MAX_RESPONSE_SEC")
+    fi
     "${gold_args[@]}"
 else
     inference_args=(

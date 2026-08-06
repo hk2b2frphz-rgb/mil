@@ -45,6 +45,11 @@ def parse_args() -> argparse.Namespace:
                         help="モデル側と行数を揃えるためのシード列。"
                              "gold は決定的なので中身は同じになる")
     parser.add_argument("--tail-sec", type=float, default=8.0)
+    parser.add_argument("--max-response-sec", type=float, default=None,
+                        help="相談員の応答音声を何秒で打ち切るか。既定は "
+                             "--tail-sec と同じ。モデル側は入力再生後 tail-sec "
+                             "しか録られないので、揃えないと gold だけ長い応答が "
+                             "丸ごと残り、応答長と UTMOS が比較できなくなる")
     parser.add_argument("--sample-rate", type=int, default=SAMPLE_RATE)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
@@ -157,11 +162,26 @@ def main() -> int:
 
     written = 0
     silent = 0
+    truncated = 0
+    max_response_sec = (
+        args.tail_sec if args.max_response_sec is None else args.max_response_sec
+    )
     for sample in samples:
         source_dir = dataset_dir / sample["path"]
         metadata = json.loads((source_dir / "metadata.json").read_text(encoding="utf-8"))
         input_sec = float((metadata.get("source") or {}).get("input_duration_sec", 0.0))
         reply, latency, clip_offset = load_reply_audio(metadata, args.sample_rate)
+
+        # モデル側と同じ観測窓に揃える。モデルは入力再生後 tail_sec しか録られ
+        # ないので、gold だけ制限なしにすると応答長と UTMOS が比較できない。
+        if reply is not None:
+            budget = max_response_sec - max(0.0, clip_offset or 0.0)
+            limit = int(max(0.0, budget) * args.sample_rate)
+            if limit <= 0:
+                reply, truncated = None, truncated + 1
+            elif reply.size > limit:
+                reply = reply[:limit]
+                truncated += 1
 
         total_sec = input_sec + args.tail_sec
         if reply is not None and clip_offset is not None:
@@ -257,6 +277,12 @@ def main() -> int:
             written += 1
 
     print(f"[gold] {written} 件を書き出しました -> {out_dir}")
+    if truncated:
+        print(
+            f"[gold] うち {truncated} ケースは応答を {max_response_sec:.1f} 秒で"
+            "打ち切りました(モデル側と同じ観測窓に揃えるため)。"
+            "応答長・UTMOS はこの窓の中の値です。"
+        )
     if silent:
         print(
             f"[gold] うち {silent} ケースは相談員も応答していません"
