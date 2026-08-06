@@ -132,6 +132,14 @@ inference_args=(
 if [[ -n "$REAL_CASES_PER_TASK" ]]; then
     inference_args+=(--cases-per-task "$REAL_CASES_PER_TASK")
 fi
+# 出力音声の再書き起こし(2 回目の ASR)を省く。応答テキストは LLM 側にあるので
+# 内容は失われないが、時刻つきチャンクが無くなる。相槌の種類判定はチャンクの
+# 文字を見るので、カスケードの相槌をきちんと採点したいときは省かないこと
+# (構造上ほぼ 0 件なので、実害が出るのは稀)。
+if [[ "${CASCADE_SKIP_OUTPUT_ALIGNMENT:-0}" == "1" ]]; then
+    inference_args+=(--skip-output-alignment)
+    echo "[real-cascade] 出力アライメント ASR を省きます"
+fi
 "${inference_args[@]}"
 
 # 3) 評価。Moshi 系と同じスクリプト、同じ指標。

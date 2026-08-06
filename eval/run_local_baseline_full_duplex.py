@@ -116,6 +116,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dtype", default="float16")
 
+    parser.add_argument(
+        "--skip-output-alignment",
+        action="store_true",
+        help=(
+            "Skip the second ASR pass over the synthesized output. The response "
+            "text then comes from the LLM directly and output.json carries no "
+            "timestamped chunks. Roughly a third of cascade wall time, at the "
+            "cost of per-word timing (needed by metrics that read chunk times)."
+        ),
+    )
     parser.add_argument("--asr-model", default="large-v3")
     parser.add_argument("--asr-device", default="cuda")
     parser.add_argument("--asr-compute-type", default="float16")
@@ -229,7 +239,7 @@ def process_variant(
     alignment_text = response_text
     alignment_chunks: list[dict[str, Any]] = []
     output_asr_wall = 0.0
-    if args.system == "cascade" and has_response:
+    if args.system == "cascade" and has_response and not args.skip_output_alignment:
         # Align the actual synthesized Japanese audio, not the LLM string.
         # The alignment input starts at zero, so shift every ASR time into the
         # full output.wav timeline after recognition.

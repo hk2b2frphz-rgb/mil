@@ -393,11 +393,15 @@ class LocalASR:
         )
 
     def transcribe(self, pcm: np.ndarray, sample_rate: int) -> tuple[str, float]:
-        text, _chunks, wall_time = self.transcribe_aligned(pcm, sample_rate)
+        # 入力の書き起こしに要るのはテキストだけ。単語タイムスタンプは
+        # faster-whisper でかなり重く、ここでは計算しても捨てていた。
+        text, _chunks, wall_time = self.transcribe_aligned(
+            pcm, sample_rate, word_timestamps=False
+        )
         return text, wall_time
 
     def transcribe_aligned(
-        self, pcm: np.ndarray, sample_rate: int
+        self, pcm: np.ndarray, sample_rate: int, word_timestamps: bool = True
     ) -> tuple[str, list[dict[str, Any]], float]:
         """Return an ASR transcript with the word/segment timing contract
         consumed by the upstream Full-Duplex-Bench evaluators."""
@@ -408,7 +412,8 @@ class LocalASR:
         pcm_16k = resample_linear(np.asarray(pcm, dtype=np.float32), sample_rate, 16000)
         started = time.perf_counter()
         segments, _info = self._model.transcribe(
-            pcm_16k, language=self.language, vad_filter=True, word_timestamps=True
+            pcm_16k, language=self.language, vad_filter=True,
+            word_timestamps=word_timestamps,
         )
         chunks: list[dict[str, Any]] = []
         for segment in segments:
