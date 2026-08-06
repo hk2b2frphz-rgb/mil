@@ -42,10 +42,29 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.build_test_wav_from_tsv import (  # noqa: E402
-    CLIP_MARGIN_SEC,
-    read_annotation,
-)
+def _load_build_test_wav_module():
+    """scripts/build_test_wav_from_tsv.py をファイルパスから読む。
+
+    `import scripts.build_test_wav_from_tsv` は、sys.path の手前に別の
+    `scripts` パッケージ(依存ライブラリや実行環境が持ち込むもの)があると
+    そちらに解決されて ModuleNotFoundError になる。リポジトリ内の 1 ファイル
+    を読みたいだけなので、パッケージ名の解決に頼らない。
+    """
+    import importlib.util
+
+    path = REPO_ROOT / "scripts" / "build_test_wav_from_tsv.py"
+    if not path.is_file():
+        raise ModuleNotFoundError(f"見つかりません: {path}")
+    spec = importlib.util.spec_from_file_location("_miltoka_build_test_wav", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_build_test_wav = _load_build_test_wav_module()
+CLIP_MARGIN_SEC = _build_test_wav.CLIP_MARGIN_SEC
+read_annotation = _build_test_wav.read_annotation
 
 TASK = "real_response"
 PROTOCOL_NAME = "Real dialogue single-turn response (annotation ground truth)"
