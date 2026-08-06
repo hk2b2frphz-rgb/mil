@@ -47,7 +47,8 @@ def load_statuses(path: Path | None) -> dict[str, dict[str, Any]]:
 
 
 def row_for(output_name: str, summary: dict[str, Any] | None,
-            status: dict[str, Any]) -> dict[str, Any]:
+            status: dict[str, Any],
+            backchannel: dict[str, Any] | None = None) -> dict[str, Any]:
     if summary is None:
         return {
             "output_name": output_name,
@@ -74,6 +75,16 @@ def row_for(output_name: str, summary: dict[str, Any] | None,
         "utmos_mean": utmos.get("mean"),
         "utmos_n": utmos.get("n"),
         "mos_backend": summary.get("mos_backend"),
+        # 割り込み(User の発話終了をまたいで喋っていた)。応答速度の集計からは
+        # 外してあるので、応答率・応答速度と必ず併せて読む。
+        "barge_in": summary.get("barge_in"),
+        "barge_in_rate": summary.get("barge_in_rate"),
+        # 相槌は別軸。応答速度と同じ列に並べないこと。gold の timing F1 は
+        # 正解が相談員自身なので定義上 1.0 で、上限としては読めない。
+        "backchannel_rate_per_min": (backchannel or {}).get("rate_per_min", {}).get("model"),
+        "backchannel_human_rate_per_min": (backchannel or {}).get("rate_per_min", {}).get("human"),
+        "backchannel_timing_f1": (backchannel or {}).get("timing", {}).get("f1"),
+        "backchannel_typed_f1": (backchannel or {}).get("typed", {}).get("f1"),
     }
 
 
@@ -95,7 +106,12 @@ def main() -> int:
         status = statuses.get(name, {})
         if summary is None and name not in statuses:
             continue  # バッチと無関係なディレクトリ
-        rows.append(row_for(name, summary, status))
+        bc_path = batch_dir / name / "benchmark_results" / "backchannel.json"
+        backchannel = (
+            json.loads(bc_path.read_text(encoding="utf-8"))
+            if bc_path.is_file() else None
+        )
+        rows.append(row_for(name, summary, status, backchannel))
 
     if not rows:
         raise SystemExit(f"{batch_dir} に集計できる結果がありません。")
@@ -131,22 +147,47 @@ def main() -> int:
         json.dumps(combined, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
 
-    header = f"{'output_name':<24} {'応答率':>8} {'遅延p50':>9} {'遅延p90':>9} {'UTMOS':>7}  status"
+    def fmt(value: Any, spec: str) -> str:
+        if isinstance(value, (int, float)):
+            return format(value, spec)
+        # 値が無い列でも桁を保つ。素の "-" を返すと以降の列がずれる。
+        width = "".join(ch for ch in spec.split(".")[0] if ch.isdigit())
+        return format("-", f">{width or 1}")
+
+    header = (f"{'output_name':<24} {'応答率':>8} {'遅延p50':>9} {'遅延p90':>9} "
+              f"{'割込率':>8} {'UTMOS':>7}  status")
     print("\n===== 実データ応答評価 まとめ =====")
     print(header)
     print("-" * len(header))
     for row in rows:
-        def fmt(value: Any, spec: str) -> str:
-            return format(value, spec) if isinstance(value, (int, float)) else "-"
         print(
             f"{row['output_name']:<24} "
             f"{fmt(row.get('response_rate'), '>8.3f')} "
             f"{fmt(row.get('latency_p50_sec'), '>9.3f')} "
             f"{fmt(row.get('latency_p90_sec'), '>9.3f')} "
+            f"{fmt(row.get('barge_in_rate'), '>8.3f')} "
             f"{fmt(row.get('utmos_mean'), '>7.2f')}  {row.get('status')}"
         )
     if gold:
         print("\ngold = 実際の相談員。上限の目安として読むこと。")
+    print("割込率 = User の発話終了をまたいで喋っていた割合。応答速度の集計外。")
+    print("UTMOS は参考指標。録音条件に強く反応するので gold は上限ではない。")
+
+    if any(row.get("backchannel_rate_per_min") is not None for row in rows):
+        bc_header = (f"{'output_name':<24} {'相槌/分':>9} {'人間/分':>9} "
+                     f"{'timing F1':>10} {'typed F1':>9}")
+        print("\n===== 相槌(別軸) =====")
+        print(bc_header)
+        print("-" * len(bc_header))
+        for row in rows:
+            print(
+                f"{row['output_name']:<24} "
+                f"{fmt(row.get('backchannel_rate_per_min'), '>9.2f')} "
+                f"{fmt(row.get('backchannel_human_rate_per_min'), '>9.2f')} "
+                f"{fmt(row.get('backchannel_timing_f1'), '>10.3f')} "
+                f"{fmt(row.get('backchannel_typed_f1'), '>9.3f')}"
+            )
+        print("gold の F1 は正解が相談員自身なので定義上 1.0。頻度と種類分布で読む。")
     print(f"\ncombined: {args.out}")
     return 0
 
