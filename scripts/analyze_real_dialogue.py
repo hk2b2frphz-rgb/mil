@@ -60,6 +60,12 @@ import soundfile as sf
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+# 下のフォールバックは「scripts/ が sys.path にある」ことを前提にしている。
+# このファイルが他所からファイルパスで読み込まれた場合(eval/ 側の評価器が
+# is_aizuchi_text だけ借りるときなど)はその前提が崩れるので、自分の隣を
+# 自分で通しておく。
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
     from scripts.analyze_backchannels import AIZUCHI_PATTERNS
