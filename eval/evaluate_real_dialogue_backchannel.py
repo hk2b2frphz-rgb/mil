@@ -127,12 +127,21 @@ def extract_predictions(
     for start, end in speech_segments(audio, sr, min_sec):
         if overlap((start, end), region) <= 0.0:
             continue
+        if end > region[1]:
+            # User の発話終了をまたいで続いている = 相槌ではなく応答(または
+            # 割り込み)。正解側も同じ規則で境界をまたぐ発話を応答へ渡している
+            # ので、予測側だけ相槌に数えると偽陽性になる。
+            predictions.append({
+                "start_sec": round(start, 4), "end_sec": round(end, 4),
+                "text": "", "labels": [], "not_backchannel": True,
+            })
+            continue
         if end - start > BACKCHANNEL_MAX_SEC:
             # 長い = 相槌ではなく発話の乗っ取り。相槌としては数えないが、
             # 件数だけ別に残す(後段で barge-in として読める)。
             predictions.append({
                 "start_sec": round(start, 4), "end_sec": round(end, 4),
-                "text": "", "labels": [], "too_long": True,
+                "text": "", "labels": [], "not_backchannel": True,
             })
             continue
         pieces = [
@@ -144,7 +153,7 @@ def extract_predictions(
         if len(pieces) > BACKCHANNEL_MAX_CHUNKS:
             predictions.append({
                 "start_sec": round(start, 4), "end_sec": round(end, 4),
-                "text": "".join(pieces).strip(), "labels": [], "too_long": True,
+                "text": "".join(pieces).strip(), "labels": [], "not_backchannel": True,
             })
             continue
         text = "".join(pieces).strip()
@@ -153,7 +162,7 @@ def extract_predictions(
             "end_sec": round(end, 4),
             "text": text,
             "labels": is_aizuchi_text(text) if text else [],
-            "too_long": False,
+            "not_backchannel": False,
         })
     return predictions
 
@@ -219,8 +228,8 @@ def main() -> int:
             if overlap((float(item["start_sec"]), float(item["end_sec"])), region) > 0.0
         ]
         raw_pred = extract_predictions(audio, sr, chunks, region, args.min_segment_sec)
-        pred = [p for p in raw_pred if not p["too_long"]]
-        barge_ins += sum(1 for p in raw_pred if p["too_long"])
+        pred = [p for p in raw_pred if not p["not_backchannel"]]
+        barge_ins += sum(1 for p in raw_pred if p["not_backchannel"])
 
         timing_pairs = match_pairs(gt, pred, args.tolerance_sec, require_type=False)
         typed_pairs = match_pairs(gt, pred, args.tolerance_sec, require_type=True)
@@ -258,7 +267,7 @@ def main() -> int:
             "region_sec": round(region_end, 4),
             "gt_count": len(gt),
             "pred_count": len(pred),
-            "barge_in_count": sum(1 for p in raw_pred if p["too_long"]),
+            "barge_in_count": sum(1 for p in raw_pred if p["not_backchannel"]),
             "timing_matched": tp,
             "typed_matched": typed_tp,
             "gt": gt,

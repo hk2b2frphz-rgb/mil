@@ -77,6 +77,30 @@ def rms_frames(audio: np.ndarray, sr: int) -> tuple[np.ndarray, int]:
     return np.sqrt((frames.astype(np.float64) ** 2).mean(axis=1)), win
 
 
+def crosses_input_end(
+    audio: np.ndarray, sr: int, input_sec: float
+) -> tuple[bool, float | None]:
+    """入力終了をまたいで音が続いているかを返す。
+
+    またいでいる = User がまだ話しているうちにモデルが喋り始めた(割り込み)。
+    2 つめの戻り値は、入力終了より何秒前から鳴っていたか。
+    """
+    if input_sec <= 0.0:
+        return False, None
+    values, win = rms_frames(audio, sr)
+    boundary = int(input_sec * sr / win)
+    if boundary <= 0 or boundary >= len(values):
+        return False, None
+    if values[boundary] < SPEECH_RMS_THRESHOLD:
+        return False, None
+    if values[boundary - 1] < SPEECH_RMS_THRESHOLD:
+        return False, None
+    i = boundary - 1
+    while i > 0 and values[i - 1] >= SPEECH_RMS_THRESHOLD:
+        i -= 1
+    return True, round(input_sec - i * win / sr, 4)
+
+
 def speech_span(audio: np.ndarray, sr: int) -> tuple[float, float] | None:
     """音が鳴っている最初と最後の時刻を返す。全部無音なら None。"""
     values, win = rms_frames(audio, sr)
@@ -169,6 +193,12 @@ def evaluate_trial(
     offset = min(audio.size, int(input_sec * sr))
     span = speech_span(audio[offset:], sr)
 
+    # User がまだ話している最中に喋り始め、そのまま入力終了をまたいだ場合。
+    # 入力終了の直後は既に鳴っているので、素直に測ると応答速度 0.000 秒という
+    # 最良の値が付く。割り込みが最速の応答として表彰されることになるので、
+    # 応答速度の集計からは外して別に数える。
+    barge_in, barge_in_lead = crosses_input_end(audio, sr, input_sec)
+
     responded = span is not None
     latency = None
     quality = None
@@ -203,7 +233,12 @@ def evaluate_trial(
         "assistant_chunks": text.get("chunks", []),
         "metrics": {
             "responded": responded,
-            "response_latency_sec": latency if responded else None,
+            # 割り込みは応答速度を持たない(起点より前から鳴っているため)。
+            "response_latency_sec": (
+                latency if responded and not barge_in else None
+            ),
+            "barge_in": barge_in,
+            "barge_in_lead_sec": barge_in_lead,
             "response_duration_sec": response_sec if responded else None,
             "utmos": quality if responded else None,
         },
@@ -255,6 +290,7 @@ def main() -> int:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     responded = [r for r in rows if r["metrics"]["responded"]]
+    barge_ins = [r for r in rows if r["metrics"].get("barge_in")]
     latencies = [r["metrics"]["response_latency_sec"] for r in responded]
     qualities = [
         r["metrics"]["utmos"] for r in responded if r["metrics"]["utmos"] is not None
@@ -273,6 +309,15 @@ def main() -> int:
         "response_rate": round(len(responded) / len(rows), 4),
         "responded": len(responded),
         "no_response": len(rows) - len(responded),
+        # User の発話終了をまたいで喋っていたケース。応答速度の集計からは
+        # 外してある。応答率と併せて読むこと。割り込みが多いモデルは、
+        # 残った少数のケースだけで応答速度が良く見える。
+        "barge_in": len(barge_ins),
+        "barge_in_rate": round(len(barge_ins) / len(rows), 4),
+        "barge_in_lead_sec": summarize(
+            [r["metrics"]["barge_in_lead_sec"] for r in barge_ins
+             if r["metrics"].get("barge_in_lead_sec") is not None]
+        ),
         "response_latency_sec": summarize([v for v in latencies if v is not None]),
         "response_duration_sec": summarize(
             [r["metrics"]["response_duration_sec"] for r in responded
@@ -297,6 +342,10 @@ def main() -> int:
     print(f"trials:       {summary['trials']}")
     print(f"応答率:       {summary['response_rate']:.3f} "
           f"({summary['responded']}/{summary['trials']})")
+    if summary["barge_in"]:
+        print(f"割り込み:     {summary['barge_in_rate']:.3f} "
+              f"({summary['barge_in']}/{summary['trials']}) "
+              "-- 応答速度の集計からは除外")
     lat = summary["response_latency_sec"]
     if lat.get("n"):
         print(f"応答速度:     mean {lat['mean']:.3f}s / p50 {lat['p50']:.3f}s "
