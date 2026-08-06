@@ -22,6 +22,8 @@ import json
 import statistics
 from pathlib import Path
 
+import soundfile as sf
+
 STAGES = (
     ("asr_wall_time_sec", "ASR(入力)"),
     ("llm_wall_time_sec", "LLM"),
@@ -44,7 +46,29 @@ def main() -> int:
     if not metas:
         raise SystemExit(f"{args.run_dir} に output.meta.json がありません。")
 
-    rows = [json.loads(p.read_text(encoding="utf-8")) for p in metas]
+    rows = []
+    for path in metas:
+        row = json.loads(path.read_text(encoding="utf-8"))
+        # 応答がどれだけ長いか。TTS が遅いのか、長い文を喋らせているのかを
+        # 分けるために要る。
+        text_path = path.parent / "output.json"
+        if text_path.is_file():
+            data = json.loads(text_path.read_text(encoding="utf-8"))
+            row["_text"] = data.get("generated_text") or data.get("text") or ""
+        else:
+            row["_text"] = ""
+        wav_path = path.parent / "output.wav"
+        row["_response_sec"] = 0.0
+        if wav_path.is_file():
+            try:
+                info = sf.info(str(wav_path))
+                row["_response_sec"] = max(
+                    0.0, info.duration - float(row.get("input_duration_sec") or 0.0)
+                    - float(row.get("wall_time_sec") or 0.0)
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        rows.append(row)
     stages = {key: [float(r.get(key) or 0.0) for r in rows] for key, _ in STAGES}
     totals = [float(r.get("wall_time_sec") or 0.0) for r in rows]
     inputs = [float(r.get("input_duration_sec") or 0.0) for r in rows]
@@ -75,6 +99,17 @@ def main() -> int:
     print("(応答テキストは LLM 側に残る。失うのは時刻つきチャンクだけ)。")
     print()
 
+    chars = [len(r["_text"]) for r in rows]
+    resp_secs = [r["_response_sec"] for r in rows]
+    print(f"応答テキスト長: 中央値 {statistics.median(chars):.0f} 文字 "
+          f"/ 最長 {max(chars)} 文字")
+    print(f"応答音声長:     中央値 {statistics.median(resp_secs):.1f} 秒 "
+          f"/ 最長 {max(resp_secs):.1f} 秒")
+    if statistics.median(chars) > 80:
+        print("  応答が長い。--llm-max-new-tokens を下げると TTS ごと短くなる")
+        print("  (CASCADE_LLM_MAX_NEW_TOKENS、既定 200)。")
+    print()
+
     ratio = placement / sum(inputs) if sum(inputs) else 0.0
     print(f"実時間比: 入力 1 秒あたり {ratio:.2f} 秒")
     if ratio > 1.0:
@@ -88,6 +123,8 @@ def main() -> int:
             f"{label}={float(row.get(key) or 0.0):.2f}" for key, label in STAGES
         )
         print(f"  {row.get('case_id')}: 合計 {row.get('wall_time_sec')}s  {parts}")
+        print(f"      応答 {len(row['_text'])} 文字 / 音声 {row['_response_sec']:.1f} 秒"
+              f"  「{row['_text'][:40]}」")
     return 0
 
 
