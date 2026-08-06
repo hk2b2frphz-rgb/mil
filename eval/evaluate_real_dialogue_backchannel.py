@@ -70,7 +70,7 @@ is_aizuchi_text = _bc.is_aizuchi_text
 # 音声区間の取り方は応答評価と揃える。同じ音を別の閾値で見ると、応答したのに
 # 相槌軸では無音、といった説明のつかない食い違いが出る。
 _resp = _load("_miltoka_resp", REPO_ROOT / "eval" / "evaluate_real_response.py")
-rms_frames = _resp.rms_frames
+speech_segments = _resp.speech_segments
 SPEECH_RMS_THRESHOLD = _resp.SPEECH_RMS_THRESHOLD
 
 
@@ -84,29 +84,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-segment-sec", type=float, default=0.1,
                         help="これより短い音声区間は相槌に数えない")
     return parser.parse_args()
-
-
-def speech_segments(
-    audio: np.ndarray, sr: int, min_sec: float
-) -> list[tuple[float, float]]:
-    """鳴っている区間を (開始, 終了) の列で返す。
-
-    応答評価の speech_span は最初と最後しか返さない。相槌は 1 ケースに複数
-    出るので、区間ごとに分けて取る必要がある。
-    """
-    values, win = rms_frames(audio, sr)
-    loud = values >= SPEECH_RMS_THRESHOLD
-    segments: list[tuple[float, float]] = []
-    start = None
-    for i, is_loud in enumerate(loud):
-        if is_loud and start is None:
-            start = i
-        elif not is_loud and start is not None:
-            segments.append((start * win / sr, i * win / sr))
-            start = None
-    if start is not None:
-        segments.append((start * win / sr, len(loud) * win / sr))
-    return [s for s in segments if s[1] - s[0] >= min_sec]
 
 
 def chunk_interval(chunk: dict[str, Any]) -> tuple[float, float] | None:

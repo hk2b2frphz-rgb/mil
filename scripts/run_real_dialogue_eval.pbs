@@ -67,7 +67,7 @@ export HALF="${HALF:-1}"
 export REAL_CONTEXT_SEC="${REAL_CONTEXT_SEC:-30}"
 export REAL_TASKS="${REAL_TASKS:-all}"
 export REAL_SEEDS="${REAL_SEEDS:-0}"
-export REAL_TAIL_SEC="${REAL_TAIL_SEC:-8}"
+export REAL_TAIL_SEC="${REAL_TAIL_SEC:-30}"
 export REAL_BC_TOLERANCE_SEC="${REAL_BC_TOLERANCE_SEC:-1.5}"
 
 # Disable Triton / torch.compile -- V100 lacks support for many Triton kernels.

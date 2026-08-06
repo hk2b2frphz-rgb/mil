@@ -62,6 +62,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mos-device", default="cpu",
                         help="UTMOS を動かすデバイス(既定: cpu)。"
                              "推論ジョブと GPU を取り合わないよう既定は cpu")
+    parser.add_argument("--reply-gap-sec", type=float, default=3.0,
+                        help="連続する発話を 1 つの応答としてまとめる間隔。"
+                             "人手アノテーション側(--gold-reply-gap-sec)と"
+                             "同じ値にしておくこと")
     parser.add_argument("--max-latency-sec", type=float, default=None,
                         help="これを超える応答開始は「応答しなかった」と扱う。"
                              "既定は無制限(tail 長で自然に切れる)")
@@ -101,13 +105,48 @@ def crosses_input_end(
     return True, round(input_sec - i * win / sr, 4)
 
 
-def speech_span(audio: np.ndarray, sr: int) -> tuple[float, float] | None:
-    """音が鳴っている最初と最後の時刻を返す。全部無音なら None。"""
+def speech_segments(
+    audio: np.ndarray, sr: int, min_sec: float = 0.0
+) -> list[tuple[float, float]]:
+    """鳴っている区間を (開始, 終了) の列で返す。"""
     values, win = rms_frames(audio, sr)
-    loud = np.flatnonzero(values >= SPEECH_RMS_THRESHOLD)
-    if loud.size == 0:
+    loud = values >= SPEECH_RMS_THRESHOLD
+    segments: list[tuple[float, float]] = []
+    start = None
+    for i, is_loud in enumerate(loud):
+        if is_loud and start is None:
+            start = i
+        elif not is_loud and start is not None:
+            segments.append((start * win / sr, i * win / sr))
+            start = None
+    if start is not None:
+        segments.append((start * win / sr, len(loud) * win / sr))
+    return [s for s in segments if s[1] - s[0] >= min_sec]
+
+
+def speech_span(
+    audio: np.ndarray, sr: int, reply_gap_sec: float = 3.0
+) -> tuple[float, float] | None:
+    """1 つの応答とみなせる区間を返す。全部無音なら None。
+
+    最初に鳴った所を応答の頭とし、そこから reply_gap_sec 以内で続く区間まで
+    を同じ応答としてまとめる。それより長く空いたらそこで切る。人手アノテー
+    ション側の応答のまとめ方(build_real_test_dataset.gold_response)と同じ
+    規則にしてあるので、gold とモデルが同じ意味の区間で測られる。
+
+    窓の端から端まで(最初に鳴った所から最後に鳴った所まで)を 1 つとして
+    扱うと、窓を広げたときに無関係な後続発話まで応答に飲み込まれ、応答長も
+    UTMOS もその分だけ歪む。
+    """
+    segments = speech_segments(audio, sr)
+    if not segments:
         return None
-    return (loud[0] * win / sr, min(audio.size, (loud[-1] + 1) * win) / sr)
+    start, end = segments[0]
+    for seg_start, seg_end in segments[1:]:
+        if seg_start - end > reply_gap_sec:
+            break
+        end = seg_end
+    return (start, min(end, audio.size / sr))
 
 
 class UtmosScorer:
@@ -171,7 +210,8 @@ def summarize(values: list[float]) -> dict[str, Any]:
 
 
 def evaluate_trial(
-    trial_dir: Path, scorer: UtmosScorer, max_latency: float | None
+    trial_dir: Path, scorer: UtmosScorer, max_latency: float | None,
+    reply_gap_sec: float = 3.0,
 ) -> dict[str, Any] | None:
     meta_path = trial_dir / "output.meta.json"
     wav_path = trial_dir / "output.wav"
@@ -191,7 +231,7 @@ def evaluate_trial(
     input_sec = float(meta.get("input_duration_sec") or 0.0)
     # 入力が鳴っている間の出力は評価対象にしない。応答開始は入力終了以降で探す。
     offset = min(audio.size, int(input_sec * sr))
-    span = speech_span(audio[offset:], sr)
+    span = speech_span(audio[offset:], sr, reply_gap_sec)
 
     # User がまだ話している最中に喋り始め、そのまま入力終了をまたいだ場合。
     # 入力終了の直後は既に鳴っているので、素直に測ると応答速度 0.000 秒という
@@ -274,7 +314,9 @@ def main() -> int:
 
     rows: list[dict[str, Any]] = []
     for i, trial_dir in enumerate(trials, 1):
-        row = evaluate_trial(trial_dir, scorer, args.max_latency_sec)
+        row = evaluate_trial(
+            trial_dir, scorer, args.max_latency_sec, args.reply_gap_sec
+        )
         if row is None:
             continue
         rows.append(row)
