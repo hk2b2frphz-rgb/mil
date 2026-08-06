@@ -72,6 +72,51 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _load_aizuchi_labeller():
+    """相槌の種類ラベル付けを scripts/analyze_real_dialogue.py から借りる。
+
+    相槌軸と同じ語彙・同じ関数を使う。別々に持つと、片方だけ語彙を足したとき
+    に「相槌軸では相槌、応答軸では実応答」という食い違いが起きる。
+    """
+    import importlib.util
+    import sys
+
+    path = Path(__file__).resolve().parent.parent / "scripts" / "analyze_real_dialogue.py"
+    spec = importlib.util.spec_from_file_location("_miltoka_analyze_real", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.is_aizuchi_text
+
+
+is_aizuchi_text = _load_aizuchi_labeller()
+
+
+def response_text_in(
+    trial_dir: Path, start_sec: float, end_sec: float
+) -> str:
+    """応答区間に重なる時刻つきテキスト片をつないで返す。
+
+    output.json の時計は output.wav と同じ(入力再生の開始が 0 秒)。
+    """
+    path = trial_dir / "output.json"
+    if not path.is_file():
+        return ""
+    chunks = json.loads(path.read_text(encoding="utf-8")).get("chunks") or []
+    pieces: list[str] = []
+    for chunk in chunks:
+        stamp = chunk.get("timestamp")
+        if not stamp or len(stamp) < 2:
+            continue
+        try:
+            lo, hi = float(stamp[0]), float(stamp[1])
+        except (TypeError, ValueError):
+            continue
+        if min(hi, end_sec) - max(lo, start_sec) > 0.0:
+            pieces.append(str(chunk.get("text") or ""))
+    return "".join(pieces).strip()
+
+
 def rms_frames(audio: np.ndarray, sr: int) -> tuple[np.ndarray, int]:
     win = max(1, int(FRAME_SEC * sr))
     pad = (-audio.size) % win
@@ -243,6 +288,8 @@ def evaluate_trial(
     latency = None
     quality = None
     response_sec = None
+    response_text = ""
+    aizuchi_only = False
     if span is not None:
         latency = round(span[0], 4)
         if max_latency is not None and latency > max_latency:
@@ -253,6 +300,14 @@ def evaluate_trial(
             response = audio[lo:hi]
             response_sec = round(response.size / sr, 4)
             quality = scorer.score(response, sr)
+            # 応答が相槌だけで終わっていないか。応答率は「はい」1 語でも満たせて
+            # しまうので、実のある応答を返したのかを内訳として分ける。相槌軸へは
+            # 移さない(境界をまたぐものは応答側、という規則を崩さないため)。
+            response_text = response_text_in(
+                trial_dir, input_sec + span[0], input_sec + span[1]
+            )
+            aizuchi_labels = is_aizuchi_text(response_text) if response_text else []
+            aizuchi_only = bool(aizuchi_labels)
 
     text_path = trial_dir / "output.json"
     text = {}
@@ -279,6 +334,9 @@ def evaluate_trial(
             ),
             "barge_in": barge_in,
             "barge_in_lead_sec": barge_in_lead,
+            # 応答が相槌だけだったか(「はい」で応答率を満たしたケース)。
+            "response_is_aizuchi_only": aizuchi_only if responded else None,
+            "response_text": response_text if responded else "",
             "response_duration_sec": response_sec if responded else None,
             "utmos": quality if responded else None,
         },
@@ -333,6 +391,9 @@ def main() -> int:
 
     responded = [r for r in rows if r["metrics"]["responded"]]
     barge_ins = [r for r in rows if r["metrics"].get("barge_in")]
+    aizuchi_only = [
+        r for r in responded if r["metrics"].get("response_is_aizuchi_only")
+    ]
     latencies = [r["metrics"]["response_latency_sec"] for r in responded]
     qualities = [
         r["metrics"]["utmos"] for r in responded if r["metrics"]["utmos"] is not None
@@ -354,6 +415,11 @@ def main() -> int:
         # User の発話終了をまたいで喋っていたケース。応答速度の集計からは
         # 外してある。応答率と併せて読むこと。割り込みが多いモデルは、
         # 残った少数のケースだけで応答速度が良く見える。
+        # 応答が相槌だけで終わったケース。応答率の内訳として読む。
+        "aizuchi_only_response": len(aizuchi_only),
+        "aizuchi_only_response_rate": (
+            round(len(aizuchi_only) / len(responded), 4) if responded else None
+        ),
         "barge_in": len(barge_ins),
         "barge_in_rate": round(len(barge_ins) / len(rows), 4),
         "barge_in_lead_sec": summarize(
@@ -384,6 +450,9 @@ def main() -> int:
     print(f"trials:       {summary['trials']}")
     print(f"応答率:       {summary['response_rate']:.3f} "
           f"({summary['responded']}/{summary['trials']})")
+    if summary["aizuchi_only_response"]:
+        print(f"うち相槌のみ: {summary['aizuchi_only_response_rate']:.3f} "
+              f"({summary['aizuchi_only_response']}/{summary['responded']})")
     if summary["barge_in"]:
         print(f"割り込み:     {summary['barge_in_rate']:.3f} "
               f"({summary['barge_in']}/{summary['trials']}) "

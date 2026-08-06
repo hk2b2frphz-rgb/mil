@@ -95,6 +95,8 @@ def row_for(output_name: str, summary: dict[str, Any] | None,
         "utmos_mean": utmos.get("mean"),
         "utmos_n": utmos.get("n"),
         "mos_backend": summary.get("mos_backend"),
+        # 応答が相槌だけで終わった割合。応答率の内訳。
+        "aizuchi_only_response_rate": summary.get("aizuchi_only_response_rate"),
         # 割り込み(User の発話終了をまたいで喋っていた)。応答速度の集計からは
         # 外してあるので、応答率・応答速度と必ず併せて読む。
         "barge_in": summary.get("barge_in"),
@@ -184,8 +186,8 @@ def main() -> int:
         width = "".join(ch for ch in spec.split(".")[0] if ch.isdigit())
         return format("-", f">{width or 1}")
 
-    header = (f"{'output_name':<24} {'応答率':>8} {'遅延p50':>9} {'遅延p90':>9} "
-              f"{'割込率':>8} {'UTMOS':>7}  status")
+    header = (f"{'output_name':<24} {'応答率':>8} {'相槌のみ':>9} {'遅延p50':>9} "
+              f"{'遅延p90':>9} {'割込率':>8} {'UTMOS':>7}  status")
     print("\n===== 実データ応答評価 まとめ =====")
     print(header)
     print("-" * len(header))
@@ -193,6 +195,7 @@ def main() -> int:
         print(
             f"{row['output_name']:<24} "
             f"{fmt(row.get('response_rate'), '>8.3f')} "
+            f"{fmt(row.get('aizuchi_only_response_rate'), '>9.3f')} "
             f"{fmt(row.get('latency_p50_sec'), '>9.3f')} "
             f"{fmt(row.get('latency_p90_sec'), '>9.3f')} "
             f"{fmt(row.get('barge_in_rate'), '>8.3f')} "
@@ -200,6 +203,7 @@ def main() -> int:
         )
     if gold:
         print("\ngold = 実際の相談員。上限の目安として読むこと。")
+    print("相槌のみ = 応答が「はい」等の相槌だけで終わった割合(応答率の内訳)。")
     print("割込率 = User の発話終了をまたいで喋っていた割合。応答速度の集計外。")
     print("UTMOS は参考指標。録音条件に強く反応するので gold は上限ではない。")
 
