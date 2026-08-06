@@ -239,9 +239,21 @@ def build_dialogue(
         # (応答速度だけは User 発話終了を 0 とする別の起点を使う)。
         input_start_sec = lo / sr
 
-        backchannels = backchannels_during(
-            utterances, start, end, target, args.backchannel_max_sec
-        )
+        backchannels = [
+            (u, "during_turn") for u in backchannels_during(
+                utterances, start, end, target, args.backchannel_max_sec
+            )
+        ]
+        # 発話終了後に相談員が相槌だけ返した場合も相槌として数える。応答軸にも
+        # 同じものが「応答」として入るが、測っているものが違うので二重で構わない
+        # (応答軸=黙っていないか、相槌軸=相槌を打てるか)。応答の中身の良し悪しは
+        # LLM-as-a-judge が見る。
+        for u in replies:
+            if (u.end - u.start) > args.backchannel_max_sec:
+                continue
+            if not is_aizuchi_text(u.text):
+                continue
+            backchannels.append((u, "after_turn"))
 
         latency = round(replies[0].start - end, 4) if replies else None
         reply_audio = None
@@ -316,8 +328,9 @@ def build_dialogue(
                     "abs_end_sec": round(u.end, 4),
                     "text": u.text,
                     "labels": is_aizuchi_text(u.text),
+                    "position": position,
                 }
-                for u in backchannels
+                for u, position in backchannels
             ],
         }
         (case_dir / "metadata.json").write_text(

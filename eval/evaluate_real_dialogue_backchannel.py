@@ -102,15 +102,15 @@ def extract_predictions(
 ) -> list[dict[str, Any]]:
     predictions: list[dict[str, Any]] = []
     for start, end in speech_segments(audio, sr, min_sec):
-        if overlap((start, end), region) <= 0.0:
-            continue
-        if end > region[1]:
+        after_turn = start >= region[1]
+        if not after_turn and end > region[1]:
             # User の発話終了をまたいで続いている = 相槌ではなく応答(または
             # 割り込み)。正解側も同じ規則で境界をまたぐ発話を応答へ渡している
             # ので、予測側だけ相槌に数えると偽陽性になる。
             predictions.append({
                 "start_sec": round(start, 4), "end_sec": round(end, 4),
                 "text": "", "labels": [], "not_backchannel": True,
+                "position": "crosses_turn_end",
             })
             continue
         if end - start > BACKCHANNEL_MAX_SEC:
@@ -119,6 +119,7 @@ def extract_predictions(
             predictions.append({
                 "start_sec": round(start, 4), "end_sec": round(end, 4),
                 "text": "", "labels": [], "not_backchannel": True,
+                "position": "after_turn" if after_turn else "during_turn",
             })
             continue
         pieces = [
@@ -131,15 +132,21 @@ def extract_predictions(
             predictions.append({
                 "start_sec": round(start, 4), "end_sec": round(end, 4),
                 "text": "".join(pieces).strip(), "labels": [], "not_backchannel": True,
+                "position": "after_turn" if after_turn else "during_turn",
             })
             continue
         text = "".join(pieces).strip()
+        labels = is_aizuchi_text(text) if text else []
+        # 発話終了後は、相槌語彙で説明できるものだけを相槌に数える。あちら側は
+        # 普通の応答が来る場所なので、短いだけで相槌とみなすと実応答を相槌に
+        # 数えてしまう。正解側も同じ条件で拾っている。
         predictions.append({
             "start_sec": round(start, 4),
             "end_sec": round(end, 4),
             "text": text,
-            "labels": is_aizuchi_text(text) if text else [],
-            "not_backchannel": False,
+            "labels": labels,
+            "not_backchannel": after_turn and not labels,
+            "position": "after_turn" if after_turn else "during_turn",
         })
     return predictions
 
@@ -189,6 +196,8 @@ def main() -> int:
         )
         if region_end <= 0.0:
             continue
+        # 相槌は User の発話中だけでなく、発話終了後にも起きる。区間は出力全体
+        # とし、region_end(発話終了)の前後で扱いを変える。
         region = (0.0, region_end)
 
         audio, sr = sf.read(trial_dir / "output.wav", dtype="float32")
@@ -200,10 +209,7 @@ def main() -> int:
             if text_path.is_file() else []
         )
 
-        gt = [
-            item for item in (metadata.get("backchannel_gt") or [])
-            if overlap((float(item["start_sec"]), float(item["end_sec"])), region) > 0.0
-        ]
+        gt = list(metadata.get("backchannel_gt") or [])
         raw_pred = extract_predictions(audio, sr, chunks, region, args.min_segment_sec)
         pred = [p for p in raw_pred if not p["not_backchannel"]]
         barge_ins += sum(1 for p in raw_pred if p["not_backchannel"])
@@ -234,8 +240,11 @@ def main() -> int:
         for item in pred:
             pred_labels[primary_label(item)] += 1
 
-        model_rates.append(per_minute(len(pred), region_end))
-        human_rates.append(per_minute(len(gt), region_end))
+        # 頻度の分母は観測できた全区間。相槌は発話終了後にも起きるので、
+        # 発話中の長さだけで割ると水増しになる。
+        observed_sec = len(audio) / sr
+        model_rates.append(per_minute(len(pred), observed_sec))
+        human_rates.append(per_minute(len(gt), observed_sec))
 
         per_case.append({
             "case_id": meta.get("case_id"),
@@ -244,6 +253,16 @@ def main() -> int:
             "region_sec": round(region_end, 4),
             "gt_count": len(gt),
             "pred_count": len(pred),
+            "gt_during_turn": sum(
+                1 for g in gt if g.get("position", "during_turn") == "during_turn"
+            ),
+            "gt_after_turn": sum(1 for g in gt if g.get("position") == "after_turn"),
+            "pred_during_turn": sum(
+                1 for x in pred if x.get("position") == "during_turn"
+            ),
+            "pred_after_turn": sum(
+                1 for x in pred if x.get("position") == "after_turn"
+            ),
             "barge_in_count": sum(1 for p in raw_pred if p["not_backchannel"]),
             "timing_matched": tp,
             "typed_matched": typed_tp,
@@ -275,6 +294,15 @@ def main() -> int:
             "pred": sum(c["pred_count"] for c in per_case),
             "barge_in": barge_ins,
         },
+        # 発話中に打ったのか、発話終了後に相槌だけ返したのかの内訳。両方とも
+        # 相槌として数える(応答軸にも同じものが「黙っていない」証拠として入るが、
+        # 測っているものが違う)。
+        "position": {
+            "gt_during_turn": sum(c["gt_during_turn"] for c in per_case),
+            "gt_after_turn": sum(c["gt_after_turn"] for c in per_case),
+            "pred_during_turn": sum(c["pred_during_turn"] for c in per_case),
+            "pred_after_turn": sum(c["pred_after_turn"] for c in per_case),
+        },
         "timing": prf(totals["tp"], totals["fp"], totals["fn"]),
         "typed": prf(typed_totals["tp"], typed_totals["fp"], typed_totals["fn"]),
         "type_accuracy": round(type_hits / type_total, 4) if type_total else None,
@@ -294,6 +322,11 @@ def main() -> int:
         for row in per_case:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
+    pos = summary["position"]
+    print(
+        f"[real-bc] 発話中 model={pos['pred_during_turn']} human={pos['gt_during_turn']} / "
+        f"発話終了後 model={pos['pred_after_turn']} human={pos['gt_after_turn']}"
+    )
     print(
         f"[real-bc] rate model={summary['rate_per_min']['model']}/min "
         f"human={summary['rate_per_min']['human']}/min  "

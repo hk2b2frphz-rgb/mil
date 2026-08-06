@@ -98,16 +98,55 @@ fi
 echo "gpus:         ${GPU_IDS[*]}"
 echo "parallelism:  $PARALLELISM"
 
-WAVE_PIDS=()
+# GPU slot scheduler. A GPU is handed to the next row the moment its previous
+# worker exits, instead of waiting for a whole wave to drain. One slow model
+# used to leave every other GPU idle until it finished.
+declare -A GPU_PID=()      # gpu_id -> pid of the worker holding it
+RUNNING_PIDS=()
+
+# Reap workers that have exited and release their GPUs.
+reap_finished() {
+    local gpu pid still=()
+    for gpu in "${!GPU_PID[@]}"; do
+        pid="${GPU_PID[$gpu]}"
+        if ! kill -0 "$pid" 2>/dev/null; then
+            # Workers always record their own status. A missing status file
+            # after an external kill is handled as FAILED in the final
+            # collection.
+            wait "$pid" 2>/dev/null || true
+            unset 'GPU_PID[$gpu]'
+        fi
+    done
+    for pid in "${RUNNING_PIDS[@]}"; do
+        kill -0 "$pid" 2>/dev/null && still+=("$pid")
+    done
+    RUNNING_PIDS=("${still[@]}")
+}
+
+# Block until a GPU is free, then echo its id.
+acquire_gpu() {
+    local gpu
+    while true; do
+        reap_finished
+        if [[ "${#GPU_PID[@]}" -lt "$PARALLELISM" ]]; then
+            for gpu in "${GPU_IDS[@]}"; do
+                if [[ -z "${GPU_PID[$gpu]:-}" ]]; then
+                    echo "$gpu"
+                    return 0
+                fi
+            done
+        fi
+        sleep 5
+    done
+}
 
 wait_for_wave() {
     local pid
-    for pid in "${WAVE_PIDS[@]}"; do
-        # Workers always record their own status. A missing status file after
-        # an external kill is handled as FAILED in the final collection.
-        wait "$pid" || true
+    for pid in "${RUNNING_PIDS[@]}"; do
+        wait "$pid" 2>/dev/null || true
     done
-    WAVE_PIDS=()
+    RUNNING_PIDS=()
+    GPU_PID=()
 }
 
 while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
@@ -295,13 +334,10 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
         wait_for_wave
     fi
 
-    # Fill one GPU wave at a time. Every worker is a separate process with a
-    # single visible GPU, so model state and random-number streams remain as
-    # isolated as in the former serial execution.
-    if [[ "${#WAVE_PIDS[@]}" -ge "$PARALLELISM" ]]; then
-        wait_for_wave
-    fi
-    gpu_id="${GPU_IDS[${#WAVE_PIDS[@]}]}"
+    # Take the first free GPU, blocking until one is released. Every worker is
+    # a separate process with a single visible GPU, so model state and
+    # random-number streams remain as isolated as in serial execution.
+    gpu_id="$(acquire_gpu)"
     status_file="$BATCH_OUT_DIR/.${output_name}.batch_status"
     rm -f "$status_file"
     mkdir -p "$BATCH_OUT_DIR/$output_name"
@@ -327,8 +363,10 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
         printf '%s|%s\n' "$status" "$elapsed" > "$status_file"
         echo "[batch] model_id=$model_id output_name=$output_name system=$row_system gpu=$gpu_id status=$status elapsed_sec=$elapsed"
     ) > >(tee "$BATCH_OUT_DIR/$output_name/batch_worker.log") 2>&1 &
-    WAVE_PIDS+=("$!")
-    echo "[batch] started model_id=$model_id on gpu=$gpu_id pid=$!"
+    worker_pid=$!
+    GPU_PID[$gpu_id]="$worker_pid"
+    RUNNING_PIDS+=("$worker_pid")
+    echo "[batch] started model_id=$model_id on gpu=$gpu_id pid=$worker_pid"
     if [[ "$row_requires_serial" == "1" ]]; then
         wait_for_wave
     fi
