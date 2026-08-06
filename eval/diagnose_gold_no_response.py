@@ -94,15 +94,12 @@ def main() -> None:
              if u.speaker.lower() == target.lower() and u.start > float(src["user_start_sec"])),
             None,
         )
-        if next_user is None:
-            closed_by = f"上限 {args.window_sec:.0f}s"
-            width = args.window_sec
-        elif next_user < user_end + args.window_sec:
-            closed_by = f"次の User 発話 {next_user:.2f}s"
-            width = next_user - user_end
-        else:
-            closed_by = f"上限 {args.window_sec:.0f}s"
-            width = args.window_sec
+        # 応答窓は次の User 発話では閉じない(gold_response の既定)。次の User
+        # 発話の位置は参考として出すだけ。
+        width = args.window_sec
+        closed_by = f"上限 {args.window_sec:.0f}s"
+        if next_user is not None:
+            closed_by += f" / 次の User 発話は {next_user:.2f}s(窓は閉じない)"
 
         nearby = [
             u for u in sorted(utterances, key=lambda x: x.start)

@@ -87,6 +87,12 @@ def parse_args() -> argparse.Namespace:
                              "0 より大きくすると相談員の声が入力に混ざる")
     parser.add_argument("--gold-window-sec", type=float, default=30.0,
                         help="Staff の応答として拾う最大秒数(既定 30)")
+    parser.add_argument("--gold-reply-gap-sec", type=float, default=3.0,
+                        help="連続する Staff 発話を 1 つの応答としてまとめる間隔")
+    parser.add_argument("--gold-next-user-closes", action="store_true",
+                        help="次の User 発話で応答窓を閉じる(旧挙動)。既定では"
+                             "閉じない。User の 1 ターンが複数行に割れていると"
+                             "窓が潰れて無応答になるため")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -107,21 +113,41 @@ def load_clips(dialogue_dir: Path) -> list[dict[str, str]]:
 
 def gold_response(
     utterances: list, user_end: float, next_user_start: float | None,
-    window_sec: float, target_speaker: str,
+    window_sec: float, target_speaker: str, reply_gap_sec: float = 3.0,
+    next_user_closes: bool = False,
 ) -> list:
     """User 発話の直後に相談員が返した発話を拾う。
 
-    次の User 発話が始まるまで(無ければ window_sec まで)を応答とみなす。
-    複数発話にまたがることがあるのでリストで返す。
+    起点は user_end。そこから window_sec 以内で**最初に始まる Staff 発話**を
+    応答の頭とし、以降 reply_gap_sec 以内で続く Staff 発話を同じ応答として
+    まとめる。複数発話にまたがることがあるのでリストで返す。
+
+    次の User 発話では窓を閉じない。1ch のアノテーションでは User の 1 ターンが
+    複数行に割れていることが多く、次の User 行が user_end の直後に来るだけで
+    窓の幅がほぼ 0 になり、相談員が実際に応答していても「無応答」に落ちて
+    いた。ユーザーが喋り続けたことは、相談員が応答しなかったことを意味しない。
+
+    next_user_closes=True で以前の挙動(次の User 発話で窓を閉じる)に戻せる。
     """
     limit = user_end + window_sec
-    if next_user_start is not None:
+    if next_user_closes and next_user_start is not None:
         limit = min(limit, next_user_start)
-    return [
-        u for u in utterances
-        if u.speaker.lower() != target_speaker.lower()
-        and u.end > user_end and u.start < limit
-    ]
+
+    candidates = sorted(
+        (u for u in utterances
+         if u.speaker.lower() != target_speaker.lower()
+         and u.end > user_end and u.start < limit),
+        key=lambda u: u.start,
+    )
+    if not candidates:
+        return []
+
+    replies = [candidates[0]]
+    for u in candidates[1:]:
+        if u.start - replies[-1].end > reply_gap_sec:
+            break
+        replies.append(u)
+    return replies
 
 
 def build_dialogue(
@@ -150,7 +176,9 @@ def build_dialogue(
 
         next_user = next((s for s in user_starts if s > start), None)
         replies = gold_response(
-            utterances, end, next_user, args.gold_window_sec, target
+            utterances, end, next_user, args.gold_window_sec, target,
+            reply_gap_sec=args.gold_reply_gap_sec,
+            next_user_closes=args.gold_next_user_closes,
         )
 
         case_id = f"{name}__{index:04d}"
@@ -202,6 +230,15 @@ def build_dialogue(
             "human_reference": {
                 "responded": bool(replies),
                 "response_latency_sec": latency,
+                # 応答が始まる前に User が次の行を喋り出していたか。応答窓は
+                # これで閉じないが、後から絞り込めるように残しておく。
+                "user_continued_before_reply": bool(
+                    replies and next_user is not None
+                    and next_user < replies[0].start
+                ),
+                "next_user_start_sec": (
+                    round(next_user, 4) if next_user is not None else None
+                ),
                 "audio": reply_audio,
                 "segments": [
                     {

@@ -38,6 +38,28 @@ gold の音声は元の 1ch 録音から切り出すので、相談員の応答�
 gold の応答率も 100% にはならない。ユーザーが話し終えても相談員が何も返さなかっ
 た場面が実データには含まれるため。データセット構築時に件数が出る。
 
+### 「相談員が応答した」の判定
+
+`eval/build_real_test_dataset.py` の `gold_response()` が、アノテーションの時刻
+だけで決める。起点は User 発話の終了時刻で、そこから `--gold-window-sec`（既定
+30 秒）以内で**最初に始まる Staff 発話**が応答の頭。以降 `--gold-reply-gap-sec`
+（既定 3 秒）以内で続く Staff 発話は同じ応答としてまとめる。
+
+**次の User 発話では窓を閉じない。** 1ch のアノテーションでは User の 1 ターンが
+複数行に割れていることが多く、以前は次の User 行が発話終了の直後に来るだけで窓
+の幅がほぼ 0 になり、相談員が実際に応答していても「無応答」に落ちていた。ユーザー
+が喋り続けたことは、相談員が応答しなかったことを意味しない。旧挙動は
+`--gold-next-user-closes` で戻せる。
+
+応答が始まる前に User が次の行を喋り出していたかは
+`human_reference.user_continued_before_reply` に残るので、後から絞り込める。
+
+判定を疑うときは、無応答とされたケースの周辺を並べる:
+
+```bash
+uv run python eval/diagnose_gold_no_response.py
+```
+
 ## 実行
 
 前提として、テストデータが作ってあること（`data/test_data/real_dialogue`）。
