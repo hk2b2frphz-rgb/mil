@@ -24,6 +24,9 @@ from pathlib import Path
 from typing import Any
 
 GOLD_ID = "gold"
+# この表が扱えるのは実データ応答評価だけ。cascade 行(FDB_SYSTEM=cascade)は
+# 合成 Full-Duplex-Bench-JA で走るので、データもプロトコルも指標も違う。
+REAL_PROTOCOL = "real_dialogue_single_turn_response"
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,6 +60,23 @@ def row_for(output_name: str, summary: dict[str, Any] | None,
             "elapsed_sec": status.get("elapsed_sec"),
             "note": "summary.json がありません(失敗、または別トラックの評価)。",
         }
+    protocol = summary.get("protocol")
+    if protocol and protocol != REAL_PROTOCOL:
+        # 別トラック(合成 Full-Duplex-Bench-JA)。指標の意味が違うので、実データ
+        # の行と同じ表に数字を並べない。空欄が並ぶより、別物だと言うほうがよい。
+        return {
+            "output_name": output_name,
+            "model_id": summary.get("model_id") or status.get("model_id"),
+            "status": status.get("status", "ok"),
+            "elapsed_sec": status.get("elapsed_sec"),
+            "protocol": protocol,
+            "other_protocol": True,
+            "note": (
+                f"別トラック({protocol})。合成 Full-Duplex-Bench-JA で走った行"
+                "なので、実データ応答評価と同じ表では読めない。"
+            ),
+        }
+
     latency = summary.get("response_latency_sec") or {}
     utmos = summary.get("utmos") or {}
     duration = summary.get("response_duration_sec") or {}
@@ -127,6 +147,13 @@ def main() -> int:
             latency if latency is not None else float("inf"),
         )
 
+    other = [r for r in rows if r.get("other_protocol")]
+    rows = [r for r in rows if not r.get("other_protocol")]
+    if not rows:
+        raise SystemExit(
+            "実データ応答評価の結果が 1 行もありません。"
+            f"別トラックの行が {len(other)} 件あります(cascade など)。"
+        )
     rows.sort(key=sort_key)
     gold = next((r for r in rows if r.get("model_id") == GOLD_ID), None)
 
@@ -141,6 +168,9 @@ def main() -> int:
             "応答が同じ指標で並びます。"
         ),
         "models": rows,
+        # 別トラックの行はここに退避する。models に混ぜると、指標の意味が
+        # 違うものが同じ列に並ぶ。
+        "other_protocol_rows": other,
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(
@@ -188,6 +218,14 @@ def main() -> int:
                 f"{fmt(row.get('backchannel_typed_f1'), '>9.3f')}"
             )
         print("gold の F1 は正解が相談員自身なので定義上 1.0。頻度と種類分布で読む。")
+    if other:
+        print("\n===== 別トラック(この表には並べられない) =====")
+        for row in other:
+            print(f"{row['output_name']:<24} {row.get('protocol')}  {row.get('status')}")
+        print("合成 Full-Duplex-Bench-JA で走った行。データもプロトコルも指標も")
+        print("違うので、実データ応答評価と同じ表で読まないこと。結果自体は")
+        print("<batch>/<output_name>/benchmark_results/summary.json にある。")
+
     print(f"\ncombined: {args.out}")
     return 0
 
