@@ -28,13 +28,20 @@
 #                   to this row, e.g. FDB_SEEDS=0,1,2;FDB_TTS_SPEAKER=Ono_Anna
 #                   or FDB_CASES_PER_TASK=1 for a one-case-per-task smoke run.
 #                   Special key FDB_SYSTEM=cascade turns this row into a local
-#                   cascade (ASR->LLM->TTS) baseline instead of a Moshi run:
-#                   the batch calls scripts/run_full_duplex_cascade_eval.sh,
+#                   cascade (ASR->LLM->TTS) baseline instead of a Moshi run.
+#                   It runs on the SAME hand-annotated real test set and the
+#                   same metrics as the Moshi rows, so it lands in the same
+#                   table: the batch calls scripts/run_real_cascade_eval.sh,
 #                   model_weight/model_config/hf_repo are ignored, and the
 #                   cascade is tuned via CASCADE_* keys in this same extra_env
 #                   (e.g. FDB_SYSTEM=cascade;CASCADE_LLM_MODEL=google/gemma-2-2b-it).
-#                   It lands in combined_summary.json side by side with the
-#                   Moshi models. See scripts/run_full_duplex_cascade_eval.sh.
+#                   The cascade only starts working once the turn has ended, so
+#                   its backchannel count is near zero by construction. That is
+#                   a structural difference, not a bug -- read it as such.
+#                   Use FDB_SYSTEM=cascade_synthetic for the old behaviour
+#                   (synthetic Full-Duplex-Bench-JA). That is a different track
+#                   and is reported separately, never in the same table.
+#                   See scripts/run_real_cascade_eval.sh.
 # - opening_greeting optional. "0" or "1", sets FDB_OPENING_GREETING for this
 #                   row only. Leave empty to use the default described below.
 #                   This dedicated column exists so the greeting toggle

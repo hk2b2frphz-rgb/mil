@@ -179,6 +179,32 @@ PC で `eval/judge_openai.py` に掛ける（既存の 2 フェーズ方針の�
 なので**入力に相談員の声が混ざる**。応答の打ち方を評価したいのに、入力に正解が
 入っている状態になる。
 
+## カスケード（ASR→LLM→TTS）
+
+`extra_env` に `FDB_SYSTEM=cascade` を書いた行は、**同じテストデータ・同じ指標**で
+カスケードを走らせる（[run_real_cascade_eval.sh](../scripts/run_real_cascade_eval.sh)）。
+Moshi 系と同じ表に並ぶ。
+
+```
+cascade_gemma2b||||FDB_SYSTEM=cascade;CASCADE_LLM_MODEL=google/gemma-2-2b-it||cascade_gemma2b
+```
+
+土俵が揃っている理由は応答音声の置き方にある。カスケードの応答は「入力を全部
+聞き終えてから、ASR+LLM+TTS の実処理が終わるまで」の位置に置かれるので、応答速度
+にパイプラインの実処理時間が入る。Moshi 側は生成そのものが応答開始なので、
+どちらも「音が鳴り始めた時刻」という同じ定義で測られる。
+
+**カスケードの相槌はほぼ 0 件になる。** ターンが終わってから動く構造なので当然で、
+欠陥ではない。相槌軸に出る差はそう解釈すること。逆に言えば、この軸が full-duplex
+の構造的な優位を示す場所になる。
+
+`CASCADE_ASR_MODEL` / `CASCADE_LLM_MODEL` / `CASCADE_TTS_BACKEND` などで中身を
+差し替えられる（既定は faster-whisper large-v3 / gemma-2-2b-it / Qwen3-TTS）。
+
+合成 Full-Duplex-Bench-JA のカスケードが要るときは `FDB_SYSTEM=cascade_synthetic`。
+別トラックなので、`combined_summary.json` では `other_protocol_rows` に分けられ、
+同じ表には並ばない。
+
 ## 合成 Full-Duplex-Bench-JA は
 
 削除していない。行ごとに `extra_env` で `FDB_SYSTEM=moshi` / `FDB_SYSTEM=cascade`

@@ -203,7 +203,7 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
         done
     fi
     case "$row_system" in
-        real|gold|moshi|cascade) ;;
+        real|gold|moshi|cascade|cascade_synthetic) ;;
         *)
             echo "[batch] WARN: unknown FDB_SYSTEM='$row_system' for $model_id, treating as real" >&2
             row_system="real"
@@ -259,6 +259,14 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
             expected_system="gold"
             ;;
         cascade)
+            # このバッチは実データ応答評価なので、cascade も同じテストデータ・
+            # 同じ指標で走らせる。合成 Full-Duplex-Bench-JA のカスケードが
+            # 要るときは FDB_SYSTEM=cascade_synthetic を使う(別トラックなので
+            # 同じ表には並ばない)。
+            eval_script="scripts/run_real_cascade_eval.sh"
+            expected_system="cascade"
+            ;;
+        cascade_synthetic)
             eval_script="scripts/run_full_duplex_cascade_eval.sh"
             expected_system="cascade"
             ;;
