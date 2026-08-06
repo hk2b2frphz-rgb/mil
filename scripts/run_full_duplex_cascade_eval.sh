@@ -49,6 +49,7 @@ cd "$REPO_ROOT"
 # sure a login-node-only proxy inherited from that shell never reaches ASR,
 # TTS, or the isolated Gemma worker.
 source "$SCRIPT_DIR/setup_proxy.sh"
+source "$SCRIPT_DIR/kokoro_uv_env.sh"
 
 MODEL_ID="${MODEL_ID:?Set MODEL_ID to a stable label such as cascade_gemma2b}"
 if ! [[ "$MODEL_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
@@ -143,6 +144,11 @@ echo "git_commit:   $FDB_GIT_COMMIT"
 echo "started_at:   $(date -Iseconds)"
 echo "=========================================="
 
+# kokoro is not a project dependency; layer it in per call site whenever a
+# stage actually asks for it (scripts/kokoro_uv_env.sh).
+kokoro_uv_run FDB_UV_RUN "$FDB_TTS_BACKEND" cascade-fdb
+kokoro_uv_run UV_RUN "$CASCADE_TTS_BACKEND" cascade-fdb
+
 # Match the Moshi runner's shared-dataset lock. Parallel model workers must
 # never build or overwrite the same input set concurrently.
 FDB_DATA_LOCK_FD=""
@@ -161,7 +167,7 @@ fi
 
 if [[ "$REFRESH_FDB_DATA" == "1" || ! -f "$FDB_DATA_DIR/manifest.json" ]]; then
     build_args=(
-        uv run python eval/build_full_duplex_ja_dataset.py
+        "${FDB_UV_RUN[@]}" python eval/build_full_duplex_ja_dataset.py
         --scenarios "$FDB_SCENARIOS"
         --out-dir "$FDB_DATA_DIR"
         --tts-backend "$FDB_TTS_BACKEND"
@@ -190,7 +196,7 @@ if [[ -n "$FDB_DATA_LOCK_FD" ]]; then
 fi
 
 baseline_args=(
-    uv run python eval/run_local_baseline_full_duplex.py
+    "${UV_RUN[@]}" python eval/run_local_baseline_full_duplex.py
     --system cascade
     --dataset-dir "$FDB_DATA_DIR"
     --out-dir "$FDB_OUT_DIR/inference"

@@ -44,6 +44,7 @@
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 source scripts/setup_proxy.sh
+source scripts/kokoro_uv_env.sh
 
 JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
 JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
@@ -117,12 +118,16 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi
 fi
 
+# kokoro is not a project dependency; layer it in when it is the TTS backend
+# (scripts/kokoro_uv_env.sh).
+kokoro_uv_run UV_RUN "$CASCADE_TTS_BACKEND" cascade-eval
+
 if [[ "$SKIP_FULL_DUPLEX" != "1" ]]; then
     rm -f "$FDB_OUT_DIR/azure_judge_input.jsonl"
     echo
     echo "===== 1/4: Full-Duplex-Bench-JA dataset (no opening greeting) ====="
     if [[ "$REFRESH_FDB_DATA" == "1" || ! -f "$FDB_DATA_DIR/manifest.json" ]]; then
-        uv run python eval/build_full_duplex_ja_dataset.py \
+        "${UV_RUN[@]}" python eval/build_full_duplex_ja_dataset.py \
             --scenarios "$FDB_SCENARIOS" \
             --out-dir "$FDB_DATA_DIR" \
             --tts-backend "$CASCADE_TTS_BACKEND" \
@@ -140,7 +145,7 @@ if [[ "$SKIP_FULL_DUPLEX" != "1" ]]; then
     echo
     echo "===== 2/4: cascade inference over Full-Duplex-Bench-JA ====="
     baseline_args=(
-        uv run python eval/run_local_baseline_full_duplex.py
+        "${UV_RUN[@]}" python eval/run_local_baseline_full_duplex.py
         --system cascade
         --dataset-dir "$FDB_DATA_DIR"
         --out-dir "$FDB_OUT_DIR/inference"
@@ -195,7 +200,7 @@ fi
 if [[ "$SKIP_LONELINESS" != "1" ]]; then
     echo
     echo "===== 3/4: cascade inference over loneliness_support ====="
-    uv run python eval/run_local_baseline_loneliness.py \
+    "${UV_RUN[@]}" python eval/run_local_baseline_loneliness.py \
         --system cascade \
         --scenarios "$LONELINESS_SCENARIOS" \
         --out-dir "$LONELINESS_OUT_DIR" \

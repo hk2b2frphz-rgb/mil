@@ -38,6 +38,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 source "$SCRIPT_DIR/setup_proxy.sh"
+source "$SCRIPT_DIR/kokoro_uv_env.sh"
 
 MODEL_ID="${MODEL_ID:?Set MODEL_ID (e.g. cascade_gemma2b)}"
 if ! [[ "$MODEL_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
@@ -124,19 +125,8 @@ fi
 
 # 2) 推論。ASR->LLM->TTS。応答の置き位置に実処理時間が入る。
 #
-# kokoro は本体の依存に入っていないので、その場で足す。misaki[ja] が引く
-# unidic は辞書データを同梱しないため、推論の前に一度 download が要る
-# (scripts/run_tts_comparison.pbs と同じ手順)。--with の組が同じなら uv は
-# 環境をキャッシュするので、辞書は次の呼び出しにも残る。
-UV_RUN=(uv run)
-if [[ "$CASCADE_TTS_BACKEND" == "kokoro" ]]; then
-    UV_RUN=(uv run --with "kokoro>=0.9.4" --with "misaki[ja]" --with unidic)
-    echo "[real-cascade] kokoro の辞書データを確認します"
-    "${UV_RUN[@]}" python -m unidic download || {
-        echo "ERROR: unidic download に失敗しました。kokoro は日本語辞書なしでは動きません。" >&2
-        exit 1
-    }
-fi
+# kokoro は本体の依存に入っていないので、その場で足す(scripts/kokoro_uv_env.sh)。
+kokoro_uv_run UV_RUN "$CASCADE_TTS_BACKEND" real-cascade
 
 inference_args=(
     "${UV_RUN[@]}" python eval/run_local_baseline_full_duplex.py
