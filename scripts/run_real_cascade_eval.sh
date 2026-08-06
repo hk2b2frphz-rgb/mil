@@ -61,10 +61,18 @@ CASCADE_ASR_MODEL="${CASCADE_ASR_MODEL:-large-v3}"
 CASCADE_ASR_DEVICE="${CASCADE_ASR_DEVICE:-cuda}"
 CASCADE_ASR_COMPUTE_TYPE="${CASCADE_ASR_COMPUTE_TYPE:-float16}"
 CASCADE_LLM_MODEL="${CASCADE_LLM_MODEL:-google/gemma-2-2b-it}"
-CASCADE_LLM_MAX_NEW_TOKENS="${CASCADE_LLM_MAX_NEW_TOKENS:-200}"
-CASCADE_TTS_BACKEND="${CASCADE_TTS_BACKEND:-qwen3}"
+# 既定 200 は相談員の応答としては長すぎ、TTS の時間ごと応答速度に乗る。
+# 短く返させる(プロンプトでも「短く」と指示している)。長さを変えたら
+# 論文にその値を書くこと。
+CASCADE_LLM_MAX_NEW_TOKENS="${CASCADE_LLM_MAX_NEW_TOKENS:-80}"
+CASCADE_TTS_BACKEND="${CASCADE_TTS_BACKEND:-kokoro}"
 CASCADE_TTS_MODEL="${CASCADE_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
-CASCADE_TTS_SPEAKER="${CASCADE_TTS_SPEAKER:-Serena}"
+# kokoro は固定の日本語話者を使う(jf_/jm_ で始まる ID)。qwen3 のときは Serena。
+if [[ "$CASCADE_TTS_BACKEND" == "kokoro" ]]; then
+    CASCADE_TTS_SPEAKER="${CASCADE_TTS_SPEAKER:-jf_alpha}"
+else
+    CASCADE_TTS_SPEAKER="${CASCADE_TTS_SPEAKER:-Serena}"
+fi
 CASCADE_DEVICE="${CASCADE_DEVICE:-cuda}"
 CASCADE_DTYPE="${CASCADE_DTYPE:-float16}"
 
@@ -89,7 +97,11 @@ echo "dataset:      $REAL_DATASET_DIR"
 echo "output:       $REAL_OUT_DIR"
 echo "asr:          $CASCADE_ASR_MODEL"
 echo "llm:          $CASCADE_LLM_MODEL"
-echo "tts:          $CASCADE_TTS_BACKEND / $CASCADE_TTS_MODEL"
+if [[ "$CASCADE_TTS_BACKEND" == "kokoro" ]]; then
+    echo "tts:          kokoro (hexgrad/Kokoro-82M) voice=$CASCADE_TTS_SPEAKER"
+else
+    echo "tts:          $CASCADE_TTS_BACKEND / $CASCADE_TTS_MODEL"
+fi
 echo "git_commit:   $REAL_GIT_COMMIT"
 echo "started_at:   $(date -Iseconds)"
 echo "======================================================="
@@ -109,8 +121,23 @@ else
 fi
 
 # 2) 推論。ASR->LLM->TTS。応答の置き位置に実処理時間が入る。
+#
+# kokoro は本体の依存に入っていないので、その場で足す。misaki[ja] が引く
+# unidic は辞書データを同梱しないため、推論の前に一度 download が要る
+# (scripts/run_tts_comparison.pbs と同じ手順)。--with の組が同じなら uv は
+# 環境をキャッシュするので、辞書は次の呼び出しにも残る。
+UV_RUN=(uv run)
+if [[ "$CASCADE_TTS_BACKEND" == "kokoro" ]]; then
+    UV_RUN=(uv run --with "kokoro>=0.9.4" --with "misaki[ja]" --with unidic)
+    echo "[real-cascade] kokoro の辞書データを確認します"
+    "${UV_RUN[@]}" python -m unidic download || {
+        echo "ERROR: unidic download に失敗しました。kokoro は日本語辞書なしでは動きません。" >&2
+        exit 1
+    }
+fi
+
 inference_args=(
-    uv run python eval/run_local_baseline_full_duplex.py
+    "${UV_RUN[@]}" python eval/run_local_baseline_full_duplex.py
     --system cascade
     --dataset-dir "$REAL_DATASET_DIR"
     --out-dir "$REAL_OUT_DIR/inference"

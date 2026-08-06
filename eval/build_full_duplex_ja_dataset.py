@@ -205,9 +205,32 @@ def config_fingerprint(config: dict[str, Any], scenarios_hash: str) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def load_kokoro_engine(device: str, voice: str) -> Any:
+    """scripts/tts_comparison_backends.py の KokoroTTS を借りる。
+
+    ファイルパスから読む。`import scripts.tts_comparison_backends` は sys.path の
+    手前に別の `scripts` パッケージがあると解決に失敗する。
+    """
+    import importlib.util
+    import sys as _sys
+
+    path = Path(__file__).resolve().parent.parent / "scripts" / "tts_comparison_backends.py"
+    spec = importlib.util.spec_from_file_location("_miltoka_tts_backends", path)
+    module = importlib.util.module_from_spec(spec)
+    _sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    engine = module.KokoroTTS(device=device, voice_moshi=voice, voice_user=voice)
+    engine.load()
+    return engine
+
+
 def initialize_tts(args: argparse.Namespace) -> tuple[str, Any | None]:
     if args.tts_backend == "pyopenjtalk":
         return "pyopenjtalk", None
+    if args.tts_backend == "kokoro":
+        # 固定の日本語話者のみ。クローンや instruct は効かない。
+        voice = args.tts_speaker if str(args.tts_speaker).startswith(("jf_", "jm_")) else "jf_alpha"
+        return "kokoro", load_kokoro_engine(args.device, voice)
     if QWEN3_IMPORT_ERROR is not None or Qwen3TTS is None:
         if args.tts_backend == "auto":
             print(
@@ -270,6 +293,19 @@ def synthesize_raw(
     speaker_role: str = "user",
 ) -> tuple[np.ndarray, int]:
     """Synthesize *text* with no speed adjustment or resampling applied."""
+    if tts_backend == "kokoro":
+        if tts_engine is None:
+            raise RuntimeError("Kokoro backend selected without a loaded engine.")
+        pcm = tts_engine.synthesize(
+            text,
+            speaker_role=speaker_role,
+            speaker_override=tts_speaker,
+        )
+        pcm = np.asarray(pcm, dtype=np.float32).squeeze()
+        if pcm.ndim != 1:
+            raise ValueError(f"Kokoro returned non-mono audio with shape {pcm.shape}")
+        return pcm, int(tts_engine.sample_rate)
+
     if tts_backend == "qwen3":
         if tts_engine is None:
             raise RuntimeError("Qwen3-TTS backend selected without a loaded engine.")

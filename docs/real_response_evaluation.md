@@ -244,7 +244,21 @@ cascade_gemma2b||||FDB_SYSTEM=cascade;CASCADE_LLM_MODEL=google/gemma-2-2b-it||ca
 の構造的な優位を示す場所になる。
 
 `CASCADE_ASR_MODEL` / `CASCADE_LLM_MODEL` / `CASCADE_TTS_BACKEND` などで中身を
-差し替えられる（既定は faster-whisper large-v3 / gemma-2-2b-it / Qwen3-TTS）。
+差し替えられる。既定は faster-whisper large-v3 / gemma-2-2b-it / **Kokoro**。
+
+TTS を Kokoro にしてあるのは速度のため。Qwen3-TTS は合成そのものが遅く、
+カスケードの応答速度に丸ごと乗る。Kokoro は固定の日本語話者のみで、声質は
+Qwen3-TTS に劣る（学習データ生成では機械音声すぎるとして不採用にした経緯が
+ある）。**カスケード行の UTMOS はこの選択に影響される**ので、音声品質でカスケードと
+比べるときはその旨を書くこと。`CASCADE_TTS_BACKEND=qwen3` で戻せる。
+
+Kokoro は本体の依存に入っていないので、ドライバが `uv run --with` でその場に足し、
+`python -m unidic download` で日本語辞書を取ってから推論に入る。
+
+生成長は `CASCADE_LLM_MAX_NEW_TOKENS`（既定 80）。既定の 200 のままだと相談員の
+応答としては長すぎ、合成時間ごと応答速度に乗る。**変えたら論文にその値を書くこと。**
+比べたいのはアーキテクチャの応答遅延であって LLM の饒舌さではないが、生成長を
+絞ることはベースラインへの介入なので、明記しないとフェアではない。
 
 合成 Full-Duplex-Bench-JA のカスケードが要るときは `FDB_SYSTEM=cascade_synthetic`。
 別トラックなので、`combined_summary.json` では `other_protocol_rows` に分けられ、

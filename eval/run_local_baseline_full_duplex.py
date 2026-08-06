@@ -108,7 +108,9 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
-    parser.add_argument("--tts-backend", choices=["qwen3", "pyopenjtalk", "auto"], default="auto")
+    parser.add_argument("--tts-backend",
+                        choices=["qwen3", "kokoro", "pyopenjtalk", "auto"],
+                        default="auto")
     parser.add_argument("--tts-model", default="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice")
     parser.add_argument("--tts-speaker", default="Serena")
     parser.add_argument("--tts-language", default="Japanese")
