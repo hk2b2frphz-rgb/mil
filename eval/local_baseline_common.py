@@ -48,17 +48,25 @@ for _dir in (SCRIPTS_DIR, EVAL_DIR):
 from build_full_duplex_ja_dataset import initialize_tts, synthesize  # noqa: E402
 from full_duplex_audio import write_wav_mono  # noqa: E402
 
-COUNSELOR_SYSTEM_PROMPT = (
-    "あなたは孤独・孤立に関する相談窓口の相談員です。"
-    "利用者の発話を受け止め、決めつけず、責めず、押しつけがましい助言を急がず、"
-    "自然な日本語で短く応答してください。"
-    # 長さはここで決める。max_new_tokens は安全網であって長さの制御手段では
-    # ない(上限で切ると文の途中で終わり、その断片がそのまま音声になる)。
-    "応答は1〜2文、おおむね60文字以内にまとめ、必ず文を言い切ってください。"
-    "危機的な内容(自傷・希死念慮など)を検知したら、安全確認を優先し、"
-    "一人で抱えないよう伝えてください。診断や断定は避けてください。"
-    "出力は応答本文のみとし、前置きや解説、ロールプレイのカッコ書きは付けないでください。"
-)
+def _load_counselor_prompt() -> str:
+    """相談員プロンプトの正本(scripts/counselor_prompts.py)を読む。
+
+    学習データ生成が使っているものと同じ文言をカスケードにも与える。別々の
+    プロンプトで比べると、測っているものがアーキテクチャの差ではなく指示文の
+    差になる。長さの指示(1発話は必ず1文)もここに入っているので、
+    max_new_tokens で長さを作る必要がない。
+    """
+    import importlib.util
+
+    path = SCRIPTS_DIR / "counselor_prompts.py"
+    spec = importlib.util.spec_from_file_location("_miltoka_counselor_prompts", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.MOSHI_AGENT_SYSTEM_PROMPT
+
+
+COUNSELOR_SYSTEM_PROMPT = _load_counselor_prompt()
 
 _PROXY_KEYS = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")
 
