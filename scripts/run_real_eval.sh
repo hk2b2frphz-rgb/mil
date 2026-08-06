@@ -162,6 +162,15 @@ if [[ -n "$REAL_MAX_LATENCY_SEC" ]]; then
 fi
 "${eval_args[@]}"
 
+# 3b) 相槌。User 発話中の別軸。応答評価とは指標の形が違うので別ファイルに出す。
+#     REAL_BACKCHANNEL=0 で飛ばせる。
+if [[ "${REAL_BACKCHANNEL:-1}" == "1" ]]; then
+    uv run python eval/evaluate_real_dialogue_backchannel.py \
+        --run-dir "$REAL_OUT_DIR/inference" \
+        --out "$REAL_OUT_DIR/benchmark_results/backchannel.json" \
+        --tolerance-sec "${REAL_BC_TOLERANCE_SEC:-1.0}"
+fi
+
 # 4) LLM-as-a-judge 入力(モデルと相談員の両方を採点対象として出す)。
 #    gold は自分自身が相談員なので、人間側の行は重複させない。
 judge_args=(
@@ -175,6 +184,7 @@ fi
 "${judge_args[@]}"
 
 echo "[real] summary:          $REAL_OUT_DIR/benchmark_results/summary.json"
+echo "[real] backchannel:      $REAL_OUT_DIR/benchmark_results/backchannel.json"
 echo "[real] per_case:         $REAL_OUT_DIR/benchmark_results/per_case.jsonl"
 echo "[real] judge input only: $REAL_OUT_DIR/real_judge_input.jsonl"
 echo "[real] No OpenAI/Azure API was called by this server run."

@@ -91,6 +91,42 @@ def load_reply_audio(
     )
 
 
+def load_backchannel_audio(
+    metadata: dict, sample_rate: int
+) -> list[tuple[float, np.ndarray]]:
+    """User の発話中に相談員が打った相槌を、元録音から切り出して返す。
+
+    返すのは (output.wav の時計での開始秒, 波形) の列。これを置かないと gold は
+    相槌軸で 0 点になり、実際には打っている相談員を「打っていない」と評価する
+    ことになる。
+    """
+    items = metadata.get("backchannel_gt") or []
+    if not items:
+        return []
+    wav_path = Path((metadata.get("source") or {}).get("wav", ""))
+    if not wav_path.is_file():
+        raise SystemExit(
+            f"元の録音が見つかりません: {wav_path}\n"
+            "  データセットを作った時とパスが変わっている場合は作り直してください。"
+        )
+    audio, sr = sf.read(wav_path, dtype="float32")
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+
+    out: list[tuple[float, np.ndarray]] = []
+    for item in items:
+        lo = max(0, int(float(item["abs_start_sec"]) * sr))
+        hi = min(audio.size, int(float(item["abs_end_sec"]) * sr))
+        if hi <= lo:
+            continue
+        clip = audio[lo:hi]
+        if sr != sample_rate:
+            import librosa
+            clip = librosa.resample(clip, orig_sr=sr, target_sr=sample_rate)
+        out.append((float(item["start_sec"]), clip.astype(np.float32)))
+    return out
+
+
 def main() -> int:
     args = parse_args()
     dataset_dir = args.dataset_dir.resolve()
@@ -135,6 +171,13 @@ def main() -> int:
             )
         aligned = np.zeros(int(total_sec * args.sample_rate) + 1, dtype=np.float32)
 
+        # User の発話中の相槌。入力再生と同じ時計なので、そのまま置く。
+        for bc_start, bc_audio in load_backchannel_audio(metadata, args.sample_rate):
+            lo = max(0, int(bc_start * args.sample_rate))
+            hi = min(aligned.size, lo + bc_audio.size)
+            if hi > lo:
+                aligned[lo:hi] = bc_audio[: hi - lo]
+
         start_sec = None
         if reply is not None:
             # 相談員が食い気味に応答した場合(latency < 0)、モデル側の出力は
@@ -159,11 +202,21 @@ def main() -> int:
             sf.write(output_wav, aligned, args.sample_rate)
 
             segments = (metadata.get("human_reference") or {}).get("segments") or []
+            backchannel_chunks = [
+                {
+                    "timestamp": [
+                        round(float(item["start_sec"]), 4),
+                        round(float(item["end_sec"]), 4),
+                    ],
+                    "text": item.get("text", ""),
+                }
+                for item in (metadata.get("backchannel_gt") or [])
+            ]
             (trial_dir / "output.json").write_text(
                 json.dumps(
                     {
                         "text": "".join(s.get("text", "") for s in segments),
-                        "chunks": [
+                        "chunks": backchannel_chunks + [
                             {
                                 "timestamp": [
                                     round(input_sec + max(0.0, s["start_sec"]

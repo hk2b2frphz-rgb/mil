@@ -48,7 +48,25 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.analyze_real_dialogue import is_aizuchi_text  # noqa: E402
+def _load_aizuchi_labeller():
+    """scripts/analyze_real_dialogue.py をファイルパスから読む。
+
+    `import scripts.analyze_real_dialogue` は、sys.path の手前に別の `scripts`
+    パッケージがあるとそちらに解決されて落ちる。
+    """
+    import importlib.util
+
+    path = REPO_ROOT / "scripts" / "analyze_real_dialogue.py"
+    if not path.is_file():
+        raise ModuleNotFoundError(f"見つかりません: {path}")
+    spec = importlib.util.spec_from_file_location("_miltoka_analyze_real", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.is_aizuchi_text
+
+
+is_aizuchi_text = _load_aizuchi_labeller()
 
 # 相槌とみなす発話の最大長。Full-Duplex-Bench の time_threshold と揃える。
 BACKCHANNEL_MAX_SEC = 3.0

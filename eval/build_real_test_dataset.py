@@ -66,6 +66,25 @@ _build_test_wav = _load_build_test_wav_module()
 CLIP_MARGIN_SEC = _build_test_wav.CLIP_MARGIN_SEC
 read_annotation = _build_test_wav.read_annotation
 
+
+def _load_aizuchi_labeller():
+    """相槌の種類ラベル付けを scripts/analyze_real_dialogue.py から借りる。
+
+    予測側(eval/evaluate_real_dialogue_backchannel.py)と同じ語彙・同じ関数で
+    ラベルを付けないと、種類一致の指標が語彙差だけで落ちる。
+    """
+    import importlib.util
+
+    path = REPO_ROOT / "scripts" / "analyze_real_dialogue.py"
+    spec = importlib.util.spec_from_file_location("_miltoka_analyze_real", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.is_aizuchi_text
+
+
+is_aizuchi_text = _load_aizuchi_labeller()
+
 TASK = "real_response"
 PROTOCOL_NAME = "Real dialogue single-turn response (annotation ground truth)"
 
@@ -87,6 +106,9 @@ def parse_args() -> argparse.Namespace:
                              "0 より大きくすると相談員の声が入力に混ざる")
     parser.add_argument("--gold-window-sec", type=float, default=30.0,
                         help="Staff の応答として拾う最大秒数(既定 30)")
+    parser.add_argument("--backchannel-max-sec", type=float, default=3.0,
+                        help="相槌とみなす最大長。これを超える割り込みは相槌に"
+                             "数えない(Full-Duplex-Bench の time_threshold と同じ)")
     parser.add_argument("--gold-reply-gap-sec", type=float, default=3.0,
                         help="連続する Staff 発話を 1 つの応答としてまとめる間隔")
     parser.add_argument("--gold-next-user-closes", action="store_true",
@@ -150,6 +172,27 @@ def gold_response(
     return replies
 
 
+def backchannels_during(
+    utterances: list, user_start: float, user_end: float, target_speaker: str,
+    max_sec: float = 3.0,
+) -> list:
+    """User が話している最中に相談員が打った相槌を拾う。
+
+    応答(gold_response)とは重ならない。あちらは user_end 以降に**終わる**発話、
+    こちらは user_end までに終わる発話。境界をまたぐ発話は応答側に渡す。
+
+    max_sec を超える長さのものは相槌ではなく発話の割り込みなので除く。
+    Full-Duplex-Bench の time_threshold と同じ 3 秒。
+    """
+    return [
+        u for u in utterances
+        if u.speaker.lower() != target_speaker.lower()
+        and u.start < user_end and u.end > user_start
+        and u.end <= user_end
+        and (u.end - u.start) <= max_sec
+    ]
+
+
 def build_dialogue(
     summary: dict, out_root: Path, args: argparse.Namespace
 ) -> list[dict]:
@@ -192,6 +235,13 @@ def build_dialogue(
             continue
         sf.write(case_dir / "input.wav", audio[lo:hi], sr)
         input_sec = (hi - lo) / sr
+        # output.wav の時計。0 秒 = 入力再生の開始。相槌の指標はこの時計で測る
+        # (応答速度だけは User 発話終了を 0 とする別の起点を使う)。
+        input_start_sec = lo / sr
+
+        backchannels = backchannels_during(
+            utterances, start, end, target, args.backchannel_max_sec
+        )
 
         latency = round(replies[0].start - end, 4) if replies else None
         reply_audio = None
@@ -223,6 +273,11 @@ def build_dialogue(
                 "user_overlap_sec": float(clip.get("overlap_sec", 0.0) or 0.0),
                 "context_sec": args.context_sec,
                 "input_duration_sec": round(input_sec, 4),
+                # output.wav の 0 秒に対応する元録音の絶対時刻。
+                "input_start_sec": round(input_start_sec, 4),
+                # User の発話終了を output.wav の時計で表したもの。相槌の
+                # 評価区間はここまで。
+                "user_end_rel_sec": round(end - input_start_sec, 4),
                 # 評価点 = User の発話が終わった瞬間。応答速度はここが起点。
                 "eval_start_sec": end,
                 "eval_end_sec": round(end + args.gold_window_sec, 4),
@@ -250,6 +305,20 @@ def build_dialogue(
                     for u in replies
                 ],
             },
+            # User が話している最中に相談員が打った相槌。応答評価とは別軸で
+            # 使う(eval/evaluate_real_dialogue_backchannel.py)。時刻は
+            # output.wav の時計。abs_* は gold が元録音から切り出すため。
+            "backchannel_gt": [
+                {
+                    "start_sec": round(u.start - input_start_sec, 4),
+                    "end_sec": round(u.end - input_start_sec, 4),
+                    "abs_start_sec": round(u.start, 4),
+                    "abs_end_sec": round(u.end, 4),
+                    "text": u.text,
+                    "labels": is_aizuchi_text(u.text),
+                }
+                for u in backchannels
+            ],
         }
         (case_dir / "metadata.json").write_text(
             json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
