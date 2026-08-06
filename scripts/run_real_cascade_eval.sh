@@ -61,10 +61,11 @@ CASCADE_ASR_MODEL="${CASCADE_ASR_MODEL:-large-v3}"
 CASCADE_ASR_DEVICE="${CASCADE_ASR_DEVICE:-cuda}"
 CASCADE_ASR_COMPUTE_TYPE="${CASCADE_ASR_COMPUTE_TYPE:-float16}"
 CASCADE_LLM_MODEL="${CASCADE_LLM_MODEL:-google/gemma-2-2b-it}"
-# 既定 200 は相談員の応答としては長すぎ、TTS の時間ごと応答速度に乗る。
-# 短く返させる(プロンプトでも「短く」と指示している)。長さを変えたら
-# 論文にその値を書くこと。
-CASCADE_LLM_MAX_NEW_TOKENS="${CASCADE_LLM_MAX_NEW_TOKENS:-80}"
+# これは安全網であって長さの制御手段ではない。上限で切ると文の途中で終わり、
+# その断片がそのまま音声になる。長さはシステムプロンプト側で指示している
+# (1〜2文・60文字程度)。言い切らずに終わった応答は打ち切りの疑いとして
+# 件数がログに出るので、そこが多いなら上限ではなくプロンプトを見直すこと。
+CASCADE_LLM_MAX_NEW_TOKENS="${CASCADE_LLM_MAX_NEW_TOKENS:-200}"
 CASCADE_TTS_BACKEND="${CASCADE_TTS_BACKEND:-kokoro}"
 CASCADE_TTS_MODEL="${CASCADE_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
 # kokoro は固定の日本語話者を使う(jf_/jm_ で始まる ID)。qwen3 のときは Serena。

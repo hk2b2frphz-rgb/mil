@@ -105,6 +105,13 @@ def main() -> int:
           f"/ 最長 {max(chars)} 文字")
     print(f"応答音声長:     中央値 {statistics.median(resp_secs):.1f} 秒 "
           f"/ 最長 {max(resp_secs):.1f} 秒")
+    truncated = [r for r in rows if r.get("response_looks_truncated")]
+    if truncated:
+        print(f"言い切らずに終わった応答: {len(truncated)}/{len(rows)} 件")
+        print("  max_new_tokens で切られた疑い。上限を上げるか、プロンプトで")
+        print("  さらに短く指示すること(上限を下げても文の途中で切れるだけ)。")
+        for row in truncated[:3]:
+            print(f"    {row.get('case_id')}: 「{row['_text'][-40:]}」")
     if statistics.median(chars) > 80:
         print("  応答が長い。--llm-max-new-tokens を下げると TTS ごと短くなる")
         print("  (CASCADE_LLM_MAX_NEW_TOKENS、既定 200)。")

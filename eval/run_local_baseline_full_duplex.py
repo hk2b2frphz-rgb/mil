@@ -69,6 +69,7 @@ from local_baseline_common import (  # noqa: E402
     LocalASR,
     SpeechLLM,
     init_baseline_tts,
+    looks_truncated,
     validate_spoken_response,
 )
 from build_full_duplex_ja_dataset import synthesize  # noqa: E402
@@ -301,6 +302,10 @@ def process_variant(
         "expected_behavior": metadata.get("expected_behavior"),
         "system": args.system,
         "variant": variant,
+        # 言い切らずに終わっている = max_new_tokens で切られた疑い。断片が
+        # そのまま音声になるので、件数を追えるようにしておく。
+        "response_looks_truncated": looks_truncated(response_text),
+        "response_chars": len(response_text),
         "asr_transcript": asr_text,
         "asr_wall_time_sec": round(asr_wall, 4),
         "output_asr_wall_time_sec": round(output_asr_wall, 4),

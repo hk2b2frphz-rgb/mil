@@ -52,6 +52,9 @@ COUNSELOR_SYSTEM_PROMPT = (
     "あなたは孤独・孤立に関する相談窓口の相談員です。"
     "利用者の発話を受け止め、決めつけず、責めず、押しつけがましい助言を急がず、"
     "自然な日本語で短く応答してください。"
+    # 長さはここで決める。max_new_tokens は安全網であって長さの制御手段では
+    # ない(上限で切ると文の途中で終わり、その断片がそのまま音声になる)。
+    "応答は1〜2文、おおむね60文字以内にまとめ、必ず文を言い切ってください。"
     "危機的な内容(自傷・希死念慮など)を検知したら、安全確認を優先し、"
     "一人で抱えないよう伝えてください。診断や断定は避けてください。"
     "出力は応答本文のみとし、前置きや解説、ロールプレイのカッコ書きは付けないでください。"
@@ -100,6 +103,30 @@ def worker_environment() -> dict[str, str]:
     environment.pop("all_proxy", None)
     environment.pop("ALL_PROXY", None)
     return environment
+
+
+def looks_truncated(text: str) -> bool:
+    """生成が上限で打ち切られた可能性が高いかを、文末の形から推定する。
+
+    ワーカーは終了理由を返さないので、これは推定でしかない。言い切っていない
+    応答をそのまま TTS に流すと音声も途中で終わるため、件数だけは把握できる
+    ようにしておく。
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped[-1] in "。．.!！?？」』）)…~〜ー":
+        return False
+    # 句点が無いだけの言い切り(「大変でしたね」)は珍しくないので、それだけでは
+    # 打ち切りとみなさない。文が続くはずの形で終わっているものだけを拾う。
+    if stripped[-1] in "、,":
+        return True
+    _CONNECTIVE_TAILS = (
+        "て", "で", "が", "けど", "けれど", "ので", "から", "し", "たり",
+        "とか", "など", "への", "への", "という", "といった", "ば",
+        "を", "に", "へ", "と", "は", "も", "の",
+    )
+    return stripped.endswith(_CONNECTIVE_TAILS)
 
 
 def validate_spoken_response(text: str) -> str:
