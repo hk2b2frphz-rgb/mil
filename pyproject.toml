@@ -10,6 +10,7 @@ dependencies = [
     "numpy",
     "pyopenjtalk",
     "pyttsx3",
+    "setuptools>=84.0.0",
     "sphn",
     "torch>=2.1.0",
     "torchaudio>=2.1.0",
