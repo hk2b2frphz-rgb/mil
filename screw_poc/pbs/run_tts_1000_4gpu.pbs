@@ -24,10 +24,12 @@ if [[ ! -f screw_poc/scripts/generate_dialogues.py ]]; then
     echo "ERROR: submit this job from the miltoka repository root." >&2
     exit 1
 fi
-if [[ -f scripts/setup_proxy.sh ]]; then
-    # shellcheck source=/dev/null
-    source scripts/setup_proxy.sh
-fi
+# Proxy first, on every job, immediately after entering the node.  Sourced
+# unconditionally (as scripts/_dag_stage.pbs does) so a missing file is a loud
+# failure instead of a silent no-proxy run that dies later on the HF download.
+# shellcheck source=/dev/null
+source "$PWD/scripts/setup_proxy.sh"
+echo "proxy: sourced scripts/setup_proxy.sh"
 command -v uv >/dev/null 2>&1 || {
     echo "ERROR: uv is not available on PATH." >&2
     exit 1
@@ -203,4 +205,39 @@ if [[ "$MERGED_ROWS" -ne "$NUM_DIALOGUES" ]]; then
 fi
 echo "merged_manifest: $MERGED_MANIFEST"
 echo "merged_rows:     $MERGED_ROWS"
+
+echo "===== chain: submit training ====="
+# Self-chaining, in the style of scripts/run_train_chain.pbs: this job submits
+# the training jobs itself, at the point where the merged manifest is known to
+# exist.  The previous `qsub -W depend=afterok` form queued both training jobs
+# up front, so a TTS failure left them held in the queue to be cleaned up by
+# hand; here a failed TTS run never reaches this line and nothing is queued.
+CHAIN_TRAIN="${CHAIN_TRAIN:-1}"
+CHAIN_ENV="TTS_RUN_DIR=$OUT_ROOT/merged"
+
+if [[ "$CHAIN_TRAIN" != "1" ]]; then
+    echo "[chain] CHAIN_TRAIN=$CHAIN_TRAIN -- not submitting training."
+elif ! command -v qsub >/dev/null 2>&1; then
+    echo "[chain] WARNING: qsub is not available on this node, so training was" >&2
+    echo "[chain] NOT submitted.  The TTS output is complete; chain it from the" >&2
+    echo "[chain] login node with:" >&2
+    echo "[chain]   TTS_RUN_DIR=$OUT_ROOT/merged bash screw_poc/pbs/submit_train_both.sh" >&2
+else
+    # -V carries the proxy settings and PATH of this job into the children;
+    # lowercase -v then overrides what must differ per job, so neither training
+    # job inherits this job's four-GPU CUDA_VISIBLE_DEVICES.  Each submission
+    # runs inside `if` so a queue rejection reports itself instead of failing
+    # a TTS run whose output is already on disk.
+    if lora_job="$(qsub -V -v "${CHAIN_ENV},NPROC=1" screw_poc/pbs/run_train.pbs)"; then
+        echo "[chain] LoRA:    $lora_job"
+    else
+        echo "[chain] ERROR: LoRA submission failed; submit run_train.pbs by hand." >&2
+    fi
+    if full_job="$(qsub -V -v "${CHAIN_ENV},NPROC=2" screw_poc/pbs/run_train_full.pbs)"; then
+        echo "[chain] Full FT: $full_job"
+    else
+        echo "[chain] ERROR: Full-FT submission failed; submit run_train_full.pbs by hand." >&2
+    fi
+fi
+
 echo "finished_at:     $(date -Iseconds)"

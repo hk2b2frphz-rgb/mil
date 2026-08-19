@@ -19,16 +19,25 @@ if [[ ! -f screw_poc/scripts/run_train.sh ]]; then
     echo "ERROR: submit this job from the miltoka repository root." >&2
     exit 1
 fi
-if [[ -f scripts/setup_proxy.sh ]]; then
-    # shellcheck source=/dev/null
-    source scripts/setup_proxy.sh
-fi
+# Proxy first, on every job, immediately after entering the node.  Sourced
+# unconditionally (as scripts/_dag_stage.pbs does) so a missing file is a loud
+# failure instead of a silent no-proxy run that dies later on the HF download.
+# shellcheck source=/dev/null
+source "$PWD/scripts/setup_proxy.sh"
+echo "proxy: sourced scripts/setup_proxy.sh"
 
 JOB_ID="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
 JOB_ID="${JOB_ID%%.*}"
 TTS_RUN_DIR="${TTS_RUN_DIR:-$PWD/screw_poc/artifacts/tts_1000/merged}"
 export NPROC="${NPROC:-1}"
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+# Do not inherit a stale multi-GPU CUDA_VISIBLE_DEVICES through #PBS -V: the
+# TTS job that qsub-chains this one runs on four GPUs, and its list would put
+# a one-GPU LoRA run on devices this allocation does not hold.
+if [[ -n "${GPU_LIST:-}" ]]; then
+    export CUDA_VISIBLE_DEVICES="$GPU_LIST"
+else
+    export CUDA_VISIBLE_DEVICES="$(seq -s, 0 $((NPROC - 1)))"
+fi
 export REFRESH_EXP_DATA="${REFRESH_EXP_DATA:-1}"
 if [[ -f scripts/setup_pbs_distributed.sh ]]; then
     # shellcheck source=/dev/null

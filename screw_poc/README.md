@@ -100,13 +100,37 @@ qsub -V screw_poc/pbs/run_train.pbs
 qsub -V screw_poc/pbs/run_train_full.pbs
 ```
 
-TTS成功後にLoRAとFull FTの両方を自動開始する依存関係付き投入は、次の1コマンドです。
+TTSから学習までを1コマンドで流す場合は次を使います。
 
 ```bash
 bash screw_poc/pbs/submit_pipeline.sh
 ```
 
-この場合、`afterok` 依存を使うため、TTSが失敗した場合に学習は始まりません。LoRAとFull FTは同じ音声データを読み、互いに独立して実行されます。
+投入されるのはTTSジョブだけです。LoRAとFull FTは、**TTSジョブが自分の最後で
+`qsub` して投入します**（`run_tts_1000_4gpu.pbs` の `chain: submit training`
+ステップ）。マージ済みmanifestの検証を通った時点で初めて投入されるため、TTSが
+失敗したときは学習ジョブがそもそもキューに入りません。以前の
+`qsub -W depend=afterok` 方式では、TTS失敗時に2本がholdのままキューに残り、
+手で `qdel` する必要がありました。
+
+連鎖したジョブIDは、TTSログ末尾の `[chain]` 行に出ます。
+
+```bash
+tail -20 screw_poc/artifacts/pbs_logs/tts_1000_<jobid>.log
+```
+
+環境変数は小文字の `-v` で渡します。`-V` は投入元のプロキシ設定とPATHを子ジョブへ
+運び、`-v` がジョブごとに変わる値（`TTS_RUN_DIR`、`NPROC`）を上書きします。これに
+より、4 GPUのTTSジョブの `CUDA_VISIBLE_DEVICES` が1 GPUのLoRAジョブへ漏れません。
+各ジョブはノードに入った直後に `scripts/setup_proxy.sh` を無条件で読み込むので、
+連鎖先でもプロキシは毎回張り直されます。
+
+連鎖を止めてTTSだけ流したい場合は `CHAIN_TRAIN=0` を渡します。
+
+```bash
+qsub -V -v CHAIN_TRAIN=1 screw_poc/pbs/run_tts_1000_4gpu.pbs   # 既定（連鎖する）
+qsub -V -v CHAIN_TRAIN=0 screw_poc/pbs/run_tts_1000_4gpu.pbs   # TTSのみ
+```
 
 すでにTTSが完成している場合は、次のコマンドで両方の学習だけを投入できます。
 
@@ -127,10 +151,15 @@ Full FTは既存のnu-dialogue経路を使い、既定でA100 2 GPU、学習率`
 100・300対話の比較実験では、たとえば300対話を次のように投入できます。
 
 ```bash
-qsub -V -v DIALOGUES_JSONL=screw_poc/artifacts/subsets/train_0300.jsonl,NUM_DIALOGUES=300,OUT_ROOT=screw_poc/artifacts/tts_0300 screw_poc/pbs/run_tts_1000_4gpu.pbs
-qsub -V -v TTS_RUN_DIR=screw_poc/artifacts/tts_0300/merged screw_poc/pbs/run_train.pbs
-qsub -V -v TTS_RUN_DIR=screw_poc/artifacts/tts_0300/merged screw_poc/pbs/run_train_full.pbs
+DIALOGUES_JSONL=screw_poc/artifacts/subsets/train_0300.jsonl \
+NUM_DIALOGUES=300 \
+OUT_ROOT=screw_poc/artifacts/tts_0300 \
+    bash screw_poc/pbs/submit_pipeline.sh
 ```
+
+これらの変数は `-v` でTTSジョブへ転送され、連鎖側は対応する
+`TTS_RUN_DIR=screw_poc/artifacts/tts_0300/merged` を自動で引き継ぎます。手で
+3本投入する必要はありません。
 
 ## 4. テスト
 

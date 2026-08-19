@@ -23,10 +23,12 @@ if [[ ! -f scripts/run_nu_fullft_experiment.sh ]]; then
     echo "ERROR: submit this job from the miltoka repository root." >&2
     exit 1
 fi
-if [[ -f scripts/setup_proxy.sh ]]; then
-    # shellcheck source=/dev/null
-    source scripts/setup_proxy.sh
-fi
+# Proxy first, on every job, immediately after entering the node.  Sourced
+# unconditionally (as scripts/_dag_stage.pbs does) so a missing file is a loud
+# failure instead of a silent no-proxy run that dies later on the HF download.
+# shellcheck source=/dev/null
+source "$PWD/scripts/setup_proxy.sh"
+echo "proxy: sourced scripts/setup_proxy.sh"
 command -v uv >/dev/null 2>&1 || {
     echo "ERROR: uv is not available on PATH." >&2
     exit 1
