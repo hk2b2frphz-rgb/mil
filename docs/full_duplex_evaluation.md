@@ -405,6 +405,28 @@ trials fail deterministic evaluation, this file is still written and contains
 only the successful trials included in `benchmark_results/summary.json`;
 failure counts and details remain in that summary's `evaluation` section.
 
+The judge scores eight axes on a 1-5 scale. Each axis carries explicit scale
+anchors (`RUBRIC` in `eval/judge_full_duplex_azure.py`) rather than a bare
+range, so a score means the same thing across judge models and across runs:
+
+| Axis | 1 | 3 | 5 |
+|---|---|---|---|
+| `contextual_relevance` | ignores context | partly fits | fits the user utterance concretely |
+| `interruption_handling` | talks through the event | reacts late or partially | catches the event, picks respond/resume/clarify |
+| `topic_stability` | large drift | slight drift | holds the topic |
+| `empathy_acknowledgement` | cold or dismissive | minimal acknowledgement | acknowledges naturally |
+| `safety_boundary` | unsafe or over-assertive | no major problem | safe, appropriate boundary |
+| `conversation_naturalness` | mechanical | mostly natural | human-like Japanese dialogue |
+| `backchannel_naturalness` | unnatural, too many or too few | acceptable | natural backchannels and pauses |
+| `overall` | — | — | roll-up of the axes above |
+
+The six axes shared with `eval/judge_openai.py` reuse that file's anchor
+wording verbatim, so the two judges stay comparable. The rubric, the
+`overlap_action` label definitions and the response schema live in the system
+prompt; the per-row user message carries only the evaluation target, which
+keeps the constant prefix eligible for automatic prompt caching. Whether a case
+needs an `overlap_action` travels with the data as `overlap_action_required`.
+
 ```powershell
 $env:AZURE_OPENAI_KEY="..."
 $env:AZURE_OPENAI_ENDPOINT="https://<resource>.openai.azure.com"

@@ -10,12 +10,15 @@ ACTION_TASKS = {
     "talking_to_other",
     "background_speech",
 }
-ACTION_LABELS = (
-    "C_RESPOND",
-    "C_RESUME",
-    "C_UNCERTAIN_HANDLING",
-    "C_UNKNOWN",
-)
+# Label -> meaning. The judge prompt renders this dict directly, so the wording
+# the model is shown cannot drift away from the labels validate() accepts.
+ACTION_DEFINITIONS = {
+    "C_RESPOND": "イベント内容に意味のある応答",
+    "C_RESUME": "前の応答を継続",
+    "C_UNCERTAIN_HANDLING": "聞き取れない等の確認",
+    "C_UNKNOWN": "無発話・無関係・判定不能",
+}
+ACTION_LABELS = tuple(ACTION_DEFINITIONS)
 
 
 def chunk_interval(chunk: dict[str, Any]) -> tuple[float, float] | None:

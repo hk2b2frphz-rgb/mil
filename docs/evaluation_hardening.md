@@ -26,6 +26,25 @@ python eval/summarize_full_duplex_adaptation.py `
 
 All synchronous judges accept `--resume`. Each successful API call is flushed to JSONL before the next request, and completed IDs are skipped when resuming. Required score/flag fields are validated instead of being silently omitted. Pairwise judging rejects duplicate or unequal case/seed sets.
 
+## Judge prompt structure
+
+The convention is that a judge puts its constant instructions -- rubric with
+per-axis scale anchors, flag definitions, label definitions, response schema --
+in the system prompt, and sends only the row under evaluation in the user
+message. Two reasons: an identical prefix is what makes the API's automatic
+prompt caching discount the repeated instructions across a run, and anchored
+axes keep a score comparable between judge models and between runs. Axes shared
+across judges reuse identical anchor wording.
+
+`judge_openai.py`, `judge_full_duplex_azure.py` and `judge_llmjp_style.py`
+follow this. `pairwise_openai.py` still appends its response schema to each user
+message, so its constant text is not cacheable.
+
+Anything the model must branch on travels with the data, not with per-row
+prompt text. `judge_full_duplex_azure.py` sends `overlap_action_required`,
+recomputed from `task` by the same `action_required()` the validator uses, so
+the prompt and the response contract cannot disagree.
+
 ## OpenAI / Azure Batch API
 
 The Batch API workflow is separate from the synchronous judge and supports both providers. For Azure, deploy a `Global-Batch` model and set `AZURE_OPENAI_KEY`, `AZURE_OPENAI_ENDPOINT`, and the deployment name in `--model`.

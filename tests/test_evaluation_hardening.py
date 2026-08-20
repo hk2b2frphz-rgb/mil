@@ -19,7 +19,13 @@ import eval.evaluate_full_duplex_ja as full_duplex_eval
 import eval.combine_full_duplex_summaries as combine_summaries
 from eval.full_duplex_judge_input import compact_event_segments
 from eval.full_duplex_sample_selection import select_samples
-from eval.judge_full_duplex_azure import validate as validate_full_duplex
+from eval.judge_full_duplex_azure import (
+    RUBRIC as FULL_DUPLEX_RUBRIC,
+    SCORE_KEYS as FULL_DUPLEX_SCORE_KEYS,
+    SYSTEM_PROMPT as FULL_DUPLEX_SYSTEM_PROMPT,
+    prompt as full_duplex_prompt,
+    validate as validate_full_duplex,
+)
 from eval.judge_llmjp_style import validate as validate_llmjp
 from eval.judge_openai import validate_judge
 from eval.pairwise_openai import load_by_key
@@ -62,6 +68,34 @@ def test_full_duplex_judge_contract_requires_overlap_action() -> None:
     raw["overlap_action"] = None
     with pytest.raises(ValueError, match="overlap_action"):
         validate_full_duplex(raw, "user_backchannel")
+
+
+def test_full_duplex_rubric_gives_every_axis_scale_anchors() -> None:
+    # A bare "1-5" range lets the same axis drift between judge models and runs.
+    assert tuple(FULL_DUPLEX_RUBRIC) == FULL_DUPLEX_SCORE_KEYS
+    for axis, anchors in FULL_DUPLEX_RUBRIC.items():
+        if axis == "overall":
+            # A roll-up of the other axes, worded as in eval/judge_openai.py.
+            assert "総合" in anchors
+            continue
+        assert "1=" in anchors, axis
+        assert "5=" in anchors, axis
+
+
+def test_full_duplex_user_prompt_carries_only_the_row() -> None:
+    # Rubric, labels and schema belong to the cacheable system-prompt prefix;
+    # the per-row message must not repeat them.
+    for fragment in ("評価ルーブリック", "フラグの定義", "返すJSON形式", "C_UNCERTAIN_HANDLING"):
+        assert fragment in FULL_DUPLEX_SYSTEM_PROMPT
+
+    rendered = full_duplex_prompt({"case_id": "case", "task": "user_interruption"})
+    for fragment in ("1-5", "true/false", "C_UNCERTAIN_HANDLING"):
+        assert fragment not in rendered
+    # The branch the model needs now travels with the data instead.
+    assert json.loads(rendered.split("\n", 1)[1])["overlap_action_required"] is True
+    assert json.loads(full_duplex_prompt({"case_id": "case", "task": "open_ended"}).split("\n", 1)[1])[
+        "overlap_action_required"
+    ] is False
 
 
 def test_general_judge_contract_rejects_missing_axes() -> None:
