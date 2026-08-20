@@ -7,11 +7,11 @@
 #PBS -j oe
 #PBS -V
 
-# Three-dialogue Qwen3-TTS smoke test.
-# Submit from the repository root:
-#   qsub -V screw_poc/pbs/run_tts_smoke.pbs
+# Three-dialogue Qwen3-TTS smoke test.  Submit from the repository root:
+#   qsub -v PROXY_URL=http://<host>:<port> screw_poc/pbs/run_tts_smoke.pbs
 # Override the number of dialogues:
-#   qsub -V -v NUM_DIALOGUES=10 screw_poc/pbs/run_tts_smoke.pbs
+#   qsub -v PROXY_URL=http://<host>:<port>,NUM_DIALOGUES=10 \
+# screw_poc/pbs/run_tts_smoke.pbs
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"

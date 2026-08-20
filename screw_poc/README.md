@@ -100,11 +100,23 @@ qsub -V screw_poc/pbs/run_train.pbs
 qsub -V screw_poc/pbs/run_train_full.pbs
 ```
 
-TTSから学習までを1コマンドで流す場合は次を使います。**プロキシは投入シェルで
-`PROXY_URL` を設定してください**（後述）。
+TTSから学習まで、投入するのはこの1本だけです。
 
 ```bash
-export PROXY_URL=http://<host>:<port>     # 認証ありなら http://user:pass@host:port
+qsub -v PROXY_URL=http://<host>:<port> screw_poc/pbs/run_tts_1000_4gpu.pbs
+```
+
+`PROXY_URL` は必須です（HFキャッシュが既にある場合を除く）。指定しないと
+`setup_proxy.sh` がプロキシを無効化し、4シャードとも重み取得で落ちます。認証ありなら
+`http://user:pass@host:port`、`PROXY_HOST`/`PROXY_PORT`/`PROXY_USER`/`PROXY_PASS`
+の形でも構いません。この値はTTSジョブが連鎖させるLoRA/Full FTへも `-v` で
+引き継がれます。
+
+シェルに `PROXY_URL` などを export 済みなら、ラッパー経由でも同じことができます
+（設定済みの `PROXY_*` を集めて `-v` に載せます）。
+
+```bash
+export PROXY_URL=http://<host>:<port>
 bash screw_poc/pbs/submit_pipeline.sh
 ```
 

@@ -10,11 +10,10 @@
 # Full fine-tune Moshi with the same merged Qwen3-TTS data used by LoRA.
 # Uses the repository's established nu-dialogue full-FT path on two A100 GPUs.
 #
-# Submit:
-#   qsub -V screw_poc/pbs/run_train_full.pbs
-# Override the dataset:
-#   qsub -V -v TTS_RUN_DIR=screw_poc/artifacts/tts_0300/merged \
-#     screw_poc/pbs/run_train_full.pbs
+# Normally submitted by run_tts_1000_4gpu.pbs, which chains it on success.
+# To run it by hand against finished TTS output:
+#   qsub -v PROXY_URL=http://<host>:<port>,TTS_RUN_DIR=screw_poc/artifacts/tts_1000/merged \
+# screw_poc/pbs/run_train_full.pbs
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"

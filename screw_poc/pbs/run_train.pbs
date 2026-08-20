@@ -8,9 +8,11 @@
 #PBS -V
 
 # Train Moshi LoRA from the merged Qwen3-TTS output.
-# Submit after TTS completion:
-#   qsub -V screw_poc/pbs/run_train.pbs
-# Or use submit_pipeline.sh to add an afterok dependency automatically.
+#
+# Normally submitted by run_tts_1000_4gpu.pbs, which chains it on success.
+# To run it by hand against finished TTS output:
+#   qsub -v PROXY_URL=http://<host>:<port>,TTS_RUN_DIR=screw_poc/artifacts/tts_1000/merged \
+# screw_poc/pbs/run_train.pbs
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"

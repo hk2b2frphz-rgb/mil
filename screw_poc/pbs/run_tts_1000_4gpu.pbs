@@ -7,14 +7,25 @@
 #PBS -j oe
 #PBS -V
 
-# Generate/validate screw dialogues, render Qwen3-TTS on four GPUs, and merge.
+# Generate/validate screw dialogues, render Qwen3-TTS on four GPUs, merge, and
+# submit the two training jobs.
 #
-# Submit:
-#   qsub -V screw_poc/pbs/run_tts_1000_4gpu.pbs
+# Submit from the repository root.  PROXY_URL is required unless the HF cache
+# is already populated: without it setup_proxy.sh disables the proxy and every
+# shard dies on the huggingface.co download.  The same value is forwarded to
+# the training jobs this one chains.
 #
-# Comparison subset example:
-#   qsub -V -v \
-# DIALOGUES_JSONL=screw_poc/artifacts/subsets/train_0300.jsonl,NUM_DIALOGUES=300,OUT_ROOT=screw_poc/artifacts/tts_0300 \
+#   qsub -v PROXY_URL=http://<host>:<port> screw_poc/pbs/run_tts_1000_4gpu.pbs
+#
+# PROXY_HOST/PROXY_PORT/PROXY_USER/PROXY_PASS work in place of PROXY_URL.
+#
+# Comparison subset:
+#   qsub -v \
+# PROXY_URL=http://<host>:<port>,DIALOGUES_JSONL=screw_poc/artifacts/subsets/train_0300.jsonl,NUM_DIALOGUES=300,OUT_ROOT=screw_poc/artifacts/tts_0300 \
+# screw_poc/pbs/run_tts_1000_4gpu.pbs
+#
+# TTS only, no training chained:
+#   qsub -v PROXY_URL=http://<host>:<port>,CHAIN_TRAIN=0 \
 # screw_poc/pbs/run_tts_1000_4gpu.pbs
 
 set -euo pipefail
