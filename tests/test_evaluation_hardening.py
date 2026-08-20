@@ -17,10 +17,11 @@ from eval.evaluate_full_duplex_adaptation import holm_adjust, paired_summary
 from eval.evaluate_full_duplex_ja import aggregate, occurrence_distribution
 import eval.evaluate_full_duplex_ja as full_duplex_eval
 import eval.combine_full_duplex_summaries as combine_summaries
-from eval.full_duplex_judge_input import compact_event_segments
+from eval.full_duplex_judge_input import compact_event_segments, event_interval
 from eval.full_duplex_sample_selection import select_samples
 from eval.judge_full_duplex_azure import (
     RUBRIC as FULL_DUPLEX_RUBRIC,
+    build_judge_input as build_full_duplex_judge_input,
     SCORE_KEYS as FULL_DUPLEX_SCORE_KEYS,
     SYSTEM_PROMPT as FULL_DUPLEX_SYSTEM_PROMPT,
     prompt as full_duplex_prompt,
@@ -68,6 +69,37 @@ def test_full_duplex_judge_contract_requires_overlap_action() -> None:
     raw["overlap_action"] = None
     with pytest.raises(ValueError, match="overlap_action"):
         validate_full_duplex(raw, "user_backchannel")
+
+
+def test_pause_handling_event_is_framed_like_the_overlap_tasks() -> None:
+    # pause_handling names its event "pause"; framing it as "overlap" silently
+    # dropped the segmentation for all 56 of those cases.
+    pause_row = {"task": "pause_handling", "events": {"pause": [[1.8, 3.8]]}}
+    assert event_interval(pause_row) == (1.8, 3.8)
+    assert event_interval({"task": "user_interruption", "events": {"interruption": [[5.1, 6.4]]}}) == (5.1, 6.4)
+    assert event_interval({"task": "user_backchannel", "events": {"overlap": [[2.0, 2.5]]}}) == (2.0, 2.5)
+    # No event of their own, so no interval to frame.
+    assert event_interval({"task": "smooth_turn_taking", "events": {}}) is None
+    assert event_interval({"task": "backchannel", "events": {}}) is None
+
+
+def test_full_duplex_judge_input_places_user_speech_on_the_timeline() -> None:
+    # events reach the judge in absolute seconds, so untimed utterances cannot
+    # be lined up against them -- in pause_handling both fragments are
+    # kind="speech" and read as one continuous turn without their times.
+    row = {
+        "case_id": "pause_001",
+        "task": "pause_handling",
+        "user_timeline": [
+            {"start_sec": 0.0, "end_sec": 1.8, "text": "最近、夜になると", "kind": "speech"},
+            {"start_sec": 3.8, "end_sec": 6.1, "text": "急に寂しくなることがあるんです。", "kind": "speech"},
+        ],
+        "event_timeline": {"pause": [[1.8, 3.8]]},
+    }
+    utterances = build_full_duplex_judge_input(row)["user_utterances"]
+    assert [u["start_sec"] for u in utterances] == [0.0, 3.8]
+    assert [u["end_sec"] for u in utterances] == [1.8, 6.1]
+    assert [u["text"] for u in utterances] == ["最近、夜になると", "急に寂しくなることがあるんです。"]
 
 
 def test_full_duplex_rubric_gives_every_axis_scale_anchors() -> None:

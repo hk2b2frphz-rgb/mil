@@ -166,10 +166,18 @@ def build_user_prompt(row: dict[str, Any]) -> str:
     context["risk_level"] = row.get("risk_level")
     context["avoid_behavior"] = row.get("avoid_behavior", [])
 
-    user_timeline = row.get("user_timeline") or row.get("clean_user_timeline") or []
+    # Times included for the same reason as in judge_full_duplex_azure.py: this
+    # prompt also carries events in absolute seconds, and TUR is unscoreable if
+    # the user's utterances cannot be placed against them.
+    user_timeline = row.get("user_timeline") or []
     if user_timeline:
         context["user_utterances"] = [
-            {"text": seg.get("text", ""), "kind": seg.get("kind")}
+            {
+                "start_sec": seg.get("start_sec"),
+                "end_sec": seg.get("end_sec"),
+                "text": seg.get("text", ""),
+                "kind": seg.get("kind"),
+            }
             for seg in user_timeline
         ]
 

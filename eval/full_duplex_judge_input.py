@@ -20,6 +20,21 @@ ACTION_DEFINITIONS = {
 }
 ACTION_LABELS = tuple(ACTION_DEFINITIONS)
 
+# Task -> the event whose interval frames the behaviour under judgement. This
+# used to be "interruption" for user_interruption and "overlap" for everything
+# else, which silently skipped pause_handling: those scenarios do carry an
+# event, but it is named "pause", so every one of them reached the judge with
+# assistant_event_segments=null and no way to see whether the model spoke
+# through the user's pause. Tasks absent from this map (smooth_turn_taking,
+# backchannel) carry no event at all and correctly get no segmentation.
+TASK_EVENT_NAMES = {
+    "user_interruption": "interruption",
+    "user_backchannel": "overlap",
+    "talking_to_other": "overlap",
+    "background_speech": "overlap",
+    "pause_handling": "pause",
+}
+
 
 def chunk_interval(chunk: dict[str, Any]) -> tuple[float, float] | None:
     value = chunk.get("timestamp")
@@ -33,7 +48,9 @@ def chunk_interval(chunk: dict[str, Any]) -> tuple[float, float] | None:
 
 def event_interval(row: dict[str, Any]) -> tuple[float, float] | None:
     events = row.get("event_timeline") or row.get("events") or {}
-    name = "interruption" if row.get("task") == "user_interruption" else "overlap"
+    name = TASK_EVENT_NAMES.get(str(row.get("task")))
+    if name is None:
+        return None
     values = events.get(name) or []
     if not values or not isinstance(values[0], list) or len(values[0]) != 2:
         return None

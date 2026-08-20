@@ -101,9 +101,21 @@ def build_judge_input(row: dict[str, Any]) -> dict[str, Any]:
         "risk_level": row.get("risk_level"),
         "expected_behavior": row.get("expected_behavior"),
         "avoid_behavior": row.get("avoid_behavior"),
+        # Timestamps travel with the utterances: events are handed to the judge
+        # in absolute seconds, so untimed text cannot be lined up against them.
+        # In pause_handling both fragments are kind="speech", and without times
+        # they read as one continuous utterance with the pause invisible.
+        # clean_user_timeline is not a fallback -- pack_full_duplex_azure.py
+        # derives it from the same user_segments, so it is empty whenever
+        # user_timeline is.
         "user_utterances": [
-            {"text": seg.get("text", ""), "kind": seg.get("kind")}
-            for seg in row.get("user_timeline") or row.get("clean_user_timeline") or []
+            {
+                "start_sec": seg.get("start_sec"),
+                "end_sec": seg.get("end_sec"),
+                "text": seg.get("text", ""),
+                "kind": seg.get("kind"),
+            }
+            for seg in row.get("user_timeline") or []
         ],
         "events": row.get("event_timeline") or {},
         "assistant_text": row.get("assistant_text", ""),

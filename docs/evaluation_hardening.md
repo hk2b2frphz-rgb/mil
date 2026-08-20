@@ -45,6 +45,16 @@ prompt text. `judge_full_duplex_azure.py` sends `overlap_action_required`,
 recomputed from `task` by the same `action_required()` the validator uses, so
 the prompt and the response contract cannot disagree.
 
+Both semantic judges receive events in absolute seconds, so user utterances
+carry `start_sec`/`end_sec` and can be placed against them. `TASK_EVENT_NAMES`
+in `full_duplex_judge_input.py` maps each task to the event that frames it --
+`pause` for `pause_handling`, `interruption` for `user_interruption`, `overlap`
+for the remaining overlap tasks. `smooth_turn_taking` and `backchannel` carry no
+event and correctly get no before/during/after segmentation. Changing this
+mapping changes `assistant_event_segments`, which is computed at pack time:
+existing `azure_judge_input.jsonl` files must be regenerated with
+`pack_full_duplex_azure.py` to pick it up.
+
 ## OpenAI / Azure Batch API
 
 The Batch API workflow is separate from the synchronous judge and supports both providers. For Azure, deploy a `Global-Batch` model and set `AZURE_OPENAI_KEY`, `AZURE_OPENAI_ENDPOINT`, and the deployment name in `--model`.
