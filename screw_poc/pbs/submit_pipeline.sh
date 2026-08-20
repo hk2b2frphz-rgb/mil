@@ -41,10 +41,20 @@ for var in DIALOGUES_JSONL NUM_DIALOGUES OUT_ROOT NUM_SHARDS; do
     fi
 done
 
+# The proxy rides along on -v.  Without it setup_proxy.sh disables the proxy
+# inside the job and every TTS shard fails on the huggingface.co download.
+# shellcheck source=screw_poc/pbs/proxy_env.sh
+source "$SCRIPT_DIR/proxy_env.sh"
+proxy_env_warn_if_empty
+proxy_fragment="$(proxy_env_fragment)"
+if [[ -n "$proxy_fragment" ]]; then
+    chain_env+=",$proxy_fragment"
+fi
+
 tts_job="$(qsub -V -v "$chain_env" screw_poc/pbs/run_tts_1000_4gpu.pbs)"
 
 echo "TTS job:  $tts_job"
-echo "env:      $chain_env"
+echo "env:      ${chain_env%%,PROXY*}"
 echo
 echo "LoRA and Full-FT are submitted by the TTS job itself once its merged"
 echo "manifest is verified.  Their job ids appear under '[chain]' at the end of"

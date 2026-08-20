@@ -96,6 +96,45 @@ import sphn  # noqa: F401
 import torchaudio  # noqa: F401
 print("qwen_tts/torchaudio preflight ok")
 PY
+
+# Fetch the checkpoint once, here, before any shard starts.  Two reasons: a
+# node that cannot reach huggingface.co fails now with one clear message
+# instead of four shards each retrying 5x and dying on the model download, and
+# the four shards then load from a warm cache instead of racing to pull the
+# same weights over the proxy at once.
+export MODEL_ID="${MODEL_ID:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
+echo "--- checkpoint: $MODEL_ID ---"
+MODEL_ID="$MODEL_ID" uv run python - <<'PY'
+import os
+import sys
+
+from huggingface_hub import snapshot_download
+
+model_id = os.environ["MODEL_ID"]
+try:
+    path = snapshot_download(model_id, local_files_only=True)
+except Exception:
+    pass
+else:
+    print(f"already cached: {path}")
+    raise SystemExit(0)
+
+try:
+    path = snapshot_download(model_id)
+except Exception as exc:
+    print(f"ERROR: cannot fetch {model_id}: {exc!r}", file=sys.stderr)
+    print(
+        "This node has no route to huggingface.co.  Submit with the proxy set,\n"
+        "  export PROXY_URL=http://<host>:<port>\n"
+        "  bash screw_poc/pbs/submit_pipeline.sh\n"
+        "which forwards it over qsub -v, or populate the HF cache from a node\n"
+        "that does have access before submitting.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+print(f"downloaded: {path}")
+PY
+
 if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi
 fi
@@ -154,7 +193,7 @@ for ((shard_index = 0; shard_index < NUM_SHARDS; shard_index++)); do
         args=(
             uv run python scripts/generate_qwen3_tts_data.py
             --tts-backend qwen3
-            --model Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+            --model "$MODEL_ID"
             --dialogues-jsonl "$shard_dir/dialogues.jsonl"
             --out-dir "$shard_training"
             --success-target "$success_target"
@@ -214,6 +253,18 @@ echo "===== chain: submit training ====="
 # hand; here a failed TTS run never reaches this line and nothing is queued.
 CHAIN_TRAIN="${CHAIN_TRAIN:-1}"
 CHAIN_ENV="TTS_RUN_DIR=$OUT_ROOT/merged"
+
+# Hand the proxy on to the training jobs the same way this job received it.
+# They pull the base Moshi checkpoint from HF, so they need it just as much.
+# shellcheck source=screw_poc/pbs/proxy_env.sh
+source "$PWD/screw_poc/pbs/proxy_env.sh"
+CHAIN_PROXY="$(proxy_env_fragment)"
+if [[ -n "$CHAIN_PROXY" ]]; then
+    CHAIN_ENV+=",$CHAIN_PROXY"
+    echo "[chain] proxy forwarded: $(proxy_env_names)"
+else
+    echo "[chain] WARNING: no PROXY_* set; the training jobs will run without a proxy." >&2
+fi
 
 if [[ "$CHAIN_TRAIN" != "1" ]]; then
     echo "[chain] CHAIN_TRAIN=$CHAIN_TRAIN -- not submitting training."

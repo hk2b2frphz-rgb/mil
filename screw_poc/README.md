@@ -100,9 +100,11 @@ qsub -V screw_poc/pbs/run_train.pbs
 qsub -V screw_poc/pbs/run_train_full.pbs
 ```
 
-TTSから学習までを1コマンドで流す場合は次を使います。
+TTSから学習までを1コマンドで流す場合は次を使います。**プロキシは投入シェルで
+`PROXY_URL` を設定してください**（後述）。
 
 ```bash
+export PROXY_URL=http://<host>:<port>     # 認証ありなら http://user:pass@host:port
 bash screw_poc/pbs/submit_pipeline.sh
 ```
 
@@ -124,6 +126,35 @@ tail -20 screw_poc/artifacts/pbs_logs/tts_1000_<jobid>.log
 より、4 GPUのTTSジョブの `CUDA_VISIBLE_DEVICES` が1 GPUのLoRAジョブへ漏れません。
 各ジョブはノードに入った直後に `scripts/setup_proxy.sh` を無条件で読み込むので、
 連鎖先でもプロキシは毎回張り直されます。
+
+### プロキシ
+
+計算ノードから huggingface.co に出られないと、Qwen3-TTSの重み取得に失敗して
+4シャードとも落ちます（`MaxRetryError HTTPSConnectionPool(host='huggingface.co',
+port=443)`）。`scripts/setup_proxy.sh` は `PROXY_URL`（または
+`PROXY_HOST`/`PROXY_PORT`/`PROXY_USER`/`PROXY_PASS`/`PROXY_SCHEME`）が
+無いとプロキシを無効化して全変数をunsetするため、**投入シェルで設定しておく必要が
+あります**。
+
+`submit_pipeline.sh` と `submit_train_both.sh` は、設定されている `PROXY_*` を
+`screw_poc/pbs/proxy_env.sh` 経由で集めて小文字 `-v` に載せます。TTSジョブは
+受け取った値をそのまま連鎖先のLoRA/Full FTへ `-v` で引き継ぐので、**チェーンの
+どのジョブでもプロキシが張られます**。ジョブ側の実際の状態はログで確認できます。
+
+```bash
+grep -n "\[proxy\]" screw_poc/artifacts/pbs_logs/tts_1000_*.log
+# [proxy] enabled: proxy.example.ac.jp:8080   <- 正常
+# [proxy] disabled                            <- 落ちる
+```
+
+未設定のまま投入しようとすると、投入時点で警告が出ます。`NO_PROXY` は値にカンマを
+含み `qsub -v` で運べないため転送対象から外しており、ジョブ内で
+`setup_proxy.sh` が再構成します。パスワードを含む値はログにも端末にも出しません
+（変数名だけを表示します）。
+
+TTSジョブの step 2/5 は、シャードを起動する前にチェックポイントを1回だけ取得します。
+到達できない場合はこの時点で1つの明確なエラーで停止し、4シャードが個別にリトライして
+死ぬことはありません。取得済みなら即通過し、4シャードは温まったキャッシュから読みます。
 
 連鎖を止めてTTSだけ流したい場合は `CHAIN_TRAIN=0` を渡します。
 

@@ -36,9 +36,18 @@ if [[ -n "$DEPENDENCY_JOB_ID" ]]; then
     qsub_args+=(-W "depend=afterok:${DEPENDENCY_JOB_ID}")
 fi
 
-lora_job="$(qsub "${qsub_args[@]}" -v "TTS_RUN_DIR=$TTS_RUN_DIR,NPROC=1" \
+# shellcheck source=screw_poc/pbs/proxy_env.sh
+source "$SCRIPT_DIR/proxy_env.sh"
+proxy_env_warn_if_empty
+proxy_fragment="$(proxy_env_fragment)"
+job_env="TTS_RUN_DIR=$TTS_RUN_DIR"
+if [[ -n "$proxy_fragment" ]]; then
+    job_env+=",$proxy_fragment"
+fi
+
+lora_job="$(qsub "${qsub_args[@]}" -v "${job_env},NPROC=1" \
     screw_poc/pbs/run_train.pbs)"
-full_job="$(qsub "${qsub_args[@]}" -v "TTS_RUN_DIR=$TTS_RUN_DIR,NPROC=2" \
+full_job="$(qsub "${qsub_args[@]}" -v "${job_env},NPROC=2" \
     screw_poc/pbs/run_train_full.pbs)"
 
 echo "dataset:      $TTS_RUN_DIR"
