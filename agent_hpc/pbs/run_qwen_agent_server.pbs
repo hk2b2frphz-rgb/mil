@@ -29,6 +29,9 @@
 #     qsub -V agent_hpc/pbs/run_qwen_agent_server.pbs
 #
 # Stop it with: qdel <jobid>
+#
+# To survive walltime, submit with CHAIN=1 (off by default -- see "chaining"
+# below) and end the chain later with: touch ~/.miltoka/stop_agent_server
 
 set -euo pipefail
 
@@ -41,6 +44,7 @@ fi
 command -v uv >/dev/null 2>&1 || { echo "ERROR: uv is not on PATH." >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "ERROR: curl is not on PATH." >&2; exit 1; }
 
+JOB_START_EPOCH="$(date +%s)"
 JOB_TAG="${PBS_JOBID%%.*}"
 JOB_NUM="${JOB_TAG//[^0-9]/}"
 
@@ -91,6 +95,49 @@ export VLLM_TOOL_CALL_PARSER="${VLLM_TOOL_CALL_PARSER:-qwen3_coder}"
 # Qwen3-Coder is a non-thinking instruct model, so no reasoning parser by
 # default. Set VLLM_REASONING_PARSER=qwen3 when serving a thinking Qwen3.
 export VLLM_REASONING_PARSER="${VLLM_REASONING_PARSER:-}"
+
+# ------------------------------------------------------------------- chaining
+# OFF by default, and deliberately so: a server that resurrects itself will
+# quietly hold the one A100 you wanted for a training run. Turn it on only for
+# stretches where the agent is what the GPU is for.
+#   CHAIN=1 qsub -V agent_hpc/pbs/run_qwen_agent_server.pbs
+# End a running chain (the current job keeps serving until walltime):
+#   touch ~/.miltoka/stop_agent_server
+# Verified separately by agent_hpc/pbs/test_chain_v100.pbs.
+CHAIN="${CHAIN:-0}"
+CHAIN_INDEX="${CHAIN_INDEX:-1}"
+MAX_CHAIN_JOBS="${MAX_CHAIN_JOBS:-7}"
+CHAIN_STOP_FILE="${CHAIN_STOP_FILE:-$HOME/.miltoka/stop_agent_server}"
+# Submit the successor this long before walltime, so it is already queued when
+# PBS kills us and the gap in service is only the model load time.
+CHAIN_LEAD_SEC="${CHAIN_LEAD_SEC:-1200}"
+# A server that died this fast never served anything; resubmitting it would
+# just burn A100 slots on the same failure.
+MIN_JOB_SEC="${MIN_JOB_SEC:-600}"
+SELF_PBS="${SELF_PBS:-agent_hpc/pbs/run_qwen_agent_server.pbs}"
+
+for value in "$CHAIN_INDEX" "$MAX_CHAIN_JOBS" "$CHAIN_LEAD_SEC"; do
+    if ! [[ "$value" =~ ^[0-9]+$ ]] || [[ "$value" -lt 1 ]]; then
+        echo "ERROR: CHAIN_INDEX / MAX_CHAIN_JOBS / CHAIN_LEAD_SEC must be positive integers." >&2
+        exit 1
+    fi
+done
+if [[ "$CHAIN_INDEX" -gt "$MAX_CHAIN_JOBS" ]]; then
+    echo "ERROR: CHAIN_INDEX=$CHAIN_INDEX exceeds MAX_CHAIN_JOBS=$MAX_CHAIN_JOBS." >&2
+    exit 1
+fi
+
+# Ask PBS what walltime we actually got rather than trusting the directive at
+# the top of this file, which someone may have overridden with qsub -l.
+WALLTIME_SEC="${WALLTIME_SEC:-}"
+if [[ -z "$WALLTIME_SEC" && -n "${PBS_JOBID:-}" ]] && command -v qstat >/dev/null 2>&1; then
+    WALLTIME_HMS="$(qstat -f "$PBS_JOBID" 2>/dev/null \
+        | tr -d ' \t' | grep -m1 '^Resource_List.walltime=' | cut -d= -f2 || true)"
+    if [[ "$WALLTIME_HMS" =~ ^([0-9]+):([0-9]{2}):([0-9]{2})$ ]]; then
+        WALLTIME_SEC=$(( 10#${BASH_REMATCH[1]} * 3600 + 10#${BASH_REMATCH[2]} * 60 + 10#${BASH_REMATCH[3]} ))
+    fi
+fi
+WALLTIME_SEC="${WALLTIME_SEC:-86400}"
 
 # ------------------------------------------------------------------- endpoint io
 ENDPOINT_FILE="${ENDPOINT_FILE:-$HOME/.miltoka/agent_endpoint.json}"
@@ -326,6 +373,49 @@ echo "endpoint file: ${ENDPOINT_FILE}"
 echo "open the tunnel on the local PC:"
 echo "  ${SSH_TUNNEL}"
 
+submit_successor() {
+    local next_index=$(( CHAIN_INDEX + 1 ))
+
+    if [[ -e "$CHAIN_STOP_FILE" ]]; then
+        echo "[chain] stop file present ($CHAIN_STOP_FILE); this is the last link."
+        return 1
+    fi
+    if [[ "$next_index" -gt "$MAX_CHAIN_JOBS" ]]; then
+        echo "[chain] reached MAX_CHAIN_JOBS=${MAX_CHAIN_JOBS}; not resubmitting."
+        return 1
+    fi
+    local elapsed=$(( $(date +%s) - JOB_START_EPOCH ))
+    if [[ "$elapsed" -lt "$MIN_JOB_SEC" ]]; then
+        echo "[chain] served only ${elapsed}s (< ${MIN_JOB_SEC}s); refusing to resubmit." >&2
+        return 1
+    fi
+    command -v qsub >/dev/null 2>&1 || {
+        echo "[chain] qsub is not available on this node; cannot resubmit." >&2
+        return 1
+    }
+
+    # AGENT_API_KEY is deliberately NOT carried over: each link mints its own,
+    # and connect.ps1 re-reads the endpoint file anyway.
+    local next_id
+    next_id="$(qsub -V \
+        -v "CHAIN=1,CHAIN_INDEX=${next_index},MAX_CHAIN_JOBS=${MAX_CHAIN_JOBS},CHAIN_STOP_FILE=${CHAIN_STOP_FILE},CHAIN_LEAD_SEC=${CHAIN_LEAD_SEC},SELF_PBS=${SELF_PBS},VLLM_MODEL=${VLLM_MODEL},AGENT_MODEL_ALIAS=${AGENT_MODEL_ALIAS},MAX_MODEL_LEN=${MAX_MODEL_LEN},ENDPOINT_FILE=${ENDPOINT_FILE},LOCAL_PORT=${LOCAL_PORT}" \
+        "$SELF_PBS")" || {
+        echo "[chain] qsub failed; this is the last link." >&2
+        return 1
+    }
+    echo "[chain] link ${next_index}/${MAX_CHAIN_JOBS} queued as ${next_id}"
+    return 0
+}
+
+if [[ "$CHAIN" == "1" ]]; then
+    CHAIN_DEADLINE=$(( JOB_START_EPOCH + WALLTIME_SEC - CHAIN_LEAD_SEC ))
+    echo "[chain] link ${CHAIN_INDEX}/${MAX_CHAIN_JOBS}; successor at $(date -Iseconds -d "@${CHAIN_DEADLINE}" 2>/dev/null || echo "+$(( WALLTIME_SEC - CHAIN_LEAD_SEC ))s")"
+else
+    CHAIN_DEADLINE=""
+    echo "[chain] disabled (pass CHAIN=1 to keep the server alive across walltime)"
+fi
+SUCCESSOR_SUBMITTED=0
+
 # Keep the job alive until walltime / qdel; die if either server dies.
 while true; do
     if ! kill -0 "$VLLM_PID" 2>/dev/null; then
@@ -335,6 +425,13 @@ while true; do
     if ! kill -0 "$PROXY_PID" 2>/dev/null; then
         echo "ERROR: LiteLLM proxy died at $(date -Iseconds)." >&2
         exit 1
+    fi
+    # Hand over before PBS kills us: a trap is not enough, since walltime
+    # expiry can arrive as SIGKILL and never run it.
+    if [[ -n "$CHAIN_DEADLINE" && "$SUCCESSOR_SUBMITTED" == "0" \
+          && "$(date +%s)" -ge "$CHAIN_DEADLINE" ]]; then
+        SUCCESSOR_SUBMITTED=1
+        submit_successor || true
     fi
     sleep 30
 done
