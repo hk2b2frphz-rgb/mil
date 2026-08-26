@@ -6,13 +6,37 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "huggingface-hub",
-    "moshi",
+    "moshi>=0.2.11",
     "numpy",
     "pyopenjtalk",
     "pyttsx3",
     "sphn",
     "torch>=2.1.0",
     "torchaudio>=2.1.0",
+    "transformers>=4.57.1,<6",
+    "accelerate",
+    "einops",
+    "faster-whisper",
+    "librosa",
+    # Kept unpinned on purpose: this env's NeMo is only for the Full-Duplex-Bench
+    # v1.5 ASR model (eval/align_full_duplex_asr.py) and must stay compatible with
+    # transformers>=4.57 / numpy 2.x. The streaming Sortformer v2 diarizer needs a
+    # newer, mutually-incompatible NeMo, so it runs in an isolated env instead
+    # (see scripts/run_real_dialogue_analysis.pbs).
+    "nemo_toolkit[asr]",
+    "orjson",
+    "tiktoken",
+    "torchcodec",
+    "tqdm",
+    "PyYAML",
+    "qwen-tts",
+    "scipy",
+    "silero-vad",
+    "soundfile",
+    "uroman",
+    # UTMOSv2 is not published as a resolvable PyPI distribution.  Pin the
+    # official implementation to a release tag so uv can build it reliably.
+    "utmosv2 @ git+https://github.com/sarulab-speech/UTMOSv2.git@14a281c6072d6fad2bf31f992ed2e60304400075",
 ]
 
 [tool.uv]

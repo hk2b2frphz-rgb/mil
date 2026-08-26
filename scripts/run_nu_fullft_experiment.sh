@@ -1,0 +1,625 @@
+#!/usr/bin/env bash
+# Launch one full fine-tuning experiment with nu-dialogue/moshi-finetune.
+#
+# Usage:
+#   bash scripts/run_nu_fullft_experiment.sh <EXP_NAME> <SRC_RUN_DIR>
+#
+# LoRA experiments continue to use scripts/run_experiment.sh and
+# kyutai-labs/moshi-finetune. This script is only for full fine-tuning.
+
+set -euo pipefail
+
+if [[ $# -lt 2 ]]; then
+    echo "Usage: bash $0 <EXP_NAME> <SRC_RUN_DIR>" >&2
+    exit 1
+fi
+
+EXP_NAME="$1"
+SRC_RUN_DIR_RAW="$2"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+
+EXP_DIR="$REPO_ROOT/experiments/$EXP_NAME"
+SRC_RUN_DIR="$(realpath -m "$SRC_RUN_DIR_RAW")"
+SRC_TRAIN_SET="$SRC_RUN_DIR/training_set"
+SRC_MANIFEST="$SRC_TRAIN_SET/synthetic_moshi_train.jsonl"
+
+if [[ ! -f "$SRC_MANIFEST" ]]; then
+    echo "ERROR: source manifest not found: $SRC_MANIFEST" >&2
+    echo "  SRC_RUN_DIR must point to a run directory containing training_set/synthetic_moshi_train.jsonl" >&2
+    exit 1
+fi
+
+mkdir -p "$EXP_DIR"
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH." >&2
+    exit 1
+}
+command -v git >/dev/null 2>&1 || {
+    echo "ERROR: git is not available on PATH." >&2
+    exit 1
+}
+
+NU_MOSHI_FT_REPO="${NU_MOSHI_FT_REPO:-$REPO_ROOT/../moshi-finetune-nu-dialogue}"
+NU_MOSHI_FT_REPO="$(realpath -m "$NU_MOSHI_FT_REPO")"
+if [[ ! -d "$NU_MOSHI_FT_REPO/.git" ]]; then
+    echo "[nu-fullft] cloning nu-dialogue/moshi-finetune -> $NU_MOSHI_FT_REPO"
+    git clone https://github.com/nu-dialogue/moshi-finetune "$NU_MOSHI_FT_REPO"
+fi
+
+# DeepSpeed may build CUDA/C++ ops during `uv sync` (before torch is importable
+# in a fresh checkout) and again at runtime. The cluster CUDA module can be a
+# newer minor than the PyTorch wheel runtime, e.g. nvcc 12.9 with torch +cu121.
+# DeepSpeed officially allows skipping this check for same-major CUDA drift, so
+# enable it before dependency sync and validate the major once torch is present.
+export DS_SKIP_CUDA_CHECK=1
+NVCC_CUDA_VERSION=""
+if command -v nvcc >/dev/null 2>&1; then
+    NVCC_CUDA_VERSION="$(nvcc --version | sed -n 's/.*release \([0-9][0-9.]*\),.*/\1/p' | head -n1)"
+fi
+
+if [[ "${NU_SKIP_UV_SYNC:-0}" != "1" && ! -d "$NU_MOSHI_FT_REPO/.venv" ]]; then
+    echo "[nu-fullft] installing nu-dialogue dependencies with uv"
+    (cd "$NU_MOSHI_FT_REPO" && uv sync --python "${NU_PYTHON:-3.12}")
+fi
+
+python3 scripts/patch_nu_dialogue_repo.py --nu-repo "$NU_MOSHI_FT_REPO"
+
+NPROC="${NPROC:-2}"
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    devs=""
+    for ((i=0; i<NPROC; i++)); do
+        devs+="${devs:+,}$i"
+    done
+    export CUDA_VISIBLE_DEVICES="$devs"
+fi
+export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
+export MASTER_PORT="${MASTER_PORT:-29500}"
+export NO_TORCH_COMPILE="${NO_TORCH_COMPILE:-1}"
+# 出力が端末でないと tqdm は 1 イテレーションごとに 1 行書く。ここは tee へ
+# パイプしているので常にその条件で、pbs_logs が開けない大きさになる主因。
+# logging_steps の定期出力に同じ情報が出るので、進捗バーは止めてよい。
+export TQDM_DISABLE="${TQDM_DISABLE:-1}"
+
+TORCH_CUDA_VERSION="$(cd "$NU_MOSHI_FT_REPO" && uv run python - <<'PY' 2>/dev/null || true
+import torch
+print(torch.version.cuda or "")
+PY
+)"
+echo "[nu-fullft] CUDA versions: torch=${TORCH_CUDA_VERSION:-<unknown>} nvcc=${NVCC_CUDA_VERSION:-<not-found>}"
+if [[ -n "$TORCH_CUDA_VERSION" && -n "$NVCC_CUDA_VERSION" && "$TORCH_CUDA_VERSION" != "$NVCC_CUDA_VERSION" ]]; then
+    torch_cuda_major="${TORCH_CUDA_VERSION%%.*}"
+    nvcc_cuda_major="${NVCC_CUDA_VERSION%%.*}"
+    if [[ "$torch_cuda_major" == "$nvcc_cuda_major" ]]; then
+        echo "[nu-fullft] DS_SKIP_CUDA_CHECK=1 (same CUDA major; allowing minor-version drift)"
+    else
+        echo "ERROR: nvcc CUDA $NVCC_CUDA_VERSION does not match torch CUDA $TORCH_CUDA_VERSION." >&2
+        echo "  Load a CUDA $TORCH_CUDA_VERSION-compatible module or use a torch wheel matching nvcc." >&2
+        exit 1
+    fi
+else
+    echo "[nu-fullft] DS_SKIP_CUDA_CHECK=1"
+fi
+
+# ---------------------------------------------------------------------------
+# GPU preflight. `accelerate launch --num_processes NPROC` maps rank i to
+# cuda:i, so it needs NPROC distinct GPUs actually visible. If fewer are
+# visible -- e.g. a stale single-GPU CUDA_VISIBLE_DEVICES was inherited into a
+# PBS job via `#PBS -V` -- every rank collapses onto cuda:0 and training runs
+# on one GPU without any error ("0,0"). Fail loudly here instead, before the
+# expensive tokenization/launch steps.
+# ---------------------------------------------------------------------------
+echo "[nu-fullft] GPU preflight: CUDA_VISIBLE_DEVICES='${CUDA_VISIBLE_DEVICES:-<unset>}' NPROC=$NPROC"
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=index,name,memory.total --format=csv || true
+fi
+VISIBLE_GPU_COUNT="$(cd "$NU_MOSHI_FT_REPO" && \
+    CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}" \
+    uv run python -c 'import torch; print(torch.cuda.device_count())' 2>/dev/null || echo 0)"
+echo "[nu-fullft] torch.cuda.device_count()=$VISIBLE_GPU_COUNT (need NPROC=$NPROC)"
+if [[ "${VISIBLE_GPU_COUNT:-0}" -lt "$NPROC" ]]; then
+    echo "ERROR: only ${VISIBLE_GPU_COUNT:-0} GPU(s) visible but NPROC=$NPROC requested." >&2
+    echo "  CUDA_VISIBLE_DEVICES='${CUDA_VISIBLE_DEVICES:-<unset>}'." >&2
+    echo "  With fewer GPUs than processes, accelerate launch puts every rank on cuda:0" >&2
+    echo "  (both ranks end up on GPU 0). A stale value is often inherited via '#PBS -V'." >&2
+    echo "  Fix: set NPROC to the number of GPUs actually allocated, or pass the correct" >&2
+    echo "  GPU list (e.g. GPU_LIST=0,1 in the PBS job), then resubmit." >&2
+    exit 1
+fi
+
+RUN_TS="$(date +%Y-%m-%d_%H%M%S)"
+EXP_LOG="$EXP_DIR/run_nu_${RUN_TS}.log"
+NU_OUTPUT_DIR="$EXP_DIR/checkpoints/nu_${RUN_TS}"
+NU_DATA_DIR="${NU_DATA_DIR:-$REPO_ROOT/data/nu_fullft/${RUN_ID:-$(basename "$SRC_RUN_DIR")}}"
+NU_DATA_DIR="$(realpath -m "$NU_DATA_DIR")"
+NU_LAUNCH_CONFIG="$EXP_DIR/nu_launch_${RUN_TS}.json"
+
+HP_LR="${HP_LR:-3e-5}"
+HP_WEIGHT_DECAY="${HP_WEIGHT_DECAY:-0.1}"
+HP_PCT_START="${HP_PCT_START:-0.05}"
+HP_BATCH_SIZE="${HP_BATCH_SIZE:-1}"
+HP_NUM_MICROBATCHES="${HP_NUM_MICROBATCHES:-8}"
+HP_MAX_STEPS="${HP_MAX_STEPS:-1200}"
+HP_CKPT_FREQ="${HP_CKPT_FREQ:-120}"
+HP_EVAL_FREQ="${HP_EVAL_FREQ:-60}"
+HP_LOG_FREQ="${HP_LOG_FREQ:-5}"
+HP_MAX_NORM="${HP_MAX_NORM:-1.0}"
+HP_DURATION_SEC="${HP_DURATION_SEC:-100}"
+HP_SEED="${HP_SEED:-0}"
+
+NU_TEXT_TOKENIZER_REPO="${NU_TEXT_TOKENIZER_REPO:-llm-jp/llm-jp-moshi-v1}"
+NU_TEXT_TOKENIZER_NAME="${NU_TEXT_TOKENIZER_NAME:-tokenizer_spm_32k_3.model}"
+NU_AUDIO_TOKENIZER_REPO="${NU_AUDIO_TOKENIZER_REPO:-llm-jp/llm-jp-moshi-v1}"
+NU_AUDIO_TOKENIZER_NAME="${NU_AUDIO_TOKENIZER_NAME:-tokenizer-e351c8d8-checkpoint125.safetensors}"
+NU_MOSHI_LM_REPO="${NU_MOSHI_LM_REPO:-llm-jp/llm-jp-moshi-v1}"
+NU_MOSHI_LM_NAME="${NU_MOSHI_LM_NAME:-model.safetensors}"
+NU_MOSHI_LM_CONFIG_NAME="${NU_MOSHI_LM_CONFIG_NAME:-moshi_lm_kwargs.json}"
+NU_MODEL_DTYPE="${NU_MODEL_DTYPE:-float32}"
+NU_MODEL_DIR="${NU_MODEL_DIR:-$NU_MOSHI_FT_REPO/init_models/llm-jp-moshi-v1-both_streams-${NU_MODEL_DTYPE}}"
+NU_MODEL_DIR="$(realpath -m "$NU_MODEL_DIR")"
+NU_DEEPSPEED_CONFIG="${NU_DEEPSPEED_CONFIG:-$REPO_ROOT/configs/deepspeed_zero3_fp16_warmlr_act_ckpt.json}"
+NU_DEEPSPEED_CONFIG="$(realpath -m "$NU_DEEPSPEED_CONFIG")"
+NU_TOKENIZE_AUDIO_WORKERS="${NU_TOKENIZE_AUDIO_WORKERS:-$NPROC}"
+NU_TOKENIZE_TEXT_WORKERS="${NU_TOKENIZE_TEXT_WORKERS:-4}"
+NU_DATASET_WORKERS="${NU_DATASET_WORKERS:-16}"
+NU_AUDIO_CHUNK_SIZE="${NU_AUDIO_CHUNK_SIZE:-1200}"
+NU_EVAL_FRACTION="${NU_EVAL_FRACTION:-0.1}"
+NU_MIN_LENGTH="${NU_MIN_LENGTH:-128}"
+NU_MAX_LENGTH="${NU_MAX_LENGTH:-$(python3 - "$HP_DURATION_SEC" <<'PY'
+import sys
+print(int(float(sys.argv[1]) * 12.5))
+PY
+)}"
+NU_WARMUP_STEPS="${NU_WARMUP_STEPS:-50}"
+
+mkdir -p "$NU_DATA_DIR" "$NU_OUTPUT_DIR"
+
+if [[ "${REFRESH_NU_DATA:-0}" == "1" ]]; then
+    echo "[nu-fullft] REFRESH_NU_DATA=1: clearing $NU_DATA_DIR"
+    rm -rf "$NU_DATA_DIR"
+    mkdir -p "$NU_DATA_DIR"
+fi
+
+NEEDS_NU_DATA_PREP=0
+if [[ ! -f "$NU_DATA_DIR/manifest.json" ]]; then
+    NEEDS_NU_DATA_PREP=1
+elif ! python3 - "$NU_DATA_DIR/manifest.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = Path(sys.argv[1])
+data = json.loads(manifest.read_text(encoding="utf-8"))
+normalization = data.get("text_normalization") or {}
+if not normalization.get("enabled") or int(normalization.get("version", 0)) < 1:
+    sys.exit(1)
+PY
+then
+    echo "[nu-fullft] existing nu data predates text normalization; rebuilding"
+    rm -rf "$NU_DATA_DIR"
+    mkdir -p "$NU_DATA_DIR"
+    NEEDS_NU_DATA_PREP=1
+fi
+
+if [[ "$NEEDS_NU_DATA_PREP" == "1" ]]; then
+    echo "[nu-fullft] preparing nu-dialogue raw dataset"
+    python3 scripts/prepare_nu_fullft_dataset.py \
+        --manifest "$SRC_MANIFEST" \
+        --output-dir "$NU_DATA_DIR" \
+        --eval-fraction "$NU_EVAL_FRACTION" \
+        --seed "$HP_SEED"
+else
+    echo "[nu-fullft] reusing prepared raw dataset: $NU_DATA_DIR"
+fi
+
+tokenize_text_args=(
+    --text_tokenizer_repo "$NU_TEXT_TOKENIZER_REPO"
+    --text_tokenizer_name "$NU_TEXT_TOKENIZER_NAME"
+    --text_padding_id "${NU_TEXT_PADDING_ID:-3}"
+    --end_of_text_padding_id "${NU_END_OF_TEXT_PADDING_ID:-0}"
+    --num_workers "$NU_TOKENIZE_TEXT_WORKERS"
+    --resume
+)
+if [[ "${NU_NO_WHITESPACE_BEFORE_WORD:-1}" == "1" ]]; then
+    tokenize_text_args+=(--no_whitespace_before_word)
+fi
+
+tokenize_split() {
+    local split="$1"
+    local audio_dir="$NU_DATA_DIR/raw/$split/audio"
+    local text_dir="$NU_DATA_DIR/raw/$split/text"
+    local token_audio_dir="$NU_DATA_DIR/tokenized/$split/audio"
+    local token_text_dir="$NU_DATA_DIR/tokenized/$split/text"
+    local parquet_prefix="$NU_DATA_DIR/processed/$split"
+
+    if [[ ! -d "$audio_dir" || ! -d "$text_dir" ]]; then
+        echo "[nu-fullft] split '$split' is absent; skipping tokenization"
+        return 0
+    fi
+
+    mkdir -p "$token_audio_dir" "$token_text_dir" "$NU_DATA_DIR/processed"
+
+    echo "[nu-fullft] tokenizing audio ($split)"
+    (cd "$NU_MOSHI_FT_REPO" && \
+        CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
+        uv run python -m tools.tokenize_audio \
+            --audio_dir "$audio_dir" \
+            --output_dir "$token_audio_dir" \
+            --audio_tokenizer_repo "$NU_AUDIO_TOKENIZER_REPO" \
+            --audio_tokenizer_name "$NU_AUDIO_TOKENIZER_NAME" \
+            --audio_chunk_size "$NU_AUDIO_CHUNK_SIZE" \
+            --num_workers "$NU_TOKENIZE_AUDIO_WORKERS" \
+            --resume)
+
+    echo "[nu-fullft] tokenizing text ($split)"
+    (cd "$NU_MOSHI_FT_REPO" && \
+        uv run python -m tools.tokenize_text \
+            --word_transcript_dir "$text_dir" \
+            --output_dir "$token_text_dir" \
+            "${tokenize_text_args[@]}")
+
+    echo "[nu-fullft] writing parquet ($split)"
+    rm -f "${parquet_prefix}"-*.parquet
+    (cd "$NU_MOSHI_FT_REPO" && \
+        uv run python -m tools.prepare_dataset \
+            --tokenized_text_dir "$token_text_dir" \
+            --tokenized_audio_dir "$token_audio_dir" \
+            --output_prefix "$parquet_prefix")
+}
+
+if ! compgen -G "$NU_DATA_DIR/processed/train-*.parquet" >/dev/null; then
+    tokenize_split train
+else
+    echo "[nu-fullft] reusing train parquet: $NU_DATA_DIR/processed/train-*.parquet"
+fi
+if [[ -d "$NU_DATA_DIR/raw/eval/audio" ]]; then
+    if ! compgen -G "$NU_DATA_DIR/processed/eval-*.parquet" >/dev/null; then
+        tokenize_split eval
+    else
+        echo "[nu-fullft] reusing eval parquet: $NU_DATA_DIR/processed/eval-*.parquet"
+    fi
+fi
+
+echo "[nu-fullft] checking train/eval parquet health"
+(cd "$NU_MOSHI_FT_REPO" && \
+    uv run python "$REPO_ROOT/scripts/check_nu_fullft_dataset.py" \
+        --data-dir "$NU_DATA_DIR" \
+        --max-length "$NU_MAX_LENGTH" \
+        --min-length "$NU_MIN_LENGTH" \
+        --text-padding-id "${NU_TEXT_PADDING_ID:-3}" \
+        --end-of-text-padding-id "${NU_END_OF_TEXT_PADDING_ID:-0}" \
+        --output-json "$EXP_DIR/nu_dataset_health_${RUN_TS}.json" \
+        ${NU_REQUIRE_EVAL:+--require-eval})
+
+if [[ ! -f "$NU_MODEL_DIR/model.safetensors" || ! -f "$NU_MODEL_DIR/moshi_lm_kwargs.json" ]]; then
+    echo "[nu-fullft] initializing full-FT model: $NU_MODEL_DIR"
+    init_args=(
+        --nu-repo "$NU_MOSHI_FT_REPO"
+        --save-dir "$NU_MODEL_DIR"
+        --moshi-lm-repo "$NU_MOSHI_LM_REPO"
+        --moshi-lm-name "$NU_MOSHI_LM_NAME"
+        --model-dtype "$NU_MODEL_DTYPE"
+        --extend-modules-for-user-stream
+    )
+    if [[ -n "$NU_MOSHI_LM_CONFIG_NAME" ]]; then
+        init_args+=(--moshi-lm-config-name "$NU_MOSHI_LM_CONFIG_NAME")
+    else
+        init_args+=(--moshi-lm-config-name "")
+    fi
+    if [[ "${NU_INIT_TEXT_EMBEDDINGS:-0}" == "1" ]]; then
+        init_args+=(--init-text-embeddings)
+    fi
+    (cd "$NU_MOSHI_FT_REPO" && uv run python "$REPO_ROOT/scripts/init_nu_moshi_for_ft.py" "${init_args[@]}")
+else
+    echo "[nu-fullft] reusing initialized model: $NU_MODEL_DIR"
+fi
+
+TRAIN_COUNT="$(python3 - "$NU_DATA_DIR/manifest.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+print(data["splits"]["train"]["count"])
+PY
+)"
+
+# Steps per epoch for this dataset/parallelism. Used both to derive
+# num_train_epochs below and to translate any epoch-denominated schedule knobs
+# (HP_*_EPOCH*) into concrete step counts, so the schedule scales with data
+# volume instead of being hardcoded for one dataset size.
+STEPS_PER_EPOCH="$(python3 - "$TRAIN_COUNT" "$HP_BATCH_SIZE" "$NPROC" "$HP_NUM_MICROBATCHES" <<'PY'
+import math, sys
+train_count, per_device, nproc, accum = map(int, sys.argv[1:])
+global_batch = max(1, per_device * nproc * accum)
+print(max(1, math.ceil(train_count / global_batch)))
+PY
+)"
+
+# Epoch-denominated overrides. When set, they take precedence over the
+# step-based HP_* values and are converted using STEPS_PER_EPOCH. This keeps
+# the schedule data-matched (e.g. "12 epochs, eval every 0.5 epoch").
+epoch_to_steps() {  # <epochs> <floor>
+    python3 - "$1" "$STEPS_PER_EPOCH" "$2" <<'PY'
+import sys
+epochs, spe, floor = float(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
+print(max(floor, round(epochs * spe)))
+PY
+}
+if [[ -n "${HP_MAX_EPOCHS:-}" ]]; then
+    HP_MAX_STEPS="$(epoch_to_steps "$HP_MAX_EPOCHS" 1)"
+fi
+if [[ -n "${HP_EVAL_EVERY_EPOCH:-}" ]]; then
+    HP_EVAL_FREQ="$(epoch_to_steps "$HP_EVAL_EVERY_EPOCH" 1)"
+fi
+if [[ -n "${HP_CKPT_EVERY_EPOCH:-}" ]]; then
+    HP_CKPT_FREQ="$(epoch_to_steps "$HP_CKPT_EVERY_EPOCH" 1)"
+fi
+if [[ -n "${HP_WARMUP_EPOCHS:-}" ]]; then
+    NU_WARMUP_STEPS="$(epoch_to_steps "$HP_WARMUP_EPOCHS" 1)"
+fi
+echo "[nu-fullft] train_count=$TRAIN_COUNT steps_per_epoch=$STEPS_PER_EPOCH" \
+     "-> max_steps=$HP_MAX_STEPS eval_steps=$HP_EVAL_FREQ" \
+     "save_steps=$HP_CKPT_FREQ warmup_steps=$NU_WARMUP_STEPS"
+
+NU_NUM_TRAIN_EPOCHS="${NU_NUM_TRAIN_EPOCHS:-$(python3 - "$TRAIN_COUNT" "$HP_BATCH_SIZE" "$NPROC" "$HP_NUM_MICROBATCHES" "$HP_MAX_STEPS" <<'PY'
+import math, sys
+train_count, per_device, nproc, accum, max_steps = map(int, sys.argv[1:])
+global_batch = max(1, per_device * nproc * accum)
+steps_per_epoch = max(1, math.ceil(train_count / global_batch))
+print(max(1, math.ceil(max_steps / steps_per_epoch)))
+PY
+)}"
+
+cat > "$NU_LAUNCH_CONFIG" <<EOF
+{
+  "runner": "nu-dialogue/moshi-finetune",
+  "nu_repo": "$NU_MOSHI_FT_REPO",
+  "exp_name": "$EXP_NAME",
+  "src_run_dir": "$SRC_RUN_DIR",
+  "nu_data_dir": "$NU_DATA_DIR",
+  "nu_output_dir": "$NU_OUTPUT_DIR",
+  "model_dir": "$NU_MODEL_DIR",
+  "model_repo": "$NU_MOSHI_LM_REPO",
+  "model_name": "$NU_MOSHI_LM_NAME",
+  "model_config_name": "$NU_MOSHI_LM_CONFIG_NAME",
+  "deepspeed_config": "$NU_DEEPSPEED_CONFIG",
+  "nproc": $NPROC,
+  "cuda_visible_devices": "$CUDA_VISIBLE_DEVICES",
+  "torch_cuda_version": "${TORCH_CUDA_VERSION:-}",
+  "nvcc_cuda_version": "${NVCC_CUDA_VERSION:-}",
+  "ds_skip_cuda_check": "${DS_SKIP_CUDA_CHECK:-}",
+  "master_addr": "$MASTER_ADDR",
+  "master_port": "$MASTER_PORT",
+  "per_device_train_batch_size": $HP_BATCH_SIZE,
+  "gradient_accumulation_steps": $HP_NUM_MICROBATCHES,
+  "max_train_steps": $HP_MAX_STEPS,
+  "num_train_epochs": $NU_NUM_TRAIN_EPOCHS,
+  "learning_rate": "$HP_LR",
+  "weight_decay": "$HP_WEIGHT_DECAY",
+  "warmup_steps": $NU_WARMUP_STEPS,
+  "max_grad_norm": "$HP_MAX_NORM",
+  "max_length": $NU_MAX_LENGTH,
+  "min_length": $NU_MIN_LENGTH,
+  "save_steps": $HP_CKPT_FREQ,
+  "eval_steps": $HP_EVAL_FREQ,
+  "logging_steps": $HP_LOG_FREQ,
+  "seed": $HP_SEED
+}
+EOF
+
+LAUNCH_CMD=(
+    uv run accelerate launch
+    --num_processes "$NPROC"
+    --num_machines 1
+    --main_process_port "$MASTER_PORT"
+    --use_deepspeed
+    --deepspeed_config_file "$NU_DEEPSPEED_CONFIG"
+    finetune.py
+    --launcher accelerate
+    --output_dir "$NU_OUTPUT_DIR"
+    --train_data_files "$NU_DATA_DIR/processed/train-*.parquet"
+    --model_dir "$NU_MODEL_DIR"
+    --model_dtype "$NU_MODEL_DTYPE"
+    --model_user_stream
+    --moshi_speakers A
+    --max_length "$NU_MAX_LENGTH"
+    --min_length "$NU_MIN_LENGTH"
+    --dataset_processing_workers "$NU_DATASET_WORKERS"
+    --dataset_cache_dir "$NU_DATA_DIR/hf_cache"
+    --process_group_timeout "${NU_PROCESS_GROUP_TIMEOUT:-3600}"
+    --per_device_train_batch_size "$HP_BATCH_SIZE"
+    --gradient_accumulation_steps "$HP_NUM_MICROBATCHES"
+    --per_device_eval_batch_size "${NU_EVAL_BATCH_SIZE:-$HP_BATCH_SIZE}"
+    --tempformer_learning_rate "$HP_LR"
+    --depformer_learning_rate "$HP_LR"
+    --weight_decay "$HP_WEIGHT_DECAY"
+    --num_train_epochs "$NU_NUM_TRAIN_EPOCHS"
+    --max_train_steps "$HP_MAX_STEPS"
+    --num_warmup_steps "$NU_WARMUP_STEPS"
+    --logging_steps "$HP_LOG_FREQ"
+    --save_steps "$HP_CKPT_FREQ"
+    --activation_checkpointing
+    --parameters_to_finetune "${NU_PARAMETERS_TO_FINETUNE:-all}"
+    --seed "$HP_SEED"
+)
+if compgen -G "$NU_DATA_DIR/processed/eval-*.parquet" >/dev/null; then
+    LAUNCH_CMD+=(--eval_data_files "$NU_DATA_DIR/processed/eval-*.parquet")
+    LAUNCH_CMD+=(--eval_steps "$HP_EVAL_FREQ")
+fi
+if [[ "${NU_REPORT_TO_WANDB:-0}" == "1" ]]; then
+    LAUNCH_CMD+=(--report_to wandb --project_name "${NU_WANDB_PROJECT:-moshi-finetuning}")
+fi
+# Keep only the best-eval-loss checkpoint (plus the just-saved one) during
+# training instead of accumulating every step_<N> ZeRO shard. Default on;
+# set NU_KEEP_BEST_ONLY=0 to keep every checkpoint.
+if [[ "${NU_KEEP_BEST_ONLY:-1}" == "1" ]]; then
+    LAUNCH_CMD+=(--keep_best_only)
+fi
+# Early stopping on eval loss, with patience counted in evaluations (so it
+# tracks HP_EVAL_EVERY_EPOCH rather than a raw step count). 0 disables it.
+if [[ "${HP_EARLY_STOPPING_PATIENCE:-0}" != "0" ]]; then
+    LAUNCH_CMD+=(--early_stopping_patience "$HP_EARLY_STOPPING_PATIENCE")
+    LAUNCH_CMD+=(--early_stopping_min_delta "${HP_EARLY_STOPPING_MIN_DELTA:-0.0}")
+fi
+
+echo "[nu-fullft] launching nu-dialogue full fine-tuning"
+echo "  exp:       $EXP_NAME"
+echo "  repo:      $NU_MOSHI_FT_REPO"
+echo "  data:      $NU_DATA_DIR"
+echo "  output:    $NU_OUTPUT_DIR"
+echo "  model:     $NU_MODEL_DIR"
+echo "  ds:        $NU_DEEPSPEED_CONFIG"
+echo "  nproc:     $NPROC"
+echo "  cuda:      $CUDA_VISIBLE_DEVICES"
+echo "  torch/nvcc:$TORCH_CUDA_VERSION / ${NVCC_CUDA_VERSION:-<not-found>}"
+echo "  ds_skip:   ${DS_SKIP_CUDA_CHECK:-<unset>}"
+echo "  port:      $MASTER_PORT"
+echo "  hp:        lr=$HP_LR batch=$HP_BATCH_SIZE grad_accum=$HP_NUM_MICROBATCHES steps=$HP_MAX_STEPS wd=$HP_WEIGHT_DECAY warmup=$NU_WARMUP_STEPS max_len=$NU_MAX_LENGTH"
+echo "  log:       $EXP_LOG"
+
+MLFLOW_ENABLED=0
+MLFLOW_SYNC_PID=""
+MLFLOW_SYNC_CMD=()
+run_mlflow_sync_once() {
+    local sync_timeout="${MLFLOW_SYNC_TIMEOUT:-60}"
+    if [[ ${#MLFLOW_SYNC_CMD[@]} -eq 0 ]]; then
+        return 0
+    fi
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$sync_timeout" "${MLFLOW_SYNC_CMD[@]}"
+    else
+        "${MLFLOW_SYNC_CMD[@]}"
+    fi
+}
+
+if [[ -n "${MLFLOW_EXPERIMENT_NAME:-}" || -n "${MLFLOW_TRACKING_URI:-}" ]]; then
+    MLFLOW_ENABLED=1
+    echo "[nu-fullft] MLflow stdout sync enabled"
+    if command -v timeout >/dev/null 2>&1; then
+        MLFLOW_CHECK_CMD=(timeout "${MLFLOW_IMPORT_TIMEOUT:-120}" uv run python -c "import mlflow")
+    else
+        MLFLOW_CHECK_CMD=(uv run python -c "import mlflow")
+    fi
+    if ! "${MLFLOW_CHECK_CMD[@]}" >/dev/null 2>&1; then
+        echo "[nu-fullft] installing mlflow into project uv environment"
+        uv pip install mlflow
+    fi
+    MLFLOW_RUN_ID_FILE="$EXP_DIR/mlflow_run_${RUN_TS}.id"
+    MLFLOW_SYNC_CMD=(uv run python scripts/sync_nu_mlflow_metrics.py
+        --output-dir "$NU_OUTPUT_DIR"
+        --log-file "$EXP_LOG"
+        --config "$NU_LAUNCH_CONFIG"
+        --experiment "${MLFLOW_EXPERIMENT_NAME:-job_fullft_hp}"
+        --run-name "${MLFLOW_RUN_NAME:-$(basename "$EXP_NAME")}"
+        --run-id-file "$MLFLOW_RUN_ID_FILE")
+    if [[ -n "${MLFLOW_TRACKING_URI:-}" ]]; then
+        MLFLOW_SYNC_CMD+=(--tracking-uri "$MLFLOW_TRACKING_URI")
+    fi
+    if [[ -n "${MLFLOW_ARTIFACT_ROOT:-}" ]]; then
+        MLFLOW_SYNC_CMD+=(--artifact-root "$MLFLOW_ARTIFACT_ROOT")
+    fi
+
+    MLFLOW_LIVE_SYNC_INTERVAL="${MLFLOW_LIVE_SYNC_INTERVAL:-300}"
+    if [[ "$MLFLOW_LIVE_SYNC_INTERVAL" != "0" ]]; then
+        (
+            while true; do
+                run_mlflow_sync_once || echo "[nu-fullft] WARN: periodic MLflow sync failed" >&2
+                sleep "$MLFLOW_LIVE_SYNC_INTERVAL"
+            done
+        ) &
+        MLFLOW_SYNC_PID="$!"
+        echo "[nu-fullft] MLflow live sync interval: ${MLFLOW_LIVE_SYNC_INTERVAL}s"
+    fi
+fi
+
+set +e
+(
+    cd "$NU_MOSHI_FT_REPO" && \
+    CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
+    MASTER_ADDR="$MASTER_ADDR" \
+    MASTER_PORT="$MASTER_PORT" \
+    NO_TORCH_COMPILE="$NO_TORCH_COMPILE" \
+    "${LAUNCH_CMD[@]}"
+) 2>&1 | python3 -u "$REPO_ROOT/scripts/compact_log.py" "${EXP_LOG%.log}.raw.log" | tee "$EXP_LOG"
+TRAIN_STATUS=${PIPESTATUS[0]}
+set -e
+
+if [[ -n "$MLFLOW_SYNC_PID" ]]; then
+    kill "$MLFLOW_SYNC_PID" >/dev/null 2>&1 || true
+    wait "$MLFLOW_SYNC_PID" 2>/dev/null || true
+fi
+
+if [[ "$MLFLOW_ENABLED" == "1" ]]; then
+    echo "[nu-fullft] final MLflow sync"
+    run_mlflow_sync_once || echo "[nu-fullft] WARN: final MLflow sync failed" >&2
+fi
+
+if [[ "$TRAIN_STATUS" -ne 0 ]]; then
+    echo "[nu-fullft] ERROR: training failed with status $TRAIN_STATUS" >&2
+    exit "$TRAIN_STATUS"
+fi
+
+# ---------------------------------------------------------------------------
+# eval loss が最小の checkpoint を自動選択して export する。
+# SKIP_AUTO_POSTPROCESS=1 で無効化できる。
+# ---------------------------------------------------------------------------
+if [[ "${SKIP_AUTO_POSTPROCESS:-0}" != "1" ]]; then
+    echo
+    echo "[nu-fullft] selecting best checkpoint by eval loss"
+
+    BEST_JSON="$EXP_DIR/best_checkpoint_nu_${RUN_TS}.json"
+    if uv run python "$REPO_ROOT/scripts/select_best_checkpoint.py" \
+        --mode fullft \
+        --log-file "$EXP_LOG" \
+        --checkpoints-dir "$NU_OUTPUT_DIR" \
+        --output-json "$BEST_JSON"; then
+
+        BEST_STEP_DIR="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['checkpoint_path'])" "$BEST_JSON")"
+        EXPORT_OUT="$EXP_DIR/exported/${RUN_TS}_best"
+
+        echo "[nu-fullft] exporting best checkpoint: $BEST_STEP_DIR -> $EXPORT_OUT"
+        uv run python "$REPO_ROOT/scripts/export_fullft_checkpoint.py" \
+            --step-dir "$BEST_STEP_DIR" \
+            --out-dir "$EXPORT_OUT" \
+            --nu-repo "$NU_MOSHI_FT_REPO" \
+            --model-dtype "${NU_EXPORT_DTYPE:-bfloat16}"
+        echo "[nu-fullft] auto-export complete: $EXPORT_OUT/model.safetensors"
+
+        # -----------------------------------------------------------------
+        # export 済みモデルで Full-Duplex-Bench-JA 評価を自動実行する。
+        # SKIP_AUTO_EVAL=1 で無効化できる。
+        #
+        # FDB_OPENING_GREETING (default 1, inherited from the environment
+        # this script was launched in) controls whether the eval dataset
+        # reserves lead-in time for the fixed opening greeting -- see
+        # docs/full_duplex_evaluation.md. Full fine-tuning on data generated
+        # with the greeting turn (the generate_qwen3_tts_data.py default)
+        # should keep it at 1 to match training. If SRC_RUN_DIR points to
+        # data generated with --no-opening-greeting (or generated before
+        # this feature existed), export FDB_OPENING_GREETING=0 before
+        # running this sweep so the auto-eval doesn't wait for a line the
+        # model was never trained to say.
+        # -----------------------------------------------------------------
+        if [[ "${SKIP_AUTO_EVAL:-0}" != "1" ]]; then
+            EVAL_MODEL_ID="$(printf '%s' "${EXP_NAME//\//_}_${RUN_TS}" | tr -cd 'A-Za-z0-9._-')"
+            echo
+            echo "[nu-fullft] running Full-Duplex-Bench-JA evaluation: model_id=$EVAL_MODEL_ID opening_greeting=${FDB_OPENING_GREETING:-1}"
+            if MODEL_ID="$EVAL_MODEL_ID" \
+               RUN_ID="$EVAL_MODEL_ID" \
+               MODEL_WEIGHT="$EXPORT_OUT/model.safetensors" \
+               MODEL_CONFIG="$EXPORT_OUT/moshi_lm_kwargs.json" \
+               HF_REPO="$NU_MOSHI_LM_REPO" \
+               FDB_OPENING_GREETING="${FDB_OPENING_GREETING:-1}" \
+               bash "$REPO_ROOT/scripts/run_full_duplex_eval.sh"; then
+                echo "[nu-fullft] auto-eval complete: $REPO_ROOT/eval_runs/full_duplex/$EVAL_MODEL_ID/benchmark_results/summary.json"
+            else
+                echo "[nu-fullft] WARN: auto-eval failed; exported model is still available at $EXPORT_OUT" >&2
+            fi
+        else
+            echo "[nu-fullft] SKIP_AUTO_EVAL=1: skipping automatic Full-Duplex-Bench evaluation"
+        fi
+    else
+        echo "[nu-fullft] WARN: could not select a best checkpoint; skipping auto-export and auto-eval" >&2
+    fi
+fi

@@ -1,0 +1,80 @@
+# Batch evaluation manifest.
+#
+# Used by scripts/run_full_duplex_eval_batch.pbs, which now evaluates on the
+# hand-annotated real dialogue test set (response rate / latency / UTMOS).
+# model_id=gold is a special row: it runs no model and places the real
+# counselor's response as the output, giving the ceiling for every metric.
+#
+#
+# One model per line, "|"-delimited (NOT comma -- FDB_SEEDS=0,1,2 needs commas
+# inside a field):
+#   model_id|model_weight|model_config|hf_repo|extra_env|opening_greeting|output_name
+#
+# - model_id       required. Same charset rule as run_full_duplex_eval.sh:
+#                   letters, digits, dot, underscore, hyphen only.
+# - model_weight    optional. Path to consolidated.safetensors / exported
+#                   model.safetensors. Leave empty to use the HF default
+#                   weight (e.g. for the base model).
+# - model_config    optional. Path to moshi_lm_kwargs.json matching
+#                   model_weight. Leave empty for merged LoRA models (same
+#                   architecture as the base) or for full-FT exports, since
+#                   run_full_duplex_eval.sh auto-detects moshi_lm_kwargs.json
+#                   sitting next to model_weight (that's where
+#                   scripts/export_fullft_checkpoint.py always writes it).
+#                   Only needed if the config lives somewhere else.
+# - hf_repo         optional. Overrides HF_REPO for this row only
+#                   (default: llm-jp/llm-jp-moshi-v1).
+# - extra_env       optional. ";"-separated KEY=VALUE overrides applied only
+#                   to this row, e.g. FDB_SEEDS=0,1,2;FDB_TTS_SPEAKER=Ono_Anna
+#                   or FDB_CASES_PER_TASK=1 for a one-case-per-task smoke run.
+#                   Special key FDB_SYSTEM=cascade turns this row into a local
+#                   cascade (ASR->LLM->TTS) baseline instead of a Moshi run.
+#                   It runs on the SAME hand-annotated real test set and the
+#                   same metrics as the Moshi rows, so it lands in the same
+#                   table: the batch calls scripts/run_real_cascade_eval.sh,
+#                   model_weight/model_config/hf_repo are ignored, and the
+#                   cascade is tuned via CASCADE_* keys in this same extra_env
+#                   (e.g. FDB_SYSTEM=cascade;CASCADE_LLM_MODEL=google/gemma-2-2b-it).
+#                   The cascade only starts working once the turn has ended, so
+#                   its backchannel count is near zero by construction. That is
+#                   a structural difference, not a bug -- read it as such.
+#                   Use FDB_SYSTEM=cascade_synthetic for the old behaviour
+#                   (synthetic Full-Duplex-Bench-JA). That is a different track
+#                   and is reported separately, never in the same table.
+#                   See scripts/run_real_cascade_eval.sh.
+# - opening_greeting optional. "0" or "1", sets FDB_OPENING_GREETING for this
+#                   row only. Leave empty to use the default described below.
+#                   This dedicated column exists so the greeting toggle
+#                   doesn't need to be smuggled through extra_env; it takes
+#                   precedence over any FDB_OPENING_GREETING inside extra_env.
+# - output_name     optional. Folder/comparison label under BATCH_OUT_DIR.
+#                   Defaults to model_id. Use this for run labels such as
+#                   v1, v2, f01_epoch12, or ablation_no_greeting while keeping
+#                   model_id stable in run metadata. Same charset rule as
+#                   model_id. For shorthand compatibility, a 6-column row
+#                   whose last column is not 0 or 1 is treated as output_name.
+#
+# FDB_OPENING_GREETING precedence for a row (highest first):
+#   1. this row's opening_greeting column
+#   2. FDB_OPENING_GREETING=... inside this row's extra_env
+#   3. auto-default: a row with empty model_weight (unmodified HF checkpoint,
+#      e.g. "base") automatically runs with FDB_OPENING_GREETING=0 -- it was
+#      never trained to say the fixed opening line, so nothing needs to be
+#      set by hand for that case.
+#
+# Blank lines and lines starting with # are ignored. Copy this file to
+# scripts/models_manifest.txt (or anywhere else) and edit before running:
+#
+#   qsub -v MODELS_FILE=scripts/models_manifest.txt \
+#     scripts/run_full_duplex_eval_batch.pbs
+
+# gold = the real counselor's own response. No model is run; the annotated
+# reply is placed as the output and scored by the same code. Keep this row
+# first so the table shows the ceiling before the models.
+gold||||||
+base||||||
+lora_h01|/path/to/lora_h01/consolidated.safetensors|||||v1
+lora_h01|/path/to/lora_h01_v2/consolidated.safetensors|||||v2
+full_f01|/path/to/full_f01/model.safetensors|||FDB_SEEDS=0,1,2||full_f01_seed012
+hf_pretrained_with_greeting|||llm-jp/some-other-checkpoint||1|hf_greeting_v1
+cascade_gemma2b||||FDB_SYSTEM=cascade;CASCADE_LLM_MODEL=google/gemma-2-2b-it||cascade_gemma2b

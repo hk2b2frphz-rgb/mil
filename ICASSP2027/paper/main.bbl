@@ -1,0 +1,125 @@
+\begin{thebibliography}{10}
+
+\bibitem{defossez2024moshi}
+Alexandre D{\'e}fossez, Laurent Mazar{\'e}, Manu Orsini, Am{\'e}lie Royer,
+  Patrick P{\'e}rez, Herv{\'e} J{\'e}gou, Edouard Grave, and Neil Zeghidour,
+\newblock ``Moshi: a speech-text foundation model for real-time dialogue,''
+\newblock {\em arXiv preprint arXiv:2410.00037}, 2024.
+
+\bibitem{nvidia2026personaplex}
+{NVIDIA},
+\newblock ``{PersonaPlex}: Voice and role control for full-duplex
+  conversational speech models,''
+  \url{https://huggingface.co/nvidia/personaplex-7b-v1}, 2026,
+\newblock Model weights under the NVIDIA Open Model License.
+
+\bibitem{ohashi2025jmoshi}
+Atsumoto Ohashi, Shinya Iizuka, Jingjing Jiang, and Ryuichiro Higashinaka,
+\newblock ``Towards a {J}apanese full-duplex spoken dialogue system,''
+\newblock in {\em Proc. Interspeech}, 2025,
+\newblock arXiv:2506.02979.
+
+\bibitem{lin2025fdbench}
+Guan-Ting Lin, Jiachen Lian, Tingle Li, Qirui Wang, Gopala Anumanchipalli,
+  Alexander~H. Liu, and Hung-yi Lee,
+\newblock ``Full-duplex-bench: A benchmark to evaluate full-duplex spoken
+  dialogue models on turn-taking capabilities,''
+\newblock {\em arXiv preprint arXiv:2503.04721}, 2025.
+
+\bibitem{lin2025fdbenchv2}
+Guan-Ting Lin, Shih-Yun~Shan Kuan, Jiatong Shi, Kai-Wei Chang, Siddhant Arora,
+  Shinji Watanabe, and Hung-yi Lee,
+\newblock ``Full-duplex-bench v2: A multi-turn evaluation framework for duplex
+  dialogue systems with an automated examiner,''
+\newblock {\em arXiv preprint arXiv:2510.07838}, 2025.
+
+\bibitem{humdial2026}
+Chengyou Wang, Hongfei Xue, Guojian Li, Zhixian Zhao, Shuiyuan Wang, Shuai
+  Wang, Xin Xu, Hui Bu, and Lei Xie,
+\newblock ``Full-duplex interaction in spoken dialogue systems: A comprehensive
+  study from the {ICASSP} 2026 {HumDial} challenge,''
+\newblock {\em arXiv preprint arXiv:2604.21406}, 2026.
+
+\bibitem{bohus2005sorry}
+Dan Bohus and Alexander~I. Rudnicky,
+\newblock ``Sorry, {I} didn't catch that! -- an investigation of
+  non-understanding errors and recovery strategies,''
+\newblock in {\em Proc. SIGdial Workshop on Discourse and Dialogue}, 2005.
+
+\bibitem{purver2004clarification}
+Matthew Purver,
+\newblock {\em The Theory and Use of Clarification Requests in Dialogue},
+\newblock Ph.D. thesis, King's College, University of London, 2004.
+
+\bibitem{peng2026proactive}
+Yizhou Peng, Ziyang Ma, Changsong Liu, Yi-Wen Chao, Xie Chen, and Eng~Siong
+  Chng,
+\newblock ``Proactive for uncertainty: Cause-aware error diagnosis and
+  interactive clarification for spoken dialogue systems,''
+\newblock {\em arXiv preprint arXiv:2605.25404}, 2026.
+
+\bibitem{fitzgerald2022massive}
+Jack FitzGerald, Christopher Hench, Charith Peris, et~al.,
+\newblock ``{MASSIVE}: A 1m-example multilingual natural language understanding
+  dataset with 51 typologically-diverse languages,''
+\newblock in {\em Proc. ACL}, 2023,
+\newblock arXiv:2204.08582.
+
+\bibitem{bastianelli2020slurp}
+Emanuele Bastianelli, Andrea Vanzo, Pawel Swietojanski, and Verena Rieser,
+\newblock ``{SLURP}: A spoken language understanding resource package,''
+\newblock in {\em Proc. EMNLP}, 2020.
+
+\bibitem{yu2025salmonnomni}
+Wenyi Yu et~al.,
+\newblock ``{SALMONN}-omni: A codec-free {LLM} for full-duplex speech
+  understanding and generation,''
+\newblock {\em arXiv preprint arXiv:2411.18138}, 2024.
+
+\bibitem{aspirin2026}
+Chi-Yuan Hsiao, Ke-Han Lu, Yu-Kuan Fu, Guan-Ting Lin, Hsiao-Tsung Hung, and
+  Hung-yi Lee,
+\newblock ``{ASPIRin}: Action space projection for interactivity-optimized
+  reinforcement learning in full-duplex speech language models,''
+\newblock {\em arXiv preprint arXiv:2604.10065}, 2026.
+
+\bibitem{zuefle2026factor}
+Maike Z{\"u}fle, Ondrej Klejch, Nicholas Sanders, Jan Niehues, Alexandra Birch,
+  and Tsz~Kin Lam,
+\newblock ``{F-Actor}: Controllable conversational behaviour in full-duplex
+  models,''
+\newblock {\em arXiv preprint arXiv:2601.11329}, 2026.
+
+\bibitem{flair2026}
+Donghang Wu, Tianyu Zhang, Yuxin Li, Hexin Liu, Chen Chen, Eng~Siong Chng, and
+  Yoshua Bengio,
+\newblock ``The silent thought: Modeling internal cognition in full-duplex
+  spoken dialogue models via latent reasoning,''
+\newblock {\em arXiv preprint arXiv:2603.17837}, 2026.
+
+\bibitem{kuan2026walking}
+Chun-Yi Kuan, Wei-Ping Huang, and Hung-yi Lee,
+\newblock ``Walking through uncertainty: An empirical study of uncertainty
+  estimation for audio-aware large language models,''
+\newblock {\em arXiv preprint arXiv:2604.25591}, 2026.
+
+\bibitem{iraf2026}
+Tao Zhong, Jiajun Deng, Nikita Kuzmin, Yinke Zhu, Tianxiang Cao, Tristan Tsoi,
+  Zhili Tan, Simon Lui, and Xunying Liu,
+\newblock ``{IRAF}: Interference-resilient adaptive fusion for noise-robust
+  end-to-end full-duplex spoken dialogue systems,''
+\newblock {\em arXiv preprint arXiv:2606.06559}, 2026.
+
+\bibitem{cascadeequiv2026}
+Jayadev Billa,
+\newblock ``The cascade equivalence hypothesis: When do speech {LLM}s behave
+  like {ASR}$\rightarrow${LLM} pipelines?,''
+\newblock {\em arXiv preprint arXiv:2602.17598}, 2026.
+
+\bibitem{pratap2024mms}
+Vineel Pratap, Andros Tjandra, Bowen Shi, et~al.,
+\newblock ``Scaling speech technology to 1,000+ languages,''
+\newblock {\em Journal of Machine Learning Research}, vol. 25, 2024,
+\newblock arXiv:2305.13516.
+
+\end{thebibliography}
