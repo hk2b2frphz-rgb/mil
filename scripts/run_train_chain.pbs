@@ -27,6 +27,8 @@
 #     scripts/run_train_chain.pbs
 #
 # Optional:
+#   SWEEP_PATTERN=h01      run that sweep pattern's hyperparameters; TOTAL_STEPS
+#                          then defaults to the pattern's own step count
 #   STEPS_PER_JOB=2400     steps per job (keep at/below what fits the walltime)
 #   CHAIN_ID=<name>        run directory prefix (default: chain_<jobid>)
 #   NPROC=1
@@ -56,6 +58,17 @@
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 source scripts/setup_proxy.sh
+
+# Run a named sweep pattern (h01, h02, ...) as a chain: the hyperparameters the
+# sweep would have used, split across jobs. Applied before TOTAL_STEPS is
+# resolved so the pattern's own step count can stand in for it.
+SWEEP_PATTERN="${SWEEP_PATTERN:-}"
+if [[ -n "$SWEEP_PATTERN" ]]; then
+    # shellcheck source=/dev/null
+    source "$PWD/scripts/sweep_patterns.sh"
+    apply_pattern "$SWEEP_PATTERN"
+    TOTAL_STEPS="${TOTAL_STEPS:-$HP_MAX_STEPS}"
+fi
 
 EXP_NAME="${EXP_NAME:?Set EXP_NAME (e.g. lora_base_config)}"
 SRC_RUN_DIR="${SRC_RUN_DIR:?Set SRC_RUN_DIR to the dataset dir (data/runs/<RUN_ID>)}"
@@ -190,7 +203,7 @@ echo "[chain]   resume_from: $NEXT_CKPT"
 # -V carries this job's environment, so any HP_* the user set at the top of the
 # chain reaches every later job. -v wins for the values that change per job.
 NEXT_JOB_ID="$(qsub -V \
-    -v "EXP_NAME=${EXP_NAME},SRC_RUN_DIR=${SRC_RUN_DIR},TOTAL_STEPS=${TOTAL_STEPS},STEPS_PER_JOB=${STEPS_PER_JOB},CHAIN_ID=${CHAIN_ID},CHAIN_INDEX=${NEXT_INDEX},RESUME_FROM=${NEXT_CKPT}" \
+    -v "EXP_NAME=${EXP_NAME},SRC_RUN_DIR=${SRC_RUN_DIR},TOTAL_STEPS=${TOTAL_STEPS},STEPS_PER_JOB=${STEPS_PER_JOB},CHAIN_ID=${CHAIN_ID},CHAIN_INDEX=${NEXT_INDEX},RESUME_FROM=${NEXT_CKPT},SWEEP_PATTERN=${SWEEP_PATTERN}" \
     scripts/run_train_chain.pbs)"
 echo "[chain] submitted: $NEXT_JOB_ID"
 echo "finished_at: $(date -Iseconds)"
