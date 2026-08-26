@@ -52,6 +52,16 @@ qsub -v 'EXP_NAME=lora_base_config,SRC_RUN_DIR=data/runs/<RUN_ID>,TOTAL_STEPS=72
   scripts/run_train_chain.pbs
 ```
 
+h01 のようなスイープパターンをそのままチェーンで回す場合（`TOTAL_STEPS` は
+パターン自身の step 数が既定になる）:
+
+```bash
+qsub -v 'EXP_NAME=lora_base_config,SRC_RUN_DIR=data/runs/<RUN_ID>,SWEEP_PATTERN=h01,STEPS_PER_JOB=1000' \
+  scripts/run_train_chain.pbs
+```
+
+パターンの定義は `scripts/sweep_patterns.sh`。スイープとチェーンで共有する。
+
 チェーンのロジックだけを先に検証する:
 
 ```bash
