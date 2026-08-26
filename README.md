@@ -58,6 +58,23 @@ qsub -v 'EXP_NAME=lora_base_config,SRC_RUN_DIR=data/runs/<RUN_ID>,TOTAL_STEPS=72
 bash scripts/check_train_chain.sh
 ```
 
+### スイープ
+
+複数パターンを順に回す。walltime が来たら、未実行のパターンを次のジョブに
+引き継ぐ（同じデータセットを使い回し、完了済みはスキップする）。
+
+```bash
+qsub -V scripts/sweep_lora.pbs
+qsub -V scripts/fullft_sweep.pbs
+```
+
+進捗は `experiments/pbs_logs/<RUN_ID>_sweep_state.tsv`。引き継ぎを止めるなら
+`SWEEP_CHAIN=0`、走っているチェーンを終わらせるなら
+`touch ~/.miltoka/stop_sweep_chain`。
+
+1パターン自体が walltime に収まらない場合は引き継げない。その場合は step で
+分割する `scripts/run_train_chain.pbs` を使う。
+
 ## 3. 評価
 
 Full-Duplex-Bench-JA。計算ノード側は外部 API を呼ばない。

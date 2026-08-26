@@ -39,4 +39,9 @@ export MLFLOW_LIVE_SYNC_INTERVAL="${MLFLOW_LIVE_SYNC_INTERVAL:-120}"
 mkdir -p experiments/pbs_logs
 exec > >(tee -a "experiments/pbs_logs/${RUN_ID}.log") 2>&1
 
+# Which job file a chained handoff should resubmit. Patterns that do not
+# fit in this walltime are handed to a fresh copy of this job instead of
+# being silently dropped (scripts/sweep_chain.sh). Disable with SWEEP_CHAIN=0.
+export SELF_PBS="${SELF_PBS:-scripts/fullft_lr_sweep.pbs}"
+
 bash scripts/run_fullft_sweep_pair.sh

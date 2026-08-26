@@ -11,10 +11,15 @@ cd "$REPO_ROOT"
 BASE_EXP="${BASE_EXP:-lora_base_config}"
 NUM_CASES="${NUM_CASES:-250}"
 SWEEP_PATTERNS="${SWEEP_PATTERNS:-h01 h02}"
-SWEEP_PATTERNS="${SWEEP_PATTERNS//,/ }"
+# '+' as well as ',': a chained handoff passes the remaining patterns
+# through qsub -v, which already uses commas to separate assignments.
+SWEEP_PATTERNS="${SWEEP_PATTERNS//[,+]/ }"
 NPROC="${NPROC:-1}"
 RUN_ID="${RUN_ID:-run_$(date +%Y%m%d_%H%M%S)}"
 INPUT_SRC_RUN_DIR="${SRC_RUN_DIR:-}"
+
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/sweep_chain.sh"
 
 export NPROC
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
@@ -175,7 +180,16 @@ if [[ ! -f "$SRC_RUN_DIR/training_set/synthetic_moshi_train.jsonl" ]]; then
     exit 1
 fi
 
+sweep_chain_init
+
 for pattern in $SWEEP_PATTERNS; do
+    if sweep_chain_completed "$pattern"; then
+        echo "[sweep] $pattern already done in an earlier link; skipping"
+        continue
+    fi
+    sweep_chain_have_time || sweep_chain_handoff
+    pattern_started="$(date +%s)"
+
     apply_pattern "$pattern"
     export MLFLOW_RUN_NAME="${RUN_ID}_${pattern}"
     SWEEP_EXP_NAME="_sweeps/${RUN_ID}_${pattern}"
@@ -193,6 +207,7 @@ for pattern in $SWEEP_PATTERNS; do
     echo "  exp=$SWEEP_EXP_NAME"
     echo "  lr=$HP_LR rank=$HP_LORA_RANK scaling=$HP_LORA_SCALING batch=$HP_BATCH_SIZE micro=$HP_NUM_MICROBATCHES steps=$HP_MAX_STEPS wd=$HP_WEIGHT_DECAY pct_start=$HP_PCT_START"
     bash scripts/run_experiment.sh "$SWEEP_EXP_NAME" "$SRC_RUN_DIR"
+    sweep_chain_record "$pattern" "$(( $(date +%s) - pattern_started ))"
 done
 
 echo

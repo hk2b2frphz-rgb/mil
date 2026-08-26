@@ -11,10 +11,15 @@ cd "$REPO_ROOT"
 BASE_EXP="${BASE_EXP:-fullft_base_config}"
 NUM_CASES="${NUM_CASES:-250}"
 SWEEP_PATTERNS="${SWEEP_PATTERNS:-f01 f02}"
-SWEEP_PATTERNS="${SWEEP_PATTERNS//,/ }"
+# '+' as well as ',': a chained handoff passes the remaining patterns
+# through qsub -v, which already uses commas to separate assignments.
+SWEEP_PATTERNS="${SWEEP_PATTERNS//[,+]/ }"
 NPROC="${NPROC:-2}"
 RUN_ID="${RUN_ID:-full_$(date +%Y%m%d_%H%M%S)}"
 INPUT_SRC_RUN_DIR="${SRC_RUN_DIR:-}"
+
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/sweep_chain.sh"
 
 export NPROC
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
@@ -169,7 +174,16 @@ if [[ ! -f "$SRC_RUN_DIR/training_set/synthetic_moshi_train.jsonl" ]]; then
     exit 1
 fi
 
+sweep_chain_init
+
 for pattern in $SWEEP_PATTERNS; do
+    if sweep_chain_completed "$pattern"; then
+        echo "[full-ft sweep] $pattern already done in an earlier link; skipping"
+        continue
+    fi
+    sweep_chain_have_time || sweep_chain_handoff
+    pattern_started="$(date +%s)"
+
     apply_pattern "$pattern"
     export MLFLOW_RUN_NAME="${RUN_ID}_${pattern}"
     SWEEP_EXP_NAME="_fullft_sweeps/${RUN_ID}_${pattern}"
@@ -188,6 +202,7 @@ for pattern in $SWEEP_PATTERNS; do
     echo "  lr=$HP_LR batch=$HP_BATCH_SIZE micro=$HP_NUM_MICROBATCHES max_epochs=$HP_MAX_EPOCHS warmup_ep=$HP_WARMUP_EPOCHS eval_ep=$HP_EVAL_EVERY_EPOCH ckpt_ep=$HP_CKPT_EVERY_EPOCH wd=$HP_WEIGHT_DECAY max_norm=$HP_MAX_NORM duration=${HP_DURATION_SEC:-100}"
     echo "  (epoch->step conversion is logged by the runner as steps_per_epoch)"
     bash scripts/run_nu_fullft_experiment.sh "$SWEEP_EXP_NAME" "$SRC_RUN_DIR"
+    sweep_chain_record "$pattern" "$(( $(date +%s) - pattern_started ))"
 done
 
 echo
