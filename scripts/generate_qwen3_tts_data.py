@@ -268,6 +268,7 @@ OPENING_GREETING_INSTRUCT = (
 class DialogueTurn:
     speaker: str  # "user" | "moshi" | "silence"
     text: str = ""
+    tts_text: str | None = None  # 合成専用の明示的な読み。text は学習用原文のまま保持する。
     emotion: str | None = None
     instruct: str | None = None      # 解決後の Qwen3-TTS instruct 文字列（参照保存用）
     duration_sec: float | None = None  # speaker=="silence" 用
@@ -1424,7 +1425,7 @@ def build_segments(
             pcm = opening_greeting_pcm.copy()
         else:
             pcm = tts.synthesize(
-                turn.text,
+                turn.tts_text or turn.text,
                 turn.speaker,
                 instruct=turn.instruct,
                 speaker_override=override,
@@ -2012,6 +2013,9 @@ def load_dialogues_from_jsonl(path: Path) -> list[dict[str, Any]]:
                     continue
                 emotion = t.get("emotion")
                 turn = {"speaker": speaker, "text": text}
+                tts_text = str(t.get("tts_text") or "").strip()
+                if tts_text:
+                    turn["tts_text"] = tts_text
                 if emotion:
                     turn["emotion"] = str(emotion)
                 timing = str(t.get("timing") or "sequential").strip().lower()
@@ -2794,6 +2798,7 @@ def prepare_dialogue_render_job(
             DialogueTurn(
                 speaker=speaker,
                 text=raw_turn["text"],
+                tts_text=str(raw_turn.get("tts_text") or "").strip() or None,
                 emotion=emotion,
                 instruct=resolve_emotion(emotion, emotion_map),
                 timing=str(raw_turn.get("timing") or "sequential"),

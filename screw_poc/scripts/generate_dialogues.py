@@ -130,6 +130,29 @@ def validate_inputs(policy: dict[str, Any], knowledge: list[Knowledge]) -> None:
         raise ValueError("the screw PoC system voice must be Ono_Anna")
     if "Ono_Anna" in voices["users"]:
         raise ValueError("Ono_Anna must not appear in the user voice pool")
+    pronunciations = policy.get("tts_pronunciations") or []
+    if not pronunciations:
+        raise ValueError("tts_pronunciations must not be empty")
+    for index, entry in enumerate(pronunciations, start=1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"tts_pronunciations[{index}] must be a mapping")
+        if not str(entry.get("written") or "") or not str(entry.get("spoken") or ""):
+            raise ValueError(f"tts_pronunciations[{index}] needs written and spoken")
+
+
+def tts_text(text: str, policy: dict[str, Any]) -> str:
+    """Return the fixed, unambiguous pronunciation used only for synthesis."""
+    rendered = text
+    for entry in policy["tts_pronunciations"]:
+        rendered = rendered.replace(str(entry["written"]), str(entry["spoken"]))
+    return rendered
+
+
+def attach_tts_text(dialogues: list[dict[str, Any]], policy: dict[str, Any]) -> None:
+    for dialogue in dialogues:
+        for turn in dialogue["turns"]:
+            if turn.get("speaker") in {"user", "moshi"}:
+                turn["tts_text"] = tts_text(str(turn["text"]), policy)
 
 
 def user_turn(text: str, *, event: str | None = None, **extra: Any) -> dict[str, Any]:
@@ -320,6 +343,7 @@ def generate_train(
         for index in range(out_of_scope_count)
     )
     rng.shuffle(dialogues)
+    attach_tts_text(dialogues, policy)
     return dialogues
 
 
@@ -340,6 +364,7 @@ def generate_evaluation(
         for index in range(remaining)
     )
     rng.shuffle(dialogues)
+    attach_tts_text(dialogues, policy)
     return dialogues
 
 

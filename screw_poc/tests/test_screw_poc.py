@@ -20,6 +20,7 @@ from screw_poc.scripts.generate_dialogues import (
 )
 from screw_poc.scripts.score_predictions import expected_texts, score
 from screw_poc.scripts.validate_dataset import read_jsonl
+from scripts.generate_qwen3_tts_data import load_dialogues_from_jsonl
 
 
 class ScrewPocTests(unittest.TestCase):
@@ -60,6 +61,39 @@ class ScrewPocTests(unittest.TestCase):
             for turn in dialogue["turns"]:
                 if turn.get("response_pattern") in {"ANSWER", "STOP"}:
                     self.assertEqual(turn["text"], answers[knowledge_id])
+
+    def test_tts_readings_are_explicit_but_keep_the_canonical_text(self) -> None:
+        k08 = next(
+            row for row in self.train
+            if row["knowledge_id"] == "K08" and row["flow"] == "direct"
+        )
+        answer = next(turn for turn in k08["turns"] if turn.get("response_pattern") == "ANSWER")
+        self.assertIn("M8かける1", answer["text"])
+        self.assertIn("エムハチかけるイチ", answer["tts_text"])
+        self.assertNotIn("M8", answer["tts_text"])
+
+        k15 = next(
+            row for row in self.train
+            if row["knowledge_id"] == "K15" and row["flow"] == "direct"
+        )
+        answer = next(turn for turn in k15["turns"] if turn.get("response_pattern") == "ANSWER")
+        self.assertIn("SSH-M3-SD-EL", answer["text"])
+        self.assertIn(
+            "エスエスエイチ・エムスリー・エスディー・イーエル",
+            answer["tts_text"],
+        )
+
+    def test_tts_reader_keeps_pronunciation_separate_from_alignment_text(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "dialogues.jsonl"
+            write_jsonl(path, [next(
+                row for row in self.train
+                if row["knowledge_id"] == "K08" and row["flow"] == "direct"
+            )])
+            loaded = load_dialogues_from_jsonl(path)
+        answer = next(turn for turn in loaded[0]["turns"] if turn["speaker"] == "moshi")
+        self.assertIn("M8かける1", answer["text"])
+        self.assertIn("エムハチかけるイチ", answer["tts_text"])
 
     def test_unresolved_flow_uses_three_question_levels_then_escalates(self) -> None:
         for dialogue in (row for row in self.train if row["flow"] == "unresolved"):
