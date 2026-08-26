@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #PBS -S /bin/bash
-#PBS -N chain_v100
+#PBS -N fd_probe
 #PBS -q xvn_s
 #PBS -l select=1:res=small
 #PBS -l walltime=00:10:00
