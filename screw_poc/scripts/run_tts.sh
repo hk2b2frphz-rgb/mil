@@ -34,7 +34,6 @@ ARGS=(
     --gap-sec "$GAP_SEC"
     --no-opening-greeting
     --no-emotion
-    --whole-utterance
 )
 if [[ -n "$NUM_DIALOGUES" ]]; then
     ARGS+=(--num-dialogues "$NUM_DIALOGUES")

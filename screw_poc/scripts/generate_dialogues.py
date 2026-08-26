@@ -301,100 +301,6 @@ def build_out_of_scope(
     }
 
 
-DUPLEX_TASKS = (
-    "pause_handling",
-    "smooth_turn_taking",
-    "backchannel",
-    "user_interruption",
-    "user_backchannel",
-    "talking_to_other",
-    "background_speech",
-)
-
-
-def first_index(turns: list[dict[str, Any]], speaker: str) -> int | None:
-    return next((index for index, turn in enumerate(turns) if turn["speaker"] == speaker), None)
-
-
-def apply_duplex_task(dialogue: dict[str, Any], task: str) -> None:
-    turns = dialogue["turns"]
-    dialogue["duplex_task"] = task
-    if task == "smooth_turn_taking":
-        return
-    if task == "pause_handling":
-        index = first_index(turns, "user")
-        assert index is not None
-        text = turns[index]["text"]
-        midpoint = max(1, len(text) // 2)
-        turns[index : index + 1] = [
-            user_turn(text[:midpoint]),
-            {"speaker": "silence", "duration_sec": 2.2, "note": "user pauses to inspect"},
-            user_turn(text[midpoint:] or "少し待ってください。"),
-        ]
-        return
-    if task == "backchannel":
-        index = first_index(turns, "user")
-        assert index is not None
-        turns.insert(
-            index + 1,
-            moshi_turn(
-                "はい。",
-                "BACKCHANNEL",
-                timing="overlap_previous",
-                start_after_previous_start_sec=0.8,
-                event="model_backchannel",
-            ),
-        )
-        dialogue["expected_response_patterns"].insert(0, "BACKCHANNEL")
-        return
-
-    index = first_index(turns, "moshi")
-    assert index is not None
-    if task == "user_interruption":
-        inserted = user_turn(
-            "すみません、今の質問に答えます。",
-            event="user_interruption",
-            timing="overlap_previous",
-            start_after_previous_start_sec=0.8,
-            truncate_previous_after_sec=0.3,
-        )
-    elif task == "user_backchannel":
-        inserted = user_turn(
-            "はい。",
-            event="user_backchannel",
-            timing="overlap_previous",
-            start_after_previous_start_sec=0.8,
-        )
-    elif task == "talking_to_other":
-        inserted = user_turn(
-            "少し待ってください、今確認しています。",
-            event="talking_to_other",
-            voice_role="other",
-            timing="overlap_previous",
-            start_after_previous_start_sec=0.8,
-            gain=0.8,
-        )
-    elif task == "background_speech":
-        inserted = user_turn(
-            "通路を空けて、安全を確認してください。",
-            event="background_speech",
-            voice_role="background",
-            timing="overlap_previous",
-            start_after_previous_start_sec=0.8,
-            gain=0.25,
-        )
-    else:
-        raise ValueError(task)
-    turns.insert(index + 1, inserted)
-
-
-def add_duplex_mix(dialogues: list[dict[str, Any]]) -> None:
-    """Apply full-duplex events to exactly 30% of a split."""
-    selected = (len(dialogues) * 3) // 10
-    for index, dialogue in enumerate(dialogues[:selected]):
-        apply_duplex_task(dialogue, DUPLEX_TASKS[index % len(DUPLEX_TASKS)])
-
-
 def generate_train(
     knowledge: list[Knowledge], policy: dict[str, Any], rng: random.Random, count: int
 ) -> list[dict[str, Any]]:
@@ -414,7 +320,6 @@ def generate_train(
         for index in range(out_of_scope_count)
     )
     rng.shuffle(dialogues)
-    add_duplex_mix(dialogues)
     return dialogues
 
 
@@ -435,7 +340,6 @@ def generate_evaluation(
         for index in range(remaining)
     )
     rng.shuffle(dialogues)
-    add_duplex_mix(dialogues)
     return dialogues
 
 
@@ -452,9 +356,15 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "knowledge_coverage": len({row["knowledge_id"] for row in rows if row["knowledge_id"]}),
         "flows": dict(sorted(Counter(row["flow"] for row in rows).items())),
         "categories": dict(sorted(Counter(row["category"] for row in rows).items())),
-        "duplex_tasks": dict(
-            sorted(Counter(row.get("duplex_task", "none") for row in rows).items())
-        ),
+        "turn_timing": {
+            "sequential": sum(
+                1
+                for row in rows
+                for turn in row["turns"]
+                if turn.get("speaker") != "silence"
+                and turn.get("timing", "sequential") == "sequential"
+            )
+        },
     }
 
 

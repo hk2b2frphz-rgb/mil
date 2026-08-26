@@ -26,7 +26,7 @@ fi
 
 JOB_ID="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
 JOB_ID="${JOB_ID%%.*}"
-TTS_RUN_DIR="${TTS_RUN_DIR:-$PWD/screw_poc/artifacts/tts_1000/merged}"
+TTS_RUN_DIR="${TTS_RUN_DIR:-$PWD/screw_poc/artifacts/tts_1000_sequential/merged}"
 export NPROC="${NPROC:-1}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export REFRESH_EXP_DATA="${REFRESH_EXP_DATA:-1}"

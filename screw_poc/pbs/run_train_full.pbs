@@ -34,7 +34,7 @@ command -v uv >/dev/null 2>&1 || {
 
 JOB_ID="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
 JOB_ID="${JOB_ID%%.*}"
-TTS_RUN_DIR="${TTS_RUN_DIR:-$PWD/screw_poc/artifacts/tts_1000/merged}"
+TTS_RUN_DIR="${TTS_RUN_DIR:-$PWD/screw_poc/artifacts/tts_1000_sequential/merged}"
 MANIFEST="$TTS_RUN_DIR/training_set/synthetic_moshi_train.jsonl"
 if [[ ! -s "$MANIFEST" ]]; then
     echo "ERROR: training manifest not found: $MANIFEST" >&2

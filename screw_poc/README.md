@@ -1,6 +1,6 @@
 # ねじ問い合わせ「疑似先輩」PoC
 
-工場の若手作業者が、ねじの見分け方・ピッチ・締付トルク・下穴・トラブル対応を音声で質問できる Moshi 用PoCです。既存miltokaの音声合成・Full-Duplex・学習処理を再利用しますが、知識、対話、生成物、実験結果はすべて `screw_poc/` 配下に分離します。
+工場の若手作業者が、ねじの見分け方・ピッチ・締付トルク・下穴・トラブル対応を音声で質問できる Moshi 用PoCです。既存miltokaの音声合成・学習処理を再利用しますが、知識、対話、生成物、実験結果はすべて `screw_poc/` 配下に分離します。
 
 ## 設計
 
@@ -45,7 +45,7 @@ python screw_poc/scripts/build_training_subsets.py
 - `artifacts/subsets/train_0300.jsonl`: 30知識をすべて含む300対話
 - `artifacts/subsets/train_1000.jsonl`: 基準となる1,000対話
 
-100/300/1000件は同じ正解文を共有するため、件数による効果を比較できます。標準の1,000件は、知識内900件、領域外100件、Full-Duplex事象300件です。
+100/300/1000件は同じ正解文を共有するため、件数による効果を比較できます。標準の1,000件は、知識内900件、領域外100件からなる通常の逐次対話です。話者の発話は重ねません。
 
 ## 2. Qwen3-TTSで音声学習データを作る
 
@@ -116,7 +116,7 @@ bash screw_poc/pbs/submit_train_both.sh
 
 出力先は次のように分かれます。
 
-- TTS: `screw_poc/artifacts/tts_1000/`
+- TTS: `screw_poc/artifacts/tts_1000_sequential/`
 - LoRA: `screw_poc/experiments/lora_base_config/`
 - Full FT: `screw_poc/experiments/fullft_base_config/`
 - PBSログ: `screw_poc/artifacts/pbs_logs/`
@@ -138,7 +138,7 @@ qsub -V -v TTS_RUN_DIR=screw_poc/artifacts/tts_0300/merged screw_poc/pbs/run_tra
 uv run pytest screw_poc/tests/test_screw_poc.py -q
 ```
 
-テストでは、30知識の存在、音声割当、1,000/200件の件数、技術回答のDB固定、3段階質問、100/300/1000件の知識網羅、既存Full-Duplex検証との互換性を確認します。
+テストでは、30知識の存在、音声割当、1,000/200件の件数、技術回答のDB固定、3段階質問、100/300/1000件の知識網羅、逐次対話であることを確認します。
 
 ## 5. 正解率を測る
 

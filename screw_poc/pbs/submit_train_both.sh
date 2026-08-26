@@ -10,7 +10,7 @@ command -v qsub >/dev/null 2>&1 || {
     exit 1
 }
 
-TTS_RUN_DIR="${TTS_RUN_DIR:-$REPO_ROOT/screw_poc/artifacts/tts_1000/merged}"
+TTS_RUN_DIR="${TTS_RUN_DIR:-$REPO_ROOT/screw_poc/artifacts/tts_1000_sequential/merged}"
 DEPENDENCY_JOB_ID="${1:-}"
 qsub_args=(-V -v "TTS_RUN_DIR=$TTS_RUN_DIR")
 if [[ -n "$DEPENDENCY_JOB_ID" ]]; then

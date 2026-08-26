@@ -26,8 +26,7 @@ $Arguments = @(
     "--device", "cuda",
     "--dtype", "float16",
     "--no-opening-greeting",
-    "--no-emotion",
-    "--whole-utterance"
+    "--no-emotion"
 )
 if ($null -ne $NumDialogues) { $Arguments += @("--num-dialogues", "$NumDialogues") }
 

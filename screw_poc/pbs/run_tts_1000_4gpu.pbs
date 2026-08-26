@@ -36,7 +36,9 @@ command -v uv >/dev/null 2>&1 || {
 JOB_ID="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
 JOB_ID="${JOB_ID%%.*}"
 DIALOGUES_JSONL="${DIALOGUES_JSONL:-$PWD/screw_poc/artifacts/train_dialogues.jsonl}"
-OUT_ROOT="${OUT_ROOT:-$PWD/screw_poc/artifacts/tts_1000}"
+# Keep the former full-duplex batch untouched. This sequential batch must use
+# a new directory because --resume would otherwise accept its old WAVs.
+OUT_ROOT="${OUT_ROOT:-$PWD/screw_poc/artifacts/tts_1000_sequential}"
 NUM_DIALOGUES="${NUM_DIALOGUES:-1000}"
 NUM_SHARDS="${NUM_SHARDS:-4}"
 SPARE_RATIO="${SPARE_RATIO:-0.15}"
@@ -157,7 +159,6 @@ for ((shard_index = 0; shard_index < NUM_SHARDS; shard_index++)); do
             --out-dir "$shard_training"
             --success-target "$success_target"
             --resume
-            --whole-utterance
             --no-opening-greeting
             --no-emotion
             --speaker-moshi Ono_Anna

@@ -20,7 +20,6 @@ from screw_poc.scripts.generate_dialogues import (
 )
 from screw_poc.scripts.score_predictions import expected_texts, score
 from screw_poc.scripts.validate_dataset import read_jsonl
-from scripts.generate_qwen3_tts_data import validate_duplex_dialogue
 
 
 class ScrewPocTests(unittest.TestCase):
@@ -50,7 +49,7 @@ class ScrewPocTests(unittest.TestCase):
             30,
         )
         self.assertEqual(Counter(row["flow"] for row in self.train)["out_of_scope"], 100)
-        self.assertEqual(sum(bool(row.get("duplex_task")) for row in self.train), 300)
+        self.assertFalse(any(row.get("duplex_task") for row in self.train))
 
     def test_system_technical_answers_are_locked_to_knowledge_db(self) -> None:
         answers = {row.knowledge_id: row.final_text for row in self.knowledge}
@@ -72,10 +71,16 @@ class ScrewPocTests(unittest.TestCase):
             self.assertTrue(asks[2].endswith("_L3"))
             self.assertEqual(patterns[-1], "ESCALATE")
 
-    def test_all_duplex_dialogues_match_existing_tts_validator(self) -> None:
+    def test_all_dialogues_are_strictly_sequential(self) -> None:
         for dialogue in self.train + self.evaluation:
             with self.subTest(dialogue=dialogue["id"]):
-                self.assertEqual(validate_duplex_dialogue(dialogue), [])
+                self.assertFalse(dialogue.get("duplex_task"))
+                self.assertTrue(
+                    all(
+                        turn.get("timing", "sequential") == "sequential"
+                        for turn in dialogue["turns"]
+                    )
+                )
 
     def test_comparison_subsets_keep_all_knowledge(self) -> None:
         for target in (100, 300, 1000):
