@@ -49,13 +49,13 @@ def post(url: str, api_key: str, payload: dict, timeout: float):
 
 
 def stream_reply(base_url: str, api_key: str, model: str, messages: list,
-                 temperature: float, max_tokens: int, timeout: float) -> str:
+                 sampling: dict, max_tokens: int, timeout: float) -> str:
     """Stream one assistant turn to stdout and return the full text."""
     payload = {
         "model": model,
         "messages": messages,
-        "temperature": temperature,
         "stream": True,
+        **sampling,
     }
     if max_tokens > 0:
         payload["max_tokens"] = max_tokens
@@ -124,7 +124,11 @@ def main() -> int:
     parser.add_argument("--model", default=os.environ.get(
         "ANTHROPIC_MODEL", saved.get("model_alias", DEFAULT_MODEL)))
     parser.add_argument("--system", default=None, help="system prompt")
-    parser.add_argument("--temperature", type=float, default=0.7)
+    # Qwen3-Coder-Next's own card asks for these; coding models degrade
+    # noticeably when you wander off their recommended sampling.
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--top-k", type=int, default=40)
     parser.add_argument("--max-tokens", type=int, default=0, help="0 = server default")
     parser.add_argument("--timeout", type=float, default=600.0)
     parser.add_argument("--check", action="store_true",
@@ -137,6 +141,11 @@ def main() -> int:
 
     if check(base_url, args.api_key) != 0:
         return 1
+
+    # top_k is not in the OpenAI spec; vLLM honours it and the proxy drops it
+    # if it cannot pass it through, so sending it costs nothing either way.
+    sampling = {"temperature": args.temperature, "top_p": args.top_p,
+                "top_k": args.top_k}
 
     messages: list[dict] = []
     if args.system:
@@ -170,7 +179,7 @@ def main() -> int:
         print(f"\n{args.model}> ", end="", flush=True)
         try:
             reply = stream_reply(base_url, args.api_key, args.model, messages,
-                                 args.temperature, args.max_tokens, args.timeout)
+                                 sampling, args.max_tokens, args.timeout)
         except KeyboardInterrupt:
             print("\n(interrupted; dropping that turn)")
             messages.pop()
