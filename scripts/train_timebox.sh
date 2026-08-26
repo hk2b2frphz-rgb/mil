@@ -125,3 +125,55 @@ timebox_latest_ckpt() {
     [[ -n "$best_step" ]] || return 1
     printf '%s\t%s\n' "$best_step" "$best_path"
 }
+
+# --------------------------------------------------------------- full-FT side
+# nu-dialogue checkpoints look different: <root>/step_<N>/<tag>/ holding
+# DeepSpeed ZeRO shards, and there is no consolidated weight until something
+# runs zero_to_fp32 over them.
+timebox_latest_fullft_ckpt() {
+    local root="$1"
+    local tag="${2:-pytorch_model}"
+    local now best_step="" best_dir=""
+    now="$(date +%s)"
+    [[ -d "$root" ]] || return 1
+
+    local dir tagdir step newest
+    for dir in "$root"/step_*; do
+        [[ -d "$dir" ]] || continue
+        step="${dir##*step_}"
+        [[ "$step" =~ ^[0-9]+$ ]] || continue
+        tagdir="$dir/$tag"
+        [[ -d "$tagdir" ]] || continue
+        compgen -G "$tagdir/*model_states*" >/dev/null 2>&1 \
+            || compgen -G "$tagdir/*zero_pp_rank*" >/dev/null 2>&1 \
+            || continue
+        newest="$(find "$tagdir" -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1 | cut -d. -f1)"
+        if [[ -n "$newest" && "$(( now - newest ))" -lt "$TIMEBOX_SETTLE_SEC" ]]; then
+            echo "[timebox] ignoring step_${step}: written $(( now - newest ))s ago, may be incomplete" >&2
+            continue
+        fi
+        step=$(( 10#$step ))
+        if [[ -z "$best_step" || "$step" -gt "$best_step" ]]; then
+            best_step="$step"
+            best_dir="$dir"
+        fi
+    done
+
+    [[ -n "$best_step" ]] || return 1
+    printf '%s\t%s\n' "$best_step" "$best_dir"
+}
+
+# Turn a ZeRO checkpoint into the MoshiForFinetuning directory that training
+# loads via --model_dir. Stage 2 of the export (clean_moshi) is for inference
+# and is skipped here.
+timebox_export_fullft_resume() {
+    local step_dir="$1"
+    local resume_dir="$2"
+    echo "[timebox] consolidating $step_dir -> $resume_dir"
+    uv run python scripts/export_fullft_checkpoint.py \
+        --step-dir "$step_dir" \
+        --out-dir "${resume_dir}_unused" \
+        --intermediate-dir "$resume_dir" \
+        --intermediate-only \
+        --overwrite
+}

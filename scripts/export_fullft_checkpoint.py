@@ -137,6 +137,11 @@ def main() -> None:
     remove_grp.add_argument("--no-remove-user-stream", dest="remove_user_stream",
                             action="store_false",
                             help="Force-disable user-stream module removal.")
+    parser.add_argument("--intermediate-only", action="store_true",
+                        help="Stop after stage 1 and keep the MoshiForFinetuning "
+                             "directory. That format is what training loads via "
+                             "--model_dir, so this is the form to use when "
+                             "resuming a run rather than evaluating it.")
     parser.add_argument("--keep-intermediate", action="store_true",
                         help="Keep the stage-1 intermediate dir instead of deleting it.")
     parser.add_argument("--overwrite", action="store_true",
@@ -184,6 +189,13 @@ def main() -> None:
         "--safe_serialization",
         "--moshi_lm_kwargs_path", str(kwargs_path),
     ], cwd=nu_repo)
+
+    if args.intermediate_only:
+        for required in ("model.safetensors", "moshi_lm_kwargs.json"):
+            if not (ft_dir / required).exists():
+                fail(f"expected {required} in {ft_dir}")
+        log(f"done (--intermediate-only). resume from: {ft_dir}")
+        return
 
     # ---- (2) MoshiForFinetuning -> original LMModel format ------------------
     log("stage 2/2: clean_moshi (convert to original Moshi format)")

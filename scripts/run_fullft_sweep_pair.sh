@@ -20,6 +20,8 @@ INPUT_SRC_RUN_DIR="${SRC_RUN_DIR:-}"
 
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/sweep_chain.sh"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/train_timebox.sh"
 
 export NPROC
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
@@ -175,13 +177,13 @@ if [[ ! -f "$SRC_RUN_DIR/training_set/synthetic_moshi_train.jsonl" ]]; then
 fi
 
 sweep_chain_init
+timebox_init "$SWEEP_START_EPOCH"
 
 for pattern in $SWEEP_PATTERNS; do
     if sweep_chain_completed "$pattern"; then
         echo "[full-ft sweep] $pattern already done in an earlier link; skipping"
         continue
     fi
-    sweep_chain_have_time || sweep_chain_handoff
     pattern_started="$(date +%s)"
 
     apply_pattern "$pattern"
@@ -196,13 +198,56 @@ for pattern in $SWEEP_PATTERNS; do
 
     export REFRESH_EXP_DATA=1
 
+    # Deterministic run dir so a later job can find this pattern's checkpoints.
+    export RUN_TS="${RUN_ID}_${pattern}"
+    NU_CKPT_ROOT="$SWEEP_EXP_DIR/checkpoints/nu_$RUN_TS"
+    RESUME_MODEL_DIR="$SWEEP_EXP_DIR/resume_model_$RUN_TS"
+    RESUME_STATE="experiments/pbs_logs/${RUN_ID}_${pattern}_fullft_resume"
+
+    unset NU_MODEL_DIR NU_WARMUP_STEPS
+    if [[ -s "$RESUME_STATE" && -f "$RESUME_MODEL_DIR/model.safetensors" ]]; then
+        DONE_STEPS="$(cat "$RESUME_STATE")"
+        # Weights carry over, optimizer state does not -- the trainer starts a
+        # fresh run from these weights, so it needs the remaining step count,
+        # and no second warmup.
+        export NU_MODEL_DIR="$RESUME_MODEL_DIR"
+        export NU_WARMUP_STEPS=0
+        HP_MAX_STEPS=$(( HP_MAX_STEPS - DONE_STEPS ))
+        if [[ "$HP_MAX_STEPS" -le 0 ]]; then
+            echo "[full-ft sweep] $pattern already reached its step budget; marking done"
+            sweep_chain_record "$pattern" 0
+            continue
+        fi
+        export HP_MAX_STEPS
+        echo "[full-ft sweep] resuming $pattern from step $DONE_STEPS, $HP_MAX_STEPS to go"
+    elif ! sweep_chain_have_time; then
+        sweep_chain_handoff
+    fi
+
     echo
     echo "[full-ft sweep] running $pattern"
     echo "  exp=$SWEEP_EXP_NAME"
     echo "  lr=$HP_LR batch=$HP_BATCH_SIZE micro=$HP_NUM_MICROBATCHES max_epochs=$HP_MAX_EPOCHS warmup_ep=$HP_WARMUP_EPOCHS eval_ep=$HP_EVAL_EVERY_EPOCH ckpt_ep=$HP_CKPT_EVERY_EPOCH wd=$HP_WEIGHT_DECAY max_norm=$HP_MAX_NORM duration=${HP_DURATION_SEC:-100}"
     echo "  (epoch->step conversion is logged by the runner as steps_per_epoch)"
-    bash scripts/run_nu_fullft_experiment.sh "$SWEEP_EXP_NAME" "$SRC_RUN_DIR"
-    sweep_chain_record "$pattern" "$(( $(date +%s) - pattern_started ))"
+    if timebox_run "$TIMEBOX_DEADLINE" bash scripts/run_nu_fullft_experiment.sh "$SWEEP_EXP_NAME" "$SRC_RUN_DIR"; then
+        sweep_chain_record "$pattern" "$(( $(date +%s) - pattern_started ))"
+        rm -f "$RESUME_STATE"
+    else
+        rc=$?
+        [[ "$rc" == "124" ]] || exit "$rc"
+        echo "[full-ft sweep] $pattern ran out of time; preparing a resume point"
+        if ! CKPT_INFO="$(timebox_latest_fullft_ckpt "$NU_CKPT_ROOT")"; then
+            echo "ERROR: no usable checkpoint under $NU_CKPT_ROOT; nothing to resume from." >&2
+            echo "       Lower HP_CKPT_FREQ so a checkpoint lands inside one walltime." >&2
+            exit 1
+        fi
+        CKPT_STEP="${CKPT_INFO%%$'	'*}"
+        CKPT_DIR="${CKPT_INFO#*$'	'}"
+        timebox_export_fullft_resume "$CKPT_DIR" "$RESUME_MODEL_DIR"
+        echo "$(( ${DONE_STEPS:-0} + CKPT_STEP ))" > "$RESUME_STATE"
+        echo "[full-ft sweep] resume point: step $(cat "$RESUME_STATE") -> $RESUME_MODEL_DIR"
+        sweep_chain_handoff
+    fi
 done
 
 echo

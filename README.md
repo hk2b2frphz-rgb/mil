@@ -87,8 +87,14 @@ qsub -V scripts/fullft_sweep.pbs
 `HP_CKPT_FREQ` step ごとに書かれているので、引き継ぎ1回あたり失うのは
 最大でその step 数。
 
-full-FT (`fullft_sweep.pbs`) はまだ対象外。`run_nu_fullft_experiment.sh` に
-学習の再開経路が無いため、引き継ぎには別途実装が要る。
+full-FT も同じように跨げる。ただし再開の作りが違う: LoRA はアダプタを
+読み直すだけだが、full-FT は ZeRO チェックポイントを
+`export_fullft_checkpoint.py --intermediate-only` で MoshiForFinetuning 形式に
+戻し、それを次ジョブの `NU_MODEL_DIR` に渡す。重みだけが渡り optimizer state は
+渡らないので、残り step 数を引いたうえで warmup は初回のみ行う。
+
+full-FT のチェックポイント間隔は `HP_CKPT_FREQ`。1回の walltime 内に最低1つは
+書かれる値にしておくこと。1つも無いと再開点が作れず、そのジョブは失敗する。
 
 ## 3. 評価
 
