@@ -20,6 +20,8 @@ INPUT_SRC_RUN_DIR="${SRC_RUN_DIR:-}"
 
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/sweep_chain.sh"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/train_timebox.sh"
 
 export NPROC
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
@@ -86,13 +88,13 @@ if [[ ! -f "$SRC_RUN_DIR/training_set/synthetic_moshi_train.jsonl" ]]; then
 fi
 
 sweep_chain_init
+timebox_init "$SWEEP_START_EPOCH"
 
 for pattern in $SWEEP_PATTERNS; do
     if sweep_chain_completed "$pattern"; then
         echo "[sweep] $pattern already done in an earlier link; skipping"
         continue
     fi
-    sweep_chain_have_time || sweep_chain_handoff
     pattern_started="$(date +%s)"
 
     apply_pattern "$pattern"
@@ -107,12 +109,34 @@ for pattern in $SWEEP_PATTERNS; do
 
     export REFRESH_EXP_DATA=1
 
+    # Deterministic run dir, so a job that picks this pattern up later can find
+    # the checkpoints the previous one wrote.
+    export RUN_TS="${RUN_ID}_${pattern}"
+    CKPT_ROOT="$SWEEP_EXP_DIR/checkpoints/$RUN_TS/checkpoints"
+
+    unset HP_RESUME_FROM HP_RESUME_STEP
+    if RESUME_INFO="$(timebox_latest_ckpt "$CKPT_ROOT")"; then
+        export HP_RESUME_STEP="${RESUME_INFO%%$'	'*}"
+        export HP_RESUME_FROM="${RESUME_INFO#*$'	'}"
+        echo "[sweep] resuming $pattern from step $HP_RESUME_STEP"
+    elif ! sweep_chain_have_time; then
+        # Only worth deferring a pattern that has not started; one already part
+        # way through makes progress every job and must not be deferred forever.
+        sweep_chain_handoff
+    fi
+
     echo
     echo "[sweep] running $pattern"
     echo "  exp=$SWEEP_EXP_NAME"
     echo "  lr=$HP_LR rank=$HP_LORA_RANK scaling=$HP_LORA_SCALING batch=$HP_BATCH_SIZE micro=$HP_NUM_MICROBATCHES steps=$HP_MAX_STEPS wd=$HP_WEIGHT_DECAY pct_start=$HP_PCT_START"
-    bash scripts/run_experiment.sh "$SWEEP_EXP_NAME" "$SRC_RUN_DIR"
-    sweep_chain_record "$pattern" "$(( $(date +%s) - pattern_started ))"
+    if timebox_run "$TIMEBOX_DEADLINE" bash scripts/run_experiment.sh "$SWEEP_EXP_NAME" "$SRC_RUN_DIR"; then
+        sweep_chain_record "$pattern" "$(( $(date +%s) - pattern_started ))"
+    else
+        rc=$?
+        [[ "$rc" == "124" ]] || exit "$rc"
+        echo "[sweep] $pattern ran out of time; the next job continues it"
+        sweep_chain_handoff
+    fi
 done
 
 echo

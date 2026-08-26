@@ -70,8 +70,9 @@ bash scripts/check_train_chain.sh
 
 ### スイープ
 
-複数パターンを順に回す。walltime が来たら、未実行のパターンを次のジョブに
-引き継ぐ（同じデータセットを使い回し、完了済みはスキップする）。
+複数パターンを順に回す。**そのまま投げれば walltime を跨げる。** 残り1時間に
+なった時点で学習を止め、最後のチェックポイントから続きを次のジョブに引き継ぐ
+（同じデータセットを使い回し、完了済みパターンはスキップする）。
 
 ```bash
 qsub -V scripts/sweep_lora.pbs
@@ -82,8 +83,12 @@ qsub -V scripts/fullft_sweep.pbs
 `SWEEP_CHAIN=0`、走っているチェーンを終わらせるなら
 `touch ~/.miltoka/stop_sweep_chain`。
 
-1パターン自体が walltime に収まらない場合は引き継げない。その場合は step で
-分割する `scripts/run_train_chain.pbs` を使う。
+止める余裕は `TIMEBOX_LEAD_SEC`（既定 3600 秒）。チェックポイントは
+`HP_CKPT_FREQ` step ごとに書かれているので、引き継ぎ1回あたり失うのは
+最大でその step 数。
+
+full-FT (`fullft_sweep.pbs`) はまだ対象外。`run_nu_fullft_experiment.sh` に
+学習の再開経路が無いため、引き継ぎには別途実装が要る。
 
 ## 3. 評価
 
