@@ -140,6 +140,33 @@ URL・キー・モデル名を自動で拾うので、引数は要りません�
 python agent_hpc/local/chat.py --base-url http://127.0.0.1:8787/v1 --api-key sk-hpc-... --model qwen-agent
 ```
 
+## llama.cpp で動かす（実験）
+
+vLLM 0.21.0（ドライバ 570.x の上限）では 2026年初頭以降のモデルが読めない。
+llama.cpp は CUDA 12 でビルドされるのでその制約が無く、Qwen3.8-27B を載せられる。
+
+```bash
+qsub -V agent_hpc/pbs/run_llamacpp_agent_server.pbs
+```
+
+既定は `unsloth/Qwen3.8-27B-GGUF` の **Q8_0（約29GB）**。80GB に対して 27B は
+小さいので、4bit まで落とす理由が無い。エンドポイントファイル・トンネル・
+`chat.py`・Claude Code の設定は vLLM 版と共通。
+
+**先に速度を測ること。** llama.cpp は decode は同等だが prefill が遅く、
+エージェントのターンは大半が prefill。
+
+```bash
+.llamacpp/build/bin/llama-bench -m models/gguf/Qwen3.8-27B-Q8_0.gguf -p 8192,32768 -n 128
+```
+
+`pp` の tok/s で1ターンの待ち時間が決まる。ここを見てから移行を判断する。
+
+起動時に未知のテンソルや CUDA エラーで落ちる場合、配布バイナリが Qwen3.8 の
+DeltaNet 層に対して古い。`LLAMACPP_FROM_SOURCE=1` で再投入する（`nvcc` が要る）。
+V100 で動かすならソースビルド必須（配布バイナリは sm_70 を含まない）＋
+`LLAMACPP_CUDA_ARCH=70`。
+
 ## 主な環境変数
 
 | 変数 | 既定 | 意味 |
