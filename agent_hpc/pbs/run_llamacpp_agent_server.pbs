@@ -33,6 +33,15 @@
 #   (needed if the prebuilt one lacks the DeltaNet CUDA kernels):
 #   LLAMACPP_FROM_SOURCE=1 qsub -V agent_hpc/pbs/run_llamacpp_agent_server.pbs
 #
+# Smoke-test the plumbing on a V100 with a small model, while the A100s are
+# busy. This proves the tunnel, the proxy and -- most importantly -- that tool
+# calls form at all, none of which depend on which model is loaded:
+#   qsub -q xvn_s -V #     -v GGUF_REPO=Qwen/Qwen2.5-Coder-7B-Instruct-GGUF,GGUF_FILE=qwen2.5-coder-7b-instruct-q8_0.gguf,# MAX_MODEL_LEN=16384,LLAMACPP_FROM_SOURCE=1,LLAMACPP_CUDA_ARCH=70,LLAMA_FLASH_ATTN=0 #     agent_hpc/pbs/run_llamacpp_agent_server.pbs
+# Volta needs the source build (release binaries omit sm_70), has no flash-attn
+# path, and 32GB will not hold a 29GB Q8 plus its cache -- hence the small model.
+# Do NOT smoke-test with Qwen3.8 here: its DeltaNet kernels are the least
+# exercised code on SM70, so a failure would tell you nothing about the plumbing.
+#
 # Stop it with: qdel <jobid>
 #
 # This duplicates the endpoint/proxy plumbing from run_qwen_agent_server.pbs on
@@ -83,6 +92,11 @@ export MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PROXY_ENV_DIR="${PROXY_ENV_DIR:-.venv_agent_proxy}"
 LLAMACPP_DIR="${LLAMACPP_DIR:-$PWD/.llamacpp}"
+# Only needed for LLAMACPP_FROM_SOURCE=1, which wants nvcc. Must be a cuda12.x
+# module: the node driver is 570.x and cannot run CUDA 13.
+LLAMACPP_CUDA_MODULE="${LLAMACPP_CUDA_MODULE:-}"
+# Volta has no working flash-attn path in llama.cpp; turn this off there.
+LLAMA_FLASH_ATTN="${LLAMA_FLASH_ATTN:-1}"
 
 # ------------------------------------------------------------------- endpoint io
 ENDPOINT_FILE="${ENDPOINT_FILE:-$HOME/.miltoka/agent_endpoint.json}"
@@ -220,8 +234,21 @@ if [[ -z "$LLAMA_SERVER" && "${LLAMACPP_FROM_SOURCE:-0}" != "1" ]]; then
 fi
 
 if [[ -z "$LLAMA_SERVER" ]]; then
+    if [[ -n "$LLAMACPP_CUDA_MODULE" ]]; then
+        if ! command -v module >/dev/null 2>&1; then
+            for module_init in /etc/profile.d/modules.sh /usr/share/Modules/init/bash; do
+                if [[ -f "$module_init" ]]; then
+                    # shellcheck source=/dev/null
+                    source "$module_init"
+                    break
+                fi
+            done
+        fi
+        module load "$LLAMACPP_CUDA_MODULE"
+    fi
     command -v nvcc >/dev/null 2>&1 || {
-        echo "ERROR: LLAMACPP_FROM_SOURCE=1 needs nvcc on PATH (load a cuda12.x module)." >&2
+        echo "ERROR: LLAMACPP_FROM_SOURCE=1 needs nvcc on PATH." >&2
+        echo "       Pass LLAMACPP_CUDA_MODULE=<cuda12.x module name> to load one." >&2
         exit 1
     }
     if [[ ! -x "$LLAMACPP_DIR/build/bin/llama-server" ]]; then
@@ -270,12 +297,14 @@ llama_args=(
     # Without --jinja the model's own chat template is ignored and tool calls
     # never form. For an agent this is the flag that decides whether it works.
     --jinja
-    --flash-attn
     # Reuse the unchanged prefix between agent turns instead of re-reading it.
     # This is the main defence against llama.cpp's slower prefill.
     --cache-reuse "${CACHE_REUSE:-256}"
     --parallel "${LLAMA_PARALLEL:-1}"
 )
+if [[ "$LLAMA_FLASH_ATTN" == "1" ]]; then
+    llama_args+=(--flash-attn)
+fi
 if [[ -n "${LLAMA_EXTRA_ARGS:-}" ]]; then
     # shellcheck disable=SC2206
     llama_args+=($LLAMA_EXTRA_ARGS)

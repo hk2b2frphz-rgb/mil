@@ -163,9 +163,23 @@ qsub -V agent_hpc/pbs/run_llamacpp_agent_server.pbs
 `pp` の tok/s で1ターンの待ち時間が決まる。ここを見てから移行を判断する。
 
 起動時に未知のテンソルや CUDA エラーで落ちる場合、配布バイナリが Qwen3.8 の
-DeltaNet 層に対して古い。`LLAMACPP_FROM_SOURCE=1` で再投入する（`nvcc` が要る）。
-V100 で動かすならソースビルド必須（配布バイナリは sm_70 を含まない）＋
-`LLAMACPP_CUDA_ARCH=70`。
+DeltaNet 層に対して古い。`LLAMACPP_FROM_SOURCE=1` で再投入する（`nvcc` が要る。
+無ければ `LLAMACPP_CUDA_MODULE=<cuda12.x のモジュール名>` で読ませる）。
+
+### V100 で配管だけ先に確認する
+
+A100 が空くのを待たずに、トンネル・プロキシ・**ツール呼び出しが形になるか**を
+検証できる。どれも載っているモデルには依存しないので、小さいモデルで足りる。
+
+```bash
+qsub -q xvn_s -V   -v GGUF_REPO=Qwen/Qwen2.5-Coder-7B-Instruct-GGUF,GGUF_FILE=qwen2.5-coder-7b-instruct-q8_0.gguf,MAX_MODEL_LEN=16384,LLAMACPP_FROM_SOURCE=1,LLAMACPP_CUDA_ARCH=70,LLAMA_FLASH_ATTN=0   agent_hpc/pbs/run_llamacpp_agent_server.pbs
+```
+
+V100 はソースビルド必須（配布バイナリに sm_70 が無い）、flash-attn は非対応、
+32GB に 29GB の Q8 とキャッシュは入らない。だから小さいモデルを使う。
+
+**ここで Qwen3.8 を試さないこと。** DeltaNet カーネルは SM70 で最も検証されて
+いない部分なので、失敗しても配管の問題なのか判別できない。
 
 ## 主な環境変数
 
