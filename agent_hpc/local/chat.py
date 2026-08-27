@@ -124,11 +124,11 @@ def main() -> int:
     parser.add_argument("--model", default=os.environ.get(
         "ANTHROPIC_MODEL", saved.get("model_alias", DEFAULT_MODEL)))
     parser.add_argument("--system", default=None, help="system prompt")
-    # Qwen3-Coder-Next's own card asks for these; coding models degrade
-    # noticeably when you wander off their recommended sampling.
-    parser.add_argument("--temperature", type=float, default=1.0)
+    # Qwen3.6-27B's "precise coding" preset from its own model card. Its general
+    # preset is temperature 1.0; coding wants the tighter one.
+    parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--top-p", type=float, default=0.95)
-    parser.add_argument("--top-k", type=int, default=40)
+    parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--max-tokens", type=int, default=0, help="0 = server default")
     parser.add_argument("--timeout", type=float, default=600.0)
     parser.add_argument("--check", action="store_true",

@@ -144,14 +144,14 @@ python agent_hpc/local/chat.py --base-url http://127.0.0.1:8787/v1 --api-key sk-
 
 | 変数 | 既定 | 意味 |
 | --- | --- | --- |
-| `VLLM_MODEL` | `bullpoint/Qwen3-Coder-Next-AWQ-4bit` | 載せるモデル（下記参照） |
+| `VLLM_MODEL` | `Qwen/Qwen3.6-27B` | 載せるモデル（下記参照） |
 | `AGENT_MODEL_ALIAS` | `qwen-agent` | エージェント側が指定する短い名前 |
 | `PROXY_PORT` | ジョブ番号から `41000-42999` | 外に見えるポート |
 | `VLLM_PORT` | `PROXY_PORT + 2000` | ノード内部専用 |
 | `LOCAL_PORT` | `8787` | トンネル先のローカルポート（表示に使うだけ） |
 | `MAX_MODEL_LEN` | `131072` | 入らないと言われたら 65536 に落とす |
 | `VLLM_TOOL_CALL_PARSER` | `qwen3_coder` | 素の Qwen3 chat 系なら `hermes` |
-| `VLLM_REASONING_PARSER` | 空 | thinking 系を載せるときだけ `qwen3` |
+| `VLLM_REASONING_PARSER` | `qwen3` | 非 thinking モデルを載せるなら空に |
 | `TENSOR_PARALLEL_SIZE` | `1` | GPU を増やすなら合わせて変更 |
 | `AGENT_API_KEY` | ランダム生成 | 固定したいときだけ指定 |
 | `ENDPOINT_FILE` | `~/.miltoka/agent_endpoint.json` | 書き込み先 |
@@ -159,15 +159,18 @@ python agent_hpc/local/chat.py --base-url http://127.0.0.1:8787/v1 --api-key sk-
 
 ## モデル選定（A100 80GB × 1 枚）
 
-| 候補 | 実体 | VRAM | 位置づけ |
-| --- | --- | --- | --- |
-| **Qwen3-Coder-Next AWQ-INT4** | 80B total / 3B active MoE, 256K ctx | 約 40–46GB | **本命。** SWE-bench Verified ~70%。Claude Code 等の scaffold に合わせて訓練されている |
-| Qwen3-Coder-30B-A3B-Instruct | 30B total / 3B active, bf16 | 約 61GB | **保険。** 量子化なしで確実に動く。賢さは一段落ちる |
-| gpt-oss-120b | MXFP4 MoE | 約 63GB | Ampere では MXFP4 を bf16 に戻す実装になりがちで 80GB に収まらないことがある。避けたほうが無難 |
+| 候補 | 実体 | VRAM | SWE-bench V. | Terminal-Bench 2.0 |
+| --- | --- | --- | --- | --- |
+| **Qwen3.6-27B** | 27B dense, bf16, 256K ctx | 約 54GB | **77.2** | **59.3** |
+| Qwen3-Coder-Next | 80B/3B MoE, AWQ-INT4 | 約 40–46GB | 70.6 | 36.2 |
+| gpt-oss-120b | MXFP4 MoE | 約 63GB | — | — |
 
-MoE で active が 3B しかないので、80B でも A100 1 枚で十分な速度が出ます。
-AWQ ビルドが Ampere でこけたら `VLLM_MODEL=Qwen/Qwen3-Coder-30B-A3B-Instruct`
-に切り替えてください（他のフラグはそのままで動きます）。
+名前に反して、**コーディングでも Qwen3.6-27B のほうが強い**。dense 27B なので
+bf16 のまま A100 1 枚に載り、量子化に伴う不確実性が無い。対話生成ジョブが同じ
+重みを既に落としてあるので、初回のダウンロードも要らない。
+
+数値は Qwen 自身の agent scaffold での測定であり、第三者による再現は限定的な点は
+割り引いて読むこと。
 
 ## A100 1 枚 vs V100 4 枚
 

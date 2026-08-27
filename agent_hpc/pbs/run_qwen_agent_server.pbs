@@ -64,18 +64,18 @@ fi
 export PROXY_PORT
 export VLLM_PORT="${VLLM_PORT:-$((PROXY_PORT + 2000))}"
 
-# Qwen3-Coder-Next (80B total / 3B active MoE) at AWQ-INT4: ~40-46GB of weights,
-# so it fits one A100 80GB with room left for a long KV cache, and only 3B
-# params are active per token so decode stays fast. It is the coding-agent
-# model of the Qwen line and is explicitly scaffolded for Claude Code.
-# Safe fallback if the AWQ build misbehaves on Ampere (bf16, ~61GB, same family):
-#   VLLM_MODEL=Qwen/Qwen3-Coder-30B-A3B-Instruct
-export VLLM_MODEL="${VLLM_MODEL:-bullpoint/Qwen3-Coder-Next-AWQ-4bit}"
+# Qwen3.6-27B beats Qwen3-Coder-Next on every coding benchmark despite the name
+# (Terminal-Bench 2.0 59.3 vs 36.2, SWE-bench Verified 77.2 vs 70.6), and being
+# a 27B dense model it fits one A100 80GB in bf16 at ~54GB -- no quantization,
+# so none of the AWQ-on-Ampere risk. The same weights are already cached here
+# from the dialogue-generation jobs.
+export VLLM_MODEL="${VLLM_MODEL:-Qwen/Qwen3.6-27B}"
 # Short alias the agent asks for; the proxy maps it onto $VLLM_MODEL.
 export AGENT_MODEL_ALIAS="${AGENT_MODEL_ALIAS:-qwen-agent}"
-# The model tops out at 256K, but the KV cache has to live in whatever the
-# weights leave behind. 131072 is comfortable at INT4; drop to 65536 if vLLM
-# complains it cannot fit the cache.
+# The model tops out at 256K, but the KV cache has to live in whatever the 54GB
+# of weights leave behind. Most of its 64 layers use linear attention, so the
+# cache is lighter than the length suggests; drop to 65536 if vLLM says it
+# cannot fit.
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
@@ -86,15 +86,19 @@ export VLLM_VERSION="${VLLM_VERSION:-0.21.0}"
 export VLLM_CUDA_MODULE="${VLLM_CUDA_MODULE:-}"
 export VLLM_ENV_DIR="${VLLM_ENV_DIR:-.venv_vllm_agent}"
 export PROXY_ENV_DIR="${PROXY_ENV_DIR:-.venv_agent_proxy}"
-# The coder models are text-only, so no multimodal limits to set. Only fill this
-# in if you swap in a multimodal model (e.g. '{"image": 0, "video": 0}').
-export VLLM_LIMIT_MM_PER_PROMPT="${VLLM_LIMIT_MM_PER_PROMPT:-}"
-# Coding agents need tool calls. Qwen3-Coder emits its own XML-ish tool format;
-# use 'hermes' instead for plain Qwen3 chat models.
+# Qwen3.6-27B carries a vision encoder we never use here. Declaring zero of each
+# skips multimodal profiling, which otherwise costs startup time and memory.
+if [[ ! -v VLLM_LIMIT_MM_PER_PROMPT ]]; then
+    export VLLM_LIMIT_MM_PER_PROMPT='{"image": 0, "video": 0}'
+else
+    export VLLM_LIMIT_MM_PER_PROMPT
+fi
+# Coding agents need tool calls. Qwen3.6 and Qwen3-Coder both emit Qwen's own
+# tool format; 'hermes' is for the older plain Qwen3 chat models.
 export VLLM_TOOL_CALL_PARSER="${VLLM_TOOL_CALL_PARSER:-qwen3_coder}"
-# Qwen3-Coder is a non-thinking instruct model, so no reasoning parser by
-# default. Set VLLM_REASONING_PARSER=qwen3 when serving a thinking Qwen3.
-export VLLM_REASONING_PARSER="${VLLM_REASONING_PARSER:-}"
+# Qwen3.6-27B thinks by default, so the trace needs parsing out of the answer.
+# Clear this when serving a non-thinking model such as Qwen3-Coder.
+export VLLM_REASONING_PARSER="${VLLM_REASONING_PARSER:-qwen3}"
 
 # ------------------------------------------------------------------- chaining
 # OFF by default, and deliberately so: a server that resurrects itself will
