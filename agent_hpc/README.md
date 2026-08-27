@@ -169,17 +169,20 @@ DeltaNet 層に対して古い。`LLAMACPP_FROM_SOURCE=1` で再投入する（`
 ### V100 で配管だけ先に確認する
 
 A100 が空くのを待たずに、トンネル・プロキシ・**ツール呼び出しが形になるか**を
-検証できる。どれも載っているモデルには依存しないので、小さいモデルで足りる。
+検証できる。どれも載っているモデルには依存しない。引数は要らない。
 
 ```bash
-qsub -q xvn_s -V   -v GGUF_REPO=Qwen/Qwen2.5-Coder-7B-Instruct-GGUF,GGUF_FILE=qwen2.5-coder-7b-instruct-q8_0.gguf,MAX_MODEL_LEN=16384,LLAMACPP_FROM_SOURCE=1,LLAMACPP_CUDA_ARCH=70,LLAMA_FLASH_ATTN=0   agent_hpc/pbs/run_llamacpp_agent_server.pbs
+qsub -V agent_hpc/pbs/smoke_v100.pbs
 ```
 
-V100 はソースビルド必須（配布バイナリに sm_70 が無い）、flash-attn は非対応、
-32GB に 29GB の Q8 とキャッシュは入らない。だから小さいモデルを使う。
+Qwen3-8B の Q8_0（約9GB）。通常の attention なので、Volta でほとんど検証されて
+いない DeltaNet カーネルを踏まない。エンドポイントは
+`~/.miltoka/agent_endpoint_smoke.json` に分けて書くので、A100 のサーバと同時に
+走らせても衝突しない。
 
-**ここで Qwen3.8 を試さないこと。** DeltaNet カーネルは SM70 で最も検証されて
-いない部分なので、失敗しても配管の問題なのか判別できない。
+V100 はソースビルド必須（配布バイナリに sm_70 が無い）で flash-attn も非対応。
+`nvcc` が見つからずに落ちたら `LLAMACPP_CUDA_MODULE=<cuda12.x のモジュール名>`
+を付けて再投入する（cuda13 系は 570.x ドライバで動かないので選ばない）。
 
 ## 主な環境変数
 
