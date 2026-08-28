@@ -1464,7 +1464,7 @@ class LLMDialogueGenerator:
             # transcript moshi sees below already shows `silence|3.4` and it can
             # answer the pause rather than the words.
             if case_allows_pauses(use_case):
-                user_turns = split_user_text_on_pauses(user_text)
+                user_turns = split_user_text_on_pauses(user_text, rng)
             else:
                 user_turns = [DialogueTurn("user", strip_residual_tags(user_text))]
             core_turns.extend(user_turns)
@@ -1731,7 +1731,7 @@ class LLMDialogueGenerator:
                 reply = pick_probe_reply(rng, used_probe_replies)
                 turns.append(DialogueTurn("moshi", reply, note="聞いているかの確認への応答"))
             else:
-                user_turns = split_user_text_on_pauses(user_text)
+                user_turns = split_user_text_on_pauses(user_text, rng)
                 # 沈黙で割れても相づちの予算は発話全体で1本ぶん。
                 budget = int(frequency["max_per_turn"])
                 for turn in user_turns:
@@ -2141,12 +2141,16 @@ def dialogue_turns_to_transcript(turns: list[DialogueTurn]) -> str:
 # the duplex prompts already use. Anything outside MIN/MAX seconds is dropped
 # rather than clamped -- a model writing `<<pause:0.2>>` is not describing a
 # silence, it is describing a comma.
-PAUSE_MARKER_RE = re.compile(r"<<\s*pause\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)\s*>>")
+PAUSE_MARKER_RE = re.compile(
+    r"<\s*<?\s*pause\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)\s*>?\s*>", re.IGNORECASE
+)
 PAUSE_MIN_SEC = 2.0
 PAUSE_MAX_SEC = 6.0
 # Belt and braces: whatever tag shape survives parsing must never reach the TTS,
 # which would happily read "<<pause:3.4>>" out loud.
-RESIDUAL_TAG_RE = re.compile(r"<<[^>]*>>")
+# 山括弧1個の書き方も拾う。日本語の発話本文に <...> は出てこないので、
+# タグ形をしたものは残らず落として構わない。
+RESIDUAL_TAG_RE = re.compile(r"<\s*<?[^<>]{0,60}>?\s*>")
 
 # States where falling silent mid-sentence reads as natural. A high-tension or
 # settled speaker who keeps stopping for four seconds does not.
@@ -2157,8 +2161,14 @@ def strip_residual_tags(text: str) -> str:
     return RESIDUAL_TAG_RE.sub("", text).strip()
 
 
-def split_user_text_on_pauses(text: str) -> list[DialogueTurn]:
+def split_user_text_on_pauses(
+    text: str, rng: random.Random | None = None
+) -> list[DialogueTurn]:
     """`前半<<pause:3.4>>後半` -> [user(前半), silence(3.4), user(後半)].
+
+    rng を渡すと秒数に揺らぎを足す。モデルはプロンプトに書いた例の数字を
+    そのまま書き写すので、放っておくと沈黙が全部 3.5 秒になる。どこで詰まる
+    かはモデルの判断を残し、どれだけ詰まるかだけこちらで散らす。
 
     A marker at the very start becomes a leading silence: the user was asked
     something and could not get the words out for a few seconds. A marker at the
@@ -2169,6 +2179,11 @@ def split_user_text_on_pauses(text: str) -> list[DialogueTurn]:
     cursor = 0
     for match in PAUSE_MARKER_RE.finditer(text):
         seconds = float(match.group(1))
+        if rng is not None:
+            seconds = round(
+                min(PAUSE_MAX_SEC, max(PAUSE_MIN_SEC, seconds + rng.uniform(-0.9, 0.9))),
+                1,
+            )
         if not PAUSE_MIN_SEC <= seconds <= PAUSE_MAX_SEC:
             # Not a split point. Leave the cursor alone so the words on both
             # sides stay in one segment; strip_residual_tags drops the tag.
@@ -2627,6 +2642,9 @@ AIZUCHI_ONLY_USER_SYSTEM_PROMPT = """
 自分のほうから話し続けます。
 整理された説明ではなく、気持ちを吐き出すように話してください。話が前後したり、
 同じことを言い直したり、途中で言葉に詰まってかまいません。
+相手が相づちしか返さないことには触れません（「反応がない」「聞いてるだけ」などと
+設定を説明しない）。話し手はそれを不自然と思っていないので、口に出しません。
+すべて日本語で書きます。英単語やローマ字は使いません。
 出力は user の次の発話本文だけ。話者名、JSON、説明、引用符、箇条書きは出力しません。
 """.strip()
 
@@ -2740,6 +2758,17 @@ def build_aizuchi_only_user_prompt(
     return AgentPrompt(system=AIZUCHI_ONLY_USER_SYSTEM_PROMPT, user=prompt)
 
 
+def recent_aizuchi_texts(turns: list[DialogueTurn], limit: int = 3) -> list[str]:
+    """直近に打った相づちを新しい順に。同じ語の繰り返しを止めるために使う。"""
+    seen: list[str] = []
+    for turn in reversed(turns):
+        if turn.speaker == "moshi" and turn.text.strip():
+            seen.append(turn.text.strip())
+            if len(seen) >= limit:
+                break
+    return seen
+
+
 def build_aizuchi_only_agent_prompt(
     use_case: dict[str, Any],
     turns: list[DialogueTurn],
@@ -2752,6 +2781,11 @@ def build_aizuchi_only_agent_prompt(
     numbered = "\n".join(f"{i + 1}: {clause}" for i, clause in enumerate(clauses))
     preset = frequency or AIZUCHI_FREQUENCY_PRESETS["normal"]
     frequency_directive = str(preset["directive"])
+    recent = recent_aizuchi_texts(turns)
+    if recent:
+        forbidden = "\n- 直前に使った語なので、今回は使いません: " + " / ".join(recent)
+    else:
+        forbidden = ""
     prompt = f"""
 相談ケース:
 {case_brief(use_case)}
@@ -2772,7 +2806,9 @@ def build_aizuchi_only_agent_prompt(
   つらさ・涙がにじむ →「あぁ…。」「あー…。」/ 事実の区切り →「はい。」/
   静かな同意 →「ええ。」「えぇ。」/ 同意が深まる →「ええ、ええ。」/
   初めて知る事実 →「そうでしたか。」/ 重い打ち明け →「そうだったんですね。」「そうなんですね。」（控えめに）。
-- text は必ず上の語彙のどれか。
+- text は必ず上の語彙のどれか。{forbidden}
+- 「あぁ…。」「あー…。」は本当に感情がこぼれた所だけです。困ったときの既定値に
+  しないでください（対話全体で数回までのつもりで選びます）。
 JSONだけを返してください。
 """.strip()
     return AgentPrompt(system=AIZUCHI_ONLY_AGENT_SYSTEM_PROMPT, user=prompt)
@@ -2795,7 +2831,9 @@ def build_aizuchi_only_judge_prompt(
 
 判定基準:
 - 話し手が言いたいことを一通り吐き出し、自然に一区切りしていれば complete=true。
-- 相談員は相づちしか返さないので、「助言が無い」ことを未完了の理由にはしません。
+- 相談員は相づちしか返さないので、「助言が無い」「返事を待っている」「承認が
+  得られていない」ことを未完了の理由にはしません。相づちを受けながら話しきれて
+  いれば、それで一区切りです。
 - 話し手が言いかけたまま、または感情が出たばかりの所で切れる場合は complete=false。
 - まだ {min_blocks} 発話未満なら complete=false。
 - {max_blocks} 発話に達したら、破綻していなければ complete=true に寄せる。
@@ -2838,8 +2876,7 @@ def sanitize_aizuchi_only_turns(
     allowed = set(AIZUCHI_ONLY_VOCAB) | set(AIZUCHI_ONLY_PROBE_REPLIES)
     out: list[DialogueTurn] = []
     limited_used = 0
-    last_moshi_text = ""
-    user_turns_since_moshi = 0
+    recent_moshi: list[str] = []
     for turn in turns:
         if turn.speaker != "moshi":
             if turn.speaker == "silence" and out and out[-1].speaker == "silence":
@@ -2848,8 +2885,6 @@ def sanitize_aizuchi_only_turns(
                     min(AIZUCHI_ONLY_SILENCE_HARD_MAX, merged), 1
                 )
                 continue
-            if turn.speaker == "user":
-                user_turns_since_moshi += 1
             out.append(turn)
             continue
 
@@ -2865,15 +2900,16 @@ def sanitize_aizuchi_only_turns(
             # 相手が黙っている間は聞き手も黙る。ここを埋めると、沈黙のたびに
             # 相づちを吐き続けるモデルになる。
             continue
-        if text == last_moshi_text and user_turns_since_moshi < 2:
+        # 直近3回に使った語は、間に user 発話が何回挟まっていても使わない。
+        if text in recent_moshi:
             continue
         if text in AIZUCHI_ONLY_LIMITED_ONCE:
             if limited_used:
                 continue
             limited_used += 1
         out.append(turn)
-        last_moshi_text = text
-        user_turns_since_moshi = 0
+        recent_moshi.append(text)
+        del recent_moshi[:-3]
     # 末尾の沈黙は誰も話さないまま終わる音声にしかならない。
     while out and out[-1].speaker == "silence":
         out.pop()
