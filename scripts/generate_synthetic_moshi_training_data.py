@@ -2440,7 +2440,9 @@ def unusable_utterance(text: str) -> tuple[str, bool] | None:
     日本語に混ざる英字は書き直しでも直らないことがある一方、対話としては読める
     ので、2回目は警告だけ出して通す -- 一発話のためにジョブを落とさない。
     """
-    stripped = text.strip()
+    # 秒数タグ（<<pause:3.5>>）は発話の一部ではないので、検査の前に外す。外さないと
+    # タグを書いた発話が軒並み「英単語が混ざっている」と判定され、全部書き直しになる。
+    stripped = RESIDUAL_TAG_RE.sub("", text).strip()
     if ROLE_TOKEN_ONLY_RE.match(stripped):
         return ("役割名だけが返っています", True)
     if len(stripped) < 4:
