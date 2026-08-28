@@ -1351,6 +1351,7 @@ class LLMDialogueGenerator:
             )
             last_raw = raw
             text = clean_agent_utterance(raw, speaker)
+            problem = unusable_utterance(text) if text else None
             self.trace_event(
                 {
                     "event": "agent_utterance",
@@ -1358,6 +1359,7 @@ class LLMDialogueGenerator:
                     "speaker": speaker,
                     "attempt": attempt + 1,
                     "empty": not bool(text),
+                    "problem": problem[0] if problem else None,
                     "raw_contains_think": bool(_THINK_OPEN_RE.search(raw)),
                     "prompt_system": current.system,
                     "prompt_user": current.user,
@@ -1366,20 +1368,37 @@ class LLMDialogueGenerator:
                     **context,
                 }
             )
-            if text:
+            if text and problem is None:
                 return text
-            logger.warning(
-                "%s produced an empty utterance on attempt %d; raw=%r",
-                role_name,
-                attempt + 1,
-                raw[:500],
-            )
+            if text and attempt + 1 >= 2 and not problem[1]:
+                # 書き直させても直らない指摘は、対話として読める限り通す。
+                logger.warning(
+                    "%s: %s (書き直しても同じ。そのまま採用): %s",
+                    role_name,
+                    problem[0],
+                    text[:120],
+                )
+                return text
+            if problem is not None:
+                logger.warning(
+                    "%s: %s -- 書き直させます: %s", role_name, problem[0], text[:120]
+                )
+                retry_note = (
+                    f"前回の出力は使えませんでした（{problem[0]}）。書き直してください。"
+                )
+            else:
+                logger.warning(
+                    "%s produced an empty utterance on attempt %d; raw=%r",
+                    role_name,
+                    attempt + 1,
+                    raw[:500],
+                )
+                retry_note = (
+                    "前回の出力が空でした。必ず1文以上の発話本文だけを返してください。"
+                )
             current = AgentPrompt(
                 system=prompt.system,
-                user=(
-                    prompt.user
-                    + "\n\n前回の出力が空でした。必ず1文以上の発話本文だけを返してください。"
-                ),
+                user=prompt.user + "\n\n" + retry_note,
             )
         if self.args.multi_agent_empty_policy == "fallback":
             logger.warning("%s fallback utterance used: %s", role_name, fallback_text)
@@ -1670,7 +1689,7 @@ class LLMDialogueGenerator:
                 "--llm-backend openai-compatible (vLLM/OpenAI-style server)."
             )
 
-        profile = build_user_agent_profile(use_case, rng)
+        profile = build_user_agent_profile(use_case, rng, listener_only=True)
         frequency_name, frequency = resolve_aizuchi_frequency(
             self.args.aizuchi_only_frequency, rng
         )
@@ -2086,8 +2105,9 @@ def case_brief(use_case: dict[str, Any]) -> str:
 
 
 def build_user_agent_profile(
-    use_case: dict[str, Any], rng: random.Random
+    use_case: dict[str, Any], rng: random.Random, listener_only: bool = False
 ) -> dict[str, str]:
+    """userAI の当たり札。listener_only では、相手が応えられない札を外す。"""
     talking_points = use_case.get("talking_points") or []
     if isinstance(talking_points, list):
         ordered_points = [str(p) for p in talking_points if str(p).strip()]
@@ -2123,7 +2143,11 @@ def build_user_agent_profile(
             [
                 "不安が少し和らぐが、完全には解決しない",
                 "話せたことで少し整理される",
-                "安心して、最後にまた相談してよいか確認する",
+                (
+                    "話せたことで少し落ち着き、自分から話を締める"
+                    if listener_only
+                    else "安心して、最後にまた相談してよいか確認する"
+                ),
                 "重さは残るが、聞かれたことへの感謝が出る",
             ]
         ),
@@ -2401,6 +2425,31 @@ def fallback_moshi_utterance(turns: list[DialogueTurn]) -> str:
     )
 
 
+# チャットテンプレートの役割名がそのまま発話として返ってくることがある。
+ROLE_TOKEN_ONLY_RE = re.compile(
+    r"^(assistant|user|system|moshi|userai|systemai|aizuchiai|judgeai)\W*$",
+    re.IGNORECASE,
+)
+LATIN_RUN_RE = re.compile(r"[A-Za-z]{3,}")
+
+
+def unusable_utterance(text: str) -> tuple[str, bool] | None:
+    """学習データに載せられない発話なら (理由, 捨てるか) を返す。
+
+    捨てる=True は空出力と同じ扱い（1回書き直させ、なお駄目なら empty_policy）。
+    日本語に混ざる英字は書き直しでも直らないことがある一方、対話としては読める
+    ので、2回目は警告だけ出して通す -- 一発話のためにジョブを落とさない。
+    """
+    stripped = text.strip()
+    if ROLE_TOKEN_ONLY_RE.match(stripped):
+        return ("役割名だけが返っています", True)
+    if len(stripped) < 4:
+        return ("短すぎます", True)
+    if LATIN_RUN_RE.search(stripped):
+        return ("英単語が混ざっています（音声にすると読めません）", False)
+    return None
+
+
 def clean_agent_utterance(text: str, speaker: str) -> str:
     text = strip_thinking(text).strip()
     text = re.sub(r"<\|im_start\|>\s*assistant\s*", "", text)
@@ -2647,13 +2696,9 @@ AIZUCHI_ONLY_USER_SYSTEM_PROMPT = """
 自分のほうから話し続けます。
 整理された説明ではなく、気持ちを吐き出すように話してください。話が前後したり、
 同じことを言い直したり、途中で言葉に詰まってかまいません。
-相手が相づちしか返さないことには触れません（「反応がない」「聞いてるだけ」などと
-設定を説明しない）。話し手はそれを不自然と思っていないので、口に出しません。
-あなたが書くのは user 一人分の発話だけです。相手（相談員）の台詞を代わりに書いたり、
-自分の問いに自分で答えたりしません。
-相手に許可や同意を求める問い（「また話してもいいですか」など）で発話を終えません。
-話し終わりは、返事を待たずに自分の言葉で結びます。
-すべて日本語で書きます。英単語やローマ字は使いません。
+書くのは user 一人分の発話だけです。相手の台詞を代わりに書かず、自分の問いに
+自分で答えません。相手が相づちしか返さないことには触れません。
+すべて日本語で書きます（英単語・ローマ字は使いません）。
 出力は user の次の発話本文だけ。話者名、JSON、説明、引用符、箇条書きは出力しません。
 """.strip()
 
@@ -2738,9 +2783,8 @@ def build_aizuchi_only_user_prompt(
             f"（秒数は {PAUSE_MIN_SEC:.0f}〜{PAUSE_MAX_SEC:.0f}）。読点の代わりには使いません。"
         )
         directive = (
-            "- 3〜6 文。相手は相づちしか返さないので、自分のペースで話し続けます。\n"
-            "- 相手に質問しません（答えは返ってきません）。\n"
-            "- 説明の順番を整えず、思い出した順に、言い直しながら話してかまいません。"
+            "- 3〜6 文。自分のペースで、思い出した順に、言い直しながら話します。\n"
+            "- 相手に質問せず、許可を求める問いでも終えません。話は自分で締めます。"
             f"{pause_directive}"
         )
     prompt = f"""
@@ -2932,7 +2976,7 @@ def aizuchi_only_prompt_preview(
     rng: random.Random,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
-    profile = build_user_agent_profile(use_case, rng)
+    profile = build_user_agent_profile(use_case, rng, listener_only=True)
     max_blocks = max(1, int(args.aizuchi_only_max_blocks))
     plans = plan_aizuchi_only_blocks(rng, max_blocks, args)
     sample_user = DialogueTurn(
