@@ -109,7 +109,11 @@ if ! [[ "$NUM_CASES" =~ ^[0-9]+$ ]] || [[ "$NUM_CASES" -lt 1 ]]; then
 fi
 
 mkdir -p "$OUT_ROOT" experiments/pbs_logs
-JOB_TAG="${PBS_JOBID%%.*}"
+# Two steps, because `set -u` makes the bare ${PBS_JOBID%%.*} an error when
+# this script is run directly (no qsub) -- which is how it runs on a rented
+# single-GPU box.
+JOB_TAG="${PBS_JOBID:-}"
+JOB_TAG="${JOB_TAG%%.*}"
 JOB_LOG="experiments/pbs_logs/${BATCH_ID}_${JOB_TAG:-local}.log"
 exec > >(tee -a "$JOB_LOG") 2>&1
 
