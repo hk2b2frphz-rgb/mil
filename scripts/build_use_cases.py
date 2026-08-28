@@ -328,6 +328,29 @@ def weighted_choice(rng: random.Random, items: list[tuple[Any, int]]) -> Any:
     return rng.choices(population, weights=weights, k=1)[0]
 
 
+# 話題は、かける理由から出てくる。雑談の話題リストから独立に引くと
+# 「失業中の人がカフカの話をする」札ができる -- 実際にそれが生成物に出た。
+# 雑談の話題は「入口」としてだけ使い、本題は必ず situation に戻す。
+ENTRY_TOPICS = [
+    "今日あった小さな出来事", "最近の天気や季節の変化", "食事や料理のこと",
+    "散歩や近所の風景", "睡眠や体調のこと", "テレビやドラマ、動画の話",
+]
+
+
+def conv_hint_token(rng: random.Random) -> str:
+    """話題の決め方だけに使う軽い前振り（会話タイプ本体は別に引く）。"""
+    return rng.choice(["direct", "direct", "direct", "entry"])
+
+
+def choose_topic(
+    sit_token: str, situation: str, hint: str, rng: random.Random
+) -> str:
+    """かける理由そのものを話題にする。ときどき、入口の世間話から入る。"""
+    if hint == "entry":
+        return f"{rng.choice(ENTRY_TOPICS)}から入り、{situation}に話が戻る"
+    return situation
+
+
 def build_one(rng: random.Random, index: int) -> UseCase:
     sit_token, situation, opening_kind, target_turns, prefers_silence = rng.choice(SITUATIONS)
     age_pool, gender_pool, occupation_pool = profile_pools(sit_token)
@@ -335,7 +358,7 @@ def build_one(rng: random.Random, index: int) -> UseCase:
     gender = rng.choice(gender_pool)
     occupation = rng.choice(occupation_pool)
     risk = weighted_choice(rng, RISK_WEIGHTS)
-    topic = rng.choice(TOPICS)
+    topic = choose_topic(sit_token, situation, conv_hint_token(rng), rng)
     time_token, time_label = rng.choice(TIME_OF_DAY)
     pers_token, pers_label, pers_guidance = rng.choice(PERSONALITIES)
     state_token, state_label, state_hint, _ = weighted_choice(
