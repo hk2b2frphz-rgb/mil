@@ -2158,7 +2158,9 @@ PAUSE_PRONE_STATES = {"涙ぐんでいる", "ふさぎ込んでいる", "不安�
 
 
 def strip_residual_tags(text: str) -> str:
-    return RESIDUAL_TAG_RE.sub("", text).strip()
+    # 閉じ括弧を書き損じたタグは残骸の "<" だけが残る。実測で、それ1文字だけの
+    # user 発話が生まれていた（TTS では読むもののない空セグメントになる）。
+    return RESIDUAL_TAG_RE.sub("", text).replace("<", "").replace(">", "").strip()
 
 
 def split_user_text_on_pauses(
