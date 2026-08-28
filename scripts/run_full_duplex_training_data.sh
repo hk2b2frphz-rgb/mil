@@ -85,6 +85,13 @@ if has_step dialogues; then
         --multi-agent-empty-policy "${MULTI_AGENT_EMPTY_POLICY:-fail}"
         --multi-agent-aizuchi-mode "${MULTI_AGENT_AIZUCHI_MODE:-separate}"
         --multi-agent-concurrency "${MULTI_AGENT_CONCURRENCY:-1}"
+        --aizuchi-only-frequency "${AIZUCHI_ONLY_FREQUENCY:-normal}"
+        --aizuchi-only-min-blocks "${AIZUCHI_ONLY_MIN_BLOCKS:-4}"
+        --aizuchi-only-max-blocks "${AIZUCHI_ONLY_MAX_BLOCKS:-8}"
+        --aizuchi-only-probe-rate "${AIZUCHI_ONLY_PROBE_RATE:-0.5}"
+        --aizuchi-only-silence-rate "${AIZUCHI_ONLY_SILENCE_RATE:-0.3}"
+        --aizuchi-only-silence-min-sec "${AIZUCHI_ONLY_SILENCE_MIN_SEC:-2.5}"
+        --aizuchi-only-silence-max-sec "${AIZUCHI_ONLY_SILENCE_MAX_SEC:-8.0}"
     )
     if [[ "${NO_MULTI_AGENT_AIZUCHI:-0}" == "1" ]]; then
         llm_args+=(--no-multi-agent-aizuchi)

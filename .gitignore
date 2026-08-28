@@ -27,6 +27,7 @@ configs/experiment.yaml
 configs/experiment.*.yaml
 !configs/experiment.example.yaml
 !configs/experiment.smoke.yaml
+!configs/experiment.aizuchi.example.yaml
 experiments/*.yaml
 experiments/_submitted_*.json
 

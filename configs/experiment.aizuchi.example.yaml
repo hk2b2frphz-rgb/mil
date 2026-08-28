@@ -1,0 +1,102 @@
+# Master config for the aizuchi-only (backchannel-only) model.
+#
+# Same self-chaining shape as experiment.example.yaml -- only the dialogue stage
+# differs: it runs the generator in `aizuchi-only` mode, where systemAI never
+# speaks and moshi's whole output is backchannels, silence, and short answers to
+# "are you still listening?". Everything downstream (TTS, fine-tuning, eval) is
+# unchanged, because those stages only ever see turns.
+#
+# Copy to a working file (gitignored) and start the chain from the login node:
+#   cp configs/experiment.aizuchi.example.yaml configs/experiment.aizuchi.local.yaml
+#   uv run python scripts/run_experiment_dag.py \
+#       --config configs/experiment.aizuchi.local.yaml --start --dry-run
+#
+# Listen to a handful of WAVs after the TTS stage before spending a training
+# job on the batch: the failure mode of this model is prosodic, not textual.
+
+experiment: aizuchi01
+out_root: data/runs/aizuchi01
+
+proxy:
+  http_proxy: ""
+  https_proxy: ""
+  no_proxy: ""
+
+# 相づちの打ち方: eager(積極的) / normal(普通) / reserved(控えめ) / mixed。
+# パターンごとに別バッチ・別モデルにするので、ここと source_batch_id を
+# 揃えて実験ごとにコピーを作る。
+vars:
+  base_exp: lora_base_config
+  aizuchi_frequency: normal
+  source_batch_id: qwen_aizuchi_1000_normal_v1
+
+paths:
+  dialogue_out: "${out_root}/dialogue"
+  tts_out: "${out_root}/tts"
+  train_out: "${out_root}/checkpoints"
+  eval_out: "${out_root}/eval"
+
+start: dialogue
+
+default_resources:
+  queue: xvn_s
+  select: "1:res=small"
+  walltime: "24:00:00"
+
+stages:
+  # 1) Listener-only dialogue generation -> ${dialogue_out}/llm_dialogues/dialogues.jsonl
+  - name: dialogue
+    pbs: scripts/run_dialogues_qwen_aizuchi_1000.pbs
+    resources: {queue: xan_s, select: "1:res=small", walltime: "24:00:00"}
+    env:
+      BATCH_ID: "${source_batch_id}"
+      OUT_ROOT: "${dialogue_out}"
+      # Silences and listening checks are the behaviours this model has to get
+      # right, so they are deliberately common in the training data.
+      AIZUCHI_ONLY_FREQUENCY: "${aizuchi_frequency}"
+      AIZUCHI_ONLY_SILENCE_RATE: "0.35"
+      AIZUCHI_ONLY_PROBE_RATE: "0.5"   # 沈黙のうち確認まで行く割合
+    expect: ["${dialogue_out}/llm_dialogues/dialogues.jsonl"]
+    next: tts
+
+  # 2) Batched vLLM-Omni Qwen3-TTS synthesis (4 V100). Backchannels are
+  #    synthesized per utterance, so they stay short instead of being read as
+  #    part of a longer line.
+  - name: tts
+    pbs: scripts/run_qwen_tts_vllm_1000_4gpu.pbs
+    resources: {queue: xvn_s, select: "1:res=middle2", walltime: "24:00:00"}
+    env:
+      SOURCE_BATCH_ID: "${source_batch_id}"
+      DIALOGUES_JSONL: "${dialogue_out}/llm_dialogues/dialogues.jsonl"
+      OUT_ROOT: "${tts_out}"
+      NUM_DIALOGUES: 1000
+    expect: ["${tts_out}/merged/training_set/synthetic_moshi_train.jsonl"]
+    next: train
+
+  # 3) Moshi fine-tuning: reads ${tts_out}, writes ${train_out}
+  - name: train
+    pbs: scripts/run_experiment.pbs
+    resources: {queue: xan_s, select: "1:res=small", walltime: "24:00:00"}
+    env:
+      SRC_RUN_DIR: "${tts_out}/merged"
+      BASE_EXP: "${base_exp}"
+      REFRESH_EXP_DATA: 1
+      MERGED_OUT: "${train_out}/consolidated.safetensors"
+      SKIP_AUTO_EVAL: 1
+      HP_LR: 2e-6
+      HP_LORA_RANK: 32
+      HP_MAX_STEPS: 500
+    expect: ["${train_out}/consolidated.safetensors"]
+    next: eval
+
+  # 4) Full-Duplex-Bench evaluation. For this model the backchannel axis is the
+  #    one that matters; the response axis is expected to score low by design,
+  #    so read the two separately rather than as one number.
+  - name: eval
+    pbs: scripts/run_full_duplex_eval.pbs
+    resources: {queue: xvn_s, select: "1:res=small", walltime: "12:00:00"}
+    env:
+      MODEL_ID: "aizuchi_${aizuchi_frequency}_h01"
+      MODEL_WEIGHT: "${train_out}/consolidated.safetensors"
+      FDB_OUT_DIR: "${eval_out}"
+    expect: ["${eval_out}/benchmark_results/summary.json"]
