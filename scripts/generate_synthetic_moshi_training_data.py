@@ -2205,7 +2205,10 @@ def split_user_text_on_pauses(
     while turns and turns[-1].speaker == "silence":
         turns.pop()
     if not any(turn.speaker == "user" for turn in turns):
-        return [DialogueTurn("user", strip_residual_tags(text))]
+        # 発話がまるごとタグだった場合、残るのは空文字。喋っていない user ターン
+        # を作るくらいなら何も返さない。
+        cleaned = strip_residual_tags(text)
+        return [DialogueTurn("user", cleaned)] if cleaned else []
     return turns
 
 
@@ -2881,6 +2884,8 @@ def sanitize_aizuchi_only_turns(
     recent_moshi: list[str] = []
     for turn in turns:
         if turn.speaker != "moshi":
+            if turn.speaker == "user" and not turn.text.strip():
+                continue
             if turn.speaker == "silence" and out and out[-1].speaker == "silence":
                 merged = (out[-1].duration_sec or 0.0) + (turn.duration_sec or 0.0)
                 out[-1].duration_sec = round(
