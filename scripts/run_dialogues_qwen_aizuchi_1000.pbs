@@ -54,10 +54,11 @@ export AIZUCHI_ONLY_FREQUENCY="${AIZUCHI_ONLY_FREQUENCY:-normal}"
 export DIALOGUES_VERSION="${DIALOGUES_VERSION:-v1}"
 export BATCH_ID="${BATCH_ID:-qwen_aizuchi_1000_${AIZUCHI_ONLY_FREQUENCY}_${DIALOGUES_VERSION}}"
 
-# One user "block" is one vented utterance, not an exchange pair: with no
-# counselor replies a dialogue needs more of them to reach a comparable length.
-export AIZUCHI_ONLY_MIN_BLOCKS="${AIZUCHI_ONLY_MIN_BLOCKS:-4}"
-export AIZUCHI_ONLY_MAX_BLOCKS="${AIZUCHI_ONLY_MAX_BLOCKS:-8}"
+# One user "block" is one vented utterance, not an exchange pair, and each is
+# only a sentence or two -- so a call needs many of them. Raised from 4-8 after
+# shortening the turns cut a dialogue to 47 seconds of speech.
+export AIZUCHI_ONLY_MIN_BLOCKS="${AIZUCHI_ONLY_MIN_BLOCKS:-8}"
+export AIZUCHI_ONLY_MAX_BLOCKS="${AIZUCHI_ONLY_MAX_BLOCKS:-14}"
 # Silences are the point of this data, so they are not rare here. A listening
 # check only ever follows a silence, so PROBE_RATE is the share of silences
 # that turn into one -- not a share of user turns.

@@ -527,13 +527,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--aizuchi-only-min-blocks",
         type=int,
-        default=int(os.environ.get("AIZUCHI_ONLY_MIN_BLOCKS") or 4),
+        default=int(os.environ.get("AIZUCHI_ONLY_MIN_BLOCKS") or 8),
         help="Minimum user utterances before the judge may stop (aizuchi-only).",
     )
     parser.add_argument(
         "--aizuchi-only-max-blocks",
         type=int,
-        default=int(os.environ.get("AIZUCHI_ONLY_MAX_BLOCKS") or 8),
+        default=int(os.environ.get("AIZUCHI_ONLY_MAX_BLOCKS") or 14),
         help="Maximum user utterances in aizuchi-only mode.",
     )
     parser.add_argument(
@@ -563,7 +563,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--aizuchi-only-silence-rate",
         type=float,
-        default=float(os.environ.get("AIZUCHI_ONLY_SILENCE_RATE") or 0.3),
+        default=float(os.environ.get("AIZUCHI_ONLY_SILENCE_RATE") or 0.25),
         help=(
             "Probability that a user utterance is followed by a silence in which "
             "the listener must stay quiet."
@@ -1702,6 +1702,7 @@ class LLMDialogueGenerator:
             DialogueTurn("moshi", AIZUCHI_ONLY_GREETING, note="固定の名乗り")
         ]
         used_probe_replies: set[str] = set()
+        silences_left = AIZUCHI_ONLY_MAX_SILENCES
         case_id = str(use_case.get("id") or "aizuchi_only_dialogue")
         self.trace_event(
             {
@@ -1754,7 +1755,16 @@ class LLMDialogueGenerator:
                 reply = pick_probe_reply(rng, used_probe_replies)
                 turns.append(DialogueTurn("moshi", reply, note="聞いているかの確認への応答"))
             else:
-                user_turns = split_user_text_on_pauses(user_text, rng)
+                user_turns = split_user_text_on_pauses(
+                    user_text,
+                    rng,
+                    max_pauses=min(
+                        AIZUCHI_ONLY_MAX_PAUSES_PER_TURN, max(0, silences_left)
+                    ),
+                )
+                silences_left -= sum(
+                    1 for item in user_turns if item.speaker == "silence"
+                )
                 # 沈黙で割れても相づちの予算は発話全体で1本ぶん。
                 budget = int(frequency["max_per_turn"])
                 for turn in user_turns:
@@ -1777,7 +1787,8 @@ class LLMDialogueGenerator:
                     )
                     turns.extend(segment_turns)
 
-            if plan["trailing_silence"]:
+            if plan["trailing_silence"] and silences_left > 0:
+                silences_left -= 1
                 turns.append(
                     DialogueTurn(
                         "silence",
@@ -2198,7 +2209,9 @@ def strip_residual_tags(text: str) -> str:
 
 
 def split_user_text_on_pauses(
-    text: str, rng: random.Random | None = None
+    text: str,
+    rng: random.Random | None = None,
+    max_pauses: int | None = None,
 ) -> list[DialogueTurn]:
     """`前半<<pause:3.4>>後半` -> [user(前半), silence(3.4), user(後半)].
 
@@ -2213,7 +2226,11 @@ def split_user_text_on_pauses(
     """
     turns: list[DialogueTurn] = []
     cursor = 0
+    used = 0
     for match in PAUSE_MARKER_RE.finditer(text):
+        if max_pauses is not None and used >= max_pauses:
+            # 上限に達したあとの印は、区切らずタグだけ落とす（本文は繋がる）。
+            continue
         seconds = float(match.group(1))
         if rng is not None:
             seconds = round(
@@ -2233,6 +2250,7 @@ def split_user_text_on_pauses(
         turns.append(
             DialogueTurn("silence", duration_sec=seconds, note="userが言葉に詰まる")
         )
+        used += 1
     rest = strip_residual_tags(text[cursor:])
     if rest:
         turns.append(DialogueTurn("user", rest))
@@ -2650,6 +2668,11 @@ AIZUCHI_ONLY_LIMITED_ONCE = frozenset({"そうだったんですね。", "そう
 # 沈黙が連続したときに1つへ畳む上限。これ以上長い無音は学習データとしてただの
 # 空白になる。
 AIZUCHI_ONLY_SILENCE_HARD_MAX = 12.0
+# 1対話に置いてよい沈黙の総数。これを超えたぶんは、userAI が書いた <<pause>> も
+# 計画側の沈黙も落とす。実測では制限なしで平均 7.0 回・通話の 40% が無音になった。
+AIZUCHI_ONLY_MAX_SILENCES = 3
+# 1発話（userAI の1回の出力）に置いてよい沈黙。詰まる場所は1箇所で足りる。
+AIZUCHI_ONLY_MAX_PAUSES_PER_TURN = 1
 
 # 電話は名乗りから始まり、挨拶で終わる。相づちではないが、これが無いと通話に
 # ならない。第一声は固定（knowledge/decisions/0002）。
