@@ -90,6 +90,92 @@ OCCUPATIONS = [
     "在宅ワーカー", "アルバイト", "経営者",
 ]
 
+# 状況ごとに、ありえない属性を抽選から外す。軸を直交に振るのは多様性のためだが、
+# 「経営者なのに失業中」「50代の学生が就職活動」「40代が受験勉強」のような札が
+# 実際に出ており、そのまま対話にすると人物像が破綻する。ここに無い状況は今まで
+# どおり全属性から自由に引く（制約は必要な所にだけ書く）。
+#   ages / genders / occupations -- 抽選をこの候補だけに絞る
+#   exclude_occupations          -- この職業だけ除いて残りから引く
+SITUATION_PROFILE_CONSTRAINTS: dict[str, dict[str, list[str]]] = {
+    # 就労状態が状況そのものに含まれるもの
+    "post_job_loss": {"occupations": ["求職中"]},
+    "post_retirement": {
+        "ages": ["50代", "60代", "70代"],
+        "occupations": ["退職した人"],
+    },
+    "job_hunting_fatigue": {
+        "ages": ["20代", "30代"],
+        "occupations": ["学生", "求職中", "アルバイト"],
+    },
+    "exam_pressure": {"ages": ["20代"], "occupations": ["学生", "アルバイト"]},
+    "student_loneliness": {"ages": ["20代"], "occupations": ["学生", "アルバイト"]},
+    "graduate_anxiety": {
+        "ages": ["20代"],
+        "occupations": ["学生", "求職中", "アルバイト"],
+    },
+    "freelancer_isolation": {
+        "occupations": ["在宅ワーカー", "自営業", "技術職"],
+    },
+    "night_shift_worker": {
+        "occupations": ["医療・介護職", "サービス業", "会社員", "技術職"],
+    },
+    "single_assignment": {
+        "ages": ["30代", "40代", "50代"],
+        "occupations": ["会社員", "公務員", "技術職"],
+    },
+    "relocation_for_work": {
+        "occupations": ["会社員", "公務員", "技術職", "医療・介護職", "サービス業"],
+    },
+    "hikikomori_phase": {
+        "occupations": ["求職中", "在宅ワーカー", "主婦・主夫", "学生"],
+    },
+    # 勤め先がある前提の状況
+    "workplace_isolation": {
+        "exclude_occupations": ["学生", "退職した人", "求職中", "主婦・主夫"],
+    },
+    "new_job_nervous": {
+        "exclude_occupations": ["学生", "退職した人", "求職中", "主婦・主夫"],
+    },
+    "commuter_solitude": {
+        "exclude_occupations": ["学生", "退職した人", "求職中", "主婦・主夫", "在宅ワーカー"],
+    },
+    "late_evening_quiet": {
+        "exclude_occupations": ["退職した人", "求職中"],
+    },
+    # ライフステージが決まるもの
+    "childcare_isolation": {
+        "ages": ["20代", "30代", "40代"],
+        "exclude_occupations": ["退職した人", "学生"],
+    },
+    "post_partum": {
+        "ages": ["20代", "30代", "40代"],
+        "genders": ["女性"],
+        "exclude_occupations": ["退職した人", "学生"],
+    },
+    "empty_nest": {"ages": ["50代", "60代", "70代"]},
+    "widowed_senior": {"ages": ["60代", "70代"]},
+    "midlife_drift": {"ages": ["40代", "50代"]},
+    "caregiving_fatigue": {
+        "ages": ["40代", "50代", "60代", "70代"],
+        "exclude_occupations": ["学生"],
+    },
+    "aging_parent_far": {"ages": ["30代", "40代", "50代", "60代"]},
+    "divorce_adjusting": {"ages": ["30代", "40代", "50代", "60代"]},
+}
+
+
+def profile_pools(sit_token: str) -> tuple[list[str], list[str], list[str]]:
+    """この状況で引いてよい年代・性別・職業。"""
+    rules = SITUATION_PROFILE_CONSTRAINTS.get(sit_token, {})
+    ages = rules.get("ages") or AGE_BANDS
+    genders = rules.get("genders") or GENDERS
+    occupations = rules.get("occupations")
+    if not occupations:
+        excluded = set(rules.get("exclude_occupations") or ())
+        occupations = [item for item in OCCUPATIONS if item not in excluded]
+    return ages, genders, occupations
+
+
 # 話題ドメイン（雑談・傾聴の中身を多様化）
 TOPICS = [
     "今日あった小さな出来事", "最近の天気や季節の変化", "食事や料理のこと",
@@ -244,9 +330,10 @@ def weighted_choice(rng: random.Random, items: list[tuple[Any, int]]) -> Any:
 
 def build_one(rng: random.Random, index: int) -> UseCase:
     sit_token, situation, opening_kind, target_turns, prefers_silence = rng.choice(SITUATIONS)
-    age = rng.choice(AGE_BANDS)
-    gender = rng.choice(GENDERS)
-    occupation = rng.choice(OCCUPATIONS)
+    age_pool, gender_pool, occupation_pool = profile_pools(sit_token)
+    age = rng.choice(age_pool)
+    gender = rng.choice(gender_pool)
+    occupation = rng.choice(occupation_pool)
     risk = weighted_choice(rng, RISK_WEIGHTS)
     topic = rng.choice(TOPICS)
     time_token, time_label = rng.choice(TIME_OF_DAY)
