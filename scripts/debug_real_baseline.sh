@@ -10,6 +10,7 @@ set -euo pipefail
 #
 # Useful overrides:
 #   DEBUG_CASES_PER_TASK=1  (default)   DEBUG_KEEP_OUTPUT=1
+#   CASCADE_LLM_MODEL=google/gemma-4-E2B-it (default for cascade)
 #   CASCADE_* / SPEECHLLM_*             passed through unchanged
 
 SYSTEM="${1:-}"
@@ -51,10 +52,23 @@ fi
 # path (input audio -> model response -> audible output -> deterministic score).
 # Full batch evaluation restores both defaults.
 if [[ "$SYSTEM" == "cascade" ]]; then
-    MODEL_ID="${MODEL_ID:-debug_cascade}"
+    # This smoke path intentionally uses the same public Gemma checkpoint and
+    # worker task as synthetic dialogue generation.  Keep the values explicit
+    # here: a debug run must never accidentally fall back to a gated Gemma 2
+    # model or another caller's shell setting.
+    MODEL_ID="${MODEL_ID:-debug_cascade_gemma4_e2b}"
+    CASCADE_LLM_MODEL="${CASCADE_LLM_MODEL:-google/gemma-4-E2B-it}"
+    CASCADE_LLM_DTYPE="${CASCADE_LLM_DTYPE:-float16}"
+    CASCADE_LLM_TASK="${CASCADE_LLM_TASK:-any-to-any}"
+    echo "cascade llm:      $CASCADE_LLM_MODEL"
+    echo "cascade llm dtype: $CASCADE_LLM_DTYPE"
+    echo "cascade llm task:  $CASCADE_LLM_TASK"
     env MODEL_ID="$MODEL_ID" RUN_ID="$DEBUG_ID" REAL_OUT_DIR="$DEBUG_OUT" \
         REAL_CASES_PER_TASK="$DEBUG_CASES_PER_TASK" REAL_MOS_BACKEND=none \
         REAL_BACKCHANNEL=0 CASCADE_SKIP_OUTPUT_ALIGNMENT=1 \
+        CASCADE_LLM_MODEL="$CASCADE_LLM_MODEL" \
+        CASCADE_LLM_DTYPE="$CASCADE_LLM_DTYPE" \
+        CASCADE_LLM_TASK="$CASCADE_LLM_TASK" \
         bash scripts/run_real_cascade_eval.sh
 else
     MODEL_ID="${MODEL_ID:-debug_speechllm}"
