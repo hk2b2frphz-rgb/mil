@@ -338,6 +338,22 @@ def process_variant(
     # from output.meta.json, automatically reflect true cascade/SpeechLLM
     # latency instead of understating it.
     output_start_sec = endpoint.detected_at_sec + vad_overrun + total_wall
+    # This is the end of the caller's actual speech, not the later time at
+    # which VAD observed enough silence.  Every cumulative value below is
+    # therefore directly comparable as "time since the user stopped talking".
+    utterance_end_sec = endpoint.speech_end_sec
+    if utterance_end_sec is None:
+        utterance_end_sec = endpoint.detected_at_sec
+    vad_complete_after_end = endpoint.detected_at_sec + vad_overrun - utterance_end_sec
+    asr_complete_after_end = vad_complete_after_end + asr_wall
+    llm_complete_after_end = asr_complete_after_end + llm_wall
+    tts_complete_after_end = llm_complete_after_end + tts_wall
+    print(
+        f"[local-fdb] completion since speech end {sample['task']}/{sample['id']} {variant}: "
+        f"VAD={vad_complete_after_end:.3f}s ASR={asr_complete_after_end:.3f}s "
+        f"LLM={llm_complete_after_end:.3f}s TTS={tts_complete_after_end:.3f}s "
+        f"all={tts_complete_after_end:.3f}s"
+    )
     silence = np.zeros(int(round(output_start_sec * sample_rate)), dtype=np.float32)
     aligned = np.concatenate([silence, response_pcm])
     write_wav_mono(trial_dir / f"{output_stem}.wav", aligned, sample_rate)
@@ -430,6 +446,12 @@ def process_variant(
         "vad_overrun_time_sec": round(vad_overrun, 4),
         "vad_silence_ms": args.vad_silence_ms,
         "vad_tail_sec": args.vad_tail_sec,
+        "utterance_end_sec": round(utterance_end_sec, 4),
+        "vad_complete_after_utterance_end_sec": round(vad_complete_after_end, 4),
+        "asr_complete_after_utterance_end_sec": round(asr_complete_after_end, 4),
+        "llm_complete_after_utterance_end_sec": round(llm_complete_after_end, 4),
+        "tts_complete_after_utterance_end_sec": round(tts_complete_after_end, 4),
+        "all_complete_after_utterance_end_sec": round(tts_complete_after_end, 4),
         "wall_time_sec": round(total_wall, 4),
         "language": "ja",
         "expected_behavior": metadata.get("expected_behavior"),

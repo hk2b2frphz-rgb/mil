@@ -100,6 +100,15 @@ def main() -> int:
     overruns = [float(r.get("vad_overrun_time_sec") or 0.0) for r in rows]
     print(f"VAD: 1件平均 {statistics.mean(stages['vad_wall_time_sec']):.3f} 秒 / "
           f"応答遅延に加算された超過分の合計 {sum(overruns):.3f} 秒")
+    print("発話終了から各段の完了まで（平均 / 中央値）:")
+    for key, label in (
+        ("vad_complete_after_utterance_end_sec", "VAD完了"),
+        ("asr_complete_after_utterance_end_sec", "ASR完了"),
+        ("llm_complete_after_utterance_end_sec", "LLM完了"),
+        ("tts_complete_after_utterance_end_sec", "TTS完了（全完了）"),
+    ):
+        values = [float(r.get(key) or 0.0) for r in rows]
+        print(f"  {label:<16} {statistics.mean(values):.3f} 秒 / {statistics.median(values):.3f} 秒")
     print("時間を削りたいだけなら CASCADE_SKIP_OUTPUT_ALIGNMENT=1 で省ける")
     print("(応答テキストは LLM 側に残る。失うのは時刻つきチャンクだけ)。")
     print()
