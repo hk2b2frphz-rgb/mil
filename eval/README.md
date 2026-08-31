@@ -46,9 +46,46 @@ audio-in/text-out baseline; use `SPEECHLLM_MODEL`, `SPEECHLLM_DEVICE_MAP`, and
 the other `SPEECHLLM_*` settings in that manifest row.  The worker stays loaded
 for the full run, rather than loading the 7B model once per test case.
 
+Before adding either row to the batch manifest, run its one-case smoke test in
+an interactive GPU allocation.  It checks the correct isolated worker import,
+executes audio input through to `output.wav`, writes the normal deterministic
+summary, and skips only optional UTMOS/backchannel work:
+
+```bash
+bash scripts/debug_real_baseline.sh cascade
+bash scripts/debug_real_baseline.sh speechllm
+```
+
+The debug output is under `eval_runs/debug/`.  Use `DEBUG_CASES_PER_TASK=2`
+to test more cases; batch evaluation restores the normal output alignment,
+UTMOS, and backchannel settings.
+
 `FDB_SYSTEM=cascade_synthetic` and `FDB_SYSTEM=speechllm_synthetic` select the
 separate Full-Duplex-Bench-JA track.  Do not mix that track's scores with the
 real-dialogue table.
+
+### Qwen2.5-Omni on a 32GB V100
+
+Use the native audio-input/audio-output 3B checkpoint as a separate row:
+
+```text
+qwen25_omni_3b||||FDB_SYSTEM=qwen25_omni;QWEN25_OMNI_MODEL=Qwen/Qwen2.5-Omni-3B;QWEN25_OMNI_DTYPE=float16||qwen25_omni_3b
+```
+
+It does **not** use the cascade TTS: `Qwen2.5-Omni-3B` provides the response
+waveform itself (24 kHz), which the evaluator resamples and writes as the
+normal `output.wav`.  On V100, retain `float16`; do not select bf16.  Before
+the first PBS run, refresh the isolated worker environment once:
+
+```bash
+uv sync --project gemma_runtime
+```
+
+Start with `REAL_CASES_PER_TASK=1`, then use the normal batch command.  The
+7B Omni checkpoint is intentionally not the default: its documented minimum
+memory is already 31.11 GB for a short 15-second example before the practical
+runtime overhead, whereas the 3B checkpoint's corresponding figure is 18.38
+GB.
 
 ## GPT Realtime (local PC only)
 
