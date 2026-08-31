@@ -39,6 +39,8 @@ cd "$REPO_ROOT"
 
 source "$SCRIPT_DIR/setup_proxy.sh"
 source "$SCRIPT_DIR/kokoro_uv_env.sh"
+source "$SCRIPT_DIR/model_cache_env.sh"
+model_cache_init "$REPO_ROOT"
 
 MODEL_ID="${MODEL_ID:?Set MODEL_ID (e.g. cascade_gemma2b)}"
 if ! [[ "$MODEL_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then

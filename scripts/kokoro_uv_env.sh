@@ -41,7 +41,7 @@ kokoro_uv_run() {
     local torch_version torchaudio_version
     torch_version="$(uv run python -c 'import torch; print(torch.__version__)')"
     torchaudio_version="$(uv run python -c 'import torchaudio; print(torchaudio.__version__)')"
-    eval "$__out_name=(uv run --isolated --no-project --index 'pytorch-cu121=https://download.pytorch.org/whl/cu121' --with 'kokoro>=0.9.4' --with 'misaki[ja]' --with unidic --with pyopenjtalk --with numpy --with sphn --with soundfile --with uroman --with faster-whisper --with 'torch==$torch_version' --with 'torchaudio==$torchaudio_version')"
+    eval "$__out_name=(uv run --isolated --no-project --index 'pytorch-cu121=https://download.pytorch.org/whl/cu121' --with 'kokoro>=0.9.4' --with 'misaki[ja]' --with unidic --with pyopenjtalk --with numpy --with sphn --with soundfile --with uroman --with faster-whisper --with silero-vad --with 'torch==$torch_version' --with 'torchaudio==$torchaudio_version')"
     local -n kokoro_uv="$__out_name"
 
     echo "[$tag] checking the kokoro Japanese dictionary (unidic)"

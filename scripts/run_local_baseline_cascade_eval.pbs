@@ -45,6 +45,8 @@ set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 source scripts/setup_proxy.sh
 source scripts/kokoro_uv_env.sh
+source scripts/model_cache_env.sh
+model_cache_init "$PWD"
 
 JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
 JOB_ID_SHORT="${JOB_ID_RAW%%.*}"

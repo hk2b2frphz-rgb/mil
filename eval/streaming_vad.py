@@ -9,6 +9,7 @@ rather than the earlier estimated end of speech.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 
@@ -21,6 +22,13 @@ class VadEndpoint:
     speech_end_sec: float | None
     audio_end_sample: int
     backend: str
+
+
+@lru_cache(maxsize=1)
+def _load_streaming_silero_model():
+    from silero_vad import load_silero_vad
+
+    return load_silero_vad()
 
 
 def find_streaming_endpoint(
@@ -48,7 +56,7 @@ def find_streaming_endpoint(
         raise ValueError("input_frame_ms must be > 0")
     try:
         import torch
-        from silero_vad import VADIterator, load_silero_vad
+        from silero_vad import VADIterator
     except ImportError as exc:
         raise RuntimeError(
             "Streaming VAD requires silero-vad. Run `uv sync` in the main project environment."
@@ -66,7 +74,9 @@ def find_streaming_endpoint(
     if len(stream_16k) % chunk_size:
         stream_16k = np.pad(stream_16k, (0, chunk_size - len(stream_16k) % chunk_size))
 
-    model = load_silero_vad()
+    # One model instance per evaluator process: individual trials must not
+    # repeatedly load weights or recreate CUDA state.
+    model = _load_streaming_silero_model()
     iterator = VADIterator(
         model,
         threshold=threshold,
