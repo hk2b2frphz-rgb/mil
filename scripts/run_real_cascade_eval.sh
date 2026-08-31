@@ -12,7 +12,7 @@ set -euo pipefail
 # 別物なので混同しないこと。あちらはデータもプロトコルも違う。
 #
 # 土俵を揃えるうえで肝心な点:
-#   応答音声は「入力を全部聞き終えてから、ASR+LLM+TTS の実処理が終わるまで」の
+#   応答音声は「Streaming VAD が終端を検出してから、ASR+LLM+TTS の実処理が終わるまで」の
 #   位置に置かれる(eval/run_local_baseline_full_duplex.py)。つまり応答速度に
 #   カスケードの実際の処理時間が入る。Moshi 側は生成そのものが応答開始なので、
 #   どちらも「音が鳴り始めた時刻」という同じ定義で測られる。
@@ -79,6 +79,8 @@ else
 fi
 CASCADE_DEVICE="${CASCADE_DEVICE:-cuda}"
 CASCADE_DTYPE="${CASCADE_DTYPE:-float16}"
+BASELINE_VAD_TAIL_SEC="${BASELINE_VAD_TAIL_SEC:-8}"
+BASELINE_VAD_SILENCE_MS="${BASELINE_VAD_SILENCE_MS:-800}"
 
 export TORCHINDUCTOR_DISABLE=1
 export NO_TORCH_COMPILE="${NO_TORCH_COMPILE:-1}"
@@ -152,6 +154,8 @@ inference_args=(
     --tts-speaker "$CASCADE_TTS_SPEAKER"
     --device "$CASCADE_DEVICE"
     --dtype "$CASCADE_DTYPE"
+    --vad-tail-sec "$BASELINE_VAD_TAIL_SEC"
+    --vad-silence-ms "$BASELINE_VAD_SILENCE_MS"
 )
 if [[ -n "$REAL_CASES_PER_TASK" ]]; then
     inference_args+=(--cases-per-task "$REAL_CASES_PER_TASK")

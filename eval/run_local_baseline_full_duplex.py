@@ -22,10 +22,12 @@ evaluate_full_duplex_ja.py works unchanged:
         --run-dir eval_runs/full_duplex/cascade_gemma2b/inference \
         --out-dir eval_runs/full_duplex/cascade_gemma2b/benchmark_results
 
-**Read this before trusting the numbers.** Cascade/SpeechLLM baselines are
-turn-based: they only ever produce ONE response, starting after the ENTIRE
-input.wav (including any embedded pause/interruption/overlap audio) has
-been fully processed. There is no way for them to react mid-utterance, so:
+**Read this before trusting the numbers.** Cascade/SpeechLLM baselines use a
+streaming Silero VAD endpoint: 20-ms capture frames are observed in order and
+ASR/LLM starts when the first end-of-utterance is detected. An 8-second silent
+tail is fed after each recording so the endpoint is always observable. They
+only ever produce ONE response and cannot react while generation is underway,
+so:
 
 - `pause_handling`/`smooth_turn_taking`/`user_interruption`: TOR and
   response-latency metrics will faithfully show these baselines never take
@@ -74,9 +76,10 @@ from local_baseline_common import (  # noqa: E402
     validate_spoken_response,
 )
 from build_full_duplex_ja_dataset import synthesize  # noqa: E402
-from full_duplex_audio import read_wav_mono, write_wav_mono, write_wav_stereo  # noqa: E402
+from full_duplex_audio import resample_linear, read_wav_mono, write_wav_mono, write_wav_stereo  # noqa: E402
 from full_duplex_sample_selection import select_samples  # noqa: E402
 from greeting_check import evaluate_opening_greeting  # noqa: E402
+from streaming_vad import find_streaming_endpoint  # noqa: E402
 
 
 FDB_V15_PROTOCOL_NAME = "Full-Duplex-Bench v1.5 static overlap protocol"
@@ -133,6 +136,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asr-model", default="large-v3")
     parser.add_argument("--asr-device", default="cuda")
     parser.add_argument("--asr-compute-type", default="float16")
+    parser.add_argument(
+        "--vad-tail-sec", type=float, default=8.0,
+        help="Zero-audio tail streamed after each recording to flush the VAD endpoint.",
+    )
+    parser.add_argument(
+        "--vad-silence-ms", type=int, default=800,
+        help="Observed silence required by streaming Silero VAD before inference starts.",
+    )
+    parser.add_argument("--vad-threshold", type=float, default=0.5)
 
     # Keep this identical to the established dialogue-generation path.  This
     # public Gemma 4 checkpoint is not the gated Gemma 2/3 Hugging Face path.
@@ -247,24 +259,39 @@ def process_variant(
     pcm, sample_rate = read_wav_mono(input_wav)
     input_duration_sec = len(pcm) / sample_rate
     output_stem = "clean_output" if variant == "clean_input" else "output"
+    endpoint = find_streaming_endpoint(
+        pcm, sample_rate, tail_sec=args.vad_tail_sec,
+        silence_ms=args.vad_silence_ms, threshold=args.vad_threshold,
+    )
+    if endpoint is None:
+        raise RuntimeError(
+            "Streaming VAD did not observe an utterance end even after "
+            f"{args.vad_tail_sec:g}s of silence. Increase --vad-tail-sec or inspect the input."
+        )
+    received_pcm = np.concatenate([
+        pcm, np.zeros(int(round(args.vad_tail_sec * sample_rate)), dtype=np.float32),
+    ])
+    # This is all and only the audio available at the online endpoint. It
+    # includes the silence that caused VAD to fire, never future fixture audio.
+    inference_pcm = received_pcm[:endpoint.audio_end_sample]
 
     asr_text = None
     asr_wall = 0.0
     if args.system == "cascade":
         assert asr is not None and llm is not None
-        asr_text, asr_wall = asr.transcribe(pcm, sample_rate)
+        asr_text, asr_wall = asr.transcribe(inference_pcm, sample_rate)
         response_text, llm_wall = llm.respond(
             asr_text, COUNSELOR_SYSTEM_PROMPT, seed=seed
         )
     elif args.system == "speechllm":
         assert speechllm is not None
-        response_text, llm_wall = speechllm.respond(pcm, sample_rate, COUNSELOR_SYSTEM_PROMPT)
+        response_text, llm_wall = speechllm.respond(inference_pcm, sample_rate, COUNSELOR_SYSTEM_PROMPT)
         response_pcm_native = None
         native_sample_rate = sample_rate
     else:
         assert qwen25_omni is not None
         response_text, response_pcm_native, native_sample_rate, llm_wall = qwen25_omni.respond(
-            pcm, sample_rate, COUNSELOR_SYSTEM_PROMPT
+            inference_pcm, sample_rate, COUNSELOR_SYSTEM_PROMPT
         )
     response_text = validate_spoken_response(response_text)
 
@@ -290,13 +317,13 @@ def process_variant(
     tts_wall = 0.0 if args.system == "qwen25_omni" else time.perf_counter() - tts_started
 
     total_wall = asr_wall + llm_wall + tts_wall
-    # Place the response at the real time it would actually start: after the
-    # full input is heard AND all processing finishes. This makes
+    # Place the response at the real time it would actually start: after VAD
+    # observes the endpoint AND all processing finishes. This makes
     # evaluate_full_duplex_ja.py's existing (unchanged) latency/TOR metrics,
     # which are derived from output.wav/output.json placement rather than
     # from output.meta.json, automatically reflect true cascade/SpeechLLM
     # latency instead of understating it.
-    output_start_sec = input_duration_sec + total_wall
+    output_start_sec = endpoint.detected_at_sec + total_wall
     silence = np.zeros(int(round(output_start_sec * sample_rate)), dtype=np.float32)
     aligned = np.concatenate([silence, response_pcm])
     write_wav_mono(trial_dir / f"{output_stem}.wav", aligned, sample_rate)
@@ -381,6 +408,12 @@ def process_variant(
         "task": sample["task"],
         "case_id": sample["id"],
         "input_duration_sec": round(input_duration_sec, 4),
+        "vad_endpoint_detected_at_sec": round(endpoint.detected_at_sec, 4),
+        "vad_speech_end_sec": round(endpoint.speech_end_sec, 4) if endpoint.speech_end_sec is not None else None,
+        "vad_audio_sent_sec": round(len(inference_pcm) / sample_rate, 4),
+        "vad_backend": endpoint.backend,
+        "vad_silence_ms": args.vad_silence_ms,
+        "vad_tail_sec": args.vad_tail_sec,
         "wall_time_sec": round(total_wall, 4),
         "language": "ja",
         "expected_behavior": metadata.get("expected_behavior"),
@@ -538,10 +571,14 @@ def main() -> int:
         "protocol": protocol,
         "protocol_conformance": {
             "input_profile": "verified" if args.require_v15_profile else "not_required",
-            "overlap_timing": "not_applicable_turn_based_baseline",
+            "overlap_timing": "streaming_vad_turn_based_baseline",
         },
         "asr_model": args.asr_model if args.system == "cascade" else None,
         "asr_compute_type": args.asr_compute_type if args.system == "cascade" else None,
+        "vad_backend": "silero_streaming_20ms_capture",
+        "vad_silence_ms": args.vad_silence_ms,
+        "vad_tail_sec": args.vad_tail_sec,
+        "vad_threshold": args.vad_threshold,
         "llm_model": args.llm_model if args.system == "cascade" else None,
         "llm_dtype": args.llm_dtype if args.system == "cascade" else None,
         "llm_temperature": args.llm_temperature if args.system == "cascade" else None,
@@ -566,8 +603,8 @@ def main() -> int:
         "tts_speaker": args.tts_speaker,
         "tts_dtype": args.dtype,
         "note": (
-            "Turn-based local baseline, not full-duplex. See this script's "
-            "module docstring for which metrics are/aren't meaningful."
+            "Streaming-VAD turn-based local baseline, not full-duplex. See this "
+            "script's module docstring for which metrics are/aren't meaningful."
         ),
     }
     (out_dir / "run_config.json").write_text(
