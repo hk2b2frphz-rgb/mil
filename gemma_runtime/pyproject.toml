@@ -8,6 +8,7 @@ dependencies = [
     "torch>=2.1.0",
     "transformers>=5.5.0",
     "numpy",
+    "qwen-omni-utils",
 ]
 
 [tool.uv]

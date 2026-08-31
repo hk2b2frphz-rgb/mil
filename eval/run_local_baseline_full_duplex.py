@@ -67,6 +67,7 @@ from local_baseline_common import (  # noqa: E402
     COUNSELOR_SYSTEM_PROMPT,
     GemmaLLM,
     LocalASR,
+    Qwen25Omni,
     SpeechLLM,
     init_baseline_tts,
     looks_truncated,
@@ -85,7 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run a local cascade or SpeechLLM baseline over a Full-Duplex-Bench-JA dataset."
     )
-    parser.add_argument("--system", required=True, choices=["cascade", "speechllm"])
+    parser.add_argument("--system", required=True, choices=["cascade", "speechllm", "qwen25_omni"])
     parser.add_argument("--dataset-dir", required=True, type=Path)
     parser.add_argument("--out-dir", required=True, type=Path)
     parser.add_argument("--model-id", default=None)
@@ -149,6 +150,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--speechllm-max-new-tokens", type=int, default=200)
     parser.add_argument("--speechllm-timeout-sec", type=float, default=300.0)
 
+    parser.add_argument("--qwen25-omni-model", default="Qwen/Qwen2.5-Omni-3B")
+    parser.add_argument("--qwen25-omni-python", default=None)
+    parser.add_argument("--qwen25-omni-device-map", default="auto")
+    parser.add_argument("--qwen25-omni-dtype", choices=["auto", "float16", "float32"], default="float16")
+    parser.add_argument("--qwen25-omni-speaker", choices=["Chelsie", "Ethan"], default="Chelsie")
+    parser.add_argument("--qwen25-omni-max-new-tokens", type=int, default=200)
+    parser.add_argument("--qwen25-omni-timeout-sec", type=float, default=600.0)
+
     return parser.parse_args()
 
 
@@ -177,6 +186,7 @@ def process_variant(
     asr: LocalASR | None,
     llm: GemmaLLM | None,
     speechllm: SpeechLLM | None,
+    qwen25_omni: Qwen25Omni | None,
     model_id: str,
 ) -> None:
     source_dir = dataset_dir / sample["path"]
@@ -199,15 +209,25 @@ def process_variant(
         response_text, llm_wall = llm.respond(
             asr_text, COUNSELOR_SYSTEM_PROMPT, seed=seed
         )
-    else:
+    elif args.system == "speechllm":
         assert speechllm is not None
         response_text, llm_wall = speechllm.respond(pcm, sample_rate, COUNSELOR_SYSTEM_PROMPT)
+        response_pcm_native = None
+        native_sample_rate = sample_rate
+    else:
+        assert qwen25_omni is not None
+        response_text, response_pcm_native, native_sample_rate, llm_wall = qwen25_omni.respond(
+            pcm, sample_rate, COUNSELOR_SYSTEM_PROMPT
+        )
     response_text = validate_spoken_response(response_text)
 
     tts_started = time.perf_counter()
     seed_local(seed)
     has_response = bool(response_text.strip())
     response_pcm = (
+        resample_linear(response_pcm_native, native_sample_rate, sample_rate)
+        if args.system == "qwen25_omni" and response_pcm_native is not None
+        else
         synthesize(
             response_text,
             sample_rate,
@@ -220,7 +240,7 @@ def process_variant(
         if has_response
         else np.zeros(1, dtype=np.float32)
     )
-    tts_wall = time.perf_counter() - tts_started
+    tts_wall = 0.0 if args.system == "qwen25_omni" else time.perf_counter() - tts_started
 
     total_wall = asr_wall + llm_wall + tts_wall
     # Place the response at the real time it would actually start: after the
@@ -268,10 +288,27 @@ def process_variant(
                 round(output_start_sec + len(response_pcm) / sample_rate, 4),
             ],
         }]
+    elif args.system in {"speechllm", "qwen25_omni"} and has_response:
+        # Qwen2-Audio returns the generated text but not word alignment.  Keep
+        # one response-wide timestamped chunk nevertheless: real-response
+        # scoring and the LLM judge read output.json on the output.wav clock.
+        # Leaving this empty made a perfectly audible SpeechLLM response look
+        # textless to those downstream steps.
+        alignment_chunks = [{
+            "text": response_text,
+            "timestamp": [
+                round(output_start_sec, 4),
+                round(output_start_sec + len(response_pcm) / sample_rate, 4),
+            ],
+        }]
     output_json = {
         "text": alignment_text,
         "chunks": alignment_chunks,
-        "source": f"{args.system}_asr_alignment" if args.system == "cascade" else f"{args.system}_text",
+        "source": (
+            f"{args.system}_asr_alignment"
+            if args.system == "cascade" and not args.skip_output_alignment
+            else f"{args.system}_generated_text"
+        ),
         "generated_text": response_text,
         "language": "ja",
     }
@@ -333,6 +370,7 @@ def process_sample(
     asr: LocalASR | None,
     llm: GemmaLLM | None,
     speechllm: SpeechLLM | None,
+    qwen25_omni: Qwen25Omni | None,
     model_id: str,
 ) -> None:
     source_dir = dataset_dir / sample["path"]
@@ -352,6 +390,7 @@ def process_sample(
             asr,
             llm,
             speechllm,
+            qwen25_omni,
             model_id,
         )
 
@@ -386,12 +425,15 @@ def main() -> int:
     if not samples:
         raise SystemExit("No benchmark samples matched --tasks.")
 
-    tts_backend, tts_engine = init_baseline_tts(
-        args.tts_backend, args.tts_model, args.tts_speaker, args.tts_language,
-        args.device, args.dtype,
-    )
+    if args.system == "qwen25_omni":
+        tts_backend, tts_engine = "qwen25_omni_native", None
+    else:
+        tts_backend, tts_engine = init_baseline_tts(
+            args.tts_backend, args.tts_model, args.tts_speaker, args.tts_language,
+            args.device, args.dtype,
+        )
 
-    asr = llm = speechllm = None
+    asr = llm = speechllm = qwen25_omni = None
     if args.system == "cascade":
         asr = LocalASR(args.asr_model, args.asr_device, args.asr_compute_type)
         llm = GemmaLLM(
@@ -400,18 +442,30 @@ def main() -> int:
             args.llm_timeout_sec,
         )
         default_model_id = f"cascade_{args.asr_model}_{args.llm_model.split('/')[-1]}"
-    else:
+    elif args.system == "speechllm":
         speechllm = SpeechLLM(
             args.speechllm_model, args.speechllm_python, args.speechllm_device_map,
             args.speechllm_dtype, args.speechllm_max_new_tokens, args.speechllm_timeout_sec,
         )
         default_model_id = f"speechllm_{args.speechllm_model.split('/')[-1]}"
+    else:
+        qwen25_omni = Qwen25Omni(
+            args.qwen25_omni_model, args.qwen25_omni_python,
+            args.qwen25_omni_device_map, args.qwen25_omni_dtype,
+            args.qwen25_omni_speaker, args.qwen25_omni_max_new_tokens,
+            args.qwen25_omni_timeout_sec,
+        )
+        default_model_id = f"qwen25_omni_{args.qwen25_omni_model.split('/')[-1]}"
     model_id = args.model_id or default_model_id
 
     if asr is not None:
         asr.load()
     if llm is not None:
         llm.load()
+    if speechllm is not None:
+        speechllm.load()
+    if qwen25_omni is not None:
+        qwen25_omni.load()
 
     run_config = {
         "model_id": model_id,
@@ -437,6 +491,14 @@ def main() -> int:
         "llm_max_new_tokens": args.llm_max_new_tokens if args.system == "cascade" else None,
         "llm_startup_wall_time_sec": (
             round(llm.startup_wall_time_sec, 4) if llm is not None else None
+        ),
+        "speechllm_model": args.speechllm_model if speechllm is not None else None,
+        "speechllm_startup_wall_time_sec": (
+            round(speechllm.startup_wall_time_sec, 4) if speechllm is not None else None
+        ),
+        "qwen25_omni_model": args.qwen25_omni_model if qwen25_omni is not None else None,
+        "qwen25_omni_startup_wall_time_sec": (
+            round(qwen25_omni.startup_wall_time_sec, 4) if qwen25_omni is not None else None
         ),
         "tts_backend_requested": args.tts_backend,
         "tts_backend_effective": tts_backend,
@@ -467,13 +529,17 @@ def main() -> int:
                     continue
                 process_sample(
                     sample, seed, dataset_dir, out_dir, args, tts_backend, tts_engine,
-                    asr, llm, speechllm, model_id,
+                    asr, llm, speechllm, qwen25_omni, model_id,
                 )
                 completed += 1
                 print(f"[local-fdb] {completed}/{total} {sample['task']}/{sample['id']} seed={seed}")
     finally:
         if llm is not None:
             llm.close()
+        if speechllm is not None:
+            speechllm.close()
+        if qwen25_omni is not None:
+            qwen25_omni.close()
 
     print(f"[local-fdb] inference complete -> {out_dir}")
     return 0

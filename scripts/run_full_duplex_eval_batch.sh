@@ -243,7 +243,7 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
         done
     fi
     case "$row_system" in
-        real|gold|moshi|cascade|speechllm|cascade_synthetic|speechllm_synthetic) ;;
+        real|gold|moshi|cascade|speechllm|qwen25_omni|cascade_synthetic|speechllm_synthetic) ;;
         *)
             echo "[batch] WARN: unknown FDB_SYSTEM='$row_system' for $model_id, treating as real" >&2
             row_system="real"
@@ -311,6 +311,10 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
             # baseline。実データ評価なので Moshi/cascade と同じ表に載る。
             eval_script="scripts/run_real_speechllm_eval.sh"
             expected_system="speechllm"
+            ;;
+        qwen25_omni)
+            eval_script="scripts/run_real_qwen25_omni_eval.sh"
+            expected_system="qwen25_omni"
             ;;
         cascade_synthetic)
             eval_script="scripts/run_full_duplex_cascade_eval.sh"

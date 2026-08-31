@@ -34,6 +34,10 @@ def parse_args() -> argparse.Namespace:
         default="auto",
     )
     parser.add_argument("--max-new-tokens", type=int, default=200)
+    parser.add_argument(
+        "--serve", action="store_true",
+        help="Keep the model loaded and process one JSON request per stdin line.",
+    )
     return parser.parse_args()
 
 
@@ -78,10 +82,6 @@ def resample_linear(pcm: np.ndarray, source_rate: int, target_rate: int) -> np.n
 
 def main() -> None:
     args = parse_args()
-    payload = json.loads(sys.stdin.read())
-    audio_path = str(payload["audio_path"])
-    prompt = str(payload.get("prompt", ""))
-
     progress(f"モデルをロード中: {args.model}")
     import torch
     from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
@@ -94,40 +94,47 @@ def main() -> None:
     model = Qwen2AudioForConditionalGeneration.from_pretrained(args.model, **model_kwargs)
     model.eval()
 
-    target_sr = int(getattr(processor.feature_extractor, "sampling_rate", 16000))
-    pcm, source_sr = read_wav_mono(audio_path)
-    audio = resample_linear(pcm, source_sr, target_sr)
+    def generate(payload: dict[str, Any]) -> dict[str, str]:
+        audio_path = str(payload["audio_path"])
+        prompt = str(payload.get("prompt", ""))
+        target_sr = int(getattr(processor.feature_extractor, "sampling_rate", 16000))
+        pcm, source_sr = read_wav_mono(audio_path)
+        audio = resample_linear(pcm, source_sr, target_sr)
+        conversation = [{"role": "user", "content": [
+            {"type": "audio", "audio_url": audio_path},
+            {"type": "text", "text": prompt},
+        ]}]
+        text_prompt = processor.apply_chat_template(
+            conversation, add_generation_prompt=True, tokenize=False
+        )
+        inputs = processor(
+            text=text_prompt, audios=[audio], sampling_rate=target_sr,
+            return_tensors="pt", padding=True,
+        )
+        inputs = {key: value.to(model.device) if hasattr(value, "to") else value
+                  for key, value in inputs.items()}
+        progress("生成中...")
+        with torch.no_grad():
+            generated_ids = model.generate(**inputs, max_new_tokens=args.max_new_tokens)
+        generated_ids = generated_ids[:, inputs["input_ids"].size(1):]
+        text = processor.batch_decode(
+            generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )[0]
+        progress("完了")
+        return {"text": text.strip()}
 
-    conversation = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "audio", "audio_url": audio_path},
-                {"type": "text", "text": prompt},
-            ],
-        }
-    ]
-    text_prompt = processor.apply_chat_template(
-        conversation, add_generation_prompt=True, tokenize=False
-    )
-    inputs = processor(
-        text=text_prompt, audios=[audio], sampling_rate=target_sr,
-        return_tensors="pt", padding=True,
-    )
-    inputs = {
-        key: value.to(model.device) if hasattr(value, "to") else value
-        for key, value in inputs.items()
-    }
-
-    progress("生成中...")
-    with torch.no_grad():
-        generated_ids = model.generate(**inputs, max_new_tokens=args.max_new_tokens)
-    generated_ids = generated_ids[:, inputs["input_ids"].size(1):]
-    text = processor.batch_decode(
-        generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
-    )[0]
-    progress("完了")
-    print(json.dumps({"text": text.strip()}, ensure_ascii=False))
+    if args.serve:
+        print(json.dumps({"ready": True}), flush=True)
+        for line in sys.stdin:
+            if not line.strip():
+                continue
+            try:
+                result: dict[str, str] = generate(json.loads(line))
+            except Exception as exc:  # keep a batch's remaining cases runnable
+                result = {"error": f"{type(exc).__name__}: {exc}"}
+            print(json.dumps(result, ensure_ascii=False), flush=True)
+        return
+    print(json.dumps(generate(json.loads(sys.stdin.read())), ensure_ascii=False))
 
 
 if __name__ == "__main__":

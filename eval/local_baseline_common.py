@@ -25,6 +25,7 @@ Pipeline pieces:
 """
 
 import json
+import base64
 import os
 import re
 import subprocess
@@ -364,6 +365,62 @@ class SpeechLLM:
         self.max_new_tokens = max_new_tokens
         self.timeout_sec = timeout_sec
         self.worker = SCRIPTS_DIR / "speechllm_worker.py"
+        self._process: subprocess.Popen[str] | None = None
+        self.startup_wall_time_sec = 0.0
+
+    def _readline(self) -> str:
+        assert self._process is not None and self._process.stdout is not None
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self._process.stdout.readline)
+        try:
+            line = future.result(timeout=self.timeout_sec)
+        except FutureTimeoutError as exc:
+            self.close()
+            raise RuntimeError(
+                f"Persistent SpeechLLM worker timed out after {self.timeout_sec}s"
+            ) from exc
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        if not line:
+            raise RuntimeError(
+                "Persistent SpeechLLM worker exited unexpectedly "
+                f"(code={self._process.poll()})"
+            )
+        return line
+
+    def load(self) -> None:
+        if self._process is not None:
+            return
+        command = [
+            self.python_exe, str(self.worker), "--model", self.model,
+            "--device-map", self.device_map, "--dtype", self.dtype,
+            "--max-new-tokens", str(self.max_new_tokens), "--serve",
+        ]
+        started = time.perf_counter()
+        self._process = subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
+            text=True, encoding="utf-8", bufsize=1, env=worker_environment(),
+        )
+        ready = json.loads(self._readline())
+        if ready.get("ready") is not True:
+            self.close()
+            raise RuntimeError(f"SpeechLLM worker did not become ready: {ready}")
+        self.startup_wall_time_sec = time.perf_counter() - started
+
+    def close(self) -> None:
+        process, self._process = self._process, None
+        if process is None:
+            return
+        if process.stdin is not None:
+            process.stdin.close()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
 
     def respond(
         self,
@@ -374,23 +431,99 @@ class SpeechLLM:
         tmp_path = Path(tempfile.mkstemp(suffix=".wav")[1])
         try:
             write_wav_mono(tmp_path, pcm, sample_rate)
+            self.load()
+            assert self._process is not None and self._process.stdin is not None
             started = time.perf_counter()
-            result = call_subprocess_worker(
-                self.worker,
-                {"audio_path": str(tmp_path), "prompt": prompt},
-                [
-                    "--model", self.model,
-                    "--device-map", self.device_map,
-                    "--dtype", self.dtype,
-                    "--max-new-tokens", str(self.max_new_tokens),
-                ],
-                self.python_exe,
-                self.timeout_sec,
+            self._process.stdin.write(
+                json.dumps({"audio_path": str(tmp_path), "prompt": prompt}, ensure_ascii=False) + "\n"
             )
+            self._process.stdin.flush()
+            result = json.loads(self._readline())
             wall_time = time.perf_counter() - started
         finally:
             tmp_path.unlink(missing_ok=True)
+        if "error" in result:
+            raise RuntimeError(f"SpeechLLM worker generation failed: {result['error']}")
         return str(result.get("text", "")).strip(), wall_time
+
+
+class Qwen25Omni:
+    """Persistent native audio-in/audio-out Qwen2.5-Omni worker."""
+
+    def __init__(self, model: str, python_exe: str | None, device_map: str,
+                 dtype: str, speaker: str, max_new_tokens: int, timeout_sec: float):
+        self.model, self.python_exe = model, resolve_llm_python(python_exe)
+        self.device_map, self.dtype, self.speaker = device_map, dtype, speaker
+        self.max_new_tokens, self.timeout_sec = max_new_tokens, timeout_sec
+        self.worker = SCRIPTS_DIR / "qwen25_omni_worker.py"
+        self._process: subprocess.Popen[str] | None = None
+        self.startup_wall_time_sec = 0.0
+
+    def _readline(self) -> str:
+        assert self._process is not None and self._process.stdout is not None
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self._process.stdout.readline)
+        try:
+            line = future.result(timeout=self.timeout_sec)
+        except FutureTimeoutError as exc:
+            self.close()
+            raise RuntimeError(f"Qwen2.5-Omni worker timed out after {self.timeout_sec}s") from exc
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        if not line:
+            raise RuntimeError(f"Qwen2.5-Omni worker exited unexpectedly (code={self._process.poll()})")
+        return line
+
+    def load(self) -> None:
+        if self._process is not None:
+            return
+        command = [self.python_exe, str(self.worker), "--model", self.model,
+                   "--device-map", self.device_map, "--dtype", self.dtype,
+                   "--speaker", self.speaker, "--max-new-tokens", str(self.max_new_tokens)]
+        started = time.perf_counter()
+        self._process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=None, text=True, encoding="utf-8", bufsize=1,
+                                         env=worker_environment())
+        ready = json.loads(self._readline())
+        if ready.get("ready") is not True:
+            self.close()
+            raise RuntimeError(f"Qwen2.5-Omni worker did not become ready: {ready}")
+        self.startup_wall_time_sec = time.perf_counter() - started
+
+    def close(self) -> None:
+        process, self._process = self._process, None
+        if process is None:
+            return
+        if process.stdin is not None:
+            process.stdin.close()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+
+    def respond(self, pcm: np.ndarray, sample_rate: int,
+                prompt: str = COUNSELOR_SYSTEM_PROMPT) -> tuple[str, np.ndarray, int, float]:
+        tmp_path = Path(tempfile.mkstemp(suffix=".wav")[1])
+        try:
+            write_wav_mono(tmp_path, pcm, sample_rate)
+            self.load()
+            assert self._process is not None and self._process.stdin is not None
+            started = time.perf_counter()
+            self._process.stdin.write(json.dumps({"audio_path": str(tmp_path), "prompt": prompt}, ensure_ascii=False) + "\n")
+            self._process.stdin.flush()
+            result = json.loads(self._readline())
+            wall_time = time.perf_counter() - started
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        if "error" in result:
+            raise RuntimeError(f"Qwen2.5-Omni generation failed: {result['error']}")
+        raw_audio = base64.b64decode(str(result.get("audio_pcm16_b64", "")))
+        output = np.frombuffer(raw_audio, dtype="<i2").astype(np.float32) / 32768.0
+        return str(result.get("text", "")).strip(), output, int(result.get("sample_rate", 24000)), wall_time
 
 
 class LocalASR:

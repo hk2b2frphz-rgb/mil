@@ -34,6 +34,8 @@ dependencies = [
     "silero-vad",
     "soundfile",
     "uroman",
+    # Used only by the local-only GPT Realtime evaluator; no PBS script calls it.
+    "websocket-client",
     # UTMOSv2 is not published as a resolvable PyPI distribution.  Pin the
     # official implementation to a release tag so uv can build it reliably.
     "utmosv2 @ git+https://github.com/sarulab-speech/UTMOSv2.git@14a281c6072d6fad2bf31f992ed2e60304400075",

@@ -138,6 +138,10 @@ def main() -> int:
         )
         default_model_id = f"speechllm_{args.speechllm_model.split('/')[-1]}"
     model_id = args.model_id or default_model_id
+    if llm is not None:
+        llm.load()
+    if speechllm is not None:
+        speechllm.load()
 
     scenarios = list(iter_jsonl(args.scenarios))
     if args.limit is not None:
@@ -230,6 +234,10 @@ def main() -> int:
             f"-> {response_text[:40]!r}"
         )
 
+    if llm is not None:
+        llm.close()
+    if speechllm is not None:
+        speechllm.close()
     print(f"[local-baseline] wrote {len(scenarios)} case(s) -> {out_dir}")
     return 0
 

@@ -37,6 +37,39 @@ python eval/summarize_eval.py \
 The judge script exits if it sees `PBS_JOBID`, `SLURM_JOB_ID`, or `LSB_JOBID`,
 unless `--allow-server` is passed.
 
+## Comparison baselines
+
+The PBS batch accepts `FDB_SYSTEM=cascade` and `FDB_SYSTEM=speechllm` rows in
+the model manifest.  Both run on the same real-dialogue data and write the
+same result layout as a Moshi row.  `speechllm` is the Qwen2-Audio
+audio-in/text-out baseline; use `SPEECHLLM_MODEL`, `SPEECHLLM_DEVICE_MAP`, and
+the other `SPEECHLLM_*` settings in that manifest row.  The worker stays loaded
+for the full run, rather than loading the 7B model once per test case.
+
+`FDB_SYSTEM=cascade_synthetic` and `FDB_SYSTEM=speechllm_synthetic` select the
+separate Full-Duplex-Bench-JA track.  Do not mix that track's scores with the
+real-dialogue table.
+
+## GPT Realtime (local PC only)
+
+GPT Realtime uses an outbound WebSocket and is intentionally not reachable
+from `scripts/run_full_duplex_eval_batch.pbs` or any PBS wrapper.  From a local
+Bash shell with the repository dependencies available:
+
+```bash
+python -m pip install websocket-client
+export OPENAI_API_KEY="..."
+MODEL_ID=gpt_realtime bash scripts/run_real_gpt_realtime_eval.sh
+```
+
+It streams each test WAV to a fresh Realtime API session, keeps the received
+audio and transcript in the normal `inference/` layout, then invokes the same
+response-rate/latency/MOS and judge-input steps.  The script refuses to run
+when PBS, Slurm, or LSF environment variables are present.  Set
+`REAL_CASES_PER_TASK=1` for a low-cost smoke run.  `GPT_REALTIME_INPUT_MODE=fast`
+is available for API plumbing checks; the default `realtime` mode paces input
+at wall-clock speed so response/interruption timing is meaningful.
+
 ## Full-duplex Japanese evaluation
 
 For the V100/PBS Full-Duplex-Bench-JA workflow, see
