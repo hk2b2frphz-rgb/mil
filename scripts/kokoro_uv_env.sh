@@ -37,4 +37,18 @@ kokoro_uv_run() {
         echo "ERROR: unidic download failed. kokoro cannot run without the Japanese dictionary." >&2
         return 1
     fi
+
+    # `from kokoro import KPipeline` imports Misaki lazily.  Check it here in
+    # the *same* uv overlay used by the evaluator so a missing Japanese extra,
+    # a broken fugashi wheel, or an unavailable dictionary is reported before
+    # a long model run starts.  Do not replace stderr with a generic message:
+    # the underlying ImportError identifies the package/system dependency that
+    # must be fixed on this particular HPC image.
+    echo "[$tag] preflighting kokoro + misaki[ja] import"
+    if ! uv run --with "kokoro>=0.9.4" --with "misaki[ja]" --with unidic \
+        python -c 'from kokoro import KPipeline; print("kokoro/misaki[ja] import: OK")'; then
+        echo "ERROR: Kokoro preflight failed in the uv isolated environment above." >&2
+        echo "       Re-run the displayed uv command after fixing its exact ImportError." >&2
+        return 1
+    fi
 }

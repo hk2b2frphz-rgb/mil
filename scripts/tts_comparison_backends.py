@@ -181,7 +181,8 @@ class KokoroTTS:
             from kokoro import KPipeline
         except ImportError as exc:
             raise RuntimeError(
-                "Kokoro requires kokoro>=0.9.4 and misaki[ja] in its isolated env."
+                "Kokoro requires kokoro>=0.9.4 and misaki[ja] in its isolated env. "
+                f"Underlying import error: {exc}"
             ) from exc
         self.pipeline = KPipeline(
             lang_code="j",
