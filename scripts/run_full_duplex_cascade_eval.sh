@@ -108,6 +108,8 @@ CASCADE_DEVICE="${CASCADE_DEVICE:-cuda}"
 CASCADE_DTYPE="${CASCADE_DTYPE:-float16}"
 BASELINE_VAD_TAIL_SEC="${BASELINE_VAD_TAIL_SEC:-8}"
 BASELINE_VAD_SILENCE_MS="${BASELINE_VAD_SILENCE_MS:-800}"
+BASELINE_VAD_THRESHOLD="${BASELINE_VAD_THRESHOLD:-0.5}"
+BASELINE_VAD_INPUT_FRAME_MS="${BASELINE_VAD_INPUT_FRAME_MS:-20}"
 
 if [[ -n "$FDB_CASES_PER_TASK" ]] && ! [[ "$FDB_CASES_PER_TASK" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: FDB_CASES_PER_TASK must be a positive integer: $FDB_CASES_PER_TASK" >&2
@@ -225,6 +227,8 @@ baseline_args=(
     --dtype "$CASCADE_DTYPE"
     --vad-tail-sec "$BASELINE_VAD_TAIL_SEC"
     --vad-silence-ms "$BASELINE_VAD_SILENCE_MS"
+    --vad-threshold "$BASELINE_VAD_THRESHOLD"
+    --vad-input-frame-ms "$BASELINE_VAD_INPUT_FRAME_MS"
     --overwrite
 )
 if [[ -n "$FDB_CASES_PER_TASK" ]]; then baseline_args+=(--cases-per-task "$FDB_CASES_PER_TASK"); fi

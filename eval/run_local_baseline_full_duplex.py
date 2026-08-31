@@ -145,6 +145,10 @@ def parse_args() -> argparse.Namespace:
         help="Observed silence required by streaming Silero VAD before inference starts.",
     )
     parser.add_argument("--vad-threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--vad-input-frame-ms", type=int, default=20,
+        help="Audio capture callback size; Silero internally accumulates its native 32-ms windows.",
+    )
 
     # Keep this identical to the established dialogue-generation path.  This
     # public Gemma 4 checkpoint is not the gated Gemma 2/3 Hugging Face path.
@@ -215,6 +219,7 @@ def warmup_baseline(
     find_streaming_endpoint(
         pcm, sample_rate, tail_sec=args.vad_tail_sec,
         silence_ms=args.vad_silence_ms, threshold=args.vad_threshold,
+        input_frame_ms=args.vad_input_frame_ms,
     )
     if args.system == "cascade":
         assert asr is not None and llm is not None
@@ -267,6 +272,7 @@ def process_variant(
     endpoint = find_streaming_endpoint(
         pcm, sample_rate, tail_sec=args.vad_tail_sec,
         silence_ms=args.vad_silence_ms, threshold=args.vad_threshold,
+        input_frame_ms=args.vad_input_frame_ms,
     )
     vad_wall = time.perf_counter() - vad_started
     if endpoint is None:
@@ -460,6 +466,8 @@ def process_variant(
         "vad_overrun_time_sec": round(vad_overrun, 4),
         "vad_silence_ms": args.vad_silence_ms,
         "vad_tail_sec": args.vad_tail_sec,
+        "vad_threshold": args.vad_threshold,
+        "vad_input_frame_ms": args.vad_input_frame_ms,
         "utterance_end_sec": round(utterance_end_sec, 4),
         "vad_complete_after_utterance_end_sec": round(vad_complete_after_end, 4),
         "asr_complete_after_utterance_end_sec": round(asr_complete_after_end, 4),
@@ -631,6 +639,7 @@ def main() -> int:
         "vad_silence_ms": args.vad_silence_ms,
         "vad_tail_sec": args.vad_tail_sec,
         "vad_threshold": args.vad_threshold,
+        "vad_input_frame_ms": args.vad_input_frame_ms,
         "llm_model": args.llm_model if args.system == "cascade" else None,
         "llm_dtype": args.llm_dtype if args.system == "cascade" else None,
         "llm_temperature": args.llm_temperature if args.system == "cascade" else None,
