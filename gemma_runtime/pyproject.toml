@@ -10,6 +10,9 @@ dependencies = [
     # compatible with V100 (sm_70) and need no CUDA 12.4+ host driver.
     "torch>=2.6.0,<2.7",
     "torchvision>=0.21.0,<0.22",
+    # Keep cuDNN explicit: some cluster environments previously resolved the
+    # PyTorch wheel without exposing its transitive CUDA runtime package.
+    "nvidia-cudnn-cu11>=9.1.0.70,<10",
     "transformers>=5.5.0",
     "numpy",
     "qwen-omni-utils",
