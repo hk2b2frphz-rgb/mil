@@ -550,6 +550,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--aizuchi-only-example",
+        type=int,
+        default=int(os.environ.get("AIZUCHI_ONLY_EXAMPLE") or 0),
+        help=(
+            "1 to show aizuchiAI one worked example of the task (one utterance "
+            "and the reactions returned for it). 0 for zero-shot, which is what "
+            "every run so far has used."
+        ),
+    )
+    parser.add_argument(
         "--aizuchi-only-probe-rate",
         type=float,
         default=float(os.environ.get("AIZUCHI_ONLY_PROBE_RATE") or 0.5),
@@ -1673,7 +1683,12 @@ class LLMDialogueGenerator:
         if not points:
             return [user_turn]
         prompt = build_aizuchi_only_agent_prompt(
-            use_case, visible_turns, user_turn.text, points, frequency=frequency
+            use_case,
+            visible_turns,
+            user_turn.text,
+            points,
+            frequency=frequency,
+            with_example=bool(self.args.aizuchi_only_example),
         )
         raw = self.call_agent(
             prompt,
@@ -2953,12 +2968,30 @@ def recent_aizuchi_texts(turns: list[DialogueTurn], limit: int = 3) -> list[str]
     return seen
 
 
+# 指示文で守られなかったことが、実例なら伝わるかもしれない。対話をまるごと
+# 見せるとプロンプトが倍になるので、発話ひとつ分の一対だけにする。見せている
+# のは3つ: 言い切った所で受け止めること、オウム返しは意味の乗った語を拾うこと、
+# そして全部の位置をオウム返しで埋めないこと。
+AIZUCHI_ONLY_EXAMPLE = """
+例:
+  1: 主人が亡くなって、
+  2: もう一年半になるんですけど。
+  3: 一周忌も済ませて、
+  4: まわりからは区切りがついたねって言われるんです。
+  声を出す位置: 2（言い切った所）/ 4（言い切った所）
+  返した内容:
+  {"reactions":[{"after_clause": 2, "text": "一年半…。", "kind": "echo"},
+                {"after_clause": 4, "text": "そうでしたか。", "kind": "aizuchi"}]}
+""".strip()
+
+
 def build_aizuchi_only_agent_prompt(
     use_case: dict[str, Any],
     turns: list[DialogueTurn],
     user_text: str,
     points: list[dict[str, Any]],
     frequency: dict[str, Any] | None = None,
+    with_example: bool = False,
 ) -> AgentPrompt:
     """反応する位置は決まっている。何と言うかだけを訊く。"""
     transcript = dialogue_turns_to_transcript(turns) or "(まだ会話は始まっていません)"
@@ -2982,6 +3015,7 @@ def build_aizuchi_only_agent_prompt(
             hint = "軽い切れ目。ごく短い相づちだけ"
         lines.append(f"  位置{index}（{clause}）… {hint}")
     slots = "\n".join(lines)
+    example = f"\n{AIZUCHI_ONLY_EXAMPLE}\n" if with_example else ""
     prompt = f"""
 相談ケース:
 {case_brief(use_case)}
@@ -3006,7 +3040,7 @@ def build_aizuchi_only_agent_prompt(
   「野球を。」）。言い換え・要約・感想は書きません。相手が使っていない語を
   混ぜたものは落とされます。
 - 謝辞や謝罪（「ありがとう」「すみません」）にはオウム返しをしません。
-
+{example}
 JSONだけを返してください:
 {{"reactions":[{{"after_clause": {points[0]["after_clause"] if points else 1}, "text": "はい。", "kind": "aizuchi"}}]}}
 """.strip()
