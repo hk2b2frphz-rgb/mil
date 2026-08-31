@@ -9,7 +9,7 @@ set -euo pipefail
 #   bash scripts/debug_real_baseline.sh speechllm
 #
 # Useful overrides:
-#   DEBUG_CASES_PER_TASK=1  (default)   DEBUG_KEEP_OUTPUT=1
+#   DEBUG_CASES_PER_TASK=3  (default)   DEBUG_KEEP_OUTPUT=1
 #   CASCADE_ASR_MODEL=turbo               (default for cascade smoke test)
 #   CASCADE_LLM_MODEL=google/gemma-4-E2B-it (default for cascade)
 #   CASCADE_LLM_MAX_NEW_TOKENS=80         (default for cascade smoke test)
@@ -27,7 +27,7 @@ cd "$REPO_ROOT"
 command -v uv >/dev/null 2>&1 || { echo "ERROR: uv is not on PATH." >&2; exit 2; }
 command -v nvidia-smi >/dev/null 2>&1 || { echo "ERROR: run this in a GPU allocation; nvidia-smi is unavailable." >&2; exit 2; }
 
-DEBUG_CASES_PER_TASK="${DEBUG_CASES_PER_TASK:-1}"
+DEBUG_CASES_PER_TASK="${DEBUG_CASES_PER_TASK:-3}"
 if ! [[ "$DEBUG_CASES_PER_TASK" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: DEBUG_CASES_PER_TASK must be a positive integer." >&2
     exit 2
