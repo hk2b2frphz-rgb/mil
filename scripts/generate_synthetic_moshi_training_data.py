@@ -1604,66 +1604,48 @@ class LLMDialogueGenerator:
         max_insertions: int | None = None,
         listener_only: bool = False,
         frequency: dict[str, Any] | None = None,
+        rng: random.Random | None = None,
     ) -> list[DialogueTurn]:
+        if listener_only:
+            return self.react_to_user_turn(
+                use_case=use_case,
+                visible_turns=visible_turns,
+                user_turn=user_turn,
+                case_id=case_id,
+                block_index=pair_index,
+                frequency=frequency or AIZUCHI_FREQUENCY_PRESETS["normal"],
+                rng=rng or random.Random(0),
+            )
         if max_insertions is None:
             max_insertions = int(self.args.multi_agent_max_aizuchi_per_user)
-        # aizuchi-only では長さの下限も間隔もプリセットが決める。multi-agent は
-        # 従来どおり --multi-agent-* のまま。
-        min_chars = (
-            int(frequency["min_chars"])
-            if frequency
-            else int(self.args.multi_agent_aizuchi_min_chars)
-        )
-        min_gap = int(frequency["min_gap"]) if frequency else 1
-        min_chunk_chars = int(frequency["min_chunk_chars"]) if frequency else 0
         if (
             self.args.no_multi_agent_aizuchi
-            or len(user_turn.text) < min_chars
+            or len(user_turn.text) < int(self.args.multi_agent_aizuchi_min_chars)
             or max_insertions <= 0
         ):
             return [user_turn]
         clauses = split_text_into_clauses(user_turn.text)
         if len(clauses) < 2:
             return [user_turn]
-        if listener_only:
-            prompt = build_aizuchi_only_agent_prompt(
-                use_case,
-                visible_turns,
-                user_turn.text,
-                max_insertions,
-                frequency=frequency,
-            )
-        else:
-            prompt = build_aizuchi_agent_prompt(
-                use_case,
-                visible_turns,
-                user_turn.text,
-                moshi_turn.text if moshi_turn is not None else "",
-                max_insertions,
-            )
+        prompt = build_aizuchi_agent_prompt(
+            use_case,
+            visible_turns,
+            user_turn.text,
+            moshi_turn.text if moshi_turn is not None else "",
+            max_insertions,
+        )
         raw = self.call_agent(
             prompt,
             temperature=self.args.multi_agent_aizuchi_temperature,
             max_tokens=120,
             role_name="aizuchiAI",
         )
-        insertions = parse_aizuchi_insertions(
-            raw,
-            clauses,
-            max_insertions,
-            allow_final=listener_only,
-            min_gap=min_gap,
-            min_chunk_chars=min_chunk_chars,
-            allow_echo=listener_only,
-        )
+        insertions = parse_aizuchi_insertions(raw, clauses, max_insertions)
         self.trace_event(
             {
                 "event": "aizuchi_decision",
                 "case_id": case_id,
                 "pair_index": pair_index,
-                "listener_only": listener_only,
-                "frequency": (frequency or {}).get("label"),
-                "aizuchi_mode": self.args.multi_agent_aizuchi_mode,
                 "prompt_system": prompt.system,
                 "prompt_user": prompt.user,
                 "raw_text": raw[:1000],
@@ -1671,6 +1653,49 @@ class LLMDialogueGenerator:
             }
         )
         return user_turns_with_aizuchi(user_turn.text, insertions)
+
+    def react_to_user_turn(
+        self,
+        *,
+        use_case: dict[str, Any],
+        visible_turns: list[DialogueTurn],
+        user_turn: DialogueTurn,
+        case_id: str,
+        block_index: int,
+        frequency: dict[str, Any],
+        rng: random.Random,
+    ) -> list[DialogueTurn]:
+        """聞き手の反応を入れる。位置はこちらが決め、語だけモデルに訊く。"""
+        clauses = split_text_into_clauses(user_turn.text)
+        if len(clauses) < 1:
+            return [user_turn]
+        points = pick_reaction_points(clauses, frequency, rng)
+        if not points:
+            return [user_turn]
+        prompt = build_aizuchi_only_agent_prompt(
+            use_case, visible_turns, user_turn.text, points, frequency=frequency
+        )
+        raw = self.call_agent(
+            prompt,
+            temperature=self.args.multi_agent_aizuchi_temperature,
+            max_tokens=200,
+            role_name="aizuchiAI",
+        )
+        reactions = parse_aizuchi_reactions(raw, clauses, points)
+        self.trace_event(
+            {
+                "event": "aizuchi_decision",
+                "case_id": case_id,
+                "block_index": block_index,
+                "frequency": frequency.get("label"),
+                "points": points,
+                "prompt_system": prompt.system,
+                "prompt_user": prompt.user,
+                "raw_text": raw[:1000],
+                "reactions": reactions,
+            }
+        )
+        return user_turns_with_aizuchi(user_turn.text, reactions)
 
     def generate_aizuchi_only(
         self,
@@ -1696,7 +1721,11 @@ class LLMDialogueGenerator:
         )
         max_blocks = max(1, int(self.args.aizuchi_only_max_blocks))
         min_blocks = max(1, min(int(self.args.aizuchi_only_min_blocks), max_blocks))
-        plans = plan_aizuchi_only_blocks(rng, max_blocks, self.args)
+        # 判定器で切り上げるのをやめ、長さは最初に引く。相づちしか返らない対話に
+        # 「一区切りついたか」を訊くと、返事が来ないこと自体を未完了と判定して
+        # 毎回上限まで走っていた。
+        block_count = rng.randint(min_blocks, max_blocks)
+        plans = plan_aizuchi_only_blocks(rng, block_count, self.args)
         # 電話は名乗りから始まる。ここだけは相づちではない固定文。
         turns: list[DialogueTurn] = [
             DialogueTurn("moshi", AIZUCHI_ONLY_GREETING, note="固定の名乗り")
@@ -1711,7 +1740,7 @@ class LLMDialogueGenerator:
                 "case_id": case_id,
                 "profile": profile,
                 "min_blocks": min_blocks,
-                "max_blocks": max_blocks,
+                "block_count": block_count,
                 "block_plans": plans,
                 "frequency": frequency_name,
                 "frequency_label": frequency["label"],
@@ -1727,7 +1756,7 @@ class LLMDialogueGenerator:
                 "trailing_silence": plan["trailing_silence"],
             }
             user_prompt = build_aizuchi_only_user_prompt(
-                use_case, profile, turns, block_index, max_blocks, plan
+                use_case, profile, turns, block_index, block_count, plan
             )
             user_text = self.call_agent_utterance(
                 user_prompt,
@@ -1765,27 +1794,21 @@ class LLMDialogueGenerator:
                 silences_left -= sum(
                     1 for item in user_turns if item.speaker == "silence"
                 )
-                # 沈黙で割れても相づちの予算は発話全体で1本ぶん。
-                budget = int(frequency["max_per_turn"])
                 for turn in user_turns:
                     if turn.speaker != "user":
                         turns.append(turn)
                         continue
-                    segment_turns = self.add_aizuchi_for_user_turn(
-                        use_case=use_case,
-                        visible_turns=turns,
-                        user_turn=turn,
-                        moshi_turn=None,
-                        case_id=case_id,
-                        pair_index=block_index + 1,
-                        max_insertions=budget,
-                        listener_only=True,
-                        frequency=frequency,
+                    turns.extend(
+                        self.react_to_user_turn(
+                            use_case=use_case,
+                            visible_turns=turns,
+                            user_turn=turn,
+                            case_id=case_id,
+                            block_index=block_index + 1,
+                            frequency=frequency,
+                            rng=rng,
+                        )
                     )
-                    budget -= sum(
-                        1 for item in segment_turns if item.speaker == "moshi"
-                    )
-                    turns.extend(segment_turns)
 
             if plan["trailing_silence"] and silences_left > 0:
                 silences_left -= 1
@@ -1805,32 +1828,6 @@ class LLMDialogueGenerator:
                     **context,
                 }
             )
-
-            # 沈黙を置いた直後に打ち切ると、黙ったまま終わる対話になる（次の
-            # ブロックで確認が入るかもしれない位置なので判定を回さない）。
-            if plan["trailing_silence"] is None and block_index + 1 >= min_blocks:
-                judge_prompt = build_aizuchi_only_judge_prompt(
-                    use_case, turns, block_index, min_blocks, max_blocks
-                )
-                judge_raw = self.call_agent(
-                    judge_prompt,
-                    temperature=self.args.multi_agent_judge_temperature,
-                    max_tokens=120,
-                    role_name="judgeAI",
-                )
-                complete = parse_completion_decision(judge_raw)
-                self.trace_event(
-                    {
-                        "event": "judge_decision",
-                        "prompt_system": judge_prompt.system,
-                        "prompt_user": judge_prompt.user,
-                        "raw_text": judge_raw[:1000],
-                        "complete": complete,
-                        **context,
-                    }
-                )
-                if complete:
-                    break
 
         # 話し手が締めたら、聞き手も挨拶で終える。切れたまま終わらない。
         time_of_day = str(use_case.get("time_of_day") or "")
@@ -2380,6 +2377,35 @@ JSONだけを返してください。
     return AgentPrompt(system=JUDGE_AGENT_SYSTEM_PROMPT, user=prompt)
 
 
+# 相づちを打つ位置は、聞き手が自由に選ぶものではなく、話し手の言葉の形でほぼ
+# 決まる。だから位置はこちらで機械的に取り、モデルには「そこで何と言うか」だけ
+# を訊く。以前は「最大N個どこにでも」と訊いていたので、モデルは上限まで等間隔
+# に埋め、上限を下げて帳尻を合わせる羽目になっていた。
+#
+#   end  文末（。！？）        言い切った。受け止めが入る。復唱もここだけ
+#   cont 継続節末（けど、から、ので、し、て、ね、が + 読点）
+#                              話が続く合図。息継ぎに重なる
+#   weak ただの読点            弱い。ほとんど入らない
+CONTINUATIVE_ENDINGS = (
+    "けど", "けれど", "だけど", "ですけど", "ますけど",
+    "から", "ので", "のに", "し", "て", "で", "が", "ね", "な", "よ",
+)
+
+
+def clause_boundary_kind(clause: str) -> str:
+    """句の終わり方から、そこがどういう切れ目かを決める。"""
+    body = clause.strip()
+    if not body:
+        return "weak"
+    if body[-1] in "。！？!?…":
+        return "end"
+    if body.endswith(("、", "，")):
+        stem = body[:-1].rstrip("…・ 　")
+        if stem.endswith(CONTINUATIVE_ENDINGS):
+            return "cont"
+    return "weak"
+
+
 def split_text_into_clauses(text: str) -> list[str]:
     parts = re.findall(r".*?[、。！？!?]|.+$", text.strip())
     return [part.strip() for part in parts if part.strip()]
@@ -2687,7 +2713,12 @@ AIZUCHI_ONLY_CLOSINGS = {
 # 「相手が言った語がそのまま入っていること」は機械的に確かめられる。言い換えや
 # 要約はここでは許さない -- 通ってしまうと本応答との境目が無くなる。
 ECHO_SUFFIXES = ("、ですか。", "ですか。", "……。", "…。", "。")
-ECHO_CORE_MIN = 2
+ECHO_CORE_MIN = 3
+# 中身のない復唱。相手の言葉から取ってはいても、これを返しても聞いた証にならない。
+ECHO_STOPWORDS = frozenset({
+    "って", "そう", "でも", "あの", "あー", "ただ", "けど", "だから", "それで",
+    "なんか", "ちょっと", "やっぱり", "本当に", "こんな", "そんな", "どうも",
+})
 ECHO_CORE_MAX = 12
 
 
@@ -2708,6 +2739,8 @@ def is_valid_echo(text: str, source: str) -> bool:
         return False
     if any(ch in text for ch in "?？"):
         return False
+    if core in ECHO_STOPWORDS:
+        return False
     return core in source
 
 # 相づちの打ち方の三段階。同じ台本でも聞き手の性格が変わるので、対話1本ごとに
@@ -2722,6 +2755,9 @@ def is_valid_echo(text: str, source: str) -> bool:
 AIZUCHI_FREQUENCY_PRESETS: dict[str, dict[str, Any]] = {
     "eager": {
         "label": "積極的",
+        # 切れ目の種類ごとに、そこで反応する確率。上限ではないので、長く話せば
+        # その分だけ相づちが増える -- 人が聞いているときと同じ振る舞いになる。
+        "rates": {"end": 0.90, "cont": 0.55, "weak": 0.20},
         "max_per_turn": 3,
         "min_chars": 10,
         "min_gap": 1,
@@ -2736,6 +2772,7 @@ AIZUCHI_FREQUENCY_PRESETS: dict[str, dict[str, Any]] = {
     },
     "normal": {
         "label": "普通",
+        "rates": {"end": 0.70, "cont": 0.35, "weak": 0.08},
         "max_per_turn": 2,
         "min_chars": 16,
         "min_gap": 2,
@@ -2748,6 +2785,7 @@ AIZUCHI_FREQUENCY_PRESETS: dict[str, dict[str, Any]] = {
     },
     "reserved": {
         "label": "控えめ",
+        "rates": {"end": 0.40, "cont": 0.12, "weak": 0.0},
         "max_per_turn": 1,
         "min_chars": 40,
         "min_gap": 3,
@@ -2919,19 +2957,31 @@ def build_aizuchi_only_agent_prompt(
     use_case: dict[str, Any],
     turns: list[DialogueTurn],
     user_text: str,
-    max_insertions: int,
+    points: list[dict[str, Any]],
     frequency: dict[str, Any] | None = None,
 ) -> AgentPrompt:
+    """反応する位置は決まっている。何と言うかだけを訊く。"""
     transcript = dialogue_turns_to_transcript(turns) or "(まだ会話は始まっていません)"
     clauses = split_text_into_clauses(user_text)
     numbered = "\n".join(f"{i + 1}: {clause}" for i, clause in enumerate(clauses))
-    preset = frequency or AIZUCHI_FREQUENCY_PRESETS["normal"]
-    frequency_directive = str(preset["directive"])
     recent = recent_aizuchi_texts(turns)
-    if recent:
-        forbidden = "\n- 直前に使った語なので、今回は使いません: " + " / ".join(recent)
-    else:
-        forbidden = ""
+    forbidden = (
+        "\n- 直前に使った語なので、今回は使いません: " + " / ".join(recent)
+        if recent
+        else ""
+    )
+    lines = []
+    for point in points:
+        index = int(point["after_clause"])
+        clause = clauses[index - 1] if index <= len(clauses) else ""
+        if point["kind"] == "end":
+            hint = "言い切った所。受け止めるか、相手の言葉をそのまま返す（オウム返し）"
+        elif point["kind"] == "cont":
+            hint = "話が続く所。短い相づちだけ"
+        else:
+            hint = "軽い切れ目。ごく短い相づちだけ"
+        lines.append(f"  位置{index}（{clause}）… {hint}")
+    slots = "\n".join(lines)
     prompt = f"""
 相談ケース:
 {case_brief(use_case)}
@@ -2942,25 +2992,23 @@ def build_aizuchi_only_agent_prompt(
 今回の user 発話を句ごとに分けたもの:
 {numbered}
 
-最大挿入数: {max_insertions}
-判断:
-- 相づちは反応であって割り込みではありません。句の意味が区切れた所・感情がこぼれた所にだけ入れます。
-- 最大挿入数まで埋める必要はありません。等間隔に並べません。
-{frequency_directive}
-- after_clause には句番号を書きます。最後の句の後に置く場合は {len(clauses)} を指定します。
-- 相手の感情に合わせて語を選び、同じ語を繰り返しません:
-  つらさ・涙がにじむ →「あぁ…。」「あー…。」/ 事実の区切り →「はい。」/
-  静かな同意 →「ええ。」「えぇ。」/ 同意が深まる →「ええ、ええ。」/
-  初めて知る事実 →「そうでしたか。」/ 重い打ち明け →「そうだったんですね。」「そうなんですね。」（控えめに）。
-- text は必ず上の語彙のどれか。{forbidden}
-- 相手の言葉をそのまま返す「オウム返し」も使えます。その場合は kind を "echo" に
-  し、text は相手が今言った語をそのまま短く（例: 相手が「もう一年半になるんです」
-  なら「一年半…。」、「野球が好きで」なら「野球を。」）。言い換え・要約・感想は
-  書きません。相手が使っていない語を混ぜると落とされます。
-- オウム返しは 1 発話に多くて 1 つ。使わない発話のほうが多くて構いません。
-- 「あぁ…。」「あー…。」は本当に感情がこぼれた所だけです。困ったときの既定値に
-  しないでください（対話全体で数回までのつもりで選びます）。
-JSONだけを返してください。
+あなたが声を出す位置は、すでに決まっています:
+{slots}
+
+それぞれの位置で何と言うかだけを決めてください。位置を増やしたり減らしたりしません。
+- 相づちは次のどれか: はい。/ ええ。/ えぇ。/ ええ、ええ。/ あぁ…。/ あー…。/
+  そうでしたか。/ そうだったんですね。/ そうなんですね。
+- 相手の感情に合う語を選びます。つらさがこぼれた所では「あぁ…。」、事実の区切り
+  では「はい。」、静かな同意では「ええ。」。{forbidden}
+- 「なるほど。」は使いません。
+- 「言い切った所」では、相づちの代わりにオウム返しもできます。その場合は
+  kind を "echo" にし、text は相手が今言った語をそのまま短く（例:「一年半…。」
+  「野球を。」）。言い換え・要約・感想は書きません。相手が使っていない語を
+  混ぜたものは落とされます。
+- 謝辞や謝罪（「ありがとう」「すみません」）にはオウム返しをしません。
+
+JSONだけを返してください:
+{{"reactions":[{{"after_clause": {points[0]["after_clause"] if points else 1}, "text": "はい。", "kind": "aizuchi"}}]}}
 """.strip()
     return AgentPrompt(system=AIZUCHI_ONLY_AGENT_SYSTEM_PROMPT, user=prompt)
 
@@ -2993,6 +3041,81 @@ def build_aizuchi_only_judge_prompt(
 JSONだけを返してください。
 """.strip()
     return AgentPrompt(system=AIZUCHI_ONLY_JUDGE_SYSTEM_PROMPT, user=prompt)
+
+
+def parse_aizuchi_reactions(
+    text: str,
+    clauses: list[str],
+    points: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """決めた位置に対する返答だけを受け取る。位置は増やせない。"""
+    try:
+        data = extract_json_object(text)
+    except (ValueError, json.JSONDecodeError):
+        return []
+    raw = data.get("reactions")
+    if not isinstance(raw, list):
+        raw = data.get("insertions")  # 旧スキーマでの返答も受ける
+    if not isinstance(raw, list):
+        return []
+    allowed = set(AIZUCHI_ONLY_VOCAB)
+    by_index = {int(p["after_clause"]): p for p in points}
+    full_text = "".join(clauses)
+    out: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            after_clause = int(item.get("after_clause"))
+        except (TypeError, ValueError):
+            continue
+        point = by_index.get(after_clause)
+        if point is None or after_clause in seen:
+            continue
+        value = str(item.get("text") or "").strip()
+        kind = str(item.get("kind") or "aizuchi").strip().lower()
+        if kind == "echo":
+            # オウム返しは言い切った所だけ。読点で切れた断片を返すと
+            # 「宙に浮いてるとか、」のような、聞いていない受け答えになる。
+            if point["kind"] != "end" or not is_valid_echo(value, full_text):
+                continue
+            previous = "".join(clauses[: after_clause])
+            if re.search(r"ありがと|すみません|すいません|ごめん", previous[-24:]):
+                continue
+        elif value not in allowed:
+            continue
+        seen.add(after_clause)
+        out.append({"after_clause": after_clause, "text": value, "kind": kind})
+    return sorted(out, key=lambda entry: entry["after_clause"])
+
+
+def pick_reaction_points(
+    clauses: list[str],
+    frequency: dict[str, Any],
+    rng: random.Random,
+) -> list[dict[str, Any]]:
+    """どの切れ目で反応するかを、切れ目の種類と確率だけで決める。
+
+    数の上限は置かない。上限を置くと、モデルはそこまで埋めようとし、こちらは
+    それを下げて帳尻を合わせることになる（実際そうなっていた）。
+    """
+    rates = frequency.get("rates") or AIZUCHI_FREQUENCY_PRESETS["normal"]["rates"]
+    points: list[dict[str, Any]] = []
+    previous = -99
+    for index, clause in enumerate(clauses, start=1):
+        kind = clause_boundary_kind(clause)
+        if rng.random() >= float(rates.get(kind, 0.0)):
+            continue
+        # 隣の句に続けて打つと畳みかけて聞こえる。ただし、話が続く所（cont）の
+        # 直後に言い切り（end）が来るのはよくある形なので、そこは許す -- 一律に
+        # 隣を禁じると、end の手前の cont がほぼ全部消える。
+        gap = index - previous
+        if gap < 1 or (gap < 2 and kind != "end"):
+            continue
+        points.append({"after_clause": index, "kind": kind})
+        previous = index
+    return points
 
 
 def pick_probe_reply(rng: random.Random, used: set[str]) -> str:
@@ -3058,7 +3181,13 @@ def sanitize_aizuchi_only_turns(
         elif text not in allowed:
             continue
         is_probe_reply = text in AIZUCHI_ONLY_PROBE_REPLIES
+        # 名乗りと終話は相づちではないので、相づちの規則で落とさない。
         if text == AIZUCHI_ONLY_GREETING and not out:
+            out.append(turn)
+            continue
+        if text in AIZUCHI_ONLY_CLOSINGS.values():
+            while out and out[-1].speaker == "silence":
+                out.pop()
             out.append(turn)
             continue
         previous = out[-1] if out else None
@@ -3095,6 +3224,9 @@ def aizuchi_only_prompt_preview(
     profile = build_user_agent_profile(use_case, rng, listener_only=True)
     max_blocks = max(1, int(args.aizuchi_only_max_blocks))
     plans = plan_aizuchi_only_blocks(rng, max_blocks, args)
+    frequency_name, frequency = resolve_aizuchi_frequency(
+        args.aizuchi_only_frequency, rng
+    )
     sample_user = DialogueTurn(
         "user", str(use_case.get("opening", "少し話してもいいですか。"))
     )
@@ -3109,22 +3241,13 @@ def aizuchi_only_prompt_preview(
         max_blocks,
         {"probe": True, "trailing_silence": None},
     )
-    frequency_name, frequency = resolve_aizuchi_frequency(
-        args.aizuchi_only_frequency, rng
-    )
+    sample_text = "夜が長くて、眠れないんですけど、どうにも落ち着かないんです。"
+    clauses = split_text_into_clauses(sample_text)
+    points = pick_reaction_points(clauses, frequency, rng) or [
+        {"after_clause": len(clauses), "kind": "end"}
+    ]
     aizuchi_prompt = build_aizuchi_only_agent_prompt(
-        use_case,
-        [],
-        sample_user.text,
-        int(frequency["max_per_turn"]),
-        frequency=frequency,
-    )
-    judge_prompt = build_aizuchi_only_judge_prompt(
-        use_case,
-        [sample_user],
-        0,
-        int(args.aizuchi_only_min_blocks),
-        max_blocks,
+        use_case, [], sample_text, points, frequency=frequency
     )
     return {
         "profile": profile,
@@ -3134,10 +3257,9 @@ def aizuchi_only_prompt_preview(
         "userAI_vent": asdict(vent_prompt),
         "userAI_probe": asdict(probe_prompt),
         "aizuchi": asdict(aizuchi_prompt),
-        "judge": asdict(judge_prompt),
+        "aizuchi_points_example": points,
         "probe_replies": list(AIZUCHI_ONLY_PROBE_REPLIES),
     }
-
 
 def multi_agent_prompt_preview(
     use_case: dict[str, Any],
