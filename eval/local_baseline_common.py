@@ -72,6 +72,30 @@ COUNSELOR_SYSTEM_PROMPT = _load_counselor_prompt()
 _PROXY_KEYS = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")
 
 
+def _prepend_gemma_cuda_libraries(environment: dict[str, str]) -> None:
+    """Expose PyTorch wheel-bundled CUDA libraries to the Gemma subprocess.
+
+    PyTorch 2.6 CUDA wheels place cuDNN 9 under
+    ``.venv/lib/python*/site-packages/nvidia/cudnn/lib``.  On some HPC nodes
+    the dynamic linker does not honor the wheel's relative RPATH after a
+    process inherits a cluster CUDA module, leading to ``libcudnn.so.9: cannot
+    open shared object file`` during Gemma generation.  Prefer the isolated
+    runtime's libraries without modifying the parent shell globally.
+    """
+    runtime_dir = REPO_ROOT / "gemma_runtime" / ".venv"
+    candidates = sorted(
+        runtime_dir.glob("lib/python*/site-packages/nvidia/*/lib")
+    )
+    existing = [item for item in candidates if item.is_dir()]
+    if not existing:
+        return
+    paths = [str(item) for item in existing]
+    current = environment.get("LD_LIBRARY_PATH", "")
+    if current:
+        paths.append(current)
+    environment["LD_LIBRARY_PATH"] = os.pathsep.join(paths)
+
+
 def worker_environment() -> dict[str, str]:
     """Return a subprocess environment with a usable, normalized proxy only.
 
@@ -82,6 +106,7 @@ def worker_environment() -> dict[str, str]:
     preserved; only malformed values are discarded.
     """
     environment = os.environ.copy()
+    _prepend_gemma_cuda_libraries(environment)
     proxy_setting = next(
         ((key, environment[key]) for key in _PROXY_KEYS if environment.get(key)),
         None,
