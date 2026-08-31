@@ -243,7 +243,7 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
         done
     fi
     case "$row_system" in
-        real|gold|moshi|cascade|cascade_synthetic) ;;
+        real|gold|moshi|cascade|speechllm|cascade_synthetic|speechllm_synthetic) ;;
         *)
             echo "[batch] WARN: unknown FDB_SYSTEM='$row_system' for $model_id, treating as real" >&2
             row_system="real"
@@ -306,9 +306,19 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
             eval_script="scripts/run_real_cascade_eval.sh"
             expected_system="cascade"
             ;;
+        speechllm)
+            # SpeechLLM は ASR を介さず音声を直接入力する turn-based
+            # baseline。実データ評価なので Moshi/cascade と同じ表に載る。
+            eval_script="scripts/run_real_speechllm_eval.sh"
+            expected_system="speechllm"
+            ;;
         cascade_synthetic)
             eval_script="scripts/run_full_duplex_cascade_eval.sh"
             expected_system="cascade"
+            ;;
+        speechllm_synthetic)
+            eval_script="scripts/run_full_duplex_speechllm_eval.sh"
+            expected_system="speechllm"
             ;;
         *)
             eval_script="scripts/run_full_duplex_eval.sh"

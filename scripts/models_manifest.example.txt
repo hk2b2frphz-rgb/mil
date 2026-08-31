@@ -42,6 +42,12 @@
 #                   (synthetic Full-Duplex-Bench-JA). That is a different track
 #                   and is reported separately, never in the same table.
 #                   See scripts/run_real_cascade_eval.sh.
+#                   FDB_SYSTEM=speechllm runs Qwen2-Audio (audio->text->TTS)
+#                   on the same real-data track. Configure it with
+#                   SPEECHLLM_* keys, for example
+#                   FDB_SYSTEM=speechllm;SPEECHLLM_MODEL=Qwen/Qwen2-Audio-7B-Instruct.
+#                   FDB_SYSTEM=speechllm_synthetic selects its separate
+#                   Full-Duplex-Bench-JA track.
 # - opening_greeting optional. "0" or "1", sets FDB_OPENING_GREETING for this
 #                   row only. Leave empty to use the default described below.
 #                   This dedicated column exists so the greeting toggle
@@ -78,3 +84,4 @@ lora_h01|/path/to/lora_h01_v2/consolidated.safetensors|||||v2
 full_f01|/path/to/full_f01/model.safetensors|||FDB_SEEDS=0,1,2||full_f01_seed012
 hf_pretrained_with_greeting|||llm-jp/some-other-checkpoint||1|hf_greeting_v1
 cascade_gemma2b||||FDB_SYSTEM=cascade;CASCADE_LLM_MODEL=google/gemma-2-2b-it||cascade_gemma2b
+speechllm_qwen2audio||||FDB_SYSTEM=speechllm;SPEECHLLM_MODEL=Qwen/Qwen2-Audio-7B-Instruct||speechllm_qwen2audio

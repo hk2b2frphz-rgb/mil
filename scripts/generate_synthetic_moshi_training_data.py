@@ -2573,11 +2573,9 @@ def parse_aizuchi_insertions(
     allow_final: bool = False,
     min_gap: int = 1,
     min_chunk_chars: int = 0,
-    allow_echo: bool = False,
 ) -> list[dict[str, Any]]:
     if len(clauses) < 2 or max_insertions <= 0:
         return []
-    full_text = "".join(clauses)
     try:
         data = extract_json_object(text)
     except (ValueError, json.JSONDecodeError):
@@ -2604,22 +2602,14 @@ def parse_aizuchi_insertions(
         except (TypeError, ValueError):
             continue
         text_value = str(item.get("text") or "").strip()
-        kind = str(item.get("kind") or "aizuchi").strip().lower()
-        if kind == "echo":
-            # 復唱は「重ねない」ので、TTS の overlap 対象（完全一致の語彙）から
-            # 自然に外れる。相手の言葉から取っているかだけ確かめる。
-            if not allow_echo or not is_valid_echo(text_value, full_text):
-                continue
-        elif text_value not in allowed:
+        if text_value not in allowed:
             continue
         if after_clause < 1 or after_clause > last_allowed:
             continue
         if after_clause in seen:
             continue
         seen.add(after_clause)
-        candidates.append(
-            {"after_clause": after_clause, "text": text_value, "kind": kind}
-        )
+        candidates.append({"after_clause": after_clause, "text": text_value})
 
     # 位置順に見て、間隔・直前の発話量・上限の順で受け入れる。上限を先に消費
     # しないよう、落とす条件はすべて上限より前に効かせる（そうしないと、捨てる
@@ -2662,14 +2652,7 @@ def user_turns_with_aizuchi(
         chunk = "".join(clauses[start:after_clause]).strip()
         if chunk:
             turns.append(DialogueTurn("user", chunk))
-        kind = str(insertion.get("kind") or "aizuchi")
-        turns.append(
-            DialogueTurn(
-                "moshi",
-                str(insertion["text"]),
-                note="オウム返し" if kind == "echo" else None,
-            )
-        )
+        turns.append(DialogueTurn("moshi", str(insertion["text"])))
         start = after_clause
     rest = "".join(clauses[start:]).strip()
     if rest:
@@ -2692,9 +2675,19 @@ def user_turns_with_aizuchi(
 # の AIZUCHI_OVERLAP_TEXTS もこの上位集合なので、ここに語を足すときは
 # generate_qwen3_tts_data.py も合わせる。
 AIZUCHI_ONLY_VOCAB = (
-    "はい。", "ええ。", "えぇ。", "ええ、ええ。",
-    "あぁ…。", "あー…。",
-    "そうでしたか。", "そうだったんですね。", "そうなんですね。",
+    # 受け止め。傾聴の相づちは内容を持たない -- 話を邪魔せず「聞いている」だけを
+    # 伝える。以前は「うん」系を、くだけすぎるとして外していたが、電話の傾聴では
+    # これが要る（2026-08-31 に方針変更）。
+    "はい。", "はい、はい。",
+    "ええ。", "えぇ。", "ええ、ええ。",
+    "うん。", "うん、うん。",
+    # 声が漏れる類。つらさがこぼれた所で。
+    "あぁ…。", "あー…。", "はぁ…。",
+    # 受け止めがひとつ深くなるとき。
+    "そうですか。", "そうですか…。", "そうでしたか。",
+    "そうだったんですね。", "そうなんですね。",
+    # ためらいや詫びへの応え。
+    "大丈夫ですよ。", "はい、大丈夫ですよ。",
 )
 # 「聞いていますか?」への応答だけは相づち語彙の外に出る。相づちと違って user の
 # 発話に重ねず、質問の後に順番に置く（TTS の overlap 対象にもならない）。
@@ -2724,49 +2717,6 @@ AIZUCHI_ONLY_CLOSINGS = {
     "day": "はい。失礼いたします。",
 }
 
-# オウム返し（復唱）。相づち語彙と違って相手の言葉次第なので固定できないが、
-# 「相手が言った語がそのまま入っていること」は機械的に確かめられる。言い換えや
-# 要約はここでは許さない -- 通ってしまうと本応答との境目が無くなる。
-ECHO_SUFFIXES = ("、ですか。", "ですか。", "……。", "…。", "。")
-ECHO_CORE_MIN = 3
-# 中身のない復唱。相手の言葉から取ってはいても、これを返しても聞いた証にならない。
-ECHO_STOPWORDS = frozenset({
-    "って", "そう", "でも", "あの", "あー", "ただ", "けど", "だから", "それで",
-    "なんか", "ちょっと", "やっぱり", "本当に", "こんな", "そんな", "どうも",
-})
-ECHO_CORE_MAX = 12
-
-
-def echo_core(text: str) -> str:
-    """復唱から、付け足した語尾を落として芯だけ取り出す。"""
-    core = text.strip()
-    for suffix in ECHO_SUFFIXES:
-        if core.endswith(suffix):
-            core = core[: -len(suffix)]
-            break
-    return core.strip("、 　")
-
-
-def is_valid_echo(text: str, source: str) -> bool:
-    """相手が実際に言った語をそのまま返しているか。"""
-    core = echo_core(text)
-    if not (ECHO_CORE_MIN <= len(core) <= ECHO_CORE_MAX):
-        return False
-    if any(ch in text for ch in "?？"):
-        return False
-    if core in ECHO_STOPWORDS:
-        return False
-    return core in source
-
-# 相づちの打ち方の三段階。同じ台本でも聞き手の性格が変わるので、対話1本ごとに
-# どれか一つを固定して使う（mixed のときだけ対話ごとに引く）。三つの違いが
-# 「頻度のつまみ1個」に潰れないよう、四つの独立した軸で分けている:
-#   max_per_turn -- 1発話に入れてよい上限
-#   min_chars    -- そもそも相づちを打ちにいく発話の長さ
-#   min_gap      -- 挿入どうしの最低距離（句数）。小さいほど畳みかける
-#   min_chunk_chars -- 直前にこれだけ喋っていなければ打たない（「あの、」の
-#                      直後に受け止めが入るのを防ぐ）
-#   directive    -- aizuchiAI に渡す打ち方の方針（0件の許容度と、末尾の受け止め）
 AIZUCHI_FREQUENCY_PRESETS: dict[str, dict[str, Any]] = {
     "eager": {
         "label": "積極的",
@@ -2970,8 +2920,7 @@ def recent_aizuchi_texts(turns: list[DialogueTurn], limit: int = 3) -> list[str]
 
 # 指示文で守られなかったことが、実例なら伝わるかもしれない。対話をまるごと
 # 見せるとプロンプトが倍になるので、発話ひとつ分の一対だけにする。見せている
-# のは3つ: 言い切った所で受け止めること、オウム返しは意味の乗った語を拾うこと、
-# そして全部の位置をオウム返しで埋めないこと。
+# のは、傾聴の相づちが短くて目立たないものだということ。
 AIZUCHI_ONLY_EXAMPLE = """
 例:
   1: 主人が亡くなって、
@@ -2980,8 +2929,8 @@ AIZUCHI_ONLY_EXAMPLE = """
   4: まわりからは区切りがついたねって言われるんです。
   声を出す位置: 2（言い切った所）/ 4（言い切った所）
   返した内容:
-  {"reactions":[{"after_clause": 2, "text": "一年半…。", "kind": "echo"},
-                {"after_clause": 4, "text": "そうでしたか。", "kind": "aizuchi"}]}
+  {"reactions":[{"after_clause": 2, "text": "はい。"},
+                {"after_clause": 4, "text": "そうですか…。"}]}
 """.strip()
 
 
@@ -3008,7 +2957,7 @@ def build_aizuchi_only_agent_prompt(
         index = int(point["after_clause"])
         clause = clauses[index - 1] if index <= len(clauses) else ""
         if point["kind"] == "end":
-            hint = "言い切った所。受け止めるか、相手の言葉をそのまま返す（オウム返し）"
+            hint = "言い切った所。受け止める"
         elif point["kind"] == "cont":
             hint = "話が続く所。短い相づちだけ"
         else:
@@ -3030,19 +2979,18 @@ def build_aizuchi_only_agent_prompt(
 {slots}
 
 それぞれの位置で何と言うかだけを決めてください。位置を増やしたり減らしたりしません。
-- 相づちは次のどれか: はい。/ ええ。/ えぇ。/ ええ、ええ。/ あぁ…。/ あー…。/
-  そうでしたか。/ そうだったんですね。/ そうなんですね。
-- 相手の感情に合う語を選びます。つらさがこぼれた所では「あぁ…。」、事実の区切り
-  では「はい。」、静かな同意では「ええ。」。{forbidden}
-- 「なるほど。」は使いません。
-- 「言い切った所」では、相づちの代わりにオウム返しもできます。その場合は
-  kind を "echo" にし、text は相手が今言った語をそのまま短く（例:「一年半…。」
-  「野球を。」）。言い換え・要約・感想は書きません。相手が使っていない語を
-  混ぜたものは落とされます。
-- 謝辞や謝罪（「ありがとう」「すみません」）にはオウム返しをしません。
+- 使えるのは次の語だけです:
+  はい。/ はい、はい。/ ええ。/ えぇ。/ ええ、ええ。/ うん。/ うん、うん。/
+  あぁ…。/ あー…。/ はぁ…。/ そうですか。/ そうですか…。/ そうでしたか。/
+  そうだったんですね。/ そうなんですね。/ 大丈夫ですよ。/ はい、大丈夫ですよ。
+- 相づちは話を邪魔しないためのものです。ほとんどは「はい。」「ええ。」「うん、うん。」
+  で足ります。長い語を選ぶのは、相手の気持ちがこぼれた所だけにします。
+- つらさがにじんだ所は「あぁ…。」、事実の区切りは「はい。」、静かな同意は「ええ。」、
+  ためらいや詫びには「大丈夫ですよ。」。{forbidden}
+- 「なるほど。」は使いません。相手の言葉を言い換えたり、返したりもしません。
 {example}
 JSONだけを返してください:
-{{"reactions":[{{"after_clause": {points[0]["after_clause"] if points else 1}, "text": "はい。", "kind": "aizuchi"}}]}}
+{{"reactions":[{{"after_clause": {points[0]["after_clause"] if points else 1}, "text": "はい。"}}]}}
 """.strip()
     return AgentPrompt(system=AIZUCHI_ONLY_AGENT_SYSTEM_PROMPT, user=prompt)
 
@@ -3094,7 +3042,6 @@ def parse_aizuchi_reactions(
         return []
     allowed = set(AIZUCHI_ONLY_VOCAB)
     by_index = {int(p["after_clause"]): p for p in points}
-    full_text = "".join(clauses)
     out: list[dict[str, Any]] = []
     seen: set[int] = set()
     for item in raw:
@@ -3108,19 +3055,10 @@ def parse_aizuchi_reactions(
         if point is None or after_clause in seen:
             continue
         value = str(item.get("text") or "").strip()
-        kind = str(item.get("kind") or "aizuchi").strip().lower()
-        if kind == "echo":
-            # オウム返しは言い切った所だけ。読点で切れた断片を返すと
-            # 「宙に浮いてるとか、」のような、聞いていない受け答えになる。
-            if point["kind"] != "end" or not is_valid_echo(value, full_text):
-                continue
-            previous = "".join(clauses[: after_clause])
-            if re.search(r"ありがと|すみません|すいません|ごめん", previous[-24:]):
-                continue
-        elif value not in allowed:
+        if value not in allowed:
             continue
         seen.add(after_clause)
-        out.append({"after_clause": after_clause, "text": value, "kind": kind})
+        out.append({"after_clause": after_clause, "text": value})
     return sorted(out, key=lambda entry: entry["after_clause"])
 
 
@@ -3204,15 +3142,7 @@ def sanitize_aizuchi_only_turns(
             continue
 
         text = turn.text.strip()
-        is_echo = turn.note == "オウム返し"
-        if is_echo:
-            # 直前に相手が言っていない語は復唱ではない。
-            previous_user = next(
-                (t.text for t in reversed(out) if t.speaker == "user"), ""
-            )
-            if not is_valid_echo(text, previous_user):
-                continue
-        elif text not in allowed:
+        if text not in allowed:
             continue
         is_probe_reply = text in AIZUCHI_ONLY_PROBE_REPLIES
         # 名乗りと終話は相づちではないので、相づちの規則で落とさない。
