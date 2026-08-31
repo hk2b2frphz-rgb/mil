@@ -1849,7 +1849,8 @@ class LLMDialogueGenerator:
         closing = AIZUCHI_ONLY_CLOSINGS[
             "night" if ("夜" in time_of_day or "深夜" in time_of_day) else "day"
         ]
-        turns.append(DialogueTurn("moshi", closing, note="固定の終話"))
+        if turns and turns[-1].speaker == "user":
+            turns.append(DialogueTurn("moshi", closing, note="固定の終話"))
         clean_turns = sanitize_aizuchi_only_turns(turns)
         self.trace_event(
             {
@@ -3141,7 +3142,9 @@ def sanitize_aizuchi_only_turns(
         if text in AIZUCHI_ONLY_CLOSINGS.values():
             while out and out[-1].speaker == "silence":
                 out.pop()
-            out.append(turn)
+            # 相づちの直後には置かない。話し手の言葉を受けて切るのが電話。
+            if out and out[-1].speaker == "user":
+                out.append(turn)
             continue
         previous = out[-1] if out else None
         if previous is None or previous.speaker == "moshi":
