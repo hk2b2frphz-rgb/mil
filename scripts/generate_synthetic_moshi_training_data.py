@@ -2706,9 +2706,12 @@ AIZUCHI_ONLY_LIMITED_ONCE = frozenset({"そうだったんですね。", "そう
 AIZUCHI_ONLY_SILENCE_HARD_MAX = 12.0
 # 1対話に置いてよい沈黙の総数。これを超えたぶんは、userAI が書いた <<pause>> も
 # 計画側の沈黙も落とす。実測では制限なしで平均 7.0 回・通話の 40% が無音になった。
-AIZUCHI_ONLY_MAX_SILENCES = 3
+AIZUCHI_ONLY_MAX_SILENCES = 2
 # 1発話（userAI の1回の出力）に置いてよい沈黙。詰まる場所は1箇所で足りる。
 AIZUCHI_ONLY_MAX_PAUSES_PER_TURN = 1
+# 1対話に置いてよい「まだ聞いていますか?」の数。沈黙のたびに聞き返す人はいない。
+# 実測では 1本あたり平均 1.9 回、最多 4 回まで出ていた。
+AIZUCHI_ONLY_MAX_PROBES = 1
 
 # 電話は名乗りから始まり、挨拶で終わる。相づちではないが、これが無いと通話に
 # ならない。第一声は固定（knowledge/decisions/0002）。
@@ -2830,10 +2833,15 @@ def plan_aizuchi_only_blocks(
 
     plans: list[dict[str, Any]] = []
     previous_silence = False
+    probes_left = AIZUCHI_ONLY_MAX_PROBES
     for index in range(num_blocks):
         # 沈黙の直後だけが確認の起きる場所。probe_rate は「沈黙のあと確認まで
         # 行く割合」で、確認ブロックは沈黙で終わらないので確認は連続しない。
-        probe = previous_silence and rng.random() < probe_rate
+        probe = (
+            previous_silence and probes_left > 0 and rng.random() < probe_rate
+        )
+        if probe:
+            probes_left -= 1
         trailing: float | None = None
         # 確認ブロックの直後に沈黙を置くと、応答したそばから黙ったことになる。
         # 最後のブロックの後ろの沈黙も、話が終わった後の空白にしかならない。
@@ -2853,6 +2861,13 @@ def build_aizuchi_only_user_prompt(
     plan: dict[str, Any],
 ) -> AgentPrompt:
     transcript = dialogue_turns_to_transcript(turns) or "(まだ会話は始まっていません)"
+    is_last = block_index + 1 >= max_blocks
+    closing_directive = (
+        "- 最後の発話です。お礼か、また電話する旨を短く言って締めます。"
+        if is_last
+        # 締めの言葉を何度も並べる対話が出ていた（「ご機嫌よう」「では、また」…）。
+        else "- まだ途中です。別れの挨拶や締めの言葉は言いません。"
+    )
     if plan.get("probe"):
         directive = (
             "- 直前に相手の反応が途切れて、沈黙が続きました。\n"
@@ -2870,7 +2885,9 @@ def build_aizuchi_only_user_prompt(
             "- 短く切っても、話題は変えません。今の話を続けるか、同じことを\n"
             "  言い直すか、さっき言ったことに戻ります。新しい話題を次々に\n"
             "  出すと、悩んで電話してきた人の話し方から離れます。\n"
-            "- 相手に質問せず、許可を求める問いでも終えません。話は自分で締めます。"
+            "- 相手に質問せず、許可を求める問いでも終えません。\n"
+            "- 相手がいるかの確認（「もしもし」「まだ聞いていますか」）はしません。\n"
+            f"{closing_directive}"
             f"{pause_directive}"
         )
     prompt = f"""
