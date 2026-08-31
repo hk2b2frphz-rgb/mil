@@ -166,6 +166,25 @@ PY
 # HP_KEEP_BEST_ONLY=false to restore the recency-based num_ckpt_keep pruning.
 export HP_KEEP_BEST_ONLY="${HP_KEEP_BEST_ONLY:-true}"
 
+# The launcher runs the trainer from MOSHI_FT_REPO below. A relative resume
+# path that exists here would therefore be resolved against a different
+# directory by the trainer and fail with "No such file or directory". Resolve
+# it once while we are still at REPO_ROOT so every caller (sweeps and explicit
+# training chains) passes an unambiguous path through the generated config.
+if [[ -n "${HP_RESUME_FROM:-}" ]]; then
+    RESUME_FROM_RAW="$HP_RESUME_FROM"
+    if ! HP_RESUME_FROM="$(realpath -e -- "$RESUME_FROM_RAW" 2>/dev/null)"; then
+        echo "ERROR: resume checkpoint does not exist: $RESUME_FROM_RAW" >&2
+        exit 1
+    fi
+    if [[ ! -f "$HP_RESUME_FROM" ]]; then
+        echo "ERROR: resume checkpoint is not a file: $HP_RESUME_FROM" >&2
+        exit 1
+    fi
+    export HP_RESUME_FROM
+    echo "[exp] resume checkpoint: $HP_RESUME_FROM"
+fi
+
 # Optional launch-time hyperparameter overrides.
 # Use HP_* env vars from PBS/qsub without editing experiment config files.
 python3 - "$RESOLVED_CONFIG" <<'PY'
