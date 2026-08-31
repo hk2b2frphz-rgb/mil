@@ -160,6 +160,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--qwen25-omni-speaker", choices=["Chelsie", "Ethan"], default="Chelsie")
     parser.add_argument("--qwen25-omni-max-new-tokens", type=int, default=200)
     parser.add_argument("--qwen25-omni-timeout-sec", type=float, default=600.0)
+    parser.add_argument(
+        "--no-warmup",
+        dest="warmup",
+        action="store_false",
+        help="Do not run the unscored ASR/LLM/TTS warmup before evaluation.",
+    )
+    parser.set_defaults(warmup=True)
 
     return parser.parse_args()
 
@@ -175,6 +182,43 @@ def seed_local(seed: int) -> None:
             torch.cuda.manual_seed_all(seed)
     except ImportError:
         pass
+
+
+def warmup_baseline(
+    args: argparse.Namespace,
+    tts_backend: str,
+    tts_engine: Any | None,
+    asr: LocalASR | None,
+    llm: GemmaLLM | None,
+    speechllm: SpeechLLM | None,
+    qwen25_omni: Qwen25Omni | None,
+    pcm: np.ndarray,
+    sample_rate: int,
+) -> float:
+    """Exercise first-request kernels without writing or scoring a trial."""
+    print("[local-fdb] warming ASR/LLM/TTS; this request is excluded from metrics")
+    started = time.perf_counter()
+    warmup_text = "最近、少し疲れています。"
+    tts_text = "お話しくださってありがとうございます。"
+    if args.system == "cascade":
+        assert asr is not None and llm is not None
+        asr.transcribe(pcm, sample_rate)
+        llm.respond(warmup_text, COUNSELOR_SYSTEM_PROMPT, seed=0)
+    elif args.system == "speechllm":
+        assert speechllm is not None
+        speechllm.respond(pcm, sample_rate, COUNSELOR_SYSTEM_PROMPT)
+    else:
+        assert qwen25_omni is not None
+        qwen25_omni.respond(pcm, sample_rate, COUNSELOR_SYSTEM_PROMPT)
+
+    if args.system != "qwen25_omni":
+        synthesize(
+            tts_text, sample_rate, args.tts_speed, tts_backend, tts_engine,
+            args.tts_speaker, speaker_role="moshi",
+        )
+    elapsed = time.perf_counter() - started
+    print(f"[local-fdb] warmup complete: {elapsed:.2f}s (unscored)")
+    return elapsed
 
 
 def process_variant(
@@ -471,6 +515,16 @@ def main() -> int:
     if qwen25_omni is not None:
         qwen25_omni.load()
 
+    warmup_wall_time_sec = 0.0
+    if args.warmup:
+        warmup_pcm, warmup_sample_rate = read_wav_mono(
+            dataset_dir / samples[0]["path"] / "input.wav"
+        )
+        warmup_wall_time_sec = warmup_baseline(
+            args, tts_backend, tts_engine, asr, llm, speechllm, qwen25_omni,
+            warmup_pcm, warmup_sample_rate,
+        )
+
     run_config = {
         "model_id": model_id,
         "system": args.system,
@@ -493,6 +547,8 @@ def main() -> int:
         "llm_temperature": args.llm_temperature if args.system == "cascade" else None,
         "llm_top_p": args.llm_top_p if args.system == "cascade" else None,
         "llm_max_new_tokens": args.llm_max_new_tokens if args.system == "cascade" else None,
+        "warmup_enabled": args.warmup,
+        "warmup_wall_time_sec": round(warmup_wall_time_sec, 4),
         "llm_startup_wall_time_sec": (
             round(llm.startup_wall_time_sec, 4) if llm is not None else None
         ),

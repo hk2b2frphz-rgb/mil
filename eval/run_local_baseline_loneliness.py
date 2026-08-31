@@ -101,6 +101,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--speechllm-dtype", default="auto")
     parser.add_argument("--speechllm-max-new-tokens", type=int, default=200)
     parser.add_argument("--speechllm-timeout-sec", type=float, default=300.0)
+    parser.add_argument(
+        "--no-warmup", dest="warmup", action="store_false",
+        help="Do not run the unscored ASR/LLM/TTS warmup before evaluation.",
+    )
+    parser.set_defaults(warmup=True)
 
     return parser.parse_args()
 
@@ -144,6 +149,28 @@ def main() -> int:
         llm.load()
     if speechllm is not None:
         speechllm.load()
+    if asr is not None:
+        asr.load()
+
+    if args.warmup:
+        print("[local-baseline] warming ASR/LLM/TTS; this request is excluded from metrics")
+        warmup_started = time.perf_counter()
+        warmup_pcm = synthesize(
+            "最近、少し疲れています。", args.sample_rate, args.tts_speed,
+            tts_backend, tts_engine, args.tts_speaker,
+        )
+        if args.system == "cascade":
+            assert asr is not None and llm is not None
+            asr.transcribe(warmup_pcm, args.sample_rate)
+            llm.respond("最近、少し疲れています。", COUNSELOR_SYSTEM_PROMPT)
+        else:
+            assert speechllm is not None
+            speechllm.respond(warmup_pcm, args.sample_rate, COUNSELOR_SYSTEM_PROMPT)
+        synthesize(
+            "お話しくださってありがとうございます。", args.sample_rate,
+            args.tts_speed, tts_backend, tts_engine, args.tts_speaker,
+        )
+        print(f"[local-baseline] warmup complete: {time.perf_counter() - warmup_started:.2f}s (unscored)")
 
     scenarios = list(iter_jsonl(args.scenarios))
     if args.limit is not None:
