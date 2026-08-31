@@ -233,14 +233,15 @@ def call_subprocess_worker(
 
 
 class GemmaLLM:
-    """Cascade response generator: reuses scripts/gemma_dialogue_worker.py."""
+    """Cascade text response generator using the dialogue-generation worker."""
 
     def __init__(
         self,
-        model: str = "google/gemma-2-2b-it",
+        model: str = "google/gemma-4-E2B-it",
         python_exe: str | None = None,
         device_map: str = "auto",
-        dtype: str = "auto",
+        dtype: str = "float16",
+        task: str = "any-to-any",
         temperature: float = 0.7,
         top_p: float = 0.9,
         max_new_tokens: int = 200,
@@ -250,6 +251,7 @@ class GemmaLLM:
         self.python_exe = resolve_llm_python(python_exe)
         self.device_map = device_map
         self.dtype = dtype
+        self.task = task
         self.temperature = temperature
         self.top_p = top_p
         self.max_new_tokens = max_new_tokens
@@ -285,7 +287,7 @@ class GemmaLLM:
             self.python_exe,
             str(self.worker),
             "--model", self.model,
-            "--task", "text-generation",
+            "--task", self.task,
             "--device-map", self.device_map,
             "--dtype", self.dtype,
             "--temperature", str(self.temperature),

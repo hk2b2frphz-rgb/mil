@@ -34,7 +34,7 @@
 #                   table: the batch calls scripts/run_real_cascade_eval.sh,
 #                   model_weight/model_config/hf_repo are ignored, and the
 #                   cascade is tuned via CASCADE_* keys in this same extra_env
-#                   (e.g. FDB_SYSTEM=cascade;CASCADE_LLM_MODEL=google/gemma-2-2b-it).
+#                   (e.g. FDB_SYSTEM=cascade;CASCADE_LLM_MODEL=google/gemma-4-E2B-it).
 #                   The cascade only starts working once the turn has ended, so
 #                   its backchannel count is near zero by construction. That is
 #                   a structural difference, not a bug -- read it as such.
@@ -83,6 +83,6 @@ lora_h01|/path/to/lora_h01/consolidated.safetensors|||||v1
 lora_h01|/path/to/lora_h01_v2/consolidated.safetensors|||||v2
 full_f01|/path/to/full_f01/model.safetensors|||FDB_SEEDS=0,1,2||full_f01_seed012
 hf_pretrained_with_greeting|||llm-jp/some-other-checkpoint||1|hf_greeting_v1
-cascade_gemma2b||||FDB_SYSTEM=cascade;CASCADE_LLM_MODEL=google/gemma-2-2b-it||cascade_gemma2b
+cascade_gemma4_e2b||||FDB_SYSTEM=cascade;CASCADE_LLM_MODEL=google/gemma-4-E2B-it;CASCADE_LLM_DTYPE=float16;CASCADE_LLM_TASK=any-to-any||cascade_gemma4_e2b
 speechllm_qwen2audio||||FDB_SYSTEM=speechllm;SPEECHLLM_MODEL=Qwen/Qwen2-Audio-7B-Instruct||speechllm_qwen2audio
 qwen25_omni_3b||||FDB_SYSTEM=qwen25_omni;QWEN25_OMNI_MODEL=Qwen/Qwen2.5-Omni-3B;QWEN25_OMNI_DTYPE=float16||qwen25_omni_3b

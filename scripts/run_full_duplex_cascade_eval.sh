@@ -20,7 +20,7 @@ set -euo pipefail
 #   CASCADE_ASR_MODEL=large-v3            faster-whisper model size.
 #   CASCADE_ASR_DEVICE=cuda
 #   CASCADE_ASR_COMPUTE_TYPE=float16
-#   CASCADE_LLM_MODEL=google/gemma-2-2b-it
+#   CASCADE_LLM_MODEL=google/gemma-4-E2B-it
 #   CASCADE_LLM_MAX_NEW_TOKENS=200
 #   CASCADE_TTS_BACKEND=qwen3
 #   CASCADE_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
@@ -95,7 +95,9 @@ REFRESH_FDB_DATA="${REFRESH_FDB_DATA:-0}"
 CASCADE_ASR_MODEL="${CASCADE_ASR_MODEL:-large-v3}"
 CASCADE_ASR_DEVICE="${CASCADE_ASR_DEVICE:-cuda}"
 CASCADE_ASR_COMPUTE_TYPE="${CASCADE_ASR_COMPUTE_TYPE:-float16}"
-CASCADE_LLM_MODEL="${CASCADE_LLM_MODEL:-google/gemma-2-2b-it}"
+CASCADE_LLM_MODEL="${CASCADE_LLM_MODEL:-google/gemma-4-E2B-it}"
+CASCADE_LLM_DTYPE="${CASCADE_LLM_DTYPE:-float16}"
+CASCADE_LLM_TASK="${CASCADE_LLM_TASK:-any-to-any}"
 CASCADE_LLM_MAX_NEW_TOKENS="${CASCADE_LLM_MAX_NEW_TOKENS:-200}"
 CASCADE_TTS_BACKEND="${CASCADE_TTS_BACKEND:-qwen3}"
 CASCADE_TTS_MODEL="${CASCADE_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
@@ -132,6 +134,7 @@ echo "run_id:       $RUN_ID"
 echo "model_id:     $MODEL_ID"
 echo "asr:          $CASCADE_ASR_MODEL ($CASCADE_ASR_COMPUTE_TYPE, $CASCADE_ASR_DEVICE)"
 echo "llm:          $CASCADE_LLM_MODEL"
+echo "llm task:     $CASCADE_LLM_TASK"
 echo "tts:          $CASCADE_TTS_BACKEND / $CASCADE_TTS_SPEAKER"
 echo "tasks:        $FDB_TASKS"
 echo "cases/task:   ${FDB_CASES_PER_TASK:-all}"
@@ -208,6 +211,8 @@ baseline_args=(
     --asr-device "$CASCADE_ASR_DEVICE"
     --asr-compute-type "$CASCADE_ASR_COMPUTE_TYPE"
     --llm-model "$CASCADE_LLM_MODEL"
+    --llm-dtype "$CASCADE_LLM_DTYPE"
+    --llm-task "$CASCADE_LLM_TASK"
     --llm-max-new-tokens "$CASCADE_LLM_MAX_NEW_TOKENS"
     --tts-backend "$CASCADE_TTS_BACKEND"
     --tts-model "$CASCADE_TTS_MODEL"

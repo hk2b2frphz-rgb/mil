@@ -83,11 +83,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asr-device", default="cuda")
     parser.add_argument("--asr-compute-type", default="float16")
 
-    # Cascade LLM (Gemma via gemma_dialogue_worker.py subprocess).
-    parser.add_argument("--llm-model", default="google/gemma-2-2b-it")
+    # Same public Gemma 4 checkpoint and worker as dialogue generation.
+    parser.add_argument("--llm-model", default="google/gemma-4-E2B-it")
     parser.add_argument("--llm-python", default=None)
     parser.add_argument("--llm-device-map", default="auto")
-    parser.add_argument("--llm-dtype", default="auto")
+    parser.add_argument("--llm-dtype", default="float16")
+    parser.add_argument("--llm-task", default="any-to-any")
     parser.add_argument("--llm-temperature", type=float, default=0.7)
     parser.add_argument("--llm-top-p", type=float, default=0.9)
     parser.add_argument("--llm-max-new-tokens", type=int, default=200)
@@ -127,6 +128,7 @@ def main() -> int:
         asr = LocalASR(args.asr_model, args.asr_device, args.asr_compute_type)
         llm = GemmaLLM(
             args.llm_model, args.llm_python, args.llm_device_map, args.llm_dtype,
+            args.llm_task,
             args.llm_temperature, args.llm_top_p, args.llm_max_new_tokens,
             args.llm_timeout_sec,
         )

@@ -61,7 +61,9 @@ REBUILD_REAL_DATASET="${REBUILD_REAL_DATASET:-0}"
 CASCADE_ASR_MODEL="${CASCADE_ASR_MODEL:-large-v3}"
 CASCADE_ASR_DEVICE="${CASCADE_ASR_DEVICE:-cuda}"
 CASCADE_ASR_COMPUTE_TYPE="${CASCADE_ASR_COMPUTE_TYPE:-float16}"
-CASCADE_LLM_MODEL="${CASCADE_LLM_MODEL:-google/gemma-2-2b-it}"
+CASCADE_LLM_MODEL="${CASCADE_LLM_MODEL:-google/gemma-4-E2B-it}"
+CASCADE_LLM_DTYPE="${CASCADE_LLM_DTYPE:-float16}"
+CASCADE_LLM_TASK="${CASCADE_LLM_TASK:-any-to-any}"
 # これは安全網であって長さの制御手段ではない。上限で切ると文の途中で終わり、
 # その断片がそのまま音声になる。長さはシステムプロンプト側で指示している
 # (1〜2文・60文字程度)。言い切らずに終わった応答は打ち切りの疑いとして
@@ -99,6 +101,7 @@ echo "dataset:      $REAL_DATASET_DIR"
 echo "output:       $REAL_OUT_DIR"
 echo "asr:          $CASCADE_ASR_MODEL"
 echo "llm:          $CASCADE_LLM_MODEL"
+echo "llm task:     $CASCADE_LLM_TASK"
 if [[ "$CASCADE_TTS_BACKEND" == "kokoro" ]]; then
     echo "tts:          kokoro (hexgrad/Kokoro-82M) voice=$CASCADE_TTS_SPEAKER"
 else
@@ -141,6 +144,8 @@ inference_args=(
     --asr-device "$CASCADE_ASR_DEVICE"
     --asr-compute-type "$CASCADE_ASR_COMPUTE_TYPE"
     --llm-model "$CASCADE_LLM_MODEL"
+    --llm-dtype "$CASCADE_LLM_DTYPE"
+    --llm-task "$CASCADE_LLM_TASK"
     --llm-max-new-tokens "$CASCADE_LLM_MAX_NEW_TOKENS"
     --tts-backend "$CASCADE_TTS_BACKEND"
     --tts-model "$CASCADE_TTS_MODEL"
