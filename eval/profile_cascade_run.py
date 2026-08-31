@@ -6,6 +6,7 @@ eval/run_local_baseline_full_duplex.py は 1 ケースごとに段別の実測�
 output.meta.json へ書いている。それを集めて合計・中央値・1 ケースあたりを出す。
 
   asr_wall_time_sec         入力の書き起こし
+  vad_wall_time_sec         Streaming VAD のCPU/GPU処理時間
   llm_wall_time_sec         応答文の生成
   tts_wall_time_sec         音声合成
   output_asr_wall_time_sec  出力音声の再書き起こし(アライメント用)
@@ -25,6 +26,7 @@ from pathlib import Path
 import soundfile as sf
 
 STAGES = (
+    ("vad_wall_time_sec", "VAD(ストリーミング)"),
     ("asr_wall_time_sec", "ASR(入力)"),
     ("llm_wall_time_sec", "LLM"),
     ("tts_wall_time_sec", "TTS"),
@@ -73,9 +75,9 @@ def main() -> int:
     totals = [float(r.get("wall_time_sec") or 0.0) for r in rows]
     inputs = [float(r.get("input_duration_sec") or 0.0) for r in rows]
 
-    # 壁時計は 2 つある。応答の置き位置に使われるのは wall_time_sec で、これは
-    # ASR(入力)+LLM+TTS のみ。出力アライメント ASR は応答が鳴った後の処理なので
-    # 応答速度には入らないが、ジョブの実時間には効く。
+    # VAD はユーザー発話中に並列に走る。vad_wall_time_sec は計算量としては
+    # 見せるが、実時間を超過した vad_overrun_time_sec だけが応答速度に入る。
+    # 出力アライメント ASR も応答開始後なので、応答速度には入らない。
     placement = sum(totals)
     grand = sum(sum(v) for v in stages.values())
     print(f"ケース数:       {len(rows)}")
@@ -95,6 +97,9 @@ def main() -> int:
               f"{statistics.median(values):>9.2f} {share:>6.1f}%")
     print()
     print("ASR(出力アライメント)は応答が鳴った後の処理なので応答速度には入らない。")
+    overruns = [float(r.get("vad_overrun_time_sec") or 0.0) for r in rows]
+    print(f"VAD: 1件平均 {statistics.mean(stages['vad_wall_time_sec']):.3f} 秒 / "
+          f"応答遅延に加算された超過分の合計 {sum(overruns):.3f} 秒")
     print("時間を削りたいだけなら CASCADE_SKIP_OUTPUT_ALIGNMENT=1 で省ける")
     print("(応答テキストは LLM 側に残る。失うのは時刻つきチャンクだけ)。")
     print()

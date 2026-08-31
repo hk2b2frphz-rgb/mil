@@ -212,6 +212,10 @@ def warmup_baseline(
     started = time.perf_counter()
     warmup_text = "最近、少し疲れています。"
     tts_text = "お話しくださってありがとうございます。"
+    find_streaming_endpoint(
+        pcm, sample_rate, tail_sec=args.vad_tail_sec,
+        silence_ms=args.vad_silence_ms, threshold=args.vad_threshold,
+    )
     if args.system == "cascade":
         assert asr is not None and llm is not None
         asr.transcribe(pcm, sample_rate)
@@ -259,10 +263,12 @@ def process_variant(
     pcm, sample_rate = read_wav_mono(input_wav)
     input_duration_sec = len(pcm) / sample_rate
     output_stem = "clean_output" if variant == "clean_input" else "output"
+    vad_started = time.perf_counter()
     endpoint = find_streaming_endpoint(
         pcm, sample_rate, tail_sec=args.vad_tail_sec,
         silence_ms=args.vad_silence_ms, threshold=args.vad_threshold,
     )
+    vad_wall = time.perf_counter() - vad_started
     if endpoint is None:
         raise RuntimeError(
             "Streaming VAD did not observe an utterance end even after "
@@ -274,6 +280,14 @@ def process_variant(
     # This is all and only the audio available at the online endpoint. It
     # includes the silence that caused VAD to fire, never future fixture audio.
     inference_pcm = received_pcm[:endpoint.audio_end_sample]
+    # VAD normally runs while the caller is still talking. Only work that
+    # cannot keep up with the received stream delays the endpoint.
+    vad_overrun = max(0.0, vad_wall - endpoint.detected_at_sec)
+    print(
+        f"[local-fdb] VAD {sample['task']}/{sample['id']} {variant}: "
+        f"endpoint={endpoint.detected_at_sec:.3f}s wall={vad_wall:.3f}s "
+        f"overrun={vad_overrun:.3f}s"
+    )
 
     asr_text = None
     asr_wall = 0.0
@@ -323,7 +337,7 @@ def process_variant(
     # which are derived from output.wav/output.json placement rather than
     # from output.meta.json, automatically reflect true cascade/SpeechLLM
     # latency instead of understating it.
-    output_start_sec = endpoint.detected_at_sec + total_wall
+    output_start_sec = endpoint.detected_at_sec + vad_overrun + total_wall
     silence = np.zeros(int(round(output_start_sec * sample_rate)), dtype=np.float32)
     aligned = np.concatenate([silence, response_pcm])
     write_wav_mono(trial_dir / f"{output_stem}.wav", aligned, sample_rate)
@@ -412,6 +426,8 @@ def process_variant(
         "vad_speech_end_sec": round(endpoint.speech_end_sec, 4) if endpoint.speech_end_sec is not None else None,
         "vad_audio_sent_sec": round(len(inference_pcm) / sample_rate, 4),
         "vad_backend": endpoint.backend,
+        "vad_wall_time_sec": round(vad_wall, 4),
+        "vad_overrun_time_sec": round(vad_overrun, 4),
         "vad_silence_ms": args.vad_silence_ms,
         "vad_tail_sec": args.vad_tail_sec,
         "wall_time_sec": round(total_wall, 4),
