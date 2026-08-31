@@ -42,10 +42,10 @@
 #                   (synthetic Full-Duplex-Bench-JA). That is a different track
 #                   and is reported separately, never in the same table.
 #                   See scripts/run_real_cascade_eval.sh.
-#                   FDB_SYSTEM=speechllm runs Qwen2-Audio (audio->text->TTS)
+#                   FDB_SYSTEM=speechllm runs Gemma 4 (audio->text->TTS)
 #                   on the same real-data track. Configure it with
 #                   SPEECHLLM_* keys, for example
-#                   FDB_SYSTEM=speechllm;SPEECHLLM_MODEL=Qwen/Qwen2-Audio-7B-Instruct.
+#                   FDB_SYSTEM=speechllm;SPEECHLLM_MODEL=google/gemma-4-E2B-it.
 #                   FDB_SYSTEM=speechllm_synthetic selects its separate
 #                   Full-Duplex-Bench-JA track.
 # - opening_greeting optional. "0" or "1", sets FDB_OPENING_GREETING for this
@@ -83,6 +83,8 @@ lora_h01|/path/to/lora_h01/consolidated.safetensors|||||v1
 lora_h01|/path/to/lora_h01_v2/consolidated.safetensors|||||v2
 full_f01|/path/to/full_f01/model.safetensors|||FDB_SEEDS=0,1,2||full_f01_seed012
 hf_pretrained_with_greeting|||llm-jp/some-other-checkpoint||1|hf_greeting_v1
-cascade_gemma4_e2b||||FDB_SYSTEM=cascade;CASCADE_LLM_MODEL=google/gemma-4-E2B-it;CASCADE_LLM_DTYPE=float16;CASCADE_LLM_TASK=any-to-any||cascade_gemma4_e2b
-speechllm_qwen2audio||||FDB_SYSTEM=speechllm;SPEECHLLM_MODEL=Qwen/Qwen2-Audio-7B-Instruct||speechllm_qwen2audio
+cascade1||||FDB_SYSTEM=cascade;CASCADE_LLM_MODEL=google/gemma-4-E2B-it;CASCADE_LLM_DTYPE=float16;CASCADE_LLM_TASK=any-to-any;CASCADE_TTS_BACKEND=kokoro||cascade1
+cascade2||||FDB_SYSTEM=cascade;CASCADE_LLM_MODEL=google/gemma-4-E2B-it;CASCADE_LLM_DTYPE=float16;CASCADE_LLM_TASK=any-to-any;CASCADE_TTS_BACKEND=qwen3;CASCADE_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice||cascade2
+speechllm1||||FDB_SYSTEM=speechllm;SPEECHLLM_MODEL=google/gemma-4-E2B-it;SPEECHLLM_DTYPE=float16;SPEECHLLM_TTS_BACKEND=kokoro||speechllm1
+speechllm2||||FDB_SYSTEM=speechllm;SPEECHLLM_MODEL=google/gemma-4-E2B-it;SPEECHLLM_DTYPE=float16;SPEECHLLM_TTS_BACKEND=qwen3;SPEECHLLM_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice||speechllm2
 qwen25_omni_3b||||FDB_SYSTEM=qwen25_omni;QWEN25_OMNI_MODEL=Qwen/Qwen2.5-Omni-3B;QWEN25_OMNI_DTYPE=float16||qwen25_omni_3b

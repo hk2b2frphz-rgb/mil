@@ -9,6 +9,7 @@ dependencies = [
     "transformers>=5.5.0",
     "numpy",
     "qwen-omni-utils",
+    "librosa",
 ]
 
 [tool.uv]

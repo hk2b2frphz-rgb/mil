@@ -94,8 +94,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--llm-max-new-tokens", type=int, default=200)
     parser.add_argument("--llm-timeout-sec", type=float, default=300.0)
 
-    # SpeechLLM (Qwen2-Audio via speechllm_worker.py subprocess).
-    parser.add_argument("--speechllm-model", default="Qwen/Qwen2-Audio-7B-Instruct")
+    # SpeechLLM (Gemma 4 direct audio input via speechllm_worker.py subprocess).
+    parser.add_argument("--speechllm-model", default="google/gemma-4-E2B-it")
     parser.add_argument("--speechllm-python", default=None)
     parser.add_argument("--speechllm-device-map", default="auto")
     parser.add_argument("--speechllm-dtype", default="auto")

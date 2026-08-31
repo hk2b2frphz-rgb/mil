@@ -5,7 +5,7 @@ set -euo pipefail
 # This is an HPC/PBS-safe sibling of run_real_cascade_eval.sh: it calls no
 # OpenAI API and writes only deterministic scores plus local judge input.
 #
-#   MODEL_ID=speechllm_qwen2audio bash scripts/run_real_speechllm_eval.sh
+#   MODEL_ID=speechllm1_gemma_kokoro bash scripts/run_real_speechllm_eval.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -30,7 +30,7 @@ REAL_MOS_DEVICE="${REAL_MOS_DEVICE:-cpu}"
 REAL_MAX_LATENCY_SEC="${REAL_MAX_LATENCY_SEC:-}"
 REBUILD_REAL_DATASET="${REBUILD_REAL_DATASET:-0}"
 
-SPEECHLLM_MODEL="${SPEECHLLM_MODEL:-Qwen/Qwen2-Audio-7B-Instruct}"
+SPEECHLLM_MODEL="${SPEECHLLM_MODEL:-google/gemma-4-E2B-it}"
 SPEECHLLM_PYTHON="${SPEECHLLM_PYTHON:-}"
 SPEECHLLM_DEVICE_MAP="${SPEECHLLM_DEVICE_MAP:-auto}"
 SPEECHLLM_DTYPE="${SPEECHLLM_DTYPE:-auto}"

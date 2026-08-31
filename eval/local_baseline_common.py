@@ -17,7 +17,7 @@ Pipeline pieces:
   the isolated gemma_runtime/ uv environment -- the same pattern
   generate_synthetic_moshi_training_data.py already uses to keep Moshi's
   huggingface-hub/transformers pins untouched.
-- SpeechLLM: scripts/speechllm_worker.py (Qwen2-Audio), same subprocess
+- SpeechLLM: scripts/speechllm_worker.py (Gemma 4 audio), same subprocess
   pattern, taking raw audio instead of an ASR transcript.
 - TTS: reuses Qwen3TTS via eval/build_full_duplex_ja_dataset.py's
   initialize_tts()/synthesize(), with the same backend and controlled preset
@@ -349,11 +349,11 @@ class GemmaLLM:
 
 
 class SpeechLLM:
-    """SpeechLLM response generator: reuses scripts/speechllm_worker.py (Qwen2-Audio)."""
+    """SpeechLLM response generator: Gemma 4 direct audio input."""
 
     def __init__(
         self,
-        model: str = "Qwen/Qwen2-Audio-7B-Instruct",
+        model: str = "google/gemma-4-E2B-it",
         python_exe: str | None = None,
         device_map: str = "auto",
         dtype: str = "auto",
