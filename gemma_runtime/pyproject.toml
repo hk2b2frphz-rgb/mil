@@ -5,8 +5,11 @@ requires-python = ">=3.11"
 dependencies = [
     "accelerate",
     "sentencepiece",
-    "torch>=2.1.0",
-    "torchvision>=0.16.0",
+    # Gemma 4's Transformers attention path uses os_mask_function, which
+    # explicitly requires PyTorch 2.6 or newer. CUDA 11.8 wheels remain fully
+    # compatible with V100 (sm_70) and need no CUDA 12.4+ host driver.
+    "torch>=2.6.0,<2.7",
+    "torchvision>=0.21.0,<0.22",
     "transformers>=5.5.0",
     "numpy",
     "qwen-omni-utils",
@@ -17,10 +20,10 @@ dependencies = [
 package = false
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu121" }
-torchvision = { index = "pytorch-cu121" }
+torch = { index = "pytorch-cu118" }
+torchvision = { index = "pytorch-cu118" }
 
 [[tool.uv.index]]
-name = "pytorch-cu121"
-url = "https://download.pytorch.org/whl/cu121"
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
 explicit = true

@@ -45,7 +45,7 @@ echo "main runtime:"
 uv run python -c 'import torch; print(f"torch={torch.__version__} cuda={torch.version.cuda} available={torch.cuda.is_available()}")'
 echo "isolated worker runtime:"
 if [[ "$SYSTEM" == "speechllm" ]]; then
-    uv run --project gemma_runtime python -c 'import torchvision; from transformers import AutoModelForMultimodalLM, AutoProcessor; print(f"Gemma 4 audio worker imports: OK (torchvision={torchvision.__version__})")'
+    uv run --project gemma_runtime python -c 'import torch, torchvision; from packaging.version import Version; from transformers import AutoModelForMultimodalLM, AutoProcessor; assert Version(torch.__version__.split("+")[0]) >= Version("2.6"), f"Gemma 4 audio requires torch>=2.6, got {torch.__version__}"; print(f"Gemma 4 audio worker imports: OK (torch={torch.__version__}, cuda={torch.version.cuda}, torchvision={torchvision.__version__})")'
 else
     uv run --project gemma_runtime python -c 'from transformers import AutoModelForCausalLM; print("Gemma worker import: OK")'
 fi
