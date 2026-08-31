@@ -283,17 +283,31 @@ def process_variant(
     # VAD normally runs while the caller is still talking. Only work that
     # cannot keep up with the received stream delays the endpoint.
     vad_overrun = max(0.0, vad_wall - endpoint.detected_at_sec)
+    # The end of actual speech, rather than the later moment at which enough
+    # silence has arrived for VAD to confirm it.
+    utterance_end_sec = (
+        endpoint.speech_end_sec
+        if endpoint.speech_end_sec is not None
+        else endpoint.detected_at_sec
+    )
+    vad_complete_after_end = endpoint.detected_at_sec + vad_overrun - utterance_end_sec
     print(
         f"[local-fdb] VAD {sample['task']}/{sample['id']} {variant}: "
         f"endpoint={endpoint.detected_at_sec:.3f}s wall={vad_wall:.3f}s "
-        f"overrun={vad_overrun:.3f}s"
+        f"overrun={vad_overrun:.3f}s complete_after_speech_end={vad_complete_after_end:.3f}s"
     )
 
     asr_text = None
     asr_wall = 0.0
+    asr_complete_after_end = vad_complete_after_end
     if args.system == "cascade":
         assert asr is not None and llm is not None
         asr_text, asr_wall = asr.transcribe(inference_pcm, sample_rate)
+        asr_complete_after_end = vad_complete_after_end + asr_wall
+        print(
+            f"[local-fdb] ASR complete {sample['task']}/{sample['id']} {variant}: "
+            f"after_speech_end={asr_complete_after_end:.3f}s"
+        )
         response_text, llm_wall = llm.respond(
             asr_text, COUNSELOR_SYSTEM_PROMPT, seed=seed
         )
@@ -307,6 +321,11 @@ def process_variant(
         response_text, response_pcm_native, native_sample_rate, llm_wall = qwen25_omni.respond(
             inference_pcm, sample_rate, COUNSELOR_SYSTEM_PROMPT
         )
+    llm_complete_after_end = asr_complete_after_end + llm_wall
+    print(
+        f"[local-fdb] LLM complete {sample['task']}/{sample['id']} {variant}: "
+        f"after_speech_end={llm_complete_after_end:.3f}s"
+    )
     response_text = validate_spoken_response(response_text)
 
     tts_started = time.perf_counter()
@@ -329,6 +348,11 @@ def process_variant(
         else np.zeros(1, dtype=np.float32)
     )
     tts_wall = 0.0 if args.system == "qwen25_omni" else time.perf_counter() - tts_started
+    tts_complete_after_end = llm_complete_after_end + tts_wall
+    print(
+        f"[local-fdb] TTS complete {sample['task']}/{sample['id']} {variant}: "
+        f"after_speech_end={tts_complete_after_end:.3f}s all_complete={tts_complete_after_end:.3f}s"
+    )
 
     total_wall = asr_wall + llm_wall + tts_wall
     # Place the response at the real time it would actually start: after VAD
@@ -338,16 +362,6 @@ def process_variant(
     # from output.meta.json, automatically reflect true cascade/SpeechLLM
     # latency instead of understating it.
     output_start_sec = endpoint.detected_at_sec + vad_overrun + total_wall
-    # This is the end of the caller's actual speech, not the later time at
-    # which VAD observed enough silence.  Every cumulative value below is
-    # therefore directly comparable as "time since the user stopped talking".
-    utterance_end_sec = endpoint.speech_end_sec
-    if utterance_end_sec is None:
-        utterance_end_sec = endpoint.detected_at_sec
-    vad_complete_after_end = endpoint.detected_at_sec + vad_overrun - utterance_end_sec
-    asr_complete_after_end = vad_complete_after_end + asr_wall
-    llm_complete_after_end = asr_complete_after_end + llm_wall
-    tts_complete_after_end = llm_complete_after_end + tts_wall
     print(
         f"[local-fdb] completion since speech end {sample['task']}/{sample['id']} {variant}: "
         f"VAD={vad_complete_after_end:.3f}s ASR={asr_complete_after_end:.3f}s "
