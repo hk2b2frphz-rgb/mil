@@ -6,7 +6,9 @@
 # docs/real_response_evaluation.md), so a plain `uv run` cannot import it and
 # scripts/tts_comparison_backends.py raises
 #   "Kokoro requires kokoro>=0.9.4 and misaki[ja] in its isolated env."
-# The packages have to be layered in at call time. misaki[ja] pulls `unidic`,
+# The packages have to be layered in at call time. Kokoro 0.9.4's custom
+# ALBERT module is not compatible with the Transformers 5.x import layout, so
+# its overlay deliberately stays on the compatible 4.x line. misaki[ja] pulls `unidic`,
 # which ships code only -- the dictionary itself must be downloaded once before
 # inference (same procedure as scripts/run_tts_comparison.pbs). uv caches the
 # environment per --with set, so the dictionary survives into later calls.
@@ -29,10 +31,13 @@ kokoro_uv_run() {
         return 0
     fi
 
-    eval "$__out_name=(uv run --with 'kokoro>=0.9.4' --with 'misaki[ja]' --with unidic)"
+    # Keep this list identical for the runner, dictionary setup, and import
+    # preflight.  Otherwise uv can solve a different environment for the
+    # preflight than the one that eventually imports KPipeline.
+    eval "$__out_name=(uv run --with 'transformers>=4.57.1,<5' --with 'kokoro>=0.9.4' --with 'misaki[ja]' --with unidic)"
 
     echo "[$tag] checking the kokoro Japanese dictionary (unidic)"
-    if ! uv run --with "kokoro>=0.9.4" --with "misaki[ja]" --with unidic \
+    if ! uv run --with "transformers>=4.57.1,<5" --with "kokoro>=0.9.4" --with "misaki[ja]" --with unidic \
         python -m unidic download; then
         echo "ERROR: unidic download failed. kokoro cannot run without the Japanese dictionary." >&2
         return 1
@@ -45,8 +50,8 @@ kokoro_uv_run() {
     # the underlying ImportError identifies the package/system dependency that
     # must be fixed on this particular HPC image.
     echo "[$tag] preflighting kokoro + misaki[ja] import"
-    if ! uv run --with "kokoro>=0.9.4" --with "misaki[ja]" --with unidic \
-        python -c 'from kokoro import KPipeline; print("kokoro/misaki[ja] import: OK")'; then
+    if ! uv run --with "transformers>=4.57.1,<5" --with "kokoro>=0.9.4" --with "misaki[ja]" --with unidic \
+        python -c 'import transformers; from kokoro import KPipeline; print(f"kokoro/misaki[ja] import: OK (transformers={transformers.__version__})")'; then
         echo "ERROR: Kokoro preflight failed in the uv isolated environment above." >&2
         echo "       Re-run the displayed uv command after fixing its exact ImportError." >&2
         return 1
