@@ -72,11 +72,17 @@ def main() -> None:
     model.eval()
 
     def generate(payload: dict[str, Any]) -> dict[str, str]:
-        audio_path = str(payload["audio_path"])
+        audio_path = Path(str(payload["audio_path"])).resolve()
+        if not audio_path.is_file():
+            raise FileNotFoundError(f"Input audio does not exist: {audio_path}")
         prompt = str(payload.get("prompt", ""))
         conversation = [{"role": "user", "content": [
             {"type": "text", "text": prompt},
-            {"type": "audio", "audio": Path(audio_path).resolve().as_uri()},
+            # Gemma 4's current processor schema uses `url`, not the older
+            # `audio` field.  A file:// URI reaches the generic URL/base64
+            # loader and can fail with "Incorrect padding"; an absolute local
+            # path is recognized as a local WAV by the audio loader instead.
+            {"type": "audio", "url": str(audio_path)},
         ]}]
         inputs = processor.apply_chat_template(
             conversation, tokenize=True, return_dict=True, return_tensors="pt",
