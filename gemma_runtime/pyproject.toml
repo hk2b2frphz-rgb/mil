@@ -6,6 +6,7 @@ dependencies = [
     "accelerate",
     "sentencepiece",
     "torch>=2.1.0",
+    "torchvision>=0.16.0",
     "transformers>=5.5.0",
     "numpy",
     "qwen-omni-utils",
@@ -17,6 +18,7 @@ package = false
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu121" }
+torchvision = { index = "pytorch-cu121" }
 
 [[tool.uv.index]]
 name = "pytorch-cu121"
