@@ -28,7 +28,7 @@ proxy:
 vars:
   base_exp: lora_base_config
   aizuchi_frequency: normal
-  source_batch_id: qwen_aizuchi_1000_normal_v1
+  source_batch_id: qwen_aizuchi_1000_normal_v9
 
 paths:
   dialogue_out: "${out_root}/dialogue"
@@ -51,8 +51,9 @@ stages:
     env:
       BATCH_ID: "${source_batch_id}"
       OUT_ROOT: "${dialogue_out}"
-      # Silences and listening checks are the behaviours this model has to get
-      # right, so they are deliberately common in the training data.
+      # 沈黙とその後の確認は、この聞き手が正しく振る舞えないと困る場面なので、
+      # データに一定量入れておく（自然な頻度に寄せるための目標値ではない）。
+      # 実際の本数は生成側で上限が掛かる: 沈黙は1対話2回まで、確認は1回まで。
       AIZUCHI_ONLY_FREQUENCY: "${aizuchi_frequency}"
       AIZUCHI_ONLY_SILENCE_RATE: "0.35"
       AIZUCHI_ONLY_PROBE_RATE: "0.5"   # 沈黙のうち確認まで行く割合

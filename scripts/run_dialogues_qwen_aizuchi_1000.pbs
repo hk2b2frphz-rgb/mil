@@ -41,10 +41,9 @@ cd "${PBS_O_WORKDIR:-$(pwd)}"
 export DIALOGUE_GENERATION_MODE="aizuchi-only"
 
 # How talkative the listener is: eager / normal / reserved, or mixed to draw one
-# per dialogue. The preset sets the per-utterance cap, the utterance length
-# below which no backchannel is attempted, the minimum spacing between
-# insertions, and the instruction aizuchiAI is given -- so the three patterns
-# differ audibly, not just in count.
+# per dialogue. A preset is a set of rates, not a cap: how often the listener
+# reacts at a sentence end, at a continuative clause end, and at a bare comma.
+# Long speech therefore earns more reactions rather than hitting a ceiling.
 export AIZUCHI_ONLY_FREQUENCY="${AIZUCHI_ONLY_FREQUENCY:-normal}"
 
 # Own batch id namespace so an aizuchi-only round never overwrites (or is picked
