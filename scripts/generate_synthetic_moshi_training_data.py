@@ -1349,6 +1349,7 @@ class LLMDialogueGenerator:
         role_name: str,
         fallback_text: str,
         context: dict[str, Any],
+        extra_check: Callable[[str], tuple[str, bool] | None] | None = None,
     ) -> str:
         current = prompt
         last_raw = ""
@@ -1362,6 +1363,8 @@ class LLMDialogueGenerator:
             last_raw = raw
             text = clean_agent_utterance(raw, speaker)
             problem = unusable_utterance(text) if text else None
+            if problem is None and text and extra_check is not None:
+                problem = extra_check(text)
             self.trace_event(
                 {
                     "event": "agent_utterance",
@@ -1783,6 +1786,7 @@ class LLMDialogueGenerator:
                     use_case, turns, plan
                 ),
                 context=context,
+                extra_check=None if plan["probe"] else unplanned_probe,
             )
             logger.info(
                 "aizuchi-only case=%s block=%d probe=%s user=%s",
@@ -2422,9 +2426,39 @@ def clause_boundary_kind(clause: str) -> str:
     return "weak"
 
 
+# 句読点を打たずに書かれた発話を切るための言い回し。話し言葉では、ここが息継ぎ
+# になる。読点があるときは使わない（打ってあるならそちらが正しい）。
+BREATH_RE = re.compile(
+    r"(んですけど|ですけど|ますけど|んですよね|ですよね|ますよね|んですよ|ですよ|"
+    r"ますよ|ますね|ですね|ですが|ますが|んだよね|だけど|けれど|んです|でした|"
+    r"ました|ます|です)(?=.)"
+)
+# これより長い一続きは、話し言葉として一息では言えない。
+BREATHLESS_CHARS = 28
+
+
 def split_text_into_clauses(text: str) -> list[str]:
     parts = re.findall(r".*?[、。！？!?]|.+$", text.strip())
-    return [part.strip() for part in parts if part.strip()]
+    clauses: list[str] = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        # 句読点を一切打たない発話が実際に出る（52字で1句になり、相づちを打つ
+        # 場所が1つも見つからず、聞き手が黙り込んでいた）。言い回しで割る。
+        if len(part) > BREATHLESS_CHARS and not part[-1] in "、。！？!?":
+            cursor = 0
+            for match in BREATH_RE.finditer(part):
+                chunk = part[cursor : match.end()].strip()
+                if len(chunk) >= 8:
+                    clauses.append(chunk)
+                    cursor = match.end()
+            rest = part[cursor:].strip()
+            if rest:
+                clauses.append(rest)
+            continue
+        clauses.append(part)
+    return clauses
 
 
 def build_aizuchi_agent_prompt(
@@ -2502,6 +2536,18 @@ ROLE_TOKEN_ONLY_RE = re.compile(
     re.IGNORECASE,
 )
 LATIN_RUN_RE = re.compile(r"[A-Za-z]{3,}")
+# 「まだ聞いていますか?」の類。沈黙のあとの計画された一度だけに留めたいので、
+# それ以外のブロックで出てきたら書き直させる（指示だけでは止まらなかった）。
+PROBE_UTTERANCE_RE = re.compile(
+    r"もしもし|聞いて(い)?ま(す|せん)か|聞こえて(い)?ま|通じて(い)?ま|繋がって(い)?ま|つながって(い)?ま|まだ.{0,8}います"
+)
+
+
+def unplanned_probe(text: str) -> tuple[str, bool] | None:
+    """計画外の「まだ聞いていますか?」なら理由を返す。"""
+    if PROBE_UTTERANCE_RE.search(text):
+        return ("相手がいるかの確認は、この発話では書きません", False)
+    return None
 
 
 def unusable_utterance(text: str) -> tuple[str, bool] | None:
@@ -2837,8 +2883,13 @@ def plan_aizuchi_only_blocks(
     for index in range(num_blocks):
         # 沈黙の直後だけが確認の起きる場所。probe_rate は「沈黙のあと確認まで
         # 行く割合」で、確認ブロックは沈黙で終わらないので確認は連続しない。
+        # 最後のブロックを確認にすると、聞き手が「はい、聞いていますよ」と答えた
+        # ところで対話が終わり、締めのないまま切れる。
         probe = (
-            previous_silence and probes_left > 0 and rng.random() < probe_rate
+            previous_silence
+            and probes_left > 0
+            and index < num_blocks - 1
+            and rng.random() < probe_rate
         )
         if probe:
             probes_left -= 1
@@ -3083,7 +3134,8 @@ def pick_reaction_points(
     points: list[dict[str, Any]] = []
     previous = -99
     for index, clause in enumerate(clauses, start=1):
-        kind = clause_boundary_kind(clause)
+        # 発話の最後は、句点を打っていなくても言い切った所。そこで話し手は黙る。
+        kind = "end" if index == len(clauses) else clause_boundary_kind(clause)
         if rng.random() >= float(rates.get(kind, 0.0)):
             continue
         # 隣の句に続けて打つと畳みかけて聞こえる。ただし、話が続く所（cont）の
