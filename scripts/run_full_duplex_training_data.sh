@@ -35,6 +35,34 @@ has_step() {
     [[ ",$STEPS," == *",$1,"* ]]
 }
 
+# Add arbitrary stage CLI arguments without eval. The environment value and/or
+# file contains one complete argv item per non-empty line. This lets the single
+# PBS entry point expose new generator options without changing this wrapper.
+append_stage_extra_args() {
+    local array_name="$1"
+    local value_var="$2"
+    local file_var="$3"
+    local -n target_array="$array_name"
+    local raw="${!value_var:-}"
+    local file="${!file_var:-}"
+    local arg
+
+    if [[ -n "$raw" ]]; then
+        while IFS= read -r arg || [[ -n "$arg" ]]; do
+            [[ -n "$arg" ]] && target_array+=("$arg")
+        done <<< "$raw"
+    fi
+    if [[ -n "$file" ]]; then
+        if [[ ! -f "$file" ]]; then
+            echo "ERROR: $file_var does not exist: $file" >&2
+            return 1
+        fi
+        while IFS= read -r arg || [[ -n "$arg" ]]; do
+            [[ -n "$arg" ]] && target_array+=("$arg")
+        done < "$file"
+    fi
+}
+
 echo "===== Full-duplex Japanese training data ====="
 echo "run_id:     $RUN_ID"
 echo "out_root:   $OUT_ROOT"
@@ -56,6 +84,7 @@ if has_step use_cases; then
         uc_args+=(--content-seeds "$CONTENT_SEEDS")
         echo "[fdb] using content seeds: $CONTENT_SEEDS"
     fi
+    append_stage_extra_args uc_args USE_CASE_EXTRA_ARGS USE_CASE_EXTRA_ARGS_FILE
     "${uc_args[@]}"
 fi
 
@@ -73,6 +102,7 @@ if has_step dialogues; then
         --llm-temperature "${LLM_TEMPERATURE:-0.8}"
         --llm-max-new-tokens "${LLM_MAX_NEW_TOKENS:-4096}"
         --llm-timeout-sec "${LLM_TIMEOUT_SEC:-7200}"
+        --llm-num-fewshot "${LLM_NUM_FEWSHOT:-2}"
         --dialogue-generation-mode "${DIALOGUE_GENERATION_MODE:-single}"
         --multi-agent-min-pairs "${MULTI_AGENT_MIN_PAIRS:-3}"
         --multi-agent-max-pairs "${MULTI_AGENT_MAX_PAIRS:-5}"
@@ -123,6 +153,10 @@ if has_step dialogues; then
     if [[ "${ALLOW_TEMPLATE_FALLBACK:-0}" == "1" ]]; then
         llm_args+=(--allow-template-fallback)
     fi
+    if [[ "${DIALOGUE_RESUME:-0}" == "1" ]]; then
+        llm_args+=(--resume)
+    fi
+    append_stage_extra_args llm_args DIALOGUE_EXTRA_ARGS DIALOGUE_EXTRA_ARGS_FILE
     "${llm_args[@]}"
     # Drop any stale enriched file so a regenerated dialogues.jsonl is never
     # rendered from previous-run enrichment.
@@ -145,6 +179,7 @@ if has_step enrich; then
     if [[ "${ENRICH_LABELED_TASKS:-0}" == "1" ]]; then
         enrich_args+=(--enrich-labeled-tasks)
     fi
+    append_stage_extra_args enrich_args ENRICH_EXTRA_ARGS ENRICH_EXTRA_ARGS_FILE
     "${enrich_args[@]}"
 fi
 
@@ -171,6 +206,15 @@ if has_step audio; then
         --speaker-other "${TTS_SPEAKER_OTHER:-Dylan}"
         --speaker-background "${TTS_SPEAKER_BACKGROUND:-Ryan}"
     )
+    # Per-speaker concatenated TTS + MMS_FA forced alignment instead of one
+    # TTS call per turn (see run_qwen_tts_whole_utterance_10000_4gpu.pbs).
+    # qwen3-only; requires Japanese romanization (uroman/pykakasi).
+    if [[ "${WHOLE_UTTERANCE:-0}" == "1" ]]; then
+        audio_args+=(
+            --whole-utterance
+            --whole-utterance-max-chars "${WHOLE_UTTERANCE_MAX_CHARS:-150}"
+        )
+    fi
     if [[ "$TTS_BACKEND" == "moss-ttsd" ]]; then
         audio_args+=(
             --moss-model "${MOSS_TTS_MODEL:-OpenMOSS-Team/MOSS-TTSD-v1.0}"
@@ -193,6 +237,10 @@ if has_step audio; then
             [[ -n "${MOSS_REF_TEXT_BACKGROUND:-}" ]] && audio_args+=(--moss-ref-text-background "$MOSS_REF_TEXT_BACKGROUND")
         fi
     fi
+    if [[ "${AUDIO_RESUME:-0}" == "1" ]]; then
+        audio_args+=(--resume)
+    fi
+    append_stage_extra_args audio_args AUDIO_EXTRA_ARGS AUDIO_EXTRA_ARGS_FILE
     "${audio_args[@]}"
 fi
 

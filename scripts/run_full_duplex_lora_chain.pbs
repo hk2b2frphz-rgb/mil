@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #PBS -S /bin/bash
 #PBS -N fd_lora_chain
-#PBS -q xvn_s
+#PBS -q xan_s
 #PBS -l select=1:res=small
 #PBS -l walltime=24:00:00
 #PBS -j oe
@@ -30,6 +30,13 @@
 #   OUT_ROOT=<path>             Data output directory.
 #   SRC_RUN_DIR=<path>          Skip generation and train an existing run.
 #   DATA_STEPS=<csv>            Default: use_cases,dialogues,enrich,audio.
+#   DATA_RUNNER=<path>          Data-stage script. Default:
+#                                scripts/run_full_duplex_training_data_qwen.sh
+#                                (vLLM-served Qwen3.6-27B dialogues + Qwen3-TTS
+#                                whole-utterance audio). Qwen3.6-27B needs an
+#                                A100, so set DATA_QUEUE=xan_s when using it.
+#                                Set DATA_RUNNER=scripts/run_full_duplex_training_data.sh
+#                                for the old gemma + per-turn-TTS pipeline.
 #   EXP_NAME=<name>             Experiment directory. Default: lora_base_config.
 #   TOTAL_STEPS=<n>             Whole training schedule. Defaults to config.yaml.
 #   SWEEP_PATTERN=<name>        Apply a pattern from sweep_patterns.sh.
@@ -108,8 +115,15 @@ fi
 
 EXP_NAME="${EXP_NAME:-${BASE_EXP:-lora_base_config}}"
 DATA_STEPS="${DATA_STEPS:-${STEPS:-use_cases,dialogues,enrich,audio}}"
+# vLLM-served Qwen3.6-27B dialogues (scripts/run_dialogues_qwen_10000.pbs) +
+# Qwen3-TTS whole-utterance audio (scripts/run_qwen_tts_whole_utterance_10000_4gpu.pbs)
+# instead of gemma + one-TTS-call-per-turn. Point DATA_RUNNER at
+# scripts/run_full_duplex_training_data.sh to restore the old pipeline.
+DATA_RUNNER="${DATA_RUNNER:-scripts/run_full_duplex_training_data_qwen.sh}"
 MIN_TRAIN_SAMPLES="${MIN_TRAIN_SAMPLES:-2}"
-DATA_QUEUE="${DATA_QUEUE:-xvn_s}"
+# Matches DATA_RUNNER's default (vLLM Qwen3.6-27B needs an A100). Set
+# DATA_QUEUE=xvn_s if DATA_RUNNER is overridden back to the gemma pipeline.
+DATA_QUEUE="${DATA_QUEUE:-xan_s}"
 DATA_SELECT="${DATA_SELECT:-1:res=small}"
 TRAIN_QUEUE="${TRAIN_QUEUE:-xan_s}"
 TRAIN_SELECT="${TRAIN_SELECT:-1:res=small}"
@@ -153,7 +167,7 @@ fi
 
 export CHAIN_ID CHAIN_INDEX MAX_CHAIN_JOBS PIPELINE_STAGE
 export RUN_ID OUT_ROOT SRC_RUN_DIR EXP_NAME TOTAL_STEPS DATA_STEPS
-export MIN_TRAIN_SAMPLES DATA_QUEUE DATA_SELECT TRAIN_QUEUE TRAIN_SELECT
+export MIN_TRAIN_SAMPLES DATA_RUNNER DATA_QUEUE DATA_SELECT TRAIN_QUEUE TRAIN_SELECT
 export PIPELINE_WALLTIME SELF_PBS CHAIN_STOP_FILE STATE_FILE SWEEP_PATTERN
 
 print_settings() {
@@ -167,6 +181,7 @@ print_settings() {
     echo "out_root:        $OUT_ROOT"
     echo "src_run_dir:     $SRC_RUN_DIR"
     echo "data_steps:      $DATA_STEPS"
+    echo "data_runner:     $DATA_RUNNER"
     echo "exp_name:        $EXP_NAME"
     echo "total_steps:     $TOTAL_STEPS"
     echo "data_resource:   $DATA_QUEUE / $DATA_SELECT"
@@ -263,7 +278,7 @@ if [[ "$PIPELINE_STAGE" == "data" ]]; then
     write_state running "data generation"
 
     set +e
-    timebox_run "$TIMEBOX_DEADLINE" bash scripts/run_full_duplex_training_data.sh
+    timebox_run "$TIMEBOX_DEADLINE" bash "$DATA_RUNNER"
     stage_rc=$?
     set -e
 

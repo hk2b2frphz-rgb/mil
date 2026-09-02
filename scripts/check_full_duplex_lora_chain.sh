@@ -96,6 +96,7 @@ run_chain() {
         export SUBMIT_LOG="$SANDBOX/submit.log"
         env TIMEBOX_SETTLE_SEC=0 TIMEBOX_POLL_SEC=1 TIMEBOX_GRACE_SEC=1 \
             TOTAL_STEPS=100 EXP_NAME=test CHAIN_ID=check CHAIN_INDEX=1 \
+            DATA_RUNNER=scripts/run_full_duplex_training_data.sh \
             "$@" /bin/bash scripts/run_full_duplex_lora_chain.pbs
     ) >> "$SANDBOX/run.log" 2>&1
     echo $?
@@ -105,7 +106,7 @@ echo "[1] Data timeout continues on the data queue"
 setup_sandbox
 status="$(run_chain TEST_DATA_RESULT=timeout PIPELINE_STAGE=data OUT_ROOT="$SANDBOX/work/data")"
 check "exit status is zero after successor submission" "[[ '$status' == 0 ]]"
-check "next stage remains data" "grep -q 'stage=data index=2 queue=xvn_s select=1:res=small' '$SANDBOX/submit.log'"
+check "next stage remains data" "grep -q 'stage=data index=2 queue=xan_s select=1:res=small' '$SANDBOX/submit.log'"
 
 echo "[2] Completed data moves to the training queue"
 setup_sandbox
