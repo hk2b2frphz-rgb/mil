@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N az_n_ft10k
+#PBS -q xan_s
+#PBS -l select=1:res=middle
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# Full fine-tuning for the normal-frequency 10,000-dialogue corpus.
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export RUN_ID="aizuchi_normal_10000_fullft"
+export SRC_RUN_DIR="$PWD/data/runs/aizuchi_normal_10000/tts/merged"
+export SWEEP_PATTERNS="f01"
+export SKIP_AUTO_EVAL=1
+# Keep chained full-FT jobs on this frequency-specific entrypoint.
+export SELF_PBS="scripts/2026-09-02/aizuchi_normal_fullft_10000.pbs"
+
+exec bash scripts/fullft_sweep.pbs
