@@ -439,7 +439,10 @@ if [[ -n "${MLFLOW_EXPERIMENT_NAME:-}" || -n "${MLFLOW_TRACKING_URI:-}" ]]; then
     fi
     if ! "${MLFLOW_CHECK_CMD[@]}" >/dev/null 2>&1; then
         echo "[exp] installing mlflow into project uv environment"
-        uv pip install mlflow
+        if ! uv pip install mlflow; then
+            echo "[exp] WARN: failed to install mlflow (no network on this node?); continuing training without MLflow live sync" >&2
+            MLFLOW_ENABLED=0
+        fi
     fi
     MLFLOW_RUN_ID_FILE="$EXP_DIR/mlflow_run_${RUN_TS}.id"
     MLFLOW_SYNC_CMD=(uv run python scripts/sync_mlflow_metrics.py
@@ -457,7 +460,7 @@ if [[ -n "${MLFLOW_EXPERIMENT_NAME:-}" || -n "${MLFLOW_TRACKING_URI:-}" ]]; then
     fi
 
     MLFLOW_LIVE_SYNC_INTERVAL="${MLFLOW_LIVE_SYNC_INTERVAL:-300}"
-    if [[ "$MLFLOW_LIVE_SYNC_INTERVAL" != "0" ]]; then
+    if [[ "$MLFLOW_ENABLED" == "1" && "$MLFLOW_LIVE_SYNC_INTERVAL" != "0" ]]; then
         (
             while true; do
                 run_mlflow_sync_once || echo "[exp] WARN: periodic MLflow sync failed" >&2
