@@ -68,7 +68,7 @@ if has_step dialogues; then
         --seed "$SEED"
         --mode dialogues-only
         --llm-backend "${LLM_BACKEND:-transformers-subprocess}"
-        --llm-model "${LLM_MODEL:-google/gemma-2-2b-it}"
+        --llm-model "${LLM_MODEL:-google/gemma-4-E2B-it}"
         --llm-dtype "${LLM_DTYPE:-bfloat16}"
         --llm-temperature "${LLM_TEMPERATURE:-0.8}"
         --llm-max-new-tokens "${LLM_MAX_NEW_TOKENS:-4096}"
