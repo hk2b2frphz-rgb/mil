@@ -28,15 +28,31 @@ from typing import Any
 
 CHARS_PER_SECOND = 6.0
 
-# 話し手が聞き手の存在を確かめる言い方。
-PROBE_RE = re.compile(
-    r"もしもし|聞いて(い)?ま|通じて|繋がって|つながって|聞こえ|いますか|いますよね"
+# 話し手が聞き手の存在を確かめる言い方。問いかけの形になっているものだけを数える
+# ので、名乗りの「あ、もしもし……。」、確認への返事「通じてて良かった…。」、
+# 単に語を含むだけの「繋がっているだけでも気が楽なんですよね」は入らない。
+PROBE_PHRASE_RE = re.compile(
+    r"聞いて(い)?ま(す|せん)か|聞こえて(い)?ま|通じて(い)?ま|"
+    r"繋がって(い)?ま|つながって(い)?ま|まだ.{0,8}います"
 )
+QUESTION_RE = re.compile(r"[?？]")
+
+
+def is_probe(text: str) -> bool:
+    body = text.strip()
+    if len(body) > 45:
+        return False
+    if PROBE_PHRASE_RE.search(body) and QUESTION_RE.search(body):
+        return True
+    # 「もしもし?」だけの呼びかけも確認。「もしもし。」の名乗りは数えない。
+    return "もしもし" in body and len(body) <= 24 and bool(QUESTION_RE.search(body))
+
+
 # 本文に残ってはいけないもの。
 TAG_RE = re.compile(r"<|>|pause", re.IGNORECASE)
 LATIN_RE = re.compile(r"[A-Za-z]{3,}")
 # 日本語には出てこない簡体字・中国語の助詞（Qwen 由来の混入を拾う）。
-CHINESE_RE = re.compile(r"[啊吧呢咱们这么吗儿说没对话时间里线呗]")
+CHINESE_RE = re.compile(r"[呢吧啊咱们这么吗儿说话时间里线呗什哪对]")
 # 終話の言い回し。対話の最後以外に出てきたら、締めそこねている。
 FAREWELL_RE = re.compile(r"失礼します|失礼いたします|さようなら|ご機嫌よう|また、?お電話|それでは、?また")
 
@@ -92,7 +108,7 @@ def measure(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 chinese += 1
             if len(text) > 60:
                 long_user += 1
-            if PROBE_RE.search(text) and len(text) < 45:
+            if is_probe(text):
                 probes_here += 1
             if FAREWELL_RE.search(text):
                 farewells_here += 1
