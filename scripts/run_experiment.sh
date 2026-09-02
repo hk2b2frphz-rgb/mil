@@ -542,14 +542,19 @@ fi
 # ---------------------------------------------------------------------------
 # 5) 起動。run.log にも tee。
 # ---------------------------------------------------------------------------
-set +e
-(
-    cd "$MOSHI_FT_REPO" && \
-    CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
-    "${LAUNCH_CMD[@]}"
-) 2>&1 | tee "$EXP_LOG"
-TRAIN_STATUS=${PIPESTATUS[0]}
-set -e
+if [[ "${RUN_EXPERIMENT_POSTPROCESS_ONLY:-0}" == "1" ]]; then
+    echo "[exp] RUN_EXPERIMENT_POSTPROCESS_ONLY=1: skipping training"
+    TRAIN_STATUS=0
+else
+    set +e
+    (
+        cd "$MOSHI_FT_REPO" && \
+        CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
+        "${LAUNCH_CMD[@]}"
+    ) 2>&1 | tee "$EXP_LOG"
+    TRAIN_STATUS=${PIPESTATUS[0]}
+    set -e
+fi
 
 if [[ -n "$MLFLOW_SYNC_PID" ]]; then
     kill "$MLFLOW_SYNC_PID" >/dev/null 2>&1 || true

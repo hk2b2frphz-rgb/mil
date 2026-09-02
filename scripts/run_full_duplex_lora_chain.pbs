@@ -1,0 +1,415 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N fd_lora_chain
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# One entry point for the complete full-duplex pipeline:
+#
+#   use cases -> LLM dialogues -> timing enrichment -> TTS -> LoRA training
+#
+# Long stages are stopped before PBS walltime and continued by a successor job.
+# Data generation resumes in the same OUT_ROOT. Training resumes from the newest
+# settled LoRA checkpoint. The data job uses DATA_QUEUE and all training jobs use
+# TRAIN_QUEUE. qsub -V carries every caller-provided environment variable, so
+# all DATA_*, LLM_*, TTS_*, MOSS_*, HP_*, tracking, cache, and proxy settings are
+# preserved without maintaining a fragile allow-list here.
+#
+# Initial submission example:
+#
+#   qsub -v 'RUN_ID=fd_001,NUM_CASES=140,EXP_NAME=lora_base_config,TOTAL_STEPS=7200' scripts/run_full_duplex_lora_chain.pbs
+#
+# Main pipeline controls:
+#   PIPELINE_STAGE=data|train   Initial stage. Default: data.
+#   RUN_ID=<name>               Stable data run name. Auto-generated if omitted.
+#   OUT_ROOT=<path>             Data output directory.
+#   SRC_RUN_DIR=<path>          Skip generation and train an existing run.
+#   DATA_STEPS=<csv>            Default: use_cases,dialogues,enrich,audio.
+#   EXP_NAME=<name>             Experiment directory. Default: lora_base_config.
+#   TOTAL_STEPS=<n>             Whole training schedule. Defaults to config.yaml.
+#   SWEEP_PATTERN=<name>        Apply a pattern from sweep_patterns.sh.
+#   MAX_CHAIN_JOBS=<n>          Runaway cap. Default: 64.
+#   CHAIN_STOP_FILE=<path>      Create this file to prevent another submission.
+#   TIMEBOX_LEAD_SEC=<seconds>  Reserved handoff time. Default: 3600.
+#   PIPELINE_DRY_RUN=1          Resolve and print inputs without running work.
+#
+# Data arguments are the same environment variables accepted by
+# run_full_duplex_training_data.sh, including:
+#   NUM_CASES FULL_DUPLEX_TASKS SEED LISTENING_RATIO CONTENT_SEEDS
+#   LLM_BACKEND LLM_MODEL LLM_DTYPE LLM_TEMPERATURE LLM_MAX_NEW_TOKENS
+#   LLM_TIMEOUT_SEC LLM_API_BASE LLM_API_KEY LLM_OPENAI_ENDPOINT
+#   DIALOGUE_GENERATION_MODE MULTI_AGENT_* AIZUCHI_ONLY_* SEC_PER_AIZUCHI
+#   AIZUCHI_PROB MAX_AIZUCHI_PER_TURN ENRICH_LABELED_TASKS
+#   TTS_BACKEND QWEN_TTS_MODEL TTS_DEVICE TTS_DTYPE TTS_SPEAKER_*
+#   MOSS_TTS_MODEL MOSS_CODEC_MODEL MOSS_REF_* GAP_SEC LEAD_IN_SEC
+# Any generator CLI option can also be supplied as one argv item per line in
+# USE_CASE_EXTRA_ARGS, DIALOGUE_EXTRA_ARGS, ENRICH_EXTRA_ARGS, or
+# AUDIO_EXTRA_ARGS. The corresponding *_EXTRA_ARGS_FILE reads the same format
+# from a file. These values are inherited unchanged by every chain link.
+#
+# Training arguments are all HP_* variables accepted by run_experiment.sh,
+# plus NPROC, MOSHI_FT_REPO, MLFLOW_*, WANDB_*, and cache/proxy variables.
+# Internal resume values override HP_MAX_STEPS, HP_RESUME_STEP,
+# HP_STOP_AT_STEP, HP_RESUME_FROM, RUN_TS, and REFRESH_EXP_DATA.
+
+set -euo pipefail
+
+REPO_ROOT="${PBS_O_WORKDIR:-$(pwd)}"
+cd "$REPO_ROOT"
+
+source scripts/setup_proxy.sh
+# shellcheck source=/dev/null
+source scripts/train_timebox.sh
+
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+CHAIN_ID="${CHAIN_ID:-fd_lora_${JOB_ID_SHORT}}"
+CHAIN_INDEX="${CHAIN_INDEX:-1}"
+MAX_CHAIN_JOBS="${MAX_CHAIN_JOBS:-64}"
+PIPELINE_STAGE="${PIPELINE_STAGE:-}"
+
+RUN_ID="${RUN_ID:-full_duplex_${JOB_ID_SHORT}}"
+OUT_ROOT_WAS_SET=0
+[[ -n "${OUT_ROOT:-}" ]] && OUT_ROOT_WAS_SET=1
+OUT_ROOT="${OUT_ROOT:-$REPO_ROOT/data/runs/$RUN_ID}"
+OUT_ROOT="$(realpath -m "$OUT_ROOT")"
+SRC_RUN_DIR_WAS_SET=0
+[[ -n "${SRC_RUN_DIR:-}" ]] && SRC_RUN_DIR_WAS_SET=1
+SRC_RUN_DIR="${SRC_RUN_DIR:-}"
+if [[ -n "$SRC_RUN_DIR" ]]; then
+    SRC_RUN_DIR="$(realpath -m "$SRC_RUN_DIR")"
+else
+    SRC_RUN_DIR="$OUT_ROOT"
+fi
+if [[ -z "$PIPELINE_STAGE" ]]; then
+    if [[ "$SRC_RUN_DIR_WAS_SET" -eq 1 ]]; then
+        PIPELINE_STAGE="train"
+    else
+        PIPELINE_STAGE="data"
+    fi
+fi
+if [[ "$PIPELINE_STAGE" == "data" ]]; then
+    SRC_RUN_DIR="$OUT_ROOT"
+elif [[ "$SRC_RUN_DIR_WAS_SET" -eq 1 && "$OUT_ROOT_WAS_SET" -eq 0 ]]; then
+    OUT_ROOT="$SRC_RUN_DIR"
+fi
+
+SWEEP_PATTERN="${SWEEP_PATTERN:-}"
+if [[ -n "$SWEEP_PATTERN" ]]; then
+    # shellcheck source=/dev/null
+    source "$REPO_ROOT/scripts/sweep_patterns.sh"
+    apply_pattern "$SWEEP_PATTERN"
+fi
+
+EXP_NAME="${EXP_NAME:-${BASE_EXP:-lora_base_config}}"
+DATA_STEPS="${DATA_STEPS:-${STEPS:-use_cases,dialogues,enrich,audio}}"
+MIN_TRAIN_SAMPLES="${MIN_TRAIN_SAMPLES:-2}"
+DATA_QUEUE="${DATA_QUEUE:-xvn_s}"
+DATA_SELECT="${DATA_SELECT:-1:res=small}"
+TRAIN_QUEUE="${TRAIN_QUEUE:-xan_s}"
+TRAIN_SELECT="${TRAIN_SELECT:-1:res=small}"
+PIPELINE_WALLTIME="${PIPELINE_WALLTIME:-24:00:00}"
+SELF_PBS="${SELF_PBS:-$REPO_ROOT/scripts/run_full_duplex_lora_chain.pbs}"
+SELF_PBS="$(realpath -m "$SELF_PBS")"
+CHAIN_STOP_FILE="${CHAIN_STOP_FILE:-$OUT_ROOT/.stop_full_duplex_lora_chain}"
+STATE_FILE="${STATE_FILE:-$OUT_ROOT/.full_duplex_lora_chain.state}"
+
+if [[ -z "${TOTAL_STEPS:-}" ]]; then
+    if [[ -n "${HP_MAX_STEPS:-}" ]]; then
+        TOTAL_STEPS="$HP_MAX_STEPS"
+    else
+        CONFIG_PATH="experiments/$EXP_NAME/config.yaml"
+        if [[ ! -f "$CONFIG_PATH" ]]; then
+            echo "ERROR: experiment config does not exist: $CONFIG_PATH" >&2
+            exit 1
+        fi
+        TOTAL_STEPS="$(awk '/^[[:space:]]*max_steps[[:space:]]*:/ {print $2; exit}' "$CONFIG_PATH")"
+    fi
+fi
+
+for value in "$CHAIN_INDEX" "$MAX_CHAIN_JOBS" "$MIN_TRAIN_SAMPLES" "$TOTAL_STEPS"; do
+    if ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: chain indexes, sample count, and TOTAL_STEPS must be positive integers." >&2
+        exit 1
+    fi
+done
+if [[ "$PIPELINE_STAGE" != "data" && "$PIPELINE_STAGE" != "train" && "$PIPELINE_STAGE" != "finalize" ]]; then
+    echo "ERROR: PIPELINE_STAGE must be data, train, or finalize, got: $PIPELINE_STAGE" >&2
+    exit 1
+fi
+if [[ "$CHAIN_INDEX" -gt "$MAX_CHAIN_JOBS" ]]; then
+    echo "ERROR: CHAIN_INDEX=$CHAIN_INDEX exceeds MAX_CHAIN_JOBS=$MAX_CHAIN_JOBS." >&2
+    exit 1
+fi
+if [[ ! -f "$SELF_PBS" ]]; then
+    echo "ERROR: SELF_PBS does not exist: $SELF_PBS" >&2
+    exit 1
+fi
+
+export CHAIN_ID CHAIN_INDEX MAX_CHAIN_JOBS PIPELINE_STAGE
+export RUN_ID OUT_ROOT SRC_RUN_DIR EXP_NAME TOTAL_STEPS DATA_STEPS
+export MIN_TRAIN_SAMPLES DATA_QUEUE DATA_SELECT TRAIN_QUEUE TRAIN_SELECT
+export PIPELINE_WALLTIME SELF_PBS CHAIN_STOP_FILE STATE_FILE SWEEP_PATTERN
+
+print_settings() {
+    echo "===== Full-duplex data and LoRA chain ====="
+    echo "job_id:          ${PBS_JOBID:-n/a}"
+    echo "host:            $(hostname)"
+    echo "chain_id:        $CHAIN_ID"
+    echo "chain_index:     $CHAIN_INDEX / $MAX_CHAIN_JOBS"
+    echo "stage:           $PIPELINE_STAGE"
+    echo "run_id:          $RUN_ID"
+    echo "out_root:        $OUT_ROOT"
+    echo "src_run_dir:     $SRC_RUN_DIR"
+    echo "data_steps:      $DATA_STEPS"
+    echo "exp_name:        $EXP_NAME"
+    echo "total_steps:     $TOTAL_STEPS"
+    echo "data_resource:   $DATA_QUEUE / $DATA_SELECT"
+    echo "train_resource:  $TRAIN_QUEUE / $TRAIN_SELECT"
+    echo "walltime:        $PIPELINE_WALLTIME"
+    echo "stop_file:       $CHAIN_STOP_FILE"
+    echo "started_at:      $(date -Iseconds)"
+    echo "=========================================="
+}
+
+write_state() {
+    local status="$1"
+    local detail="${2:-}"
+    mkdir -p "$(dirname "$STATE_FILE")"
+    {
+        echo "status=$status"
+        echo "detail=$detail"
+        echo "stage=$PIPELINE_STAGE"
+        echo "chain_id=$CHAIN_ID"
+        echo "chain_index=$CHAIN_INDEX"
+        echo "job_id=${PBS_JOBID:-n/a}"
+        echo "updated_at=$(date -Iseconds)"
+    } > "$STATE_FILE"
+}
+
+submit_successor() {
+    local next_stage="$1"
+    local next_queue="$2"
+    local next_select="$3"
+    local next_index=$(( CHAIN_INDEX + 1 ))
+
+    if [[ -e "$CHAIN_STOP_FILE" ]]; then
+        echo "[chain] stop file exists; not submitting another job: $CHAIN_STOP_FILE"
+        write_state stopped "stop file present before successor submission"
+        return 0
+    fi
+    if [[ "$next_index" -gt "$MAX_CHAIN_JOBS" ]]; then
+        echo "ERROR: next chain index $next_index exceeds MAX_CHAIN_JOBS=$MAX_CHAIN_JOBS." >&2
+        write_state failed "runaway guard reached"
+        return 1
+    fi
+    if ! command -v qsub >/dev/null 2>&1; then
+        echo "ERROR: qsub is unavailable; cannot continue the chain." >&2
+        write_state failed "qsub unavailable"
+        return 1
+    fi
+
+    export PIPELINE_STAGE="$next_stage"
+    export CHAIN_INDEX="$next_index"
+    echo "[chain] submitting link $next_index: stage=$next_stage queue=$next_queue select=$next_select"
+    local next_job_id qsub_rc
+    set +e
+    next_job_id="$(qsub -V -q "$next_queue" -l "select=$next_select" \
+        -l "walltime=$PIPELINE_WALLTIME" "$SELF_PBS")"
+    qsub_rc=$?
+    set -e
+    if [[ "$qsub_rc" -ne 0 ]]; then
+        echo "ERROR: successor qsub failed with status $qsub_rc." >&2
+        write_state failed "successor qsub rc=$qsub_rc stage=$next_stage"
+        return "$qsub_rc"
+    fi
+    echo "[chain] submitted: $next_job_id"
+    write_state submitted "next_job_id=$next_job_id next_stage=$next_stage"
+}
+
+print_settings
+
+if [[ "${PIPELINE_DRY_RUN:-0}" == "1" ]]; then
+    echo "[dry-run] no data generation, training, or qsub was performed."
+    exit 0
+fi
+
+mkdir -p "$OUT_ROOT" experiments/pbs_logs
+LOG_FILE="experiments/pbs_logs/${CHAIN_ID}_link$(printf '%02d' "$CHAIN_INDEX")_${PIPELINE_STAGE}.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "log:             $LOG_FILE"
+
+if [[ -e "$CHAIN_STOP_FILE" ]]; then
+    echo "[chain] stop file exists; ending before work starts: $CHAIN_STOP_FILE"
+    write_state stopped "stop file present at job start"
+    exit 0
+fi
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+fi
+
+timebox_init
+
+if [[ "$PIPELINE_STAGE" == "data" ]]; then
+    export STEPS="$DATA_STEPS"
+    export DIALOGUE_RESUME=1
+    export AUDIO_RESUME=1
+    write_state running "data generation"
+
+    set +e
+    timebox_run "$TIMEBOX_DEADLINE" bash scripts/run_full_duplex_training_data.sh
+    stage_rc=$?
+    set -e
+
+    if [[ "$stage_rc" -eq 124 ]]; then
+        echo "[chain] data time budget reached; continuing in another data job."
+        submit_successor data "$DATA_QUEUE" "$DATA_SELECT"
+        exit $?
+    fi
+    if [[ "$stage_rc" -ne 0 ]]; then
+        echo "ERROR: data generation failed with status $stage_rc; not resubmitting." >&2
+        write_state failed "data generation rc=$stage_rc"
+        exit "$stage_rc"
+    fi
+
+    MANIFEST="$SRC_RUN_DIR/training_set/synthetic_moshi_train.jsonl"
+    if [[ ! -s "$MANIFEST" ]]; then
+        echo "ERROR: data generation completed without a manifest: $MANIFEST" >&2
+        write_state failed "training manifest missing"
+        exit 1
+    fi
+    SAMPLE_COUNT="$(awk 'NF {count++} END {print count+0}' "$MANIFEST")"
+    if [[ "$SAMPLE_COUNT" -lt "$MIN_TRAIN_SAMPLES" ]]; then
+        echo "ERROR: manifest has $SAMPLE_COUNT samples; need at least $MIN_TRAIN_SAMPLES." >&2
+        write_state failed "too few training samples: $SAMPLE_COUNT"
+        exit 1
+    fi
+
+    echo "[chain] data complete: $SAMPLE_COUNT samples. Moving to training queue."
+    export TRAIN_RESUME_STEP=0
+    unset TRAIN_RESUME_FROM HP_RESUME_FROM
+    submit_successor train "$TRAIN_QUEUE" "$TRAIN_SELECT"
+    exit $?
+fi
+
+MANIFEST="$SRC_RUN_DIR/training_set/synthetic_moshi_train.jsonl"
+if [[ ! -s "$MANIFEST" ]]; then
+    echo "ERROR: training manifest does not exist: $MANIFEST" >&2
+    write_state failed "training manifest missing"
+    exit 1
+fi
+
+if [[ "$PIPELINE_STAGE" == "finalize" ]]; then
+    FINALIZE_RUN_TS="${FINALIZE_RUN_TS:?finalize stage requires FINALIZE_RUN_TS}"
+    export RUN_TS="$FINALIZE_RUN_TS"
+    export RUN_EXPERIMENT_POSTPROCESS_ONLY=1
+    export REFRESH_EXP_DATA=0
+    unset HP_RESUME_FROM TRAIN_RESUME_FROM
+    write_state running "postprocessing training run $RUN_TS"
+
+    set +e
+    timebox_run "$TIMEBOX_DEADLINE" bash scripts/run_experiment.sh "$EXP_NAME" "$SRC_RUN_DIR"
+    stage_rc=$?
+    set -e
+
+    if [[ "$stage_rc" -eq 0 ]]; then
+        echo "[chain] training postprocessing completed."
+        write_state complete "training and postprocessing completed"
+        exit 0
+    fi
+    if [[ "$stage_rc" -eq 124 ]]; then
+        echo "[chain] postprocessing time budget reached; continuing in another job."
+        export FINALIZE_RUN_TS
+        submit_successor finalize "$TRAIN_QUEUE" "$TRAIN_SELECT"
+        exit $?
+    fi
+    echo "ERROR: training postprocessing failed with status $stage_rc; not resubmitting." >&2
+    write_state failed "postprocessing rc=$stage_rc"
+    exit "$stage_rc"
+fi
+
+TRAIN_RESUME_STEP="${TRAIN_RESUME_STEP:-${HP_RESUME_STEP:-0}}"
+TRAIN_RESUME_FROM="${TRAIN_RESUME_FROM:-${HP_RESUME_FROM:-}}"
+if ! [[ "$TRAIN_RESUME_STEP" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: TRAIN_RESUME_STEP must be a non-negative integer." >&2
+    exit 1
+fi
+if [[ "$TRAIN_RESUME_STEP" -ge "$TOTAL_STEPS" ]]; then
+    echo "[chain] resume step $TRAIN_RESUME_STEP reached TOTAL_STEPS=$TOTAL_STEPS."
+    write_state complete "total training steps already reached"
+    exit 0
+fi
+if [[ "$TRAIN_RESUME_STEP" -gt 0 && ! -s "$TRAIN_RESUME_FROM" ]]; then
+    echo "ERROR: resumed training requires TRAIN_RESUME_FROM: $TRAIN_RESUME_FROM" >&2
+    write_state failed "resume checkpoint missing"
+    exit 1
+fi
+
+export RUN_TS="${CHAIN_ID}_train$(printf '%02d' "$CHAIN_INDEX")"
+export HP_MAX_STEPS="$TOTAL_STEPS"
+export HP_RESUME_STEP="$TRAIN_RESUME_STEP"
+export HP_STOP_AT_STEP="$TOTAL_STEPS"
+export RUN_EXPERIMENT_POSTPROCESS_ONLY=0
+if [[ -n "$TRAIN_RESUME_FROM" ]]; then
+    export HP_RESUME_FROM="$TRAIN_RESUME_FROM"
+    export REFRESH_EXP_DATA=0
+else
+    unset HP_RESUME_FROM
+    export REFRESH_EXP_DATA="${REFRESH_EXP_DATA:-1}"
+fi
+export NPROC="${NPROC:-1}"
+export TRAIN_RESUME_STEP TRAIN_RESUME_FROM
+
+TRAIN_CKPT_ROOT="experiments/$EXP_NAME/checkpoints/$RUN_TS/checkpoints"
+echo "[chain] training steps $TRAIN_RESUME_STEP -> $TOTAL_STEPS"
+echo "[chain] resume checkpoint: ${TRAIN_RESUME_FROM:-<fresh start>}"
+echo "[chain] run_ts: $RUN_TS"
+write_state running "training from step $TRAIN_RESUME_STEP"
+
+set +e
+timebox_run "$TIMEBOX_DEADLINE" bash scripts/run_experiment.sh "$EXP_NAME" "$SRC_RUN_DIR"
+stage_rc=$?
+set -e
+
+if [[ "$stage_rc" -eq 0 ]]; then
+    echo "[chain] training command completed; no successor is needed."
+    write_state complete "training command completed"
+    exit 0
+fi
+if [[ "$stage_rc" -ne 124 ]]; then
+    echo "ERROR: training failed with status $stage_rc; not resubmitting." >&2
+    write_state failed "training rc=$stage_rc"
+    exit "$stage_rc"
+fi
+
+echo "[chain] training time budget reached; locating the newest settled checkpoint."
+if ! latest_ckpt="$(timebox_latest_ckpt "$TRAIN_CKPT_ROOT")"; then
+    echo "ERROR: no settled checkpoint is available under $TRAIN_CKPT_ROOT." >&2
+    echo "ERROR: not resubmitting because a safe training resume is impossible." >&2
+    write_state failed "no settled checkpoint after timebox"
+    exit 1
+fi
+IFS=$'\t' read -r next_resume_step next_resume_from <<< "$latest_ckpt"
+if [[ "$next_resume_step" -le "$TRAIN_RESUME_STEP" ]]; then
+    echo "ERROR: newest checkpoint step $next_resume_step did not advance past $TRAIN_RESUME_STEP." >&2
+    write_state failed "training made no checkpoint progress"
+    exit 1
+fi
+
+if [[ "$next_resume_step" -ge "$TOTAL_STEPS" ]]; then
+    echo "[chain] final checkpoint reached step $next_resume_step; continuing postprocessing."
+    export FINALIZE_RUN_TS="$RUN_TS"
+    submit_successor finalize "$TRAIN_QUEUE" "$TRAIN_SELECT"
+    exit $?
+fi
+
+export TRAIN_RESUME_STEP="$next_resume_step"
+export TRAIN_RESUME_FROM="$(realpath -e "$next_resume_from")"
+echo "[chain] continuing from step $TRAIN_RESUME_STEP: $TRAIN_RESUME_FROM"
+submit_successor train "$TRAIN_QUEUE" "$TRAIN_SELECT"
