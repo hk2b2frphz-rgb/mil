@@ -2538,14 +2538,23 @@ ROLE_TOKEN_ONLY_RE = re.compile(
 LATIN_RUN_RE = re.compile(r"[A-Za-z]{3,}")
 # 「まだ聞いていますか?」の類。沈黙のあとの計画された一度だけに留めたいので、
 # それ以外のブロックで出てきたら書き直させる（指示だけでは止まらなかった）。
-PROBE_UTTERANCE_RE = re.compile(
-    r"もしもし|聞いて(い)?ま(す|せん)か|聞こえて(い)?ま|通じて(い)?ま|繋がって(い)?ま|つながって(い)?ま|まだ.{0,8}います"
+# 「まだ聞いていますか?」の類。沈黙のあとの計画された一度だけに留めたいので、
+# それ以外のブロックで出てきたら書き直させる（指示だけでは止まらなかった）。
+# 「もしもし」単独は電話に出るときの挨拶なので、これだけでは確認とみなさない。
+PROBE_PHRASE_RE = re.compile(
+    r"聞いて(い)?ま(す|せん)か|聞こえて(い)?ま|通じて(い)?ま|"
+    r"繋がって(い)?ま|つながって(い)?ま|まだ.{0,8}います"
 )
+QUESTION_RE = re.compile(r"[?？]")
 
 
 def unplanned_probe(text: str) -> tuple[str, bool] | None:
     """計画外の「まだ聞いていますか?」なら理由を返す。"""
-    if PROBE_UTTERANCE_RE.search(text):
+    body = RESIDUAL_TAG_RE.sub("", text).strip()
+    if PROBE_PHRASE_RE.search(body):
+        return ("相手がいるかの確認は、この発話では書きません", False)
+    # 「もしもし?」だけで問いかけている短い発話も確認。名乗りの「もしもし。」は通す。
+    if "もしもし" in body and len(body) <= 24 and QUESTION_RE.search(body):
         return ("相手がいるかの確認は、この発話では書きません", False)
     return None
 
