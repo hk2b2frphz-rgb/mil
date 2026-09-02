@@ -440,6 +440,21 @@ AIZUCHI_OVERLAP_TEXTS = frozenset({
     "なるほど。",
 })
 AIZUCHI_OVERLAP_START_AFTER_PREVIOUS_START_SEC = 999
+# 相づちは、相手が言い終わるのを待ってから打つものではない。文末の助詞のあたりに
+# 少し被せて打ち始める。0 にすると「言い終わった瞬間」になり、礼儀正しすぎるか、
+# 逆に間が詰まって聞こえる。
+AIZUCHI_OVERLAP_LEAD_SEC = 0.25
+# 全部が同じ位置に入ると機械的に聞こえるので、前後に散らす。対話をまたいで
+# 再現するよう、乱数ではなくターン番号から決める。
+AIZUCHI_OVERLAP_LEAD_JITTER_SEC = 0.10
+# 被せるのは句の後半だけ。句が始まった直後に打つと、聞かずに反応したことになる。
+AIZUCHI_OVERLAP_MIN_INTO_CLAUSE_SEC = 0.20
+
+
+def aizuchi_overlap_lead(turn_index: int) -> float:
+    """その相づちを、相手の句末からどれだけ食い気味に始めるか（秒）。"""
+    jitter = ((turn_index * 37) % 21 - 10) / 10.0 * AIZUCHI_OVERLAP_LEAD_JITTER_SEC
+    return max(0.0, AIZUCHI_OVERLAP_LEAD_SEC + jitter)
 
 
 def apply_aizuchi_overlap(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1825,11 +1840,20 @@ def build_segments_whole_utterance(
                 merged_turns.add(secondary)
             for gi in range(len(group) - 1):
                 curr_idx, next_idx = group[gi], group[gi + 1]
-                _, curr_tight_end = turn_tight[curr_idx]
-                overlap_in_merged = curr_tight_end - first_exp_start
+                curr_tight_start, curr_tight_end = turn_tight[curr_idx]
+                clause_end = curr_tight_end - first_exp_start
+                # 句が始まってすぐには打たない。短い句では食い込みを詰める。
+                earliest = (
+                    curr_tight_start
+                    - first_exp_start
+                    + AIZUCHI_OVERLAP_MIN_INTO_CLAUSE_SEC
+                )
                 for a in range(curr_idx + 1, next_idx):
                     if a in aizuchi_indices:
-                        aizuchi_overlay_sec[a] = overlap_in_merged
+                        lead = aizuchi_overlap_lead(a)
+                        aizuchi_overlay_sec[a] = max(
+                            0.0, min(clause_end, max(earliest, clause_end - lead))
+                        )
             logger.debug(
                 "merged user turns %s into one segment (%.2fs)",
                 group, (last_exp_end - first_exp_start),
