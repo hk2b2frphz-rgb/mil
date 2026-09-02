@@ -95,7 +95,9 @@ command -v uv >/dev/null 2>&1 || {
 if [[ -n "${MLFLOW_EXPERIMENT_NAME:-}" || -n "${MLFLOW_TRACKING_URI:-}" ]]; then
     if ! uv run python -c "import mlflow" >/dev/null 2>&1; then
         echo "mlflow is not installed in the project uv environment; installing it."
-        uv pip install mlflow
+        if ! uv pip install mlflow; then
+            echo "WARN: failed to install mlflow (no network on this node?); continuing without live sync" >&2
+        fi
     fi
 fi
 

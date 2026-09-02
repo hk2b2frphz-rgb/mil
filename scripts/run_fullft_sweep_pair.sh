@@ -154,7 +154,9 @@ else
 fi
 if ! "${MLFLOW_CHECK_CMD[@]}" >/dev/null 2>&1; then
     echo "[full-ft sweep] installing mlflow into project uv environment"
-    uv pip install mlflow
+    if ! uv pip install mlflow; then
+        echo "[full-ft sweep] WARN: failed to install mlflow (no network on this node?); continuing without live sync" >&2
+    fi
 fi
 
 echo
