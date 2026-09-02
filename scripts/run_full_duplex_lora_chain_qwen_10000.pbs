@@ -22,6 +22,11 @@
 # Override anything run_full_duplex_lora_chain.pbs or
 # run_full_duplex_training_data_qwen.sh accepts the normal way, e.g.:
 #   qsub -v RUN_ID=fd_10000_v2 scripts/run_full_duplex_lora_chain_qwen_10000.pbs
+#
+# Clone moshi's voice for the audio stage (mixed mode -- user stays a built-in
+# CustomVoice; PROXY_URL is carried through by -V like any other variable):
+#   qsub -V -v 'QWEN_VOICE_MODE=mixed,CLONE_OUT_DIR_MOSHI=data/clone_examples/<result>,PROXY_URL=http://<proxy-host>:<port>' \
+#       scripts/run_full_duplex_lora_chain_qwen_10000.pbs
 
 set -euo pipefail
 

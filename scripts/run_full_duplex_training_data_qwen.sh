@@ -1,19 +1,17 @@
 #!/usr/bin/env bash
-# Drop-in replacement for run_full_duplex_training_data.sh's "dialogues" and
-# "audio" steps: dialogues come from a local vLLM-served Qwen3.6-27B instead
-# of gemma (matching scripts/run_dialogues_qwen_10000.pbs), and audio uses
-# Qwen3-TTS whole-utterance synthesis (matching
-# scripts/run_qwen_tts_whole_utterance_10000_4gpu.pbs) instead of one TTS
-# call per turn. use_cases/enrich are unchanged.
+# Drop-in replacement for run_full_duplex_training_data.sh's "dialogues" step:
+# dialogues come from a local vLLM-served Qwen3.6-27B instead of gemma
+# (matching scripts/run_dialogues_qwen_10000.pbs). use_cases is unchanged.
+# enrich/audio are a separate stage (see
+# run_full_duplex_training_data_audio_vllm_omni.sh) because Qwen3.6-27B needs
+# an A100 while the fast Qwen3-TTS engine is V100-only.
 #
 # Accepts the same environment contract as run_full_duplex_training_data.sh
-# (RUN_ID, OUT_ROOT, NUM_CASES, STEPS, DIALOGUE_RESUME, AUDIO_RESUME, ...) so
-# it can be swapped in wherever that script is called, including
+# (RUN_ID, OUT_ROOT, NUM_CASES, STEPS, DIALOGUE_RESUME, ...) so it can be
+# swapped in wherever that script is called, including
 # run_full_duplex_lora_chain.pbs's data stage (DATA_RUNNER=).
 #
-# vLLM is only started when STEPS includes "dialogues". A resumed job that
-# only has "audio" left to do (whole-utterance TTS) skips the vLLM download
-# and server startup entirely.
+# vLLM is only started when STEPS includes "dialogues".
 
 set -euo pipefail
 
@@ -21,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-STEPS="${STEPS:-use_cases,dialogues,enrich,audio}"
+STEPS="${STEPS:-use_cases,dialogues}"
 has_step() {
     [[ ",$STEPS," == *",$1,"* ]]
 }
@@ -30,10 +28,6 @@ command -v uv >/dev/null 2>&1 || {
     echo "ERROR: uv is not available on PATH." >&2
     exit 1
 }
-
-export WHOLE_UTTERANCE=1
-export WHOLE_UTTERANCE_MAX_CHARS="${WHOLE_UTTERANCE_MAX_CHARS:-150}"
-export TTS_BACKEND="${TTS_BACKEND:-qwen3}"
 
 if ! has_step dialogues; then
     echo "[fdq] STEPS does not include dialogues; skipping vLLM, running run_full_duplex_training_data.sh directly."

@@ -193,8 +193,21 @@ elif [[ -s "$DIALOGUES_ENRICHED" && ! "$DIALOGUES_RAW" -nt "$DIALOGUES_ENRICHED"
 fi
 
 if has_step audio; then
+    # vllm-omni needs to run inside its own isolated venv/interpreter (built
+    # by setup_vllm_omni_v100_env.sh), not the repo's uv project -- it is not
+    # a uv-managed dependency here. See run_qwen_tts_vllm_common.sh.
+    if [[ "${QWEN_ENGINE:-transformers}" == "vllm-omni" ]]; then
+        : "${VLLM_PYTHON:?VLLM_PYTHON must point at the vllm-omni venv python when QWEN_ENGINE=vllm-omni}"
+        [[ -x "$VLLM_PYTHON" ]] || {
+            echo "ERROR: vLLM-Omni python not found: $VLLM_PYTHON (run scripts/setup_vllm_omni_v100_env.sh first)" >&2
+            exit 1
+        }
+        audio_launcher=("$VLLM_PYTHON" scripts/generate_qwen3_tts_data.py)
+    else
+        audio_launcher=(uv run python scripts/generate_qwen3_tts_data.py)
+    fi
     audio_args=(
-        uv run python scripts/generate_qwen3_tts_data.py
+        "${audio_launcher[@]}"
         --out-dir "$TRAINING_DIR"
         --dialogues-jsonl "$AUDIO_DIALOGUES"
         --tts-backend "$TTS_BACKEND"
@@ -214,6 +227,33 @@ if has_step audio; then
             --whole-utterance
             --whole-utterance-max-chars "${WHOLE_UTTERANCE_MAX_CHARS:-150}"
         )
+    fi
+    if [[ "$TTS_BACKEND" == "qwen3" ]]; then
+        audio_args+=(--qwen-engine "${QWEN_ENGINE:-transformers}")
+        # customvoice (default): --speaker-user/--speaker-moshi/--user-speaker-pool
+        # pick from the model's built-in voices. clone/mixed instead synthesize
+        # from a reference clip (see scripts/resolve_clone_refs.py /
+        # clone_voice_examples.py output) -- mixed clones only moshi's voice,
+        # clone clones both moshi and the user.
+        QWEN_VOICE_MODE="${QWEN_VOICE_MODE:-customvoice}"
+        audio_args+=(--qwen-voice-mode "$QWEN_VOICE_MODE")
+        [[ -n "${QWEN_CLONE_MODEL:-}" ]] && audio_args+=(--qwen-clone-model "$QWEN_CLONE_MODEL")
+        if [[ "$QWEN_VOICE_MODE" == "clone" || "$QWEN_VOICE_MODE" == "mixed" ]]; then
+            audio_args+=(--qwen-clone-ref-audio-moshi "${MOSHI_REF_WAV:?MOSHI_REF_WAV (or CLONE_OUT_DIR_MOSHI resolved beforehand) is required for QWEN_VOICE_MODE=$QWEN_VOICE_MODE}")
+            if [[ "${CLONE_MODE:-in-context}" == "in-context" ]]; then
+                audio_args+=(--qwen-clone-ref-text-moshi "${MOSHI_REF_TEXT:?MOSHI_REF_TEXT is required when CLONE_MODE=in-context}")
+            else
+                audio_args+=(--qwen-clone-x-vector-only)
+            fi
+        fi
+        if [[ "$QWEN_VOICE_MODE" == "clone" ]]; then
+            audio_args+=(--user-speaker-pool '' --qwen-clone-ref-audio-user "${USER_REF_WAV:?USER_REF_WAV (or CLONE_OUT_DIR_USER resolved beforehand) is required for QWEN_VOICE_MODE=clone}")
+            [[ "${CLONE_MODE:-in-context}" == "in-context" ]] && audio_args+=(--qwen-clone-ref-text-user "${USER_REF_TEXT:?USER_REF_TEXT is required when CLONE_MODE=in-context}")
+        elif [[ -n "${USER_SPEAKER_POOL:-}" ]]; then
+            audio_args+=(--user-speaker-pool "$USER_SPEAKER_POOL")
+        fi
+        [[ -n "${INSTRUCT_USER:-}" ]] && audio_args+=(--instruct-user "$INSTRUCT_USER")
+        [[ -n "${INSTRUCT_MOSHI:-}" ]] && audio_args+=(--instruct-moshi "$INSTRUCT_MOSHI")
     fi
     if [[ "$TTS_BACKEND" == "moss-ttsd" ]]; then
         audio_args+=(

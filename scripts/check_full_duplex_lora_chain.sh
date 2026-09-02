@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# Local, GPU-free check for run_full_duplex_lora_chain.pbs. It replaces data
-# generation, training, and qsub inside a temporary sandbox.
+# Local, GPU-free check for run_full_duplex_lora_chain.pbs. It replaces
+# dialogue generation, audio synthesis, training, and qsub inside a temporary
+# sandbox.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHAIN_SRC="$REPO_ROOT/scripts/run_full_duplex_lora_chain.pbs"
@@ -34,15 +35,27 @@ setup_sandbox() {
     cp "$TIMEBOX_SRC" "$SANDBOX/work/scripts/train_timebox.sh"
     printf ':\n' > "$SANDBOX/work/scripts/setup_proxy.sh"
 
+    # One stub stands in for both DATA_RUNNER and AUDIO_RUNNER: it looks at
+    # STEPS to tell which stage it is being called as.
     cat > "$SANDBOX/work/scripts/run_full_duplex_training_data.sh" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "${TEST_DATA_RESULT:-success}" == "timeout" ]]; then
-    exit 124
+has_step() { [[ ",${STEPS:-}," == *",$1,"* ]]; }
+if has_step dialogues; then
+    if [[ "${TEST_DATA_RESULT:-success}" == "timeout" ]]; then
+        exit 124
+    fi
+    mkdir -p "$OUT_ROOT/llm_dialogues"
+    printf '{"turns":[]}\n' > "$OUT_ROOT/llm_dialogues/dialogues.jsonl"
 fi
-mkdir -p "$OUT_ROOT/training_set"
-printf '{"path":"a.wav"}\n{"path":"b.wav"}\n' \
-    > "$OUT_ROOT/training_set/synthetic_moshi_train.jsonl"
+if has_step audio; then
+    if [[ "${TEST_AUDIO_RESULT:-success}" == "timeout" ]]; then
+        exit 124
+    fi
+    mkdir -p "$OUT_ROOT/training_set"
+    printf '{"path":"a.wav"}\n{"path":"b.wav"}\n' \
+        > "$OUT_ROOT/training_set/synthetic_moshi_train.jsonl"
+fi
 STUB
 
     cat > "$SANDBOX/work/scripts/run_experiment.sh" <<'STUB'
@@ -97,24 +110,41 @@ run_chain() {
         env TIMEBOX_SETTLE_SEC=0 TIMEBOX_POLL_SEC=1 TIMEBOX_GRACE_SEC=1 \
             TOTAL_STEPS=100 EXP_NAME=test CHAIN_ID=check CHAIN_INDEX=1 \
             DATA_RUNNER=scripts/run_full_duplex_training_data.sh \
+            AUDIO_RUNNER=scripts/run_full_duplex_training_data.sh \
             "$@" /bin/bash scripts/run_full_duplex_lora_chain.pbs
     ) >> "$SANDBOX/run.log" 2>&1
     echo $?
 }
 
-echo "[1] Data timeout continues on the data queue"
+echo "[1] Data (dialogue) timeout continues on the data queue"
 setup_sandbox
 status="$(run_chain TEST_DATA_RESULT=timeout PIPELINE_STAGE=data OUT_ROOT="$SANDBOX/work/data")"
 check "exit status is zero after successor submission" "[[ '$status' == 0 ]]"
 check "next stage remains data" "grep -q 'stage=data index=2 queue=xan_s select=1:res=small' '$SANDBOX/submit.log'"
 
-echo "[2] Completed data moves to the training queue"
+echo "[2] Completed dialogues move to the audio queue"
 setup_sandbox
 status="$(run_chain TEST_DATA_RESULT=success PIPELINE_STAGE=data OUT_ROOT="$SANDBOX/work/data")"
 check "exit status is zero" "[[ '$status' == 0 ]]"
+check "next stage is audio" "grep -q 'stage=audio index=2 queue=xvn_s select=1:res=small' '$SANDBOX/submit.log'"
+
+echo "[3] Audio timeout continues on the audio queue"
+setup_sandbox
+mkdir -p "$SANDBOX/work/data/llm_dialogues"
+printf '{"turns":[]}\n' > "$SANDBOX/work/data/llm_dialogues/dialogues.jsonl"
+status="$(run_chain TEST_AUDIO_RESULT=timeout PIPELINE_STAGE=audio SRC_RUN_DIR="$SANDBOX/work/data")"
+check "exit status is zero" "[[ '$status' == 0 ]]"
+check "next stage remains audio" "grep -q 'stage=audio index=2 queue=xvn_s select=1:res=small' '$SANDBOX/submit.log'"
+
+echo "[4] Completed audio moves to the training queue"
+setup_sandbox
+mkdir -p "$SANDBOX/work/data/llm_dialogues"
+printf '{"turns":[]}\n' > "$SANDBOX/work/data/llm_dialogues/dialogues.jsonl"
+status="$(run_chain TEST_AUDIO_RESULT=success PIPELINE_STAGE=audio SRC_RUN_DIR="$SANDBOX/work/data")"
+check "exit status is zero" "[[ '$status' == 0 ]]"
 check "next stage is fresh training" "grep -q 'stage=train index=2 queue=xan_s.*resume_step=0' '$SANDBOX/submit.log'"
 
-echo "[3] Training timeout resumes from a settled checkpoint"
+echo "[5] Training timeout resumes from a settled checkpoint"
 setup_sandbox
 mkdir -p "$SANDBOX/work/data/training_set"
 printf '{"path":"a.wav"}\n{"path":"b.wav"}\n' \
@@ -125,7 +155,7 @@ check "exit status is zero" "[[ '$status' == 0 ]]"
 check "next training link starts at checkpoint 50" \
     "grep -q 'stage=train index=2 queue=xan_s.*resume_step=50 resume_from=.*checkpoint_000050.*/lora.safetensors' '$SANDBOX/submit.log'"
 
-echo "[4] A final checkpoint continues with postprocessing"
+echo "[6] A final checkpoint continues with postprocessing"
 setup_sandbox
 mkdir -p "$SANDBOX/work/data/training_set"
 printf '{"path":"a.wav"}\n{"path":"b.wav"}\n' \
@@ -136,7 +166,7 @@ check "exit status is zero" "[[ '$status' == 0 ]]"
 check "next stage is finalize and keeps the run directory" \
     "grep -q 'stage=finalize index=2 queue=xan_s.*finalize_run=check_train01' '$SANDBOX/submit.log'"
 
-echo "[5] Successful training and finalization stop the chain"
+echo "[7] Successful training and finalization stop the chain"
 setup_sandbox
 mkdir -p "$SANDBOX/work/data/training_set"
 printf '{"path":"a.wav"}\n{"path":"b.wav"}\n' \
@@ -154,7 +184,7 @@ status="$(run_chain PIPELINE_STAGE=finalize FINALIZE_RUN_TS=previous_train \
 check "successful finalization exits zero" "[[ '$status' == 0 ]]"
 check "successful finalization does not submit" "[[ ! -s '$SANDBOX/submit.log' ]]"
 
-echo "[6] Stop file and chain cap prevent runaway submission"
+echo "[8] Stop file and chain cap prevent runaway submission"
 setup_sandbox
 mkdir -p "$SANDBOX/work/data"
 touch "$SANDBOX/work/data/stop"

@@ -15,28 +15,42 @@
 #
 # Long stages are stopped before PBS walltime and continued by a successor job.
 # Data generation resumes in the same OUT_ROOT. Training resumes from the newest
-# settled LoRA checkpoint. The data job uses DATA_QUEUE and all training jobs use
-# TRAIN_QUEUE. qsub -V carries every caller-provided environment variable, so
-# all DATA_*, LLM_*, TTS_*, MOSS_*, HP_*, tracking, cache, and proxy settings are
-# preserved without maintaining a fragile allow-list here.
+# settled LoRA checkpoint. The data (dialogue) job uses DATA_QUEUE, the audio
+# (TTS) job uses AUDIO_QUEUE, and all training jobs use TRAIN_QUEUE -- three
+# separate stages/queues because dialogue generation (Qwen3.6-27B) needs an
+# A100 while the fast Qwen3-TTS engine (vllm-omni) is V100-only; one PBS job
+# cannot hold both GPU types. qsub -V carries every caller-provided
+# environment variable, so all DATA_*, AUDIO_*, LLM_*, TTS_*, MOSS_*, HP_*,
+# tracking, cache, and proxy settings are preserved without maintaining a
+# fragile allow-list here.
 #
 # Initial submission example:
 #
 #   qsub -v 'RUN_ID=fd_001,NUM_CASES=140,EXP_NAME=lora_base_config,TOTAL_STEPS=7200' scripts/run_full_duplex_lora_chain.pbs
 #
 # Main pipeline controls:
-#   PIPELINE_STAGE=data|train   Initial stage. Default: data.
+#   PIPELINE_STAGE=data|audio|train   Initial stage. Default: data.
 #   RUN_ID=<name>               Stable data run name. Auto-generated if omitted.
 #   OUT_ROOT=<path>             Data output directory.
 #   SRC_RUN_DIR=<path>          Skip generation and train an existing run.
-#   DATA_STEPS=<csv>            Default: use_cases,dialogues,enrich,audio.
-#   DATA_RUNNER=<path>          Data-stage script. Default:
+#   DATA_STEPS=<csv>            Dialogue stage steps. Default: use_cases,dialogues.
+#   DATA_RUNNER=<path>          Dialogue-stage script. Default:
 #                                scripts/run_full_duplex_training_data_qwen.sh
-#                                (vLLM-served Qwen3.6-27B dialogues + Qwen3-TTS
-#                                whole-utterance audio). Qwen3.6-27B needs an
-#                                A100, so set DATA_QUEUE=xan_s when using it.
-#                                Set DATA_RUNNER=scripts/run_full_duplex_training_data.sh
-#                                for the old gemma + per-turn-TTS pipeline.
+#                                (vLLM-served Qwen3.6-27B dialogues, needs an
+#                                A100 -- DATA_QUEUE defaults to xan_s). Set
+#                                DATA_RUNNER=scripts/run_full_duplex_training_data.sh
+#                                for the old gemma pipeline (then also fold
+#                                enrich,audio back into DATA_STEPS and set
+#                                AUDIO_STEPS= to skip the audio stage).
+#   AUDIO_STEPS=<csv>           Audio stage steps. Default: enrich,audio.
+#   AUDIO_RUNNER=<path>         Audio-stage script. Default:
+#                                scripts/run_full_duplex_training_data_audio_vllm_omni.sh
+#                                (Qwen3-TTS whole-utterance via the vllm-omni
+#                                engine, V100-only -- AUDIO_QUEUE defaults to
+#                                xvn_s; needs scripts/setup_vllm_omni_v100_env.pbs
+#                                run once beforehand). Set AUDIO_RUNNER=
+#                                scripts/run_full_duplex_training_data.sh for
+#                                the slower transformers engine (any GPU).
 #   EXP_NAME=<name>             Experiment directory. Default: lora_base_config.
 #   TOTAL_STEPS=<n>             Whole training schedule. Defaults to config.yaml.
 #   SWEEP_PATTERN=<name>        Apply a pattern from sweep_patterns.sh.
@@ -54,6 +68,12 @@
 #   AIZUCHI_PROB MAX_AIZUCHI_PER_TURN ENRICH_LABELED_TASKS
 #   TTS_BACKEND QWEN_TTS_MODEL TTS_DEVICE TTS_DTYPE TTS_SPEAKER_*
 #   MOSS_TTS_MODEL MOSS_CODEC_MODEL MOSS_REF_* GAP_SEC LEAD_IN_SEC
+# Audio-stage voice cloning (QWEN_ENGINE=vllm-omni, qwen3 backend only):
+#   QWEN_VOICE_MODE=auto|customvoice|clone|mixed  CLONE_MODE=in-context|x-vector
+#   CLONE_OUT_DIR_MOSHI CLONE_OUT_DIR_USER (or MOSHI_REF_WAV/TEXT, USER_REF_WAV/TEXT)
+#   USER_SPEAKER_POOL INSTRUCT_USER INSTRUCT_MOSHI
+# PROXY_URL/PROXY_HOST/etc (scripts/setup_proxy.sh) and any other environment
+# variable also pass through unchanged via qsub -V, same as everything above.
 # Any generator CLI option can also be supplied as one argv item per line in
 # USE_CASE_EXTRA_ARGS, DIALOGUE_EXTRA_ARGS, ENRICH_EXTRA_ARGS, or
 # AUDIO_EXTRA_ARGS. The corresponding *_EXTRA_ARGS_FILE reads the same format
@@ -114,17 +134,29 @@ if [[ -n "$SWEEP_PATTERN" ]]; then
 fi
 
 EXP_NAME="${EXP_NAME:-${BASE_EXP:-lora_base_config}}"
-DATA_STEPS="${DATA_STEPS:-${STEPS:-use_cases,dialogues,enrich,audio}}"
-# vLLM-served Qwen3.6-27B dialogues (scripts/run_dialogues_qwen_10000.pbs) +
-# Qwen3-TTS whole-utterance audio (scripts/run_qwen_tts_whole_utterance_10000_4gpu.pbs)
-# instead of gemma + one-TTS-call-per-turn. Point DATA_RUNNER at
-# scripts/run_full_duplex_training_data.sh to restore the old pipeline.
+# The data stage only generates dialogues (Qwen3.6-27B via vLLM, needs an
+# A100). enrich+audio moved to their own "audio" stage/queue because Qwen3-TTS
+# whole-utterance's fast vllm-omni engine is V100-specific -- one PBS job
+# cannot hold both GPU types. Point DATA_RUNNER at
+# scripts/run_full_duplex_training_data.sh (with DATA_STEPS covering
+# enrich/audio too, and AUDIO_STEPS='') to restore the old single-stage gemma
+# pipeline.
+DATA_STEPS="${DATA_STEPS:-${STEPS:-use_cases,dialogues}}"
 DATA_RUNNER="${DATA_RUNNER:-scripts/run_full_duplex_training_data_qwen.sh}"
+# Qwen3-TTS whole-utterance via the vllm-omni engine (see
+# run_full_duplex_training_data_audio_vllm_omni.sh). Needs a one-time
+# scripts/setup_vllm_omni_v100_env.pbs beforehand. Point AUDIO_RUNNER at
+# scripts/run_full_duplex_training_data.sh for the slower transformers engine.
+AUDIO_STEPS="${AUDIO_STEPS:-enrich,audio}"
+AUDIO_RUNNER="${AUDIO_RUNNER:-scripts/run_full_duplex_training_data_audio_vllm_omni.sh}"
 MIN_TRAIN_SAMPLES="${MIN_TRAIN_SAMPLES:-2}"
 # Matches DATA_RUNNER's default (vLLM Qwen3.6-27B needs an A100). Set
 # DATA_QUEUE=xvn_s if DATA_RUNNER is overridden back to the gemma pipeline.
 DATA_QUEUE="${DATA_QUEUE:-xan_s}"
 DATA_SELECT="${DATA_SELECT:-1:res=small}"
+# vllm-omni is V100-only (see AUDIO_RUNNER above).
+AUDIO_QUEUE="${AUDIO_QUEUE:-xvn_s}"
+AUDIO_SELECT="${AUDIO_SELECT:-1:res=small}"
 TRAIN_QUEUE="${TRAIN_QUEUE:-xan_s}"
 TRAIN_SELECT="${TRAIN_SELECT:-1:res=small}"
 PIPELINE_WALLTIME="${PIPELINE_WALLTIME:-24:00:00}"
@@ -152,8 +184,9 @@ for value in "$CHAIN_INDEX" "$MAX_CHAIN_JOBS" "$MIN_TRAIN_SAMPLES" "$TOTAL_STEPS
         exit 1
     fi
 done
-if [[ "$PIPELINE_STAGE" != "data" && "$PIPELINE_STAGE" != "train" && "$PIPELINE_STAGE" != "finalize" ]]; then
-    echo "ERROR: PIPELINE_STAGE must be data, train, or finalize, got: $PIPELINE_STAGE" >&2
+if [[ "$PIPELINE_STAGE" != "data" && "$PIPELINE_STAGE" != "audio" \
+      && "$PIPELINE_STAGE" != "train" && "$PIPELINE_STAGE" != "finalize" ]]; then
+    echo "ERROR: PIPELINE_STAGE must be data, audio, train, or finalize, got: $PIPELINE_STAGE" >&2
     exit 1
 fi
 if [[ "$CHAIN_INDEX" -gt "$MAX_CHAIN_JOBS" ]]; then
@@ -167,7 +200,8 @@ fi
 
 export CHAIN_ID CHAIN_INDEX MAX_CHAIN_JOBS PIPELINE_STAGE
 export RUN_ID OUT_ROOT SRC_RUN_DIR EXP_NAME TOTAL_STEPS DATA_STEPS
-export MIN_TRAIN_SAMPLES DATA_RUNNER DATA_QUEUE DATA_SELECT TRAIN_QUEUE TRAIN_SELECT
+export MIN_TRAIN_SAMPLES DATA_RUNNER DATA_QUEUE DATA_SELECT
+export AUDIO_STEPS AUDIO_RUNNER AUDIO_QUEUE AUDIO_SELECT TRAIN_QUEUE TRAIN_SELECT
 export PIPELINE_WALLTIME SELF_PBS CHAIN_STOP_FILE STATE_FILE SWEEP_PATTERN
 
 print_settings() {
@@ -182,9 +216,12 @@ print_settings() {
     echo "src_run_dir:     $SRC_RUN_DIR"
     echo "data_steps:      $DATA_STEPS"
     echo "data_runner:     $DATA_RUNNER"
+    echo "audio_steps:     $AUDIO_STEPS"
+    echo "audio_runner:    $AUDIO_RUNNER"
     echo "exp_name:        $EXP_NAME"
     echo "total_steps:     $TOTAL_STEPS"
     echo "data_resource:   $DATA_QUEUE / $DATA_SELECT"
+    echo "audio_resource:  $AUDIO_QUEUE / $AUDIO_SELECT"
     echo "train_resource:  $TRAIN_QUEUE / $TRAIN_SELECT"
     echo "walltime:        $PIPELINE_WALLTIME"
     echo "stop_file:       $CHAIN_STOP_FILE"
@@ -274,8 +311,7 @@ timebox_init
 if [[ "$PIPELINE_STAGE" == "data" ]]; then
     export STEPS="$DATA_STEPS"
     export DIALOGUE_RESUME=1
-    export AUDIO_RESUME=1
-    write_state running "data generation"
+    write_state running "dialogue generation"
 
     set +e
     timebox_run "$TIMEBOX_DEADLINE" bash "$DATA_RUNNER"
@@ -288,14 +324,47 @@ if [[ "$PIPELINE_STAGE" == "data" ]]; then
         exit $?
     fi
     if [[ "$stage_rc" -ne 0 ]]; then
-        echo "ERROR: data generation failed with status $stage_rc; not resubmitting." >&2
-        write_state failed "data generation rc=$stage_rc"
+        echo "ERROR: dialogue generation failed with status $stage_rc; not resubmitting." >&2
+        write_state failed "dialogue generation rc=$stage_rc"
+        exit "$stage_rc"
+    fi
+
+    DIALOGUES_FILE="$SRC_RUN_DIR/llm_dialogues/dialogues.jsonl"
+    if [[ ! -s "$DIALOGUES_FILE" ]]; then
+        echo "ERROR: dialogue generation completed without dialogues: $DIALOGUES_FILE" >&2
+        write_state failed "dialogues missing"
+        exit 1
+    fi
+
+    echo "[chain] dialogues complete. Moving to audio queue."
+    submit_successor audio "$AUDIO_QUEUE" "$AUDIO_SELECT"
+    exit $?
+fi
+
+if [[ "$PIPELINE_STAGE" == "audio" ]]; then
+    export STEPS="$AUDIO_STEPS"
+    export AUDIO_RESUME=1
+    write_state running "audio synthesis"
+
+    set +e
+    timebox_run "$TIMEBOX_DEADLINE" bash "$AUDIO_RUNNER"
+    stage_rc=$?
+    set -e
+
+    if [[ "$stage_rc" -eq 124 ]]; then
+        echo "[chain] audio time budget reached; continuing in another audio job."
+        submit_successor audio "$AUDIO_QUEUE" "$AUDIO_SELECT"
+        exit $?
+    fi
+    if [[ "$stage_rc" -ne 0 ]]; then
+        echo "ERROR: audio synthesis failed with status $stage_rc; not resubmitting." >&2
+        write_state failed "audio synthesis rc=$stage_rc"
         exit "$stage_rc"
     fi
 
     MANIFEST="$SRC_RUN_DIR/training_set/synthetic_moshi_train.jsonl"
     if [[ ! -s "$MANIFEST" ]]; then
-        echo "ERROR: data generation completed without a manifest: $MANIFEST" >&2
+        echo "ERROR: audio synthesis completed without a manifest: $MANIFEST" >&2
         write_state failed "training manifest missing"
         exit 1
     fi
@@ -306,7 +375,7 @@ if [[ "$PIPELINE_STAGE" == "data" ]]; then
         exit 1
     fi
 
-    echo "[chain] data complete: $SAMPLE_COUNT samples. Moving to training queue."
+    echo "[chain] audio complete: $SAMPLE_COUNT samples. Moving to training queue."
     export TRAIN_RESUME_STEP=0
     unset TRAIN_RESUME_FROM HP_RESUME_FROM
     submit_successor train "$TRAIN_QUEUE" "$TRAIN_SELECT"
