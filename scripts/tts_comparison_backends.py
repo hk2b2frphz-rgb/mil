@@ -149,6 +149,64 @@ CosyVoice2TTS = CosyVoiceTTS
 CosyVoice3TTS = CosyVoiceTTS
 
 
+# Misaki Japanese G2P preserves ASCII punctuation but drops full-width forms.
+# This changes only the text passed to synthesis, never the training transcript.
+_G2P_PUNCT = str.maketrans({
+    "。": ".", "、": ",", "！": "!", "？": "?", "：": ":", "；": ";",
+})
+
+
+def punctuation_for_g2p(text: str) -> str:
+    return text.translate(_G2P_PUNCT)
+
+
+class RoleRoutedTTS:
+    """Send selected speaker roles to another TTS backend."""
+
+    supports_instruct = False
+
+    def __init__(self, default: Any, by_role: dict[str, Any]) -> None:
+        self.default = default
+        self.by_role = dict(by_role)
+
+    @property
+    def sample_rate(self) -> int:
+        for backend in (self.default, *self.by_role.values()):
+            rate = getattr(backend, "sample_rate", None)
+            if rate:
+                return int(rate)
+        raise RuntimeError("no backend reported a sample rate")
+
+    def backend_for(self, speaker_role: str) -> Any:
+        return self.by_role.get(speaker_role, self.default)
+
+    def load(self) -> None:
+        for backend in (self.default, *self.by_role.values()):
+            loader = getattr(backend, "load", None)
+            if callable(loader):
+                loader()
+
+    def synthesize(
+        self,
+        text: str,
+        speaker_role: str,
+        instruct: str | None = None,
+        speaker_override: str | None = None,
+    ) -> np.ndarray:
+        backend = self.backend_for(speaker_role)
+        if not getattr(backend, "supports_instruct", False):
+            instruct = None
+        return backend.synthesize(
+            text, speaker_role, instruct=instruct, speaker_override=speaker_override
+        )
+
+    def release(self) -> None:
+        for backend in (self.default, *self.by_role.values()):
+            releaser = getattr(backend, "release", None)
+            if callable(releaser):
+                releaser()
+
+
 class KokoroTTS:
     """Kokoro fixed Japanese voices; cloning and emotion instructions unsupported."""
 
@@ -212,7 +270,7 @@ class KokoroTTS:
             logger.debug("Kokoro ignores instruct=%r", instruct[:48])
 
         chunks: list[np.ndarray] = []
-        for result in self.pipeline(text, voice=voice, speed=1.0):
+        for result in self.pipeline(punctuation_for_g2p(text), voice=voice, speed=1.0):
             audio = result[2]
             if audio is None:
                 continue

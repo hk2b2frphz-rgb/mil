@@ -268,6 +268,7 @@ OPENING_GREETING_INSTRUCT = (
 class DialogueTurn:
     speaker: str  # "user" | "moshi" | "silence"
     text: str = ""
+    tts_text: str | None = None  # 合成専用の明示的な読み。text は学習用原文のまま保持する。
     emotion: str | None = None
     instruct: str | None = None      # 解決後の Qwen3-TTS instruct 文字列（参照保存用）
     duration_sec: float | None = None  # speaker=="silence" 用
@@ -1447,7 +1448,7 @@ def build_segments(
             pcm = opening_greeting_pcm.copy()
         else:
             pcm = tts.synthesize(
-                turn.text,
+                turn.tts_text or turn.text,
                 turn.speaker,
                 instruct=turn.instruct,
                 speaker_override=override,
@@ -2044,6 +2045,9 @@ def load_dialogues_from_jsonl(path: Path) -> list[dict[str, Any]]:
                     continue
                 emotion = t.get("emotion")
                 turn = {"speaker": speaker, "text": text}
+                tts_text = str(t.get("tts_text") or "").strip()
+                if tts_text:
+                    turn["tts_text"] = tts_text
                 if emotion:
                     turn["emotion"] = str(emotion)
                 timing = str(t.get("timing") or "sequential").strip().lower()
@@ -2297,6 +2301,16 @@ def parse_args() -> argparse.Namespace:
         help=(
             "TTS backend. Default: qwen3. kokoro は軽量・高速だが emotion/style "
             "instruct 非対応（無視される）。"
+        ),
+    )
+    parser.add_argument(
+        "--moshi-tts-backend",
+        choices=["", "qwen3", "kokoro"],
+        default="",
+        help=(
+            "moshi（システム）側だけ別の TTS で合成する。既定は空で、--tts-backend "
+            "と同じものを使う。kokoro を指定すると、技術値を述べる側の読みが "
+            "G2P で確定し、ユーザー側は --tts-backend の話者数を保てる。"
         ),
     )
     parser.add_argument(
@@ -2826,6 +2840,7 @@ def prepare_dialogue_render_job(
             DialogueTurn(
                 speaker=speaker,
                 text=raw_turn["text"],
+                tts_text=str(raw_turn.get("tts_text") or "").strip() or None,
                 emotion=emotion,
                 instruct=resolve_emotion(emotion, emotion_map),
                 timing=str(raw_turn.get("timing") or "sequential"),
@@ -3653,6 +3668,30 @@ def main() -> None:
             args,
             model_id=args.model,
             clone_refs=clone_refs,
+        )
+
+    if args.moshi_tts_backend and args.moshi_tts_backend != args.tts_backend:
+        # システム側だけ別 backend にする。読みを外せない発話はこちらに寄せる。
+        try:
+            from scripts.tts_comparison_backends import KokoroTTS, RoleRoutedTTS
+        except ImportError:
+            from tts_comparison_backends import KokoroTTS, RoleRoutedTTS
+        if args.moshi_tts_backend != "kokoro":
+            raise ValueError(
+                f"--moshi-tts-backend={args.moshi_tts_backend} は未対応です"
+            )
+        moshi_tts = KokoroTTS(
+            device=args.device,
+            voice_moshi=args.kokoro_voice_moshi,
+            voice_user=args.kokoro_voice_moshi,
+            voice_other=args.kokoro_voice_other,
+            voice_background=args.kokoro_voice_background,
+            model_id=args.kokoro_model,
+        )
+        tts = RoleRoutedTTS(tts, {"moshi": moshi_tts})
+        logger.info(
+            "moshi は %s、それ以外は %s で合成します",
+            args.moshi_tts_backend, args.tts_backend,
         )
 
     # 固定挨拶は run の最初に1回だけ合成（またはキャッシュから読み込み）、
