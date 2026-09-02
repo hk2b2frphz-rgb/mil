@@ -14,6 +14,7 @@ import argparse
 import csv
 import json
 import random
+import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -130,6 +131,22 @@ def validate_inputs(policy: dict[str, Any], knowledge: list[Knowledge]) -> None:
         raise ValueError("the screw PoC system voice must be Ono_Anna")
     if "Ono_Anna" in voices["users"]:
         raise ValueError("Ono_Anna must not appear in the user voice pool")
+    vague = policy.get("vague_questions") or {}
+    for item in knowledge:
+        if item.intent not in vague:
+            raise ValueError(f"{item.knowledge_id}: vague_questions に intent={item.intent!r} がありません")
+    speech = policy.get("slot_speech") or {}
+    for item in knowledge:
+        for slot, value in item.slot_values.items():
+            entry = speech.get(value)
+            if entry is None:
+                raise ValueError(
+                    f"{item.knowledge_id}: slot_speech に {value!r} の言い方がありません"
+                )
+            if isinstance(entry, str) and entry in {PLAIN, UNANSWERABLE, GIVEN}:
+                continue
+            if not isinstance(entry, dict) or not entry.get("say") or not entry.get("confirm"):
+                raise ValueError(f"slot_speech[{value!r}] には say と confirm が要ります")
     pronunciations = policy.get("tts_pronunciations") or []
     if not pronunciations:
         raise ValueError("tts_pronunciations must not be empty")
@@ -138,6 +155,39 @@ def validate_inputs(policy: dict[str, Any], knowledge: list[Knowledge]) -> None:
             raise ValueError(f"tts_pronunciations[{index}] must be a mapping")
         if not str(entry.get("written") or "") or not str(entry.get("spoken") or ""):
             raise ValueError(f"tts_pronunciations[{index}] needs written and spoken")
+
+
+PLAIN = "plain"
+UNANSWERABLE = "unanswerable"
+GIVEN = "given"
+
+
+def speech_of(value: str, policy: dict[str, Any]) -> str | dict[str, str]:
+    """この値を声に出すときの扱い。知識表に無い値は通さない。"""
+    table = policy["slot_speech"]
+    if value not in table:
+        raise ValueError(f"slot value has no slot_speech entry: {value!r}")
+    return table[value]
+
+
+def is_askable(value: str, policy: dict[str, Any]) -> bool:
+    """ユーザーが答えられる値かどうか。答えられない値は聞き返しても進まない。"""
+    entry = speech_of(value, policy)
+    return not (isinstance(entry, str) and entry in {UNANSWERABLE, GIVEN})
+
+
+def askable_slots(item: "Knowledge", policy: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(
+        slot for slot in item.required_slots
+        if is_askable(item.slot_values[slot], policy)
+    )
+
+
+def unanswerable_slots(item: "Knowledge", policy: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(
+        slot for slot in item.required_slots
+        if speech_of(item.slot_values[slot], policy) == UNANSWERABLE
+    )
 
 
 def tts_text(text: str, policy: dict[str, Any]) -> str:
@@ -149,10 +199,23 @@ def tts_text(text: str, policy: dict[str, Any]) -> str:
 
 
 def attach_tts_text(dialogues: list[dict[str, Any]], policy: dict[str, Any]) -> None:
+    """読みを当てて、当たらなかった数字が残っていないか確かめる。
+
+    tts_pronunciations は上から順の置換なので、表に無い数値（0.7ニュートンなど）
+    は素通りして、合成時に読み方が揺れる。黙って通すと音でしか気づけない。
+    """
+    unread: set[str] = set()
     for dialogue in dialogues:
         for turn in dialogue["turns"]:
-            if turn.get("speaker") in {"user", "moshi"}:
-                turn["tts_text"] = tts_text(str(turn["text"]), policy)
+            if turn.get("speaker") not in {"user", "moshi"}:
+                continue
+            rendered = tts_text(str(turn["text"]), policy)
+            turn["tts_text"] = rendered
+            unread.update(re.findall(r"[0-9]+(?:\.[0-9]+)?", rendered))
+    if unread:
+        raise ValueError(
+            "tts_pronunciations に読みが無い数値: " + ", ".join(sorted(unread))
+        )
 
 
 def user_turn(text: str, *, event: str | None = None, **extra: Any) -> dict[str, Any]:
@@ -181,14 +244,6 @@ def choose(rng: random.Random, values: Iterable[str]) -> str:
     return options[rng.randrange(len(options))]
 
 
-def slot_summary(item: Knowledge, policy: dict[str, Any]) -> str:
-    parts = []
-    for slot in item.required_slots:
-        label = policy["slots"][slot]["label"]
-        parts.append(f"{label}は{item.slot_values[slot]}")
-    return "、".join(parts)
-
-
 def start_question(
     item: Knowledge,
     policy: dict[str, Any],
@@ -198,16 +253,11 @@ def start_question(
     vague: bool,
 ) -> str:
     if vague:
-        question = choose(rng, policy["vague_questions"][item.category])
+        question = choose(rng, policy["vague_questions"][item.intent])
     else:
         question = choose(rng, item.question_examples)
     wrapper = choose(rng, policy["question_templates"][split])
-    text = wrapper.format(question=question)
-    if not vague and item.required_slots:
-        summary = slot_summary(item, policy)
-        if summary and not all(value in text for value in item.slot_values.values()):
-            text = f"{text} {summary}。"
-    return text
+    return wrapper.format(question=question)
 
 
 def final_turn(item: Knowledge) -> dict[str, Any]:
@@ -221,9 +271,79 @@ def ask_turn(slot: str, level: int, policy: dict[str, Any]) -> dict[str, Any]:
     return moshi_turn(policy["slots"][slot]["questions"][level], f"ASK_{slot.upper()}_L{level + 1}")
 
 
-def reveal_turn(slot: str, value: str, policy: dict[str, Any], rng: random.Random, split: str) -> dict[str, Any]:
-    text = choose(rng, policy["acknowledgements"][split]).format(value=value)
+def reveal_turn(
+    slot: str,
+    value: str,
+    policy: dict[str, Any],
+    rng: random.Random,
+    split: str,
+    *,
+    hedged: bool = False,
+) -> dict[str, Any]:
+    entry = speech_of(value, policy)
+    if entry == PLAIN:
+        template = "たぶん{value}です。" if hedged else choose(rng, policy["acknowledgements"][split])
+        text = template.format(value=value)
+    else:
+        text = str(entry["say"])
     return user_turn(text, provided_slot=slot, provided_value=value)
+
+
+def confirm_turn(slot: str, value: str, policy: dict[str, Any]) -> dict[str, Any]:
+    entry = speech_of(value, policy)
+    if entry == PLAIN:
+        text = policy["response_patterns"]["CONFIRM"].format(
+            slot_label=policy["slots"][slot]["label"], value=value
+        )
+    else:
+        text = str(entry["confirm"])
+    return moshi_turn(text, "CONFIRM")
+
+
+def reaffirm_turn(value: str, policy: dict[str, Any]) -> dict[str, Any]:
+    if speech_of(value, policy) == PLAIN:
+        return user_turn(f"はい。見直しても{value}です。")
+    return user_turn("はい。間違いないです。")
+
+
+def pick_unknown_replies(
+    policy: dict[str, Any], rng: random.Random, split: str, count: int
+) -> list[str]:
+    """同じ言い訳を続けて言わせない。"""
+    replies: list[str] = []
+    for _ in range(count):
+        options = [
+            text for text in policy["unknown_replies"][split]
+            if not replies or text != replies[-1]
+        ]
+        replies.append(choose(rng, options))
+    return replies
+
+
+def already_said(turns: list[dict[str, Any]], value: str) -> bool:
+    """相手がもう言った値は訊き返さない。
+
+    品番 SSH-M10-SD-EL には呼び径が入っている。それを聞いた直後に
+    「ねじの呼び径を教えてください」と訊くと、聞いていないことになる。
+    """
+    return any(value in turn["text"] for turn in turns if turn["speaker"] == "user")
+
+
+def collect_slots(
+    item: Knowledge,
+    slots: Iterable[str],
+    policy: dict[str, Any],
+    rng: random.Random,
+    split: str,
+    turns: list[dict[str, Any]],
+) -> None:
+    """答えられる項目を、平易な訊き方から順に埋めていく。"""
+    for slot in slots:
+        value = item.slot_values[slot]
+        if already_said(turns, value):
+            continue
+        turns.append(ask_turn(slot, 0, policy))
+        turns.append(reveal_turn(slot, value, policy, rng, split))
 
 
 def build_core_dialogue(
@@ -235,52 +355,62 @@ def build_core_dialogue(
     split: str,
 ) -> dict[str, Any]:
     turns: list[dict[str, Any]] = []
-    expected_patterns: list[str] = []
+    askable = askable_slots(item, policy)
+    unanswerable = unanswerable_slots(item, policy)
+
+    # 訊ける項目が一つも無ければ、聞き返しようがないので直球で答える。
+    # ただし「答えられない項目」があるなら、訊いて答えが出ない筋は作れる。
+    if flow == "varied" and not askable:
+        flow = "clarify" if unanswerable else "direct"
+    if flow == "clarify" and not askable and not unanswerable:
+        flow = "direct"
+    # 答えられない項目を持たない知識で「詰まる」流れを作るときは、
+    # 答えられるはずの項目を相手が見つけられない、という筋にする。
+    if flow == "unresolved" and not (unanswerable or askable):
+        flow = "direct"
 
     if flow == "direct":
         turns.append(user_turn(start_question(item, policy, rng, split, vague=False)))
         turns.append(final_turn(item))
     elif flow == "clarify":
         turns.append(user_turn(start_question(item, policy, rng, split, vague=True)))
-        for slot_index, slot in enumerate(item.required_slots):
-            level = (sequence + slot_index) % 2
-            turns.append(ask_turn(slot, level, policy))
-            turns.append(reveal_turn(slot, item.slot_values[slot], policy, rng, split))
+        collect_slots(item, askable, policy, rng, split, turns)
+        if unanswerable:
+            # 答えられない項目に当たったところで、言い換えて三度まで訊く。
+            slot = unanswerable[sequence % len(unanswerable)]
+            for level, reply in enumerate(pick_unknown_replies(policy, rng, split, 3)):
+                turns.append(ask_turn(slot, level, policy))
+                turns.append(user_turn(reply))
         turns.append(final_turn(item))
     elif flow == "varied":
         turns.append(user_turn(start_question(item, policy, rng, split, vague=True)))
-        first, *remaining = item.required_slots
-        level = 1 + (sequence % 2)
-        turns.append(ask_turn(first, level, policy))
-        turns.append(
-            user_turn(
-                f"たぶん{item.slot_values[first]}だと思います。",
-                provided_slot=first,
-                provided_value=item.slot_values[first],
-            )
-        )
-        confirm = policy["response_patterns"]["CONFIRM"].format(
-            slot_label=policy["slots"][first]["label"], value=item.slot_values[first]
-        )
-        turns.append(moshi_turn(confirm, "CONFIRM"))
-        turns.append(user_turn(f"はい。見直しても{item.slot_values[first]}です。"))
-        for slot_index, slot in enumerate(remaining):
-            turns.append(ask_turn(slot, min(2, 1 + ((sequence + slot_index) % 2)), policy))
-            turns.append(reveal_turn(slot, item.slot_values[slot], policy, rng, split))
+        first, *remaining = askable
+        value = item.slot_values[first]
+        turns.append(ask_turn(first, 0, policy))
+        turns.append(reveal_turn(first, value, policy, rng, split, hedged=True))
+        turns.append(confirm_turn(first, value, policy))
+        turns.append(reaffirm_turn(value, policy))
+        collect_slots(item, remaining, policy, rng, split, turns)
+        if unanswerable:
+            slot = unanswerable[sequence % len(unanswerable)]
+            for level, reply in enumerate(pick_unknown_replies(policy, rng, split, 3)):
+                turns.append(ask_turn(slot, level, policy))
+                turns.append(user_turn(reply))
         turns.append(final_turn(item))
     elif flow == "unresolved":
         turns.append(user_turn(start_question(item, policy, rng, split, vague=True)))
-        target_slot = item.required_slots[sequence % len(item.required_slots)]
-        for level in range(3):
+        pool = unanswerable or askable
+        target_slot = pool[sequence % len(pool)]
+        for level, reply in enumerate(pick_unknown_replies(policy, rng, split, 3)):
             turns.append(ask_turn(target_slot, level, policy))
-            turns.append(user_turn(choose(rng, policy["unknown_replies"][split])))
+            turns.append(user_turn(reply))
         turns.append(moshi_turn(policy["response_patterns"]["ESCALATE"], "ESCALATE"))
     else:
         raise ValueError(f"unknown flow: {flow}")
 
-    expected_patterns.extend(
+    expected_patterns = [
         turn["response_pattern"] for turn in turns if turn["speaker"] == "moshi"
-    )
+    ]
     return {
         "id": f"{split}_{item.knowledge_id.lower()}_{sequence:03d}",
         "category": item.category,

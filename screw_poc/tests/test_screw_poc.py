@@ -124,8 +124,16 @@ class ScrewPocTests(unittest.TestCase):
                 len({row["knowledge_id"] for row in subset if row["knowledge_id"]}),
                 30,
             )
+        # 「特定できないまま終わる」筋を作れるのは、訊く先がある知識だけ。
+        # K10・K11 は問いの中に材料が全部入っているので、詰まりようがない。
+        resolvable = {
+            row["knowledge_id"]
+            for row in self.train
+            if row["knowledge_id"] and row["flow"] == "unresolved"
+        }
         flows_100 = Counter(row["flow"] for row in build_subset(self.train, 100))
-        self.assertEqual(flows_100["unresolved"], 30)
+        self.assertEqual(flows_100["unresolved"], len(resolvable))
+        self.assertEqual(len(resolvable), 28)
 
     def test_jsonl_round_trip_is_utf8(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
