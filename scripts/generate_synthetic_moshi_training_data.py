@@ -2536,6 +2536,10 @@ ROLE_TOKEN_ONLY_RE = re.compile(
     re.IGNORECASE,
 )
 LATIN_RUN_RE = re.compile(r"[A-Za-z]{3,}")
+# 生成に使っている Qwen は中国語のモデルなので、日本語の文に中国語が混ざる。
+# 実測21件のうち最多は文末の「呢」、次いで簡体字での置き換わり（时间里 / 话す /
+# 目线）。日本語には現れない字だけを並べる（「没」は「水没」で使うので入れない）。
+CHINESE_RE = re.compile(r"[呢吧啊咱们这么吗儿说话时间里线呗什哪对]")
 # 「まだ聞いていますか?」の類。沈黙のあとの計画された一度だけに留めたいので、
 # それ以外のブロックで出てきたら書き直させる（指示だけでは止まらなかった）。
 # 「まだ聞いていますか?」の類。沈黙のあとの計画された一度だけに留めたいので、
@@ -2575,6 +2579,8 @@ def unusable_utterance(text: str) -> tuple[str, bool] | None:
         return ("短すぎます", True)
     if LATIN_RUN_RE.search(stripped):
         return ("英単語が混ざっています（音声にすると読めません）", False)
+    if CHINESE_RE.search(stripped):
+        return ("中国語が混ざっています（日本語で書いてください）", False)
     return None
 
 
