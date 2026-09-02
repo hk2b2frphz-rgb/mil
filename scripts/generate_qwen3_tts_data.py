@@ -2841,7 +2841,25 @@ def prepare_dialogue_render_job(
             )
         )
 
-    if not args.no_opening_greeting and args.opening_greeting:
+    # Some dialogue sources (notably the aizuchi-only generator) already put
+    # the fixed call-opening line in the first spoken turn.  Do not prepend it
+    # a second time: that both repeats the greeting and makes the user wait
+    # through an extra greeting-plus-gap before speaking.
+    first_spoken_turn = next(
+        (turn for turn in turns if turn.speaker != "silence"),
+        None,
+    )
+    has_source_opening_greeting = (
+        first_spoken_turn is not None
+        and first_spoken_turn.speaker == "moshi"
+        and first_spoken_turn.text.strip() == str(args.opening_greeting).strip()
+    )
+    if has_source_opening_greeting:
+        # Mark it so the existing fixed-greeting cache/style path is reused.
+        # Preserve a source-specific event if one was intentionally supplied.
+        if first_spoken_turn.event is None:
+            first_spoken_turn.event = "opening_greeting"
+    elif not args.no_opening_greeting and args.opening_greeting:
         turns = [
             DialogueTurn(
                 speaker="moshi",

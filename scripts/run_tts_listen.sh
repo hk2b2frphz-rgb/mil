@@ -48,6 +48,8 @@ echo "=== synthesizing $N dialogues from $SRC ==="
     --tts-backend qwen3 \
     --qwen-voice-mode "${QWEN_VOICE_MODE:-customvoice}" \
     --whole-utterance \
+    --auto-overlap-aizuchi \
+    --gap-sec "${GAP_SEC:-0.2}" \
     --style-preset "${STYLE_PRESET:-counseling_neutral}" \
     --fa-fallback skip \
     --device cuda
