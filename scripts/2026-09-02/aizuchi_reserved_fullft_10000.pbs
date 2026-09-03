@@ -14,7 +14,6 @@ cd "${PBS_O_WORKDIR:-$(pwd)}"
 export RUN_ID="aizuchi_reserved_10000_fullft"
 export SRC_RUN_DIR="$PWD/data/runs/aizuchi_reserved_10000/tts/merged"
 export SWEEP_PATTERNS="f01"
-export SKIP_AUTO_EVAL=1
 # Keep chained full-FT jobs on this frequency-specific entrypoint.
 export SELF_PBS="scripts/2026-09-02/aizuchi_reserved_fullft_10000.pbs"
 
