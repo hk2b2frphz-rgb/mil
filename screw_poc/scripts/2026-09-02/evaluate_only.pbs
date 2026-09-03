@@ -50,6 +50,9 @@ set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 [[ -f screw_poc/scripts/run_train.sh ]] || { echo "ERROR: run from repository root" >&2; exit 1; }
 [[ -f scripts/setup_proxy.sh ]] && source scripts/setup_proxy.sh
+# Python run as a file only gets that file's directory on sys.path, so anything
+# under screw_poc/ importing scripts.* needs the repository root as well.
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 
 RUN_DATE="2026-09-02"
 JOB_ID="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"; JOB_ID="${JOB_ID%%.*}"
