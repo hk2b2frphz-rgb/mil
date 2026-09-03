@@ -324,11 +324,26 @@ print(data["splits"]["train"]["count"])
 PY
 )"
 
+# finetune.py splits each dialogue into chunks and drops chunks shorter than
+# min_length. Use the post-filter chunk count from the health report rather than
+# the manifest dialogue count, otherwise epoch-based schedules become too short
+# and eval/save steps can miss each other entirely.
+TRAIN_EXAMPLES="$(python3 - "$EXP_DIR/nu_dataset_health_${RUN_TS}.json" "$TRAIN_COUNT" <<'PY'
+import json, sys
+health_path, fallback = sys.argv[1], int(sys.argv[2])
+try:
+    data = json.load(open(health_path, encoding="utf-8"))
+    chunks = int(((data.get("train") or {}).get("post_filter_chunks")) or 0)
+except Exception:
+    chunks = 0
+print(chunks if chunks > 0 else fallback)
+PY
+)"
+
 # Steps per epoch for this dataset/parallelism. Used both to derive
 # num_train_epochs below and to translate any epoch-denominated schedule knobs
-# (HP_*_EPOCH*) into concrete step counts, so the schedule scales with data
-# volume instead of being hardcoded for one dataset size.
-STEPS_PER_EPOCH="$(python3 - "$TRAIN_COUNT" "$HP_BATCH_SIZE" "$NPROC" "$HP_NUM_MICROBATCHES" <<'PY'
+# (HP_*_EPOCH*) into concrete step counts.
+STEPS_PER_EPOCH="$(python3 - "$TRAIN_EXAMPLES" "$HP_BATCH_SIZE" "$NPROC" "$HP_NUM_MICROBATCHES" <<'PY'
 import math, sys
 train_count, per_device, nproc, accum = map(int, sys.argv[1:])
 global_batch = max(1, per_device * nproc * accum)
@@ -358,15 +373,27 @@ fi
 if [[ -n "${HP_WARMUP_EPOCHS:-}" ]]; then
     NU_WARMUP_STEPS="$(epoch_to_steps "$HP_WARMUP_EPOCHS" 1)"
 fi
-echo "[nu-fullft] train_count=$TRAIN_COUNT steps_per_epoch=$STEPS_PER_EPOCH" \
+# Every selectable checkpoint must have an eval metric. Align the save cadence
+# to eval_steps so best-checkpoint selection has at least one eligible step.
+if [[ -n "${HP_EVAL_FREQ:-}" && "${HP_EVAL_FREQ:-0}" -gt 0 && "${HP_CKPT_FREQ:-0}" -gt 0 ]]; then
+    ALIGNED_CKPT_FREQ="$(python3 - "$HP_CKPT_FREQ" "$HP_EVAL_FREQ" <<'PY'
+import sys
+ckpt, evl = int(sys.argv[1]), int(sys.argv[2])
+print(ckpt if ckpt % evl == 0 else max(evl, round(ckpt / evl) * evl))
+PY
+)"
+    if [[ "$ALIGNED_CKPT_FREQ" != "$HP_CKPT_FREQ" ]]; then
+        echo "[nu-fullft] aligning save_steps $HP_CKPT_FREQ -> $ALIGNED_CKPT_FREQ (multiple of eval_steps=$HP_EVAL_FREQ)"
+        HP_CKPT_FREQ="$ALIGNED_CKPT_FREQ"
+    fi
+fi
+echo "[nu-fullft] train_count=$TRAIN_COUNT train_examples=$TRAIN_EXAMPLES steps_per_epoch=$STEPS_PER_EPOCH" \
      "-> max_steps=$HP_MAX_STEPS eval_steps=$HP_EVAL_FREQ" \
      "save_steps=$HP_CKPT_FREQ warmup_steps=$NU_WARMUP_STEPS"
 
-NU_NUM_TRAIN_EPOCHS="${NU_NUM_TRAIN_EPOCHS:-$(python3 - "$TRAIN_COUNT" "$HP_BATCH_SIZE" "$NPROC" "$HP_NUM_MICROBATCHES" "$HP_MAX_STEPS" <<'PY'
+NU_NUM_TRAIN_EPOCHS="${NU_NUM_TRAIN_EPOCHS:-$(python3 - "$HP_MAX_STEPS" "$STEPS_PER_EPOCH" <<'PY'
 import math, sys
-train_count, per_device, nproc, accum, max_steps = map(int, sys.argv[1:])
-global_batch = max(1, per_device * nproc * accum)
-steps_per_epoch = max(1, math.ceil(train_count / global_batch))
+max_steps, steps_per_epoch = map(int, sys.argv[1:])
 print(max(1, math.ceil(max_steps / steps_per_epoch)))
 PY
 )}"
