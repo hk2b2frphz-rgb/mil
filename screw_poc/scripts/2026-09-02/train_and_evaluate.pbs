@@ -29,23 +29,11 @@ exec > >(tee -a "screw_poc/artifacts/pbs_logs/${RUN_DATE}_train_eval_${JOB_ID}.l
 
 echo "===== screw PoC ${RUN_DATE}: LoRA + held-out evaluation (A100) ====="
 bash screw_poc/scripts/run_train.sh "$TTS_RUN_DIR"
-MODEL_WEIGHT="$(find screw_poc/experiments/lora_base_config/merged -type f -name consolidated.safetensors -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)"
-[[ -n "$MODEL_WEIGHT" && -f "$MODEL_WEIGHT" ]] || { echo "ERROR: LoRA merged model not found" >&2; exit 1; }
 
-uv run python screw_poc/scripts/${RUN_DATE}/build_eval_inputs.py \
-    --source "$EVAL_SOURCE" --out-dir "$EVAL_OUT" --limit "${EVAL_LIMIT:-48}" --device cuda --dtype float16
-uv run python response_recorder.py --inputs "$EVAL_OUT/inputs" --out-dir "$EVAL_OUT/inference" \
-    --moshi-weight "$MODEL_WEIGHT" --device cuda --half --seeds 0 --silence-sec 8 --max-gen-sec 30 --response-sec 15
-uv run python - "$EVAL_OUT/reference.jsonl" "$EVAL_OUT/inference" "$EVAL_OUT/predictions.jsonl" <<'PY'
-import json, sys
-from pathlib import Path
-reference, inference, out = map(Path, sys.argv[1:])
-rows = [json.loads(line) for line in reference.read_text(encoding="utf-8").splitlines() if line]
-predictions = []
-for row in rows:
-    path = inference / row["id"] / "seed_0" / "transcript.txt"
-    if path.is_file(): predictions.append({"id": row["id"], "response_text": path.read_text(encoding="utf-8").strip()})
-out.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in predictions), encoding="utf-8")
-PY
-uv run python screw_poc/scripts/score_predictions.py "$EVAL_OUT/predictions.jsonl" --reference "$EVAL_OUT/reference.jsonl" | tee "$EVAL_OUT/score.json"
+# The evaluation half lives in evaluate_only.pbs so there is exactly one
+# implementation of it. If this job dies during evaluation, or the model needs
+# to be scored again, submit that script with the same EVAL_OUT: it reuses the
+# TTS inputs and only runs inference for queries that have no transcript yet.
+EVAL_OUT="$EVAL_OUT" EVAL_SOURCE="$EVAL_SOURCE" EVAL_LIMIT="${EVAL_LIMIT:-48}" \
+    bash "screw_poc/scripts/${RUN_DATE}/evaluate_only.pbs"
 echo "TRAIN_EVAL_OK=$EVAL_OUT"
