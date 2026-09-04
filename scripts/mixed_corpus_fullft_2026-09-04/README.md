@@ -49,21 +49,30 @@
 
 ## 実行
 
-stage 1 を投げるだけで 2 → 3 → 4 まで自動で連鎖します（各ジョブが末尾で次を qsub）。
+**自動連鎖はしません。** 1 stage ずつ投げます。各ジョブは終了時に次の stage の
+コマンドをログに出すので、それをコピーして投げてください。
 
 ```bash
+# stage 1
 qsub -V scripts/mixed_corpus_fullft_2026-09-04/11_dialogue_response.pbs
+
+# stage 2（stage 1 完了後）
+qsub -V scripts/mixed_corpus_fullft_2026-09-04/21_tts_response.pbs
+
+# stage 3（stage 2 完了後）
+qsub -V scripts/mixed_corpus_fullft_2026-09-04/30_mix_corpus.pbs
+
+# stage 4（stage 3 完了後）
+qsub -V scripts/mixed_corpus_fullft_2026-09-04/40_train_eval.pbs
 ```
 
-段ごとに手で回したいときは `CHAIN=0`:
-
-```bash
-qsub -V -v CHAIN=0 scripts/mixed_corpus_fullft_2026-09-04/11_dialogue_response.pbs
-```
+既定値以外を使った場合は、後続 stage にも同じ値を渡してください（`NUM_CASES` は
+stage 1〜3、`MIX_VERSION` は stage 3〜4 でパス解決に使われます）。ジョブが出力する
+`next:` 行にはその値が埋まった形のコマンドが出ます。
 
 TTS が 24h に収まらなかった場合は、**同じファイルをもう一度投げれば再開**します
 （完了した shard・対話・リクエストはスキップ）。stage 2 は merged マニフェストが
-まだ無ければ自分自身を再投入し、揃った時点で stage 3 へ進みます。
+まだ揃っていなければその旨と再投入コマンドを出して正常終了します。
 
 ## よく変える値
 

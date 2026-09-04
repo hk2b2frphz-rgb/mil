@@ -62,8 +62,12 @@ export SWEEP_PATTERNS="${SWEEP_PATTERNS:-f01}"
 # --no-opening-greeting.
 export FDB_OPENING_GREETING="${FDB_OPENING_GREETING:-1}"
 
-# Chained handoffs (patterns that do not fit this walltime) come back to this
-# same entrypoint rather than the generic sweep job.
+# No job in this pipeline submits another job. The sweep runner's own walltime
+# handoff (which would qsub a continuation for patterns that do not fit) is off
+# by default here; set SWEEP_CHAIN=1 to turn it back on when sweeping several
+# patterns in one submit. SELF_PBS names this file so that, if re-enabled, the
+# continuation comes back to this entrypoint rather than the generic sweep job.
+export SWEEP_CHAIN="${SWEEP_CHAIN:-0}"
 export SELF_PBS="scripts/mixed_corpus_fullft_2026-09-04/40_train_eval.pbs"
 
 test -s "$SRC_RUN_DIR/training_set/synthetic_moshi_train.jsonl" || {

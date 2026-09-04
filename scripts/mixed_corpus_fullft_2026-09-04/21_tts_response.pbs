@@ -55,29 +55,17 @@ test -s "$DIALOGUES_JSONL" || {
 bash scripts/run_qwen_tts_vllm_10000_4gpu.pbs
 
 MERGED="$OUT_ROOT/merged/training_set/synthetic_moshi_train.jsonl"
-NEXT="scripts/mixed_corpus_fullft_2026-09-04/30_mix_corpus.pbs"
 
 if [[ ! -s "$MERGED" ]]; then
     # The TTS driver merges shards only once every shard has finished. Not an
     # error: re-submit this same file to resume the remaining shards.
     echo "merged manifest not present yet: $MERGED"
-    if [[ "${CHAIN:-1}" == "1" ]] && command -v qsub >/dev/null 2>&1; then
-        echo "re-submitting this stage to continue the remaining shards"
-        qsub -V -v "RESPONSE_VERSION=$RESPONSE_VERSION,NUM_CASES=$NUM_CASES" \
-            scripts/mixed_corpus_fullft_2026-09-04/21_tts_response.pbs
-    fi
+    echo "re-submit this same file to continue the remaining shards:"
+    echo "  qsub -V -v RESPONSE_VERSION=$RESPONSE_VERSION,NUM_CASES=$NUM_CASES \\"
+    echo "        scripts/mixed_corpus_fullft_2026-09-04/21_tts_response.pbs"
     exit 0
 fi
 
 echo "stage 2 done: $MERGED"
-
-if [[ "${CHAIN:-1}" == "1" ]]; then
-    if command -v qsub >/dev/null 2>&1; then
-        echo "chaining -> $NEXT"
-        qsub -V -v "RESPONSE_VERSION=$RESPONSE_VERSION,NUM_CASES=$NUM_CASES" "$NEXT"
-    else
-        echo "WARNING: qsub not on PATH; submit $NEXT manually." >&2
-    fi
-else
-    echo "CHAIN=0; submit $NEXT manually."
-fi
+echo "next: qsub -V -v RESPONSE_VERSION=$RESPONSE_VERSION,NUM_CASES=$NUM_CASES \\"
+echo "        scripts/mixed_corpus_fullft_2026-09-04/30_mix_corpus.pbs"

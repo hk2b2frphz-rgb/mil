@@ -29,8 +29,8 @@
 #
 # Submit:
 #   qsub -V scripts/mixed_corpus_fullft_2026-09-04/11_dialogue_response.pbs
-# Without auto-chaining to the TTS stage:
-#   qsub -V -v CHAIN=0 scripts/mixed_corpus_fullft_2026-09-04/11_dialogue_response.pbs
+# Stages are submitted one at a time; this job does not submit the next one.
+# It prints the exact command for the following stage when it finishes.
 # Different size:
 #   qsub -V -v NUM_CASES=6000 scripts/mixed_corpus_fullft_2026-09-04/11_dialogue_response.pbs
 
@@ -64,14 +64,5 @@ DIALOGUES="$OUT_ROOT/llm_dialogues/dialogues.jsonl"
 test -s "$DIALOGUES"
 echo "stage 1 done: $DIALOGUES"
 
-NEXT="scripts/mixed_corpus_fullft_2026-09-04/21_tts_response.pbs"
-if [[ "${CHAIN:-1}" == "1" ]]; then
-    if command -v qsub >/dev/null 2>&1; then
-        echo "chaining -> $NEXT"
-        qsub -V -v "RESPONSE_VERSION=$RESPONSE_VERSION,NUM_CASES=$NUM_CASES" "$NEXT"
-    else
-        echo "WARNING: qsub not on PATH; submit $NEXT manually." >&2
-    fi
-else
-    echo "CHAIN=0; submit $NEXT manually."
-fi
+echo "next: qsub -V -v RESPONSE_VERSION=$RESPONSE_VERSION,NUM_CASES=$NUM_CASES \\"
+echo "        scripts/mixed_corpus_fullft_2026-09-04/21_tts_response.pbs"

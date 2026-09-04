@@ -76,14 +76,5 @@ test -s "$MIXED_MANIFEST"
 echo "stage 3 done: $MIXED_MANIFEST"
 echo "summary:      $MIX_OUT/mix_summary.json"
 
-NEXT="scripts/mixed_corpus_fullft_2026-09-04/40_train_eval.pbs"
-if [[ "${CHAIN:-1}" == "1" ]]; then
-    if command -v qsub >/dev/null 2>&1; then
-        echo "chaining -> $NEXT"
-        qsub -V -v "MIX_VERSION=$MIX_VERSION" "$NEXT"
-    else
-        echo "WARNING: qsub not on PATH; submit $NEXT manually." >&2
-    fi
-else
-    echo "CHAIN=0; submit $NEXT manually."
-fi
+echo "next: qsub -V -v MIX_VERSION=$MIX_VERSION \\"
+echo "        scripts/mixed_corpus_fullft_2026-09-04/40_train_eval.pbs"
