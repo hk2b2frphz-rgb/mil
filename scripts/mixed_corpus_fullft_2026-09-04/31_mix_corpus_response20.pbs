@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N mixft_mix_r20
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# Experiment 2: build a fixed 10,000 aizuchi + 2,000 response manifest.
+# MIX_VERSION is an experiment label; the aizuchi source remains v3.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export MIX_VERSION="v3_r20"
+export RESPONSE_VERSION="v1"
+export NUM_CASES="10000"
+export MIX_TAKE_AIZUCHI="all"
+export MIX_TAKE_RESPONSE="2000"
+export MIX_SRC_AIZUCHI="$PWD/data/runs/aizuchi_normal_10000_v3/tts/merged"
+export MIX_SRC_RESPONSE="$PWD/data/runs/response_10000_v1/tts/merged"
+export MIX_ROOT="$PWD/data/runs/mixed_normal_${MIX_VERSION}"
+
+exec bash scripts/mixed_corpus_fullft_2026-09-04/30_mix_corpus.pbs

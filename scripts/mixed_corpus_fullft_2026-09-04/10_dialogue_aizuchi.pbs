@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N mixft_dlg_aizu
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# STAGE 0a (OPTIONAL) of the mixed-corpus pipeline.
+# See scripts/mixed_corpus_fullft_2026-09-04/README.md.
+#
+# Regenerates the corrected v3 AIZUCHI half of the corpus. v2 must not be
+# reused because its TTS timeline can collapse later backchannels into a rapid
+# chain. Stage 3 points at v3 by default.
+#
+# This is a thin wrapper around the 2026-09-04 job so the two rounds cannot
+# drift apart: all AIZUCHI_ONLY_* tuning lives in that file, not here.
+#
+# Submit:
+#   qsub -V scripts/mixed_corpus_fullft_2026-09-04/10_dialogue_aizuchi.pbs
+#
+# This v3 pipeline pins AIZUCHI_VERSION so an inherited v2 value cannot leak in.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export AIZUCHI_VERSION="v3"
+exec bash scripts/2026-09-04/aizuchi_normal_dialogue_10000.pbs

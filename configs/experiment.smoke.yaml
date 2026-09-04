@@ -1,0 +1,70 @@
+# Smoke config for the experiment pipeline: fake, instant stages that exercise
+# the orchestration, output wiring, AND the real qsub self-chaining -- without
+# GPU or heavy work. Each stage checks its INPUT, creates its OUTPUT, prints OK.
+#
+# Local (no qsub, one process):
+#   bash scripts/smoke_experiment_dag.sh          # or: --start --local
+# Real PBS self-chain (tiny jobs; verifies compute-node qsub works):
+#   bash scripts/smoke_experiment_dag.sh pbs      # kicks off --start, waits, --check
+#
+# default_resources are intentionally tiny/short so the PBS smoke is cheap.
+
+experiment: smoke
+out_root: data/runs/_smoke
+
+default_resources:
+  queue: xvn_s
+  select: "1:res=small"
+  walltime: "00:10:00"
+
+paths:
+  dialogue_out: "${out_root}/dialogue"
+  tts_out: "${out_root}/tts"
+  train_out: "${out_root}/checkpoints"
+  eval_out: "${out_root}/eval"
+
+start: dialogue
+
+stages:
+  - name: dialogue
+    cmd: 'mkdir -p "$DIALOGUE_OUT" && echo "{}" > "$DIALOGUE_OUT/dialogues.jsonl" && echo "[dialogue] wrote $DIALOGUE_OUT/dialogues.jsonl"'
+    env:
+      DIALOGUE_OUT: "${dialogue_out}"
+    expect: ["${dialogue_out}/dialogues.jsonl"]
+    next: tts
+
+  - name: tts
+    cmd: 'test -f "$DIALOGUE_OUT/dialogues.jsonl" && mkdir -p "$TTS_OUT" && touch "$TTS_OUT/synthetic_moshi_train.jsonl" && echo "[tts] read $DIALOGUE_OUT, wrote $TTS_OUT"'
+    env:
+      DIALOGUE_OUT: "${dialogue_out}"
+      TTS_OUT: "${tts_out}"
+    expect: ["${tts_out}/synthetic_moshi_train.jsonl"]
+    next: train
+
+  - name: train
+    cmd: 'test -f "$TTS_OUT/synthetic_moshi_train.jsonl" && mkdir -p "$TRAIN_OUT" && touch "$TRAIN_OUT/consolidated.safetensors" && echo "[train] read $TTS_OUT, wrote $TRAIN_OUT"'
+    env:
+      TTS_OUT: "${tts_out}"
+      TRAIN_OUT: "${train_out}"
+    expect: ["${train_out}/consolidated.safetensors"]
+    next: eval
+
+  - name: eval
+    cmd: 'test -f "$TRAIN_OUT/consolidated.safetensors" && mkdir -p "$EVAL_OUT" && echo "[eval] read $TRAIN_OUT, ok" > "$EVAL_OUT/summary.txt" && echo "[eval] read $TRAIN_OUT"'
+    env:
+      TRAIN_OUT: "${train_out}"
+      EVAL_OUT: "${eval_out}"
+    expect: ["${eval_out}/summary.txt"]
+    next: verify
+
+  # Final self-verify link: checks every stage's output and prints the verdict.
+  # Because it runs as the last job in the self-chain, the smoke result lives in
+  # this job's log (dag_verify) -- no login-node polling needed.
+  - name: verify
+    cmd: 'ok=1; for f in "$DIALOGUE_OUT/dialogues.jsonl" "$TTS_OUT/synthetic_moshi_train.jsonl" "$TRAIN_OUT/consolidated.safetensors" "$EVAL_OUT/summary.txt"; do if [ -f "$f" ]; then echo "[verify] ok:   $f"; else echo "[verify] MISS: $f"; ok=0; fi; done; if [ "$ok" = 1 ]; then echo "[SMOKE OK] all stages passed"; else echo "[SMOKE FAILED]"; exit 1; fi'
+    env:
+      DIALOGUE_OUT: "${dialogue_out}"
+      TTS_OUT: "${tts_out}"
+      TRAIN_OUT: "${train_out}"
+      EVAL_OUT: "${eval_out}"
+    expect: ["${eval_out}/summary.txt"]

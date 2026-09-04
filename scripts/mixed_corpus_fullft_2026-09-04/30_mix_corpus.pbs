@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N mixft_mix_corpus
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# STAGE 3 of the mixed-corpus pipeline. See scripts/mixed_corpus_fullft_2026-09-04/README.md.
+#
+# Mixes the aizuchi corpus and the response corpus into one training manifest
+# at a controlled ratio. No audio is copied: the manifest references the
+# existing wavs by absolute path, so this stage is cheap and reversible.
+#
+# The mix ratio is the experimental variable of this pipeline. Too little
+# response data and the model still cannot render injected content; too much
+# and the backchannel timing behaviour regresses toward an ordinary turn-based
+# assistant. MIX_TAKE_RESPONSE is what you sweep.
+#
+# Submit:
+#   qsub -V scripts/mixed_corpus_fullft_2026-09-04/30_mix_corpus.pbs
+# Different ratio (count, or a 0<x<=1 fraction of what is available):
+#   qsub -V -v MIX_TAKE_RESPONSE=1000 scripts/mixed_corpus_fullft_2026-09-04/30_mix_corpus.pbs
+#   qsub -V -v MIX_TAKE_RESPONSE=0.5  scripts/mixed_corpus_fullft_2026-09-04/30_mix_corpus.pbs
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export RESPONSE_VERSION="${RESPONSE_VERSION:-v1}"
+export NUM_CASES="${NUM_CASES:-10000}"
+export MIX_VERSION="${MIX_VERSION:-v1}"
+export AIZUCHI_VERSION="v3"
+
+# The aizuchi half is reused as-is from the 2026-09-04 pipeline. Regenerate it
+# with scripts/mixed_corpus_fullft_2026-09-04/10_dialogue_aizuchi.pbs + 20_tts_aizuchi.pbs only if
+# you actually need a fresh one.
+MIX_SRC_AIZUCHI="${MIX_SRC_AIZUCHI:-$PWD/data/runs/aizuchi_normal_10000_${AIZUCHI_VERSION}/tts/merged}"
+MIX_SRC_RESPONSE="${MIX_SRC_RESPONSE:-$PWD/data/runs/response_${NUM_CASES}_${RESPONSE_VERSION}/tts/merged}"
+
+MIX_TAKE_AIZUCHI="${MIX_TAKE_AIZUCHI:-all}"
+MIX_TAKE_RESPONSE="${MIX_TAKE_RESPONSE:-all}"
+
+MIX_ROOT="${MIX_ROOT:-$PWD/data/runs/mixed_normal_${MIX_VERSION}}"
+MIX_OUT="$MIX_ROOT/mixed"
+
+for src in "$MIX_SRC_AIZUCHI" "$MIX_SRC_RESPONSE"; do
+    test -s "$src/training_set/synthetic_moshi_train.jsonl" || {
+        echo "ERROR: no merged manifest under $src" >&2
+        echo "       Both halves must be rendered before mixing." >&2
+        exit 1
+    }
+done
+
+mkdir -p experiments/pbs_logs
+JOB_TAG="${PBS_JOBID%%.*}"
+exec > >(tee -a "experiments/pbs_logs/mix_corpus_${MIX_VERSION}_${JOB_TAG:-local}.log") 2>&1
+
+echo "===== stage 3: mix corpus ====="
+echo "aizuchi_src:   $MIX_SRC_AIZUCHI (take=$MIX_TAKE_AIZUCHI)"
+echo "response_src:  $MIX_SRC_RESPONSE (take=$MIX_TAKE_RESPONSE)"
+echo "out:           $MIX_OUT"
+echo "==============================="
+
+uv run python scripts/mix_training_manifests.py \
+    --source "aizuchi=$MIX_SRC_AIZUCHI" \
+    --source "response=$MIX_SRC_RESPONSE" \
+    --take "aizuchi=$MIX_TAKE_AIZUCHI" \
+    --take "response=$MIX_TAKE_RESPONSE" \
+    --out-dir "$MIX_OUT" \
+    --seed "${MIX_SEED:-0}"
+
+MIXED_MANIFEST="$MIX_OUT/training_set/synthetic_moshi_train.jsonl"
+test -s "$MIXED_MANIFEST"
+echo "stage 3 done: $MIXED_MANIFEST"
+echo "summary:      $MIX_OUT/mix_summary.json"
+
+echo "next: qsub -V -v MIX_VERSION=$MIX_VERSION \\"
+echo "        scripts/mixed_corpus_fullft_2026-09-04/40_train_eval.pbs"

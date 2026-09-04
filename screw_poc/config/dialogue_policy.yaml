@@ -1,0 +1,373 @@
+version: 1
+seed: 20260803
+
+voices:
+  system: Ono_Anna
+  users:
+    - Serena
+    - Sohee
+    - Vivian
+    - Dylan
+    - Eric
+    - Aiden
+    - Uncle_Fu
+    - Ryan
+
+dataset:
+  train_dialogues: 1000
+  evaluation_dialogues: 200
+  core_dialogues_per_knowledge: 30
+  out_of_scope_train: 100
+  target_seconds_per_dialogue: [20, 45]
+  flows_per_knowledge:
+    direct: 8
+    clarify: 12
+    varied: 6
+    unresolved: 4
+
+response_patterns:
+  CONFIRM: "確認すると、{slot_label}は{value}ですね。"
+  ESCALATE: "規定値を特定できません。作業を進めず、作業指示書か責任者を確認してください。"
+  OUT_OF_SCOPE: "その内容は、このねじ問い合わせシステムには登録されていません。作業指示書か責任者を確認してください。"
+  NOT_HEARD: "聞き取れませんでした。もう一度、見える数字や文字をそのまま教えてください。"
+
+# TTSへ渡すときだけ使う、ねじ規格・数値の固定読み。表示、評価、知識DBの
+# 原文は書き換えない。上から順に置換するため、長い品番・数値を先に置く。
+tts_pronunciations:
+  - written: "SSH-M10-SD-EL"
+    spoken: "エスエスエイチ・エムジュウ・エスディー・イーエル"
+  - written: "SSH-M8-SD-EL"
+    spoken: "エスエスエイチ・エムハチ・エスディー・イーエル"
+  - written: "SSH-M4-SD-EL"
+    spoken: "エスエスエイチ・エムヨン・エスディー・イーエル"
+  - written: "SSH-M3-SD-EL"
+    spoken: "エスエスエイチ・エムスリー・エスディー・イーエル"
+  - written: "NBK"
+    spoken: "エヌビーケー"
+  - written: "M12"
+    spoken: "エムジュウニ"
+  - written: "M10"
+    spoken: "エムジュウ"
+  - written: "M8"
+    spoken: "エムハチ"
+  - written: "M6"
+    spoken: "エムロク"
+  - written: "M5"
+    spoken: "エムゴ"
+  - written: "M4"
+    spoken: "エムヨン"
+  - written: "M3"
+    spoken: "エムスリー"
+  - written: "10.9"
+    spoken: "ジュッテンキュウ"
+  - written: "8.8"
+    spoken: "ハッテンハチ"
+  - written: "1.75ミリ"
+    spoken: "イッテンナナゴミリ"
+  - written: "1.25ミリ"
+    spoken: "イッテンニゴミリ"
+  - written: "1.0ミリ"
+    spoken: "イッテンゼロミリ"
+  - written: "0.8ミリ"
+    spoken: "ゼロテンハチミリ"
+  - written: "0.7ミリ"
+    spoken: "ゼロテンナナミリ"
+  - written: "0.5ミリ"
+    spoken: "ゼロテンゴミリ"
+  - written: "1.5ミリ"
+    spoken: "イッテンゴミリ"
+  # 「1.0や1.25のような表示」という訊き方に出てくる、単位の付かない数値。
+  - written: "1.25"
+    spoken: "イッテンニゴ"
+  - written: "1.0"
+    spoken: "イッテンゼロ"
+  - written: "1.7ニュートン"
+    spoken: "イッテンナナニュートン"
+  - written: "0.7ニュートン"
+    spoken: "ゼロテンナナニュートン"
+  - written: "27ニュートン"
+    spoken: "ニジュウナナニュートン"
+  - written: "14ニュートン"
+    spoken: "ジュウヨンニュートン"
+  - written: "8ミリ"
+    spoken: "ハチミリ"
+  - written: "2ミリ"
+    spoken: "ニミリ"
+  - written: "1ミリ"
+    spoken: "イチミリ"
+  - written: "×"
+    spoken: "かける"
+  - written: "1"
+    spoken: "イチ"
+  - written: "M"
+    spoken: "エム"
+
+# 知識表の slot_values は照合用のキーであって、そのままでは人の言葉にならない。
+# 「工程不明」は工程が分からない状態を指す値なので、ユーザーがそれを申告する対話は
+# 成り立たない。値ごとに、声に出せるかどうかと、その言い方をここで決める。
+#   plain        … そのまま acknowledgements の型に入れて読める
+#   unanswerable … ユーザーは答えられない。訊けば答えの出ないまま終わる
+#   given        … 質問文そのものに入っている。聞き返さない
+#   say/confirm  … 値をそのまま読むと文にならないので、言い方を与える
+slot_speech:
+  M3: plain
+  M4: plain
+  M5: plain
+  M6: plain
+  M8: plain
+  M10: plain
+  M12: plain
+  "M8×1": plain
+  "8.8": plain
+  "1.25ミリ": plain
+  SSH-M3-SD-EL: plain
+  SSH-M4-SD-EL: plain
+  SSH-M8-SD-EL: plain
+  SSH-M10-SD-EL: plain
+
+  工程不明: unanswerable
+  部品番号不明: unanswerable
+  不明: unanswerable
+
+  "1.0ミリと1.25ミリ": given
+  メートルねじとインチねじ: given
+  小ねじとタッピンねじ: given
+
+  六角穴:
+    say: "頭に六角の穴が空いています。"
+    confirm: "確認すると、頭は六角穴ですね。"
+  外側が六角:
+    say: "頭の外側が六角です。"
+    confirm: "確認すると、頭は外側が六角ですね。"
+  油あり:
+    say: "油が付いています。"
+    confirm: "確認すると、油が付いた状態ですね。"
+  乾燥:
+    say: "乾いています。"
+    confirm: "確認すると、表面は乾いていますね。"
+  平座金あり:
+    say: "平たいワッシャーが入っています。"
+    confirm: "確認すると、平座金ありですね。"
+  アルミ:
+    say: "アルミです。"
+    confirm: "確認すると、相手材はアルミですね。"
+  タッピンねじ:
+    say: "タッピンねじです。"
+    confirm: "確認すると、タッピンねじですね。"
+  ステンレスねじ:
+    say: "ステンレスねじです。"
+    confirm: "確認すると、ステンレスねじですね。"
+  "2ミリ":
+    say: "2ミリです。"
+    confirm: "確認すると、板厚は2ミリですね。"
+  下穴が大きい:
+    say: "下穴が少し大きいみたいです。"
+    confirm: "確認すると、下穴が大きめということですね。"
+  下穴が小さい:
+    say: "下穴が小さいみたいです。"
+    confirm: "確認すると、下穴が小さいということですね。"
+  ねじ込み初期から固い:
+    say: "ねじ込み始めから固いです。"
+    confirm: "確認すると、最初から固いということですね。"
+  急に固着して動かない:
+    say: "急に固まって、動かなくなりました。"
+    confirm: "確認すると、途中で動かなくなったということですね。"
+  締めても空転する:
+    say: "締めても、ずっと空回りします。"
+    confirm: "確認すると、締めても止まらないということですね。"
+
+question_templates:
+  train:
+    - "{question}"
+    - "すみません、{question}"
+    - "ちょっと確認です。{question}"
+    - "作業中なんですが、{question}"
+    - "これについて、{question}"
+    - "先輩、{question}"
+  evaluation:
+    - "今ちょっと困っていて、{question}"
+    - "念のため聞きたいんですが、{question}"
+    - "現場で確認したいです。{question}"
+    - "これ、どう判断すればいいですか。{question}"
+
+# 詳細を伏せた切り出し方。カテゴリ単位にすると、工具の話を訊いておいて
+# ピッチの答えが返る、という噛み合わない対話ができてしまうので、intent 単位で持つ。
+vague_questions:
+  pitch_lookup:
+    - "このねじのピッチを知りたいです。"
+    - "ねじ山の間隔を知りたいんですが。"
+  pitch_designation:
+    - "ねじの表示の読み方が分からないです。"
+    - "箱に書いてある表記の意味を知りたいです。"
+  thread_compatibility:
+    - "手元のねじが入るか見てほしいです。"
+    - "同じ太さなら使えるのか知りたいです。"
+  thread_system_compatibility:
+    - "規格の違うねじを使っていいか知りたいです。"
+    - "径が近いねじで代用できますか。"
+  screw_type_difference:
+    - "このねじの種類の違いが分からないです。"
+    - "どちらのねじを使えばいいか知りたいです。"
+  tool_selection:
+    - "このねじを回す工具が分からないです。"
+    - "どの工具を当てればいいですか。"
+  tool_size_selection:
+    - "工具のサイズの選び方を知りたいです。"
+    - "どのソケットを使えばいいですか。"
+  head_marking:
+    - "ボルトの頭の表示について知りたいです。"
+    - "頭に書いてあるものの意味を知りたいです。"
+  product_torque:
+    - "このボルト、どれくらいで締めますか。"
+    - "締付けトルクを教えてください。"
+  torque_lubrication:
+    - "表面の状態で締め方が変わるか知りたいです。"
+    - "この状態のまま同じトルクでいいですか。"
+  torque_mating_material:
+    - "相手材によって締め方が変わるか知りたいです。"
+    - "この材料でも同じ条件でいいですか。"
+  torque_washer:
+    - "座金の有無で締め方が変わるか知りたいです。"
+    - "この組合せのまま締めていいですか。"
+  generic_torque:
+    - "このボルトの締付トルクを知りたいです。"
+    - "何ニュートンで締めればいいか知りたいです。"
+  tap_drill_condition:
+    - "タップの下穴を決めたいです。"
+    - "下穴の決め方を知りたいです。"
+  tapping_pilot_condition:
+    - "タッピンねじの下穴を決めたいです。"
+    - "この板に開ける下穴を知りたいです。"
+  pilot_too_large:
+    - "下穴の具合が気になっています。"
+    - "この下穴のまま進めていいですか。"
+  pilot_too_small:
+    - "下穴の具合が気になっています。"
+    - "ねじ込みが固いのが気になります。"
+  early_resistance:
+    - "ねじ締めで異常が出ました。"
+    - "このまま締めてよいですか。"
+  seizing:
+    - "ねじが途中で動かなくなりました。"
+    - "回らなくなったねじがあります。"
+  thread_stripping:
+    - "ねじが締まらないです。"
+    - "締付けがおかしいです。"
+  reuse:
+    - "外したねじの扱いを知りたいです。"
+    - "このねじをもう一度使っていいか知りたいです。"
+
+unknown_replies:
+  train:
+    - "分かりません。"
+    - "そこは見ていません。"
+    - "どこを見ればいいですか。"
+    - "表示がよく分かりません。"
+  evaluation:
+    - "ちょっと判断できないです。"
+    - "手元では確認できません。"
+    - "そういう番号は分からないです。"
+
+acknowledgements:
+  train:
+    - "{value}です。"
+    - "見たら、{value}でした。"
+    - "表示は{value}です。"
+    - "たぶん{value}です。"
+  evaluation:
+    - "手元では{value}となっています。"
+    - "書いてあるのは{value}です。"
+    - "確認すると{value}でした。"
+
+slots:
+  process_id:
+    label: "工程"
+    questions:
+      - "どの設備・工程の、どの部分ですか？"
+      - "作業指示書に工程名や設備名はありますか？"
+      - "見える工程番号や設備名を、そのまま教えてください。"
+  part_number:
+    label: "部品番号"
+    questions:
+      - "部品番号は分かりますか？"
+      - "箱や作業指示書に番号はありますか？"
+      - "見える英数字を、そのまま教えてください。"
+  head_marking:
+    label: "頭部の刻印"
+    questions:
+      - "ボルト頭部の刻印を教えてください。"
+      - "ボルトの頭に数字や文字はありますか？"
+      - "『8.8』や『10.9』のような表示があれば、そのまま読んでください。"
+  nominal_diameter:
+    label: "ねじサイズ"
+    questions:
+      - "ねじの呼び径を教えてください。"
+      - "M6やM8などのサイズは分かりますか？"
+      - "箱や指示書に『M』で始まる表示はありますか？"
+  thread_designation:
+    label: "ねじの表示"
+    questions:
+      - "ねじの規格表示を教えてください。"
+      - "M8かM8かける1のような表示はありますか？"
+      - "『M』で始まる文字と数字を、そのまま読んでください。"
+  pitch:
+    label: "ピッチ"
+    questions:
+      - "ピッチを教えてください。"
+      - "並目か細目か分かりますか？"
+      - "箱や指示書に、1.0や1.25のような表示はありますか？"
+  drive_type:
+    label: "頭部形状"
+    questions:
+      - "ねじの駆動部形状を教えてください。"
+      - "頭は外側が六角ですか、穴が六角ですか、十字ですか？"
+      - "工具を当てる部分の形を、見たまま教えてください。"
+  screw_type:
+    label: "ねじ種類"
+    questions:
+      - "ねじの種類を教えてください。"
+      - "小ねじですか、タッピンねじですか？"
+      - "先端がとがっているか、見たまま教えてください。"
+  lubrication:
+    label: "表面状態"
+    questions:
+      - "潤滑状態を教えてください。"
+      - "油やグリスは付いていますか？"
+      - "表面は乾いていますか、それとも油で濡れていますか？"
+  mating_material:
+    label: "相手材"
+    questions:
+      - "締付け先の材質を教えてください。"
+      - "締める相手は、鉄、アルミ、樹脂のどれですか？"
+      - "磁石が付く金属ですか、軽い金属ですか、プラスチックですか？"
+  plate_thickness:
+    label: "板厚"
+    questions:
+      - "相手材の板厚を教えてください。"
+      - "材料の厚さは何ミリですか？"
+      - "図面や指示書に書かれた厚さを、そのまま教えてください。"
+  washer:
+    label: "座金"
+    questions:
+      - "座金の条件を教えてください。"
+      - "平たいワッシャーは入っていますか？"
+      - "ねじ頭の下に、薄い輪の部品がありますか？"
+  symptom:
+    label: "症状"
+    questions:
+      - "発生している症状を教えてください。"
+      - "途中で固い、空回り、頭が滑る、のどれですか？"
+      - "ねじが今どう動くか、見たまま教えてください。"
+
+out_of_scope_questions:
+  train:
+    - "今日の食堂メニューは何ですか？"
+    - "この機械の電気配線を変更していいですか？"
+    - "休暇申請はどこから出しますか？"
+    - "溶接条件を教えてください。"
+    - "薬品が手に付いたけど大丈夫ですか？"
+  evaluation:
+    - "フォークリフトの免許更新はいつですか？"
+    - "旋盤の回転数を決めてください。"
+    - "社内Wi-Fiのパスワードを教えてください。"
+    - "この薬を飲んでも大丈夫ですか？"

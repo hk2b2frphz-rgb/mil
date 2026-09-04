@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N az_n_tts10k
+#PBS -q xvn_s
+#PBS -l select=1:res=middle2
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# Qwen3-TTS for the normal-frequency 10,000-dialogue corpus.
+# Re-submit this same file after walltime to resume unfinished shards.
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export SOURCE_BATCH_ID="qwen_aizuchi_10000_normal_v1"
+export BATCH_ID="aizuchi_normal_10000_tts_vllm"
+export DIALOGUES_JSONL="$PWD/data/runs/aizuchi_normal_10000/dialogue/llm_dialogues/dialogues.jsonl"
+export OUT_ROOT="$PWD/data/runs/aizuchi_normal_10000/tts"
+export NUM_DIALOGUES=10000
+
+exec bash scripts/run_qwen_tts_vllm_10000_4gpu.pbs

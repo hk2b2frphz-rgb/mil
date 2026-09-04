@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N mixft_tts_aizu
+#PBS -q xvn_s
+#PBS -l select=1:res=middle2
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# STAGE 0b (OPTIONAL) of the mixed-corpus pipeline.
+# See scripts/mixed_corpus_fullft_2026-09-04/README.md.
+#
+# Renders the corrected v3 AIZUCHI half. Submit after
+# scripts/mixed_corpus_fullft_2026-09-04/10_dialogue_aizuchi.pbs. Never resume
+# the old v2 TTS output into this run.
+#
+# Thin wrapper around the 2026-09-04 job, which also pins
+# CLONE_OUT_DIR_MOSHI=data/clone_examples/99999 -- the same moshi voice the
+# response half uses. Keeping both halves on one clone source is what stops the
+# acoustic codebooks from receiving a bimodal speaker target.
+#
+# Re-submit to resume unfinished shards.
+#
+# Submit:
+#   qsub -V scripts/mixed_corpus_fullft_2026-09-04/20_tts_aizuchi.pbs
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export AIZUCHI_VERSION="v3"
+exec bash scripts/2026-09-04/aizuchi_normal_tts_10000.pbs

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N az_n_dlg10k3
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# 10,000 listener-only dialogues, normal backchannel frequency, v3.
+# v3 applies the configured per-turn count, length and spacing limits. It must
+# use a fresh output root because v2 can contain rapid-fire backchannel data.
+#
+# Why v2 exists (see also the block comment in experiments/lora_base_config/
+# config.yaml around duration_sec): moshi-finetune splits any dialogue longer
+# than duration_sec (170s) into equal chunks, and every chunk after the first
+# starts mid-conversation with no opening greeting. The model cannot tell such
+# a chunk from the true start of a call, so it learns to skip the greeting and
+# open with a backchannel instead -- which is exactly how the v1 aizuchi model
+# failed. The regular dialogue corpus stayed under 170s so 170 was enough
+# there; the aizuchi corpus is longer by design (the user monologues at length
+# with silences), so it has to be shortened at the source.
+#
+# MAX_BLOCKS is therefore 10 rather than v1's 14. Measure the rendered result
+# before training and adjust if dialogues still run past 170s:
+#
+#   python3 -c "import json; d=sorted(json.loads(l)['duration'] for l in open('data/runs/aizuchi_normal_10000_v3/tts/merged/training_set/synthetic_moshi_train.jsonl')); n=len(d); print('p95=%.1f max=%.1f over170=%.1f%%' % (d[int(n*.95)], d[-1], 100*sum(1 for x in d if x>170)/n))"
+#
+# Every AIZUCHI_ONLY_* value below can be overridden at submit time, e.g.:
+#   qsub -V -v AIZUCHI_ONLY_MAX_BLOCKS=8 scripts/2026-09-04/aizuchi_normal_dialogue_10000.pbs
+#
+# Output goes to a new v3 root so the earlier corpora stay intact.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export AIZUCHI_VERSION="v3"
+export BATCH_ID="qwen_aizuchi_10000_normal_${AIZUCHI_VERSION}"
+export OUT_ROOT="$PWD/data/runs/aizuchi_normal_10000_${AIZUCHI_VERSION}/dialogue"
+export NUM_CASES="${NUM_CASES:-10000}"
+export DIALOGUE_GENERATION_MODE="aizuchi-only"
+export AIZUCHI_ONLY_FREQUENCY="normal"
+
+# Shortened from v1 (8/14) so a whole call fits in one 170s training chunk.
+export AIZUCHI_ONLY_MIN_BLOCKS="${AIZUCHI_ONLY_MIN_BLOCKS:-6}"
+export AIZUCHI_ONLY_MAX_BLOCKS="${AIZUCHI_ONLY_MAX_BLOCKS:-10}"
+
+# Silence eats into the same 170s budget as speech. Trimmed from v1's 8.0s cap
+# for the same reason; the rate and floor are unchanged.
+export AIZUCHI_ONLY_SILENCE_RATE="${AIZUCHI_ONLY_SILENCE_RATE:-0.35}"
+export AIZUCHI_ONLY_SILENCE_MIN_SEC="${AIZUCHI_ONLY_SILENCE_MIN_SEC:-2.5}"
+export AIZUCHI_ONLY_SILENCE_MAX_SEC="${AIZUCHI_ONLY_SILENCE_MAX_SEC:-6.0}"
+
+export AIZUCHI_ONLY_PROBE_RATE="${AIZUCHI_ONLY_PROBE_RATE:-0.5}"
+
+exec bash scripts/run_dialogues_qwen_10000.pbs

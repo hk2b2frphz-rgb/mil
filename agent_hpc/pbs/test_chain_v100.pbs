@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N fd_probe
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=00:10:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII characters anywhere in this file
+# (not even in comments) -- the job dies immediately at submission.
+#
+# Prove the self-resubmission machinery on a cheap V100 before letting the
+# A100 agent server depend on it. This job does NO real work: it records where
+# it landed, sleeps briefly, and submits the next link of the chain.
+#
+# What it actually tests:
+#   1. qsub works from inside a running job (not just from the login node)
+#   2. -v variables reach the next job, so CHAIN_INDEX really increments
+#   3. the chain stops at MAX_CHAIN_JOBS instead of running forever
+#   4. a stop file ends the chain without needing to race qdel
+#   5. the instant-exit guard refuses to resubmit a job that died on startup
+#
+# Every link appends one line to a single shared log, so the whole chain is
+# visible in one file afterwards.
+#
+# Submit:
+#   qsub -V agent_hpc/pbs/test_chain_v100.pbs
+# Longer/shorter test:
+#   MAX_CHAIN_JOBS=5 SLEEP_SEC=30 qsub -V agent_hpc/pbs/test_chain_v100.pbs
+#
+# Stop a running chain early (the next link will not be submitted):
+#   touch ~/.miltoka/stop_chain_v100
+#
+# Inspect afterwards:
+#   cat experiments/pbs_logs/<CHAIN_ID>_chain.log
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+JOB_START_EPOCH="$(date +%s)"
+JOB_ID_SHORT="${PBS_JOBID%%.*}"
+
+CHAIN_INDEX="${CHAIN_INDEX:-1}"
+MAX_CHAIN_JOBS="${MAX_CHAIN_JOBS:-3}"
+SLEEP_SEC="${SLEEP_SEC:-60}"
+CHAIN_ID="${CHAIN_ID:-chainv100_${JOB_ID_SHORT:-manual}}"
+STOP_FILE="${STOP_FILE:-$HOME/.miltoka/stop_chain_v100}"
+# A link that dies this fast did not do its job; resubmitting would spin the
+# queue. Same guard as scripts/run_train_chain.pbs.
+MIN_JOB_SEC="${MIN_JOB_SEC:-10}"
+SELF_PBS="${SELF_PBS:-agent_hpc/pbs/test_chain_v100.pbs}"
+
+for value in "$CHAIN_INDEX" "$MAX_CHAIN_JOBS" "$SLEEP_SEC"; do
+    if ! [[ "$value" =~ ^[0-9]+$ ]] || [[ "$value" -lt 1 ]]; then
+        echo "ERROR: CHAIN_INDEX / MAX_CHAIN_JOBS / SLEEP_SEC must be positive integers." >&2
+        exit 1
+    fi
+done
+if ! [[ "$CHAIN_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "ERROR: CHAIN_ID may contain only letters, digits, dot, underscore, hyphen." >&2
+    exit 1
+fi
+if [[ "$CHAIN_INDEX" -gt "$MAX_CHAIN_JOBS" ]]; then
+    echo "ERROR: CHAIN_INDEX=$CHAIN_INDEX exceeds MAX_CHAIN_JOBS=$MAX_CHAIN_JOBS." >&2
+    exit 1
+fi
+
+mkdir -p experiments/pbs_logs
+INDEX_TAG="$(printf '%02d' "$CHAIN_INDEX")"
+LOG_FILE="experiments/pbs_logs/${CHAIN_ID}_job${INDEX_TAG}.log"
+CHAIN_LOG="experiments/pbs_logs/${CHAIN_ID}_chain.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "===== chain link ${CHAIN_INDEX}/${MAX_CHAIN_JOBS} ====="
+echo "chain_id:   $CHAIN_ID"
+echo "job_id:     ${PBS_JOBID:-n/a}"
+echo "host:       $(hostname)"
+echo "workdir:    $(pwd)"
+echo "sleep_sec:  $SLEEP_SEC"
+echo "stop_file:  $STOP_FILE"
+echo "chain_log:  $CHAIN_LOG"
+echo "started_at: $(date -Iseconds)"
+
+# Not needed for the chain itself, but it confirms we really landed on a GPU
+# node and tells us which one. Best effort: never fail the test over this.
+if command -v nvidia-smi >/dev/null 2>&1; then
+    echo "gpu:        $(nvidia-smi --query-gpu=name --format=csv,noheader | paste -sd',' -)"
+else
+    echo "gpu:        (nvidia-smi not available)"
+fi
+echo "=========================================="
+
+echo "${CHAIN_ID} index=${CHAIN_INDEX} job=${PBS_JOBID:-n/a} host=$(hostname) started=$(date -Iseconds)" >> "$CHAIN_LOG"
+
+# Stand in for real work.
+sleep "$SLEEP_SEC"
+
+echo "work done at $(date -Iseconds)"
+
+# ------------------------------------------------------------------ chaining
+JOB_ELAPSED_SEC=$(( $(date +%s) - JOB_START_EPOCH ))
+
+stop_chain() {
+    echo "[chain] $1"
+    echo "${CHAIN_ID} index=${CHAIN_INDEX} job=${PBS_JOBID:-n/a} finished=$(date -Iseconds) next=none reason=$2" >> "$CHAIN_LOG"
+    echo "finished_at: $(date -Iseconds)"
+    exit 0
+}
+
+if [[ -e "$STOP_FILE" ]]; then
+    stop_chain "stop file present ($STOP_FILE); ending the chain." "stopfile"
+fi
+
+if [[ "$JOB_ELAPSED_SEC" -lt "$MIN_JOB_SEC" && "${CHAIN_ALLOW_FAST:-0}" != "1" ]]; then
+    echo "[chain] this link ran only ${JOB_ELAPSED_SEC}s (< ${MIN_JOB_SEC}s)." >&2
+    echo "[chain] that usually means it failed on startup; not resubmitting." >&2
+    echo "[chain] set CHAIN_ALLOW_FAST=1 to override." >&2
+    echo "${CHAIN_ID} index=${CHAIN_INDEX} job=${PBS_JOBID:-n/a} finished=$(date -Iseconds) next=none reason=toofast" >> "$CHAIN_LOG"
+    exit 1
+fi
+
+NEXT_INDEX=$(( CHAIN_INDEX + 1 ))
+if [[ "$NEXT_INDEX" -gt "$MAX_CHAIN_JOBS" ]]; then
+    stop_chain "reached MAX_CHAIN_JOBS=${MAX_CHAIN_JOBS}; chain complete." "complete"
+fi
+
+command -v qsub >/dev/null 2>&1 || {
+    echo "ERROR: qsub is not available on this compute node." >&2
+    echo "       Self-chaining is not possible here; submit each link from the login node." >&2
+    echo "${CHAIN_ID} index=${CHAIN_INDEX} job=${PBS_JOBID:-n/a} finished=$(date -Iseconds) next=none reason=noqsub" >> "$CHAIN_LOG"
+    exit 1
+}
+
+echo "[chain] submitting link ${NEXT_INDEX}/${MAX_CHAIN_JOBS}..."
+NEXT_JOB_ID="$(qsub -V \
+    -v "CHAIN_ID=${CHAIN_ID},CHAIN_INDEX=${NEXT_INDEX},MAX_CHAIN_JOBS=${MAX_CHAIN_JOBS},SLEEP_SEC=${SLEEP_SEC},STOP_FILE=${STOP_FILE},SELF_PBS=${SELF_PBS}" \
+    "$SELF_PBS")"
+
+echo "[chain] next job: ${NEXT_JOB_ID}"
+echo "${CHAIN_ID} index=${CHAIN_INDEX} job=${PBS_JOBID:-n/a} finished=$(date -Iseconds) next=${NEXT_JOB_ID}" >> "$CHAIN_LOG"
+echo "finished_at: $(date -Iseconds)"

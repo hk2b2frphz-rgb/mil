@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N grpo_tts
+#PBS -q xvn_s
+#PBS -l select=1:res=middle2
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# STAGE 2 of the GRPO pipeline: 10_dialogue -> 20_tts -> 30_grpo_train.
+#
+# Renders the dialogues to stereo WAVs with Qwen3-TTS. Every setting is
+# hardcoded; see the note at the top of 10_dialogue.pbs.
+#
+# VOICE: CLONE_OUT_DIR_MOSHI points at the same clone source the aizuchi and
+#   response corpora used (data/clone_examples/99999). Keeping one moshi voice
+#   across every corpus matters here for the same reason it matters for SFT: a
+#   second voice gives the acoustic codebooks a bimodal target for one speaker.
+#   QWEN_VOICE_MODE is deliberately left unset -- it defaults to "auto", which
+#   resolves to "mixed" when a moshi clone source is present and no user clone
+#   source is (resolve_qwen_voice_mode in scripts/run_qwen_tts_vllm_common.sh).
+#
+# RESUME: re-submitting this same file continues the unfinished shards.
+#   Finished shards, dialogues and requests are all skipped. When the merge has
+#   not happened yet, this stage re-submits itself rather than chaining on.
+#
+# Submit:
+#   qsub -V scripts/grpo_judge_lora_2026-09-04/20_tts.pbs
+#
+# This stage chains to 30_grpo_train.pbs once the merged manifest exists.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+RUN_ROOT="$PWD/data/runs/grpo_response_2000_v1"
+
+export CLONE_OUT_DIR_MOSHI="$PWD/data/clone_examples/99999"
+
+export SOURCE_BATCH_ID="qwen_grpo_response_2000_v1"
+export BATCH_ID="grpo_response_2000_v1_tts_vllm"
+export DIALOGUES_JSONL="$RUN_ROOT/dialogue/llm_dialogues/dialogues.jsonl"
+export OUT_ROOT="$RUN_ROOT/tts"
+export NUM_DIALOGUES="2000"
+
+test -s "$DIALOGUES_JSONL" || {
+    echo "ERROR: dialogues not found: $DIALOGUES_JSONL" >&2
+    echo "       Run scripts/grpo_judge_lora_2026-09-04/10_dialogue.pbs first." >&2
+    exit 1
+}
+
+bash scripts/run_qwen_tts_vllm_10000_4gpu.pbs
+
+MERGED="$OUT_ROOT/merged/training_set/synthetic_moshi_train.jsonl"
+
+if [[ ! -s "$MERGED" ]]; then
+    # The TTS driver merges shards only once every shard has finished. This is
+    # not an error, it is what an interrupted run looks like.
+    echo "merged manifest not present yet: $MERGED"
+    if command -v qsub >/dev/null 2>&1; then
+        echo "re-submitting this stage to continue the remaining shards"
+        qsub -V scripts/grpo_judge_lora_2026-09-04/20_tts.pbs
+    fi
+    exit 0
+fi
+
+echo "stage 2 done: $MERGED"
+
+NEXT="scripts/grpo_judge_lora_2026-09-04/30_grpo_train.pbs"
+if command -v qsub >/dev/null 2>&1; then
+    echo "chaining -> $NEXT"
+    qsub -V "$NEXT"
+else
+    echo "WARNING: qsub not on PATH; submit $NEXT manually." >&2
+fi

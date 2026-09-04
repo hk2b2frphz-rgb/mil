@@ -1,339 +1,125 @@
-# Moshi Fixed-Input Response Recorder
+# moshimoshi-J
 
-Batch experiment tool that feeds **fixed audio files** into Moshi as the
-opening utterance and records Moshi's responses — both audio and text
-(inner-monologue transcript) — in a structured directory tree.
+日本語の傾聴対話向けに Moshi (`llm-jp/llm-jp-moshi-v1`) をドメイン適応する
+パイプライン。合成対話の生成から学習・評価まで。
 
-Designed for reproducible comparison experiments: multiple input audios ×
-multiple random seeds.
+```
+対話生成 -> TTS(ステレオWAV) -> 学習 -> 評価
+```
 
----
-
-## Requirements
-
-- **GPU**: NVIDIA GPU with at least ~16 GB VRAM for bfloat16 inference
-  (e.g. A100, A40, RTX 4090).
-  For the full `moshiko-pytorch-bf16` checkpoint, ~24 GB is comfortable.
-- **CUDA**: matching driver and CUDA toolkit for your PyTorch wheel.
-- **Python**: 3.11+ recommended (type-union syntax `str | Path` is used).
-
----
-
-## Installation (on the GPU server)
-
-Run these commands from the cloned `mos` folder:
+## セットアップ
 
 ```bash
-cd mos
-
-# 1. Install uv if needed
-pip install uv
-
-# 2. Create .venv and install dependencies
+git clone https://github.com/kyutai-labs/moshi-finetune.git ../moshi-finetune
 uv sync
-
-# 3. Run inside the uv environment
-uv run python response_recorder.py --help
+uv sync --project gemma_runtime
 ```
 
-`pyproject.toml` is configured for CUDA 12.1 PyTorch wheels via the
-`pytorch-cu121` index. If your GPU server uses a different CUDA wheel set,
-update the `[[tool.uv.index]]` URL and matching `tool.uv.sources` entries.
-
-If the `moshi` PyPI package is not available or is outdated, install from
-source into the uv environment:
+Python 3.11+ / NVIDIA GPU。計算ノードからの外部取得にプロキシが要る環境では
+`PROXY_URL` を明示的に渡す（`qsub -V` で引き継がれる）。
 
 ```bash
-uv pip install git+https://github.com/kyutai-labs/moshi.git
+qsub -v PROXY_URL=http://<proxy-host>:<port>,MODEL_ID=base scripts/run_full_duplex_eval.pbs
 ```
 
-`uv sync` installs local Python-side TTS dependencies (`pyopenjtalk` and
-`pyttsx3`). No sudo is required. Japanese stdin/text prompts use
-`pyopenjtalk` first, so TTS works locally without an online service.
+## 1. 学習データ生成
+
+対話を生成し（A100・vLLM で Qwen3.6-27B）、話者ごとに全発話を連結して1回で
+合成、MMS_FA で境界を復元する。
 
 ```bash
-uv sync
-uv run python -c "import pyopenjtalk; print('pyopenjtalk OK')"
-echo "こんにちは" | uv run python response_recorder.py --out-dir results/stdin/
+qsub -V scripts/run_dialogues_qwen_3000.pbs
+qsub -V scripts/run_qwen_tts_whole_utterance_3000_4gpu.pbs
 ```
 
-Make the local TTS prompt faster with `--tts-speed`:
+対話数は `1000` / `3000` / `10000` の3系統。動作確認は `_smoke` を使う。
+TTS のバックエンドは 1000 が Qwen3-TTS、3000/10000 は Kokoro（Qwen3-TTS では
+walltime 内に終わらないため）。
+
+## 2. 学習
+
+ハイパラは `experiments/<name>/config.yaml` で管理する。
 
 ```bash
-echo "こんにちは" | uv run python response_recorder.py --tts-speed 1.5 --out-dir results/fast-tts/
+bash scripts/run_experiment.sh lora_base_config ./data/runs/<RUN_ID>
 ```
 
-If you intentionally use an already-active virtual environment instead of
-`uv run`, install the missing package into that environment:
+walltime を越える step 数はチェーンで分割する。LR スケジュールを連続させる
+ため `max_steps` は全ジョブで `TOTAL_STEPS` 固定。
 
 ```bash
-uv pip install pyttsx3
+qsub -v 'EXP_NAME=lora_base_config,SRC_RUN_DIR=data/runs/<RUN_ID>,TOTAL_STEPS=7200' \
+  scripts/run_train_chain.pbs
 ```
 
-The script tries local TTS backends in this order: `pyopenjtalk`, `pyttsx3`,
-`espeak-ng`, `espeak`, `pico2wave`, then Windows System.Speech. `--tts-voice`
-only applies to backends that support voice selection.
-
----
-
-## Quick-start examples
-
-### Minimal run (one input file, three seeds, default model)
+h01 のようなスイープパターンをそのままチェーンで回す場合（`TOTAL_STEPS` は
+パターン自身の step 数が既定になる）:
 
 ```bash
-python response_recorder.py \
-    --inputs  prompts/hello.wav \
-    --seeds   0,1,2 \
-    --silence-sec 15 \
-    --out-dir results/
+qsub -v 'EXP_NAME=lora_base_config,SRC_RUN_DIR=data/runs/<RUN_ID>,SWEEP_PATTERN=h01,STEPS_PER_JOB=1000' \
+  scripts/run_train_chain.pbs
 ```
 
-### Text prompt with simple TTS
+パターンの定義は `scripts/sweep_patterns.sh`。スイープとチェーンで共有する。
 
-Pipe text on standard input:
+チェーンのロジックだけを先に検証する:
 
 ```bash
-echo "こんにちは。今日の予定を教えてください。" | python response_recorder.py \
-    --out-dir results/stdin/
+bash scripts/check_train_chain.sh
 ```
 
-This reads the text from stdin, synthesizes it to WAV under
-`<out-dir>/_tts_inputs/`, feeds that WAV to Moshi, saves about the first
-10 seconds of the response as `response.wav`, and prints a chronological
-conversation timeline.
+### スイープ
+
+複数パターンを順に回す。**そのまま投げれば walltime を跨げる。** 残り1時間に
+なった時点で学習を止め、最後のチェックポイントから続きを次のジョブに引き継ぐ
+（同じデータセットを使い回し、完了済みパターンはスキップする）。
 
 ```bash
-python response_recorder.py \
-    --texts "こんにちは。今日の予定を教えてください。" \
-    --seeds 0,1,2 \
-    --out-dir results/text-prompt/
+qsub -V scripts/sweep_lora.pbs
+qsub -V scripts/fullft_sweep.pbs
 ```
 
-Multiple text prompts can be passed directly, or loaded from a UTF-8 text file
-with one prompt per line:
+進捗は `experiments/pbs_logs/<RUN_ID>_sweep_state.tsv`。引き継ぎを止めるなら
+`SWEEP_CHAIN=0`、走っているチェーンを終わらせるなら
+`touch ~/.miltoka/stop_sweep_chain`。
+
+止める余裕は `TIMEBOX_LEAD_SEC`（既定 3600 秒）。チェックポイントは
+`HP_CKPT_FREQ` step ごとに書かれているので、引き継ぎ1回あたり失うのは
+最大でその step 数。
+
+full-FT も同じように跨げる。ただし再開の作りが違う: LoRA はアダプタを
+読み直すだけだが、full-FT は ZeRO チェックポイントを
+`export_fullft_checkpoint.py --intermediate-only` で MoshiForFinetuning 形式に
+戻し、それを次ジョブの `NU_MODEL_DIR` に渡す。重みだけが渡り optimizer state は
+渡らないので、残り step 数を引いたうえで warmup は初回のみ行う。
+
+full-FT のチェックポイント間隔は `HP_CKPT_FREQ`。1回の walltime 内に最低1つは
+書かれる値にしておくこと。1つも無いと再開点が作れず、そのジョブは失敗する。
+
+## 3. 評価
+
+Full-Duplex-Bench-JA。計算ノード側は外部 API を呼ばない。
 
 ```bash
-python response_recorder.py \
-    --text-file prompts.txt \
-    --out-dir results/text-file/
+qsub -v MODEL_ID=base scripts/run_full_duplex_eval.pbs
+qsub -v MODEL_ID=lora_h01,MODEL_WEIGHT=/path/model.safetensors,MODEL_CONFIG=/path/moshi_lm_kwargs.json \
+  scripts/run_full_duplex_eval.pbs
 ```
 
-The generated prompt WAV files are saved under `<out-dir>/_tts_inputs/`.
-The script first tries local Japanese TTS with `pyopenjtalk`, then falls back
-to other local system TTS backends. For OS-specific voices, select a voice when
-needed:
+LoRA は評価前にマージする。
 
 ```bash
-python response_recorder.py \
-    --texts "もしもし、聞こえますか。" \
-    --tts-voice "Microsoft Haruka Desktop" \
-    --out-dir results/ja-tts/
+qsub -v LORA_CKPT=/path/to/checkpoint/consolidated/lora.safetensors scripts/merge_lora.pbs
 ```
 
-### Multiple input files and more seeds
+## ディレクトリ
 
-```bash
-python response_recorder.py \
-    --inputs  prompts/hello.wav prompts/question.wav \
-    --seeds   0,1,2,3,4 \
-    --silence-sec 20 \
-    --out-dir results/multi/
-```
-
-### Entire directory of prompts
-
-```bash
-python response_recorder.py \
-    --inputs  prompts/ \
-    --seeds   0,1,2 \
-    --silence-sec 15 \
-    --out-dir results/
-```
-
-### Explicit model selection
-
-```bash
-python response_recorder.py \
-    --hf-repo llm-jp/llm-jp-moshi-v1 \
-    --inputs  prompts_ja/ \
-    --seeds   0,1 \
-    --silence-sec 20 \
-    --out-dir results/llm-jp-moshi/
-```
-
-### Local weights (no HF download)
-
-```bash
-python response_recorder.py \
-    --hf-repo    kyutai/moshiko-pytorch-bf16 \
-    --moshi-weight  /data/moshi/moshi.safetensors \
-    --mimi-weight   /data/moshi/mimi.safetensors \
-    --tokenizer     /data/moshi/tokenizer.model \
-    --config        /data/moshi/config.json \
-    --inputs        prompts/ \
-    --seeds         0,1,2 \
-    --out-dir       results/local/
-```
-
-### Override sampling parameters
-
-```bash
-python response_recorder.py \
-    --inputs  prompts/ \
-    --seeds   0 \
-    --temp      0.8 \
-    --temp-text 0.8 \
-    --cfg-coef  1.5 \
-    --max-gen-sec 45 \
-    --silence-sec 15 \
-    --out-dir results/high-temp/
-```
-
----
-
-## CLI reference
-
-| Flag | Default | Description |
-|---|---|---|
-| `--hf-repo` | `llm-jp/llm-jp-moshi-v1` | HuggingFace model repo |
-| `--moshi-weight` | — | Local path to Moshi weights |
-| `--mimi-weight` | — | Local path to Mimi weights |
-| `--tokenizer` | — | Local path to tokenizer |
-| `--config` | — | Local path to config file |
-| `--inputs` | — | WAV files or directories |
-| `--texts` | — | Text prompts to synthesize into WAV inputs |
-| `--text-file` | — | UTF-8 file with one prompt per line |
-| `--stdin` | auto for piped stdin | Read one text prompt from standard input |
-| `--tts-voice` | — | Optional TTS voice name |
-| `--tts-rate` | `200` | TTS speaking rate for `pyttsx3` |
-| `--tts-speed` | `1.25` | Speed multiplier for `pyopenjtalk` prompt audio |
-| `--silence-sec` | `15.0` | Silence appended after input |
-| `--seeds` | — | Comma-separated seed list |
-| `--num-trials` | — | Use seeds 0..N-1 (fallback when `--seeds` absent) |
-| `--out-dir` | *(required)* | Root output directory |
-| `--device` | `cuda` | `cuda` or `cpu` |
-| `--half` | bfloat16 | Pass to switch to float16 |
-| `--temp` | model default | Audio sampling temperature |
-| `--temp-text` | model default | Text sampling temperature |
-| `--cfg-coef` | model default | CFG coefficient |
-| `--max-gen-sec` | `60.0` | Per-trial generation cap (seconds) |
-| `--response-sec` | `10.0` | Seconds of response audio to save |
-| `--no-print-transcript` | off | Suppress transcript output |
-
----
-
-## Why `--silence-sec` matters
-
-Moshi is a full-duplex streaming model.  It generates output **only while
-input frames are being fed**.  Without silence appended to the end of the
-input utterance, the response would be cut off the moment the speech ends.
-
-`--silence-sec` (default 15 s) pads the input with zeros so Moshi has time
-to produce a complete reply.  Increase it for longer expected responses.
-
----
-
-## Output structure
-
-```
-<out-dir>/
-├── run_metadata.json          # Global metadata (model, date, all CLI args)
-├── <input_stem>/
-│   └── seed_<N>/
-│       ├── response.wav       # Moshi's response audio (acoustic-delay corrected)
-│       ├── conversation_timeline.jsonl
-│       ├── conversation_timeline.txt
-│       ├── transcript.jsonl   # One JSON line per emitted text token
-│       ├── transcript.txt     # Plain-text concatenation of all pieces
-│       └── meta.json          # Per-trial metadata (schema below)
-...
-```
-
-### Timeline output
-
-The console and `conversation_timeline.txt` show user input and Moshi output
-on one timeline:
-
-```text
-Conversation timeline:
-[00:00.000] user  speech_start こんにちは
-[00:02.560] user  speech_end
-[00:03.120] moshi speech_start (audio starts)
-[00:03.200] moshi text_output こんにちは。どうしましたか。
-```
-
-`conversation_timeline.jsonl` stores the same events as JSON lines for later
-analysis.
-
-By default, Moshi runs in its normal full-duplex streaming mode: user audio is
-fed frame by frame, and Moshi can respond at any point while the prompt and
-appended silence are being fed. To test faster user prompts, increase
-`--tts-speed`.
-
-### `transcript.jsonl` format
-
-Each line is a JSON object:
-
-```json
-{"step": 42, "time_sec": 3.36, "piece": " hello"}
-```
-
-- `step`: frame index within the trial
-- `time_sec`: `step / frame_rate` (frame_rate = 12.5 Hz → 80 ms per step)
-- `piece`: decoded SentencePiece token (padding ids 0 and 3 already excluded,
-  `▁` replaced with a space)
-
-### `meta.json` schema
-
-```json
-{
-  "input_path": "/abs/path/to/prompt.wav",
-  "input_duration_sec": 2.56,
-  "silence_sec": 15.0,
-  "seed": 0,
-  "model_repo": "llm-jp/llm-jp-moshi-v1",
-  "dtype": "bfloat16",
-  "device": "cuda",
-  "temp": NaN,
-  "temp_text": NaN,
-  "cfg_coef": NaN,
-  "frame_rate": 12.5,
-  "sample_rate": 24000,
-  "total_steps": 225,
-  "input_end_step": 32,
-  "first_audio_step": 18,
-  "first_audio_time_sec": 1.44,
-  "audible_response_start_step": 20,
-  "audible_response_start_sec": 1.6,
-  "audible_start_after_input_sec": -0.96,
-  "first_response_step": 18,
-  "first_response_latency_sec": 1.44,
-  "wall_time_sec": 47.2,
-  "output_audio_sec": 14.08
-}
-```
-
-`NaN` appears for temperature/cfg fields when the model's built-in default
-was used (i.e. the corresponding CLI flag was not supplied).
-
-`first_response_latency_sec` is the latency to the **first non-padding text
-token**.  It is `null` when no text was generated.
-
-`first_audio_time_sec` is when Moshi first returned audio tokens. Because the
-codec has an acoustic delay, `audible_response_start_sec` is the estimated
-stream time where that audio becomes audible in `response.wav`.
-`audible_start_after_input_sec` compares that estimated audible start with the
-end of the prompt audio: negative means Moshi started speaking while the prompt
-was still being fed, positive means it started after the prompt ended.
-
----
-
-## Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Empty `response.wav` / blank transcript | `--silence-sec` too short | Increase to 20–30 s |
-| CUDA OOM | VRAM insufficient | Use a smaller model, or `--half` (float16) |
-| `ModuleNotFoundError: moshi` | Package not installed | `pip install moshi` or install from source |
-| Garbled text | Expected for some tokens; check `▁` replacement | No fix needed; output is still valid |
-| Trial skipped with `FAILED` | Per-trial exception | Check stderr; other trials continue |
+| | |
+| --- | --- |
+| `scripts/` | 生成・学習・評価の実行スクリプトと PBS ジョブ |
+| `eval/` | Full-Duplex-Bench-JA の評価本体 |
+| `configs/` | DeepSpeed / TTS / GRPO の設定 |
+| `experiments/` | 実験ごとのハイパラ |
+| `eval_sets/` | 評価シナリオと正解データ |
+| `gemma_runtime/` | 対話生成・カスケード用 Gemma の隔離 venv |
+| `agent_hpc/` | A100 上のコーディングモデルをローカルから使う一式 |

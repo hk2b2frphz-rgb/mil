@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N fd_aizuchi_1000
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# Generate ~1000 Japanese "listener-only" dialogues with Qwen3.6-27B on one A100.
+#
+# This is run_dialogues_qwen_1000.pbs with the aizuchi-only mode switched on, so
+# the vLLM install/serve/wait logic stays in exactly one place: everything below
+# only exports env and then sources that script.
+#
+# What the mode changes (see generate_synthetic_moshi_training_data.py):
+#   - systemAI is never called; moshi produces backchannels and nothing else.
+#   - userAI vents instead of consulting: longer turns, no questions to moshi.
+#   - some user turns are followed by a silence in which the listener must stay
+#     quiet, and some user turns are "are you still listening?" checks, which
+#     always get a short spoken answer.
+# The turn list is then filtered (sanitize_aizuchi_only_turns) so no content
+# reply, stacked backchannel, or silence-filling backchannel survives into the
+# training data.
+#
+# Submit:
+#   qsub -V scripts/run_dialogues_qwen_aizuchi_1000.pbs
+# Smoke it first (a few cases, same code path):
+#   NUM_CASES=20 DIALOGUES_VERSION=smoke qsub -V scripts/run_dialogues_qwen_aizuchi_1000.pbs
+# One batch per backchannel pattern:
+#   for f in eager normal reserved; do
+#     AIZUCHI_ONLY_FREQUENCY=$f qsub -V scripts/run_dialogues_qwen_aizuchi_1000.pbs
+#   done
+# Tune how often silences / listening checks appear:
+#   AIZUCHI_ONLY_SILENCE_RATE=0.4 AIZUCHI_ONLY_PROBE_RATE=0.2 qsub -V scripts/run_dialogues_qwen_aizuchi_1000.pbs
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export DIALOGUE_GENERATION_MODE="aizuchi-only"
+
+# How talkative the listener is: eager / normal / reserved, or mixed to draw one
+# per dialogue. A preset is a set of rates, not a cap: how often the listener
+# reacts at a sentence end, at a continuative clause end, and at a bare comma.
+# Long speech therefore earns more reactions rather than hitting a ceiling.
+export AIZUCHI_ONLY_FREQUENCY="${AIZUCHI_ONLY_FREQUENCY:-normal}"
+
+# Own batch id namespace so an aizuchi-only round never overwrites (or is picked
+# up as) a normal dialogue batch, and so the three frequency patterns land in
+# separate batches. The TTS stage reads SOURCE_BATCH_ID, so point it at this id
+# when chaining.
+export DIALOGUES_VERSION="${DIALOGUES_VERSION:-v1}"
+export BATCH_ID="${BATCH_ID:-qwen_aizuchi_1000_${AIZUCHI_ONLY_FREQUENCY}_${DIALOGUES_VERSION}}"
+
+# One user "block" is one vented utterance, not an exchange pair, and each is
+# only a sentence or two -- so a call needs many of them. Raised from 4-8 after
+# shortening the turns cut a dialogue to 47 seconds of speech.
+export AIZUCHI_ONLY_MIN_BLOCKS="${AIZUCHI_ONLY_MIN_BLOCKS:-8}"
+export AIZUCHI_ONLY_MAX_BLOCKS="${AIZUCHI_ONLY_MAX_BLOCKS:-14}"
+# Silences are the point of this data, so they are not rare here. A listening
+# check only ever follows a silence, so PROBE_RATE is the share of silences
+# that turn into one -- not a share of user turns.
+export AIZUCHI_ONLY_SILENCE_RATE="${AIZUCHI_ONLY_SILENCE_RATE:-0.35}"
+export AIZUCHI_ONLY_SILENCE_MIN_SEC="${AIZUCHI_ONLY_SILENCE_MIN_SEC:-2.5}"
+export AIZUCHI_ONLY_SILENCE_MAX_SEC="${AIZUCHI_ONLY_SILENCE_MAX_SEC:-8.0}"
+export AIZUCHI_ONLY_PROBE_RATE="${AIZUCHI_ONLY_PROBE_RATE:-0.5}"
+
+# shellcheck source=scripts/run_dialogues_qwen_1000.pbs
+source "$PWD/scripts/run_dialogues_qwen_1000.pbs"

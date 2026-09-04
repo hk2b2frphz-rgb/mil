@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N screw_moshi_lora
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# Train Moshi LoRA from the merged Qwen3-TTS output.
+# Submit after TTS completion:
+#   qsub -V screw_poc/pbs/run_train.pbs
+# Or use submit_pipeline.sh to add an afterok dependency automatically.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+if [[ ! -f screw_poc/scripts/run_train.sh ]]; then
+    echo "ERROR: submit this job from the miltoka repository root." >&2
+    exit 1
+fi
+if [[ -f scripts/setup_proxy.sh ]]; then
+    # shellcheck source=/dev/null
+    source scripts/setup_proxy.sh
+fi
+
+JOB_ID="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID="${JOB_ID%%.*}"
+TTS_RUN_DIR="${TTS_RUN_DIR:-$PWD/screw_poc/artifacts/tts_1000_sequential/merged}"
+export NPROC="${NPROC:-1}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export REFRESH_EXP_DATA="${REFRESH_EXP_DATA:-1}"
+if [[ -f scripts/setup_pbs_distributed.sh ]]; then
+    # shellcheck source=/dev/null
+    source scripts/setup_pbs_distributed.sh
+fi
+
+MANIFEST="$TTS_RUN_DIR/training_set/synthetic_moshi_train.jsonl"
+if [[ ! -s "$MANIFEST" ]]; then
+    echo "ERROR: training manifest not found: $MANIFEST" >&2
+    exit 1
+fi
+
+mkdir -p screw_poc/artifacts/pbs_logs
+exec > >(tee -a "screw_poc/artifacts/pbs_logs/train_${JOB_ID}.log") 2>&1
+
+echo "===== screw PoC Moshi LoRA ====="
+echo "job_id:       ${PBS_JOBID:-n/a}"
+echo "host:         $(hostname)"
+echo "tts_run_dir:  $TTS_RUN_DIR"
+echo "manifest:     $MANIFEST"
+echo "samples:      $(grep -c . "$MANIFEST" || true)"
+echo "cuda:         $CUDA_VISIBLE_DEVICES"
+echo "started_at:   $(date -Iseconds)"
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+fi
+
+bash screw_poc/scripts/run_train.sh "$TTS_RUN_DIR"
+echo "finished_at: $(date -Iseconds)"

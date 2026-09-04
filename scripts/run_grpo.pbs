@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N grpo_moshi
+#PBS -q xan_s
+#PBS -l select=1:res=middle
+#PBS -l walltime=48:00:00
+#PBS -j oe
+#PBS -V
+# ---------------------------------------------------------------------------
+# GRPO interactivity alignment training for Moshi on 2x A100 80GB.
+#
+# Reproduces the Kyutai Multi-Faceted Interactivity Alignment paper
+# (arxiv 2606.11167) adapted for domain-C.
+#
+# Submit:
+#   qsub scripts/run_grpo.pbs
+#   qsub -v CONFIG=configs/grpo_loneliness.yaml scripts/run_grpo.pbs
+# ---------------------------------------------------------------------------
+set -euo pipefail
+
+if [[ -n "${PBS_O_WORKDIR:-}" ]]; then
+    cd "$PBS_O_WORKDIR"
+else
+    cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+source scripts/setup_proxy.sh
+REPO_ROOT="$(pwd)"
+
+CONFIG="${CONFIG:-configs/grpo_loneliness.yaml}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+
+if [[ "${DISABLE_TRITON:-0}" == "1" ]]; then
+    export TORCHINDUCTOR_DISABLE=1
+    export NO_TORCH_COMPILE="${NO_TORCH_COMPILE:-1}"
+    export TORCH_COMPILE_DISABLE=1
+fi
+
+mkdir -p experiments/pbs_logs
+JOB_TAG="${PBS_JOBID%%.*}"
+JOB_LOG="experiments/pbs_logs/grpo_${JOB_TAG:-local}.log"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
+echo "===== GRPO interactivity alignment ====="
+echo "repo_root: $REPO_ROOT"
+echo "host:      $(hostname)"
+echo "config:    $CONFIG"
+echo "cuda:      $CUDA_VISIBLE_DEVICES"
+echo "started:   $(date -Iseconds)"
+echo "git:       $(git rev-parse --short HEAD 2>/dev/null || echo n/a) / $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo n/a)"
+echo "job_log:   $JOB_LOG"
+echo "========================================="
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+fi
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH." >&2
+    exit 1
+}
+
+DS_CONFIG="${DS_CONFIG:-configs/deepspeed_grpo_zero3.json}"
+NUM_PROC="${NUM_PROC:-2}"
+SEGMENT_DIR="${SEGMENT_DIR:-}"
+
+# Auto-detect segment_dir from common batch locations
+if [[ -z "$SEGMENT_DIR" ]]; then
+    for candidate in \
+        data/runs/qwen_dialogues_1000/grpo_segments \
+        data/runs/qwen_dialogues_10000/grpo_segments \
+        data/runs/gptoss_dialogues_1000/grpo_segments; do
+        if [[ -d "$candidate" ]]; then
+            SEGMENT_DIR="$candidate"
+            break
+        fi
+    done
+fi
+if [[ -z "$SEGMENT_DIR" ]]; then
+    echo "ERROR: no segment_dir found. Run segment extraction first:" >&2
+    echo "  qsub scripts/run_extract_grpo_segments.pbs" >&2
+    exit 1
+fi
+
+echo "deepspeed:   $DS_CONFIG"
+echo "num_proc:    $NUM_PROC"
+echo "segment_dir: $SEGMENT_DIR"
+
+# Inject segment_dir into config at runtime via env var override.
+# The YAML config may have segment_dir="" -- override it here.
+export GRPO_SEGMENT_DIR="$SEGMENT_DIR"
+
+uv run accelerate launch \
+    --num_processes "$NUM_PROC" \
+    --use_deepspeed \
+    --deepspeed_config_file "$DS_CONFIG" \
+    scripts/grpo/train_grpo.py --config "$CONFIG"
+
+echo "===== done ====="
+echo "ended: $(date -Iseconds)"

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N mixft_r20
+#PBS -q xan_s
+#PBS -l select=1:res=middle
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# Experiment 2: full fine-tuning and evaluation on the response-20% manifest.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export MIX_VERSION="v3_r20"
+export RUN_ID="mixed_normal_v3_r20_fullft"
+export MLFLOW_EXPERIMENT_NAME="mixed_corpus_fullft_response20"
+export MIX_ROOT="$PWD/data/runs/mixed_normal_${MIX_VERSION}"
+export SRC_RUN_DIR="$MIX_ROOT/mixed"
+export SWEEP_PATTERNS="${SWEEP_PATTERNS:-f01}"
+
+exec bash scripts/mixed_corpus_fullft_2026-09-04/40_train_eval.pbs
