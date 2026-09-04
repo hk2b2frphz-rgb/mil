@@ -69,6 +69,12 @@ def main():
     parser.add_argument("--out", required=True, help="Output path for merged safetensors")
     parser.add_argument("--hf-repo", default="llm-jp/llm-jp-moshi-v1",
                         help="HF repo for base model weights")
+    parser.add_argument("--base-weight", default=None,
+                        help="Local safetensors to merge into, instead of --hf-repo. "
+                             "Required when the adapter was trained on top of an "
+                             "already-merged model (e.g. a GRPO adapter over the "
+                             "merged SFT weights): merging such an adapter into the "
+                             "HF base silently discards the fine-tuning underneath it.")
     parser.add_argument("--scaling", type=float, default=None,
                         help="LoRA scaling (alpha/rank). If not set, read from checkpoint config.json")
     args = parser.parse_args()
@@ -107,8 +113,15 @@ def main():
                   "Pass --scaling explicitly if your run used a different value "
                   "(e.g. sweep patterns h06=1.0, h07=4.0).")
 
-    print(f"[merge] Loading base model from {args.hf_repo}...")
-    base_path = find_base_weights(args.hf_repo)
+    if args.base_weight:
+        base_path = Path(args.base_weight)
+        if not base_path.is_file():
+            print(f"ERROR: base weight not found: {base_path}", file=sys.stderr)
+            sys.exit(1)
+        print(f"[merge] Loading base model from {base_path}...")
+    else:
+        print(f"[merge] Loading base model from {args.hf_repo}...")
+        base_path = find_base_weights(args.hf_repo)
     base_state = safetensors.torch.load_file(str(base_path))
     print(f"[merge]   base keys: {len(base_state)}")
 

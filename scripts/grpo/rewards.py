@@ -156,11 +156,19 @@ def reward_user_interruption(
 def decoupling_normalize(
     rewards_per_axis: list[list[float]],
     weights: list[float] | None = None,
+    min_std: float = 1e-4,
 ) -> list[float]:
     """Reward decoupling normalization across axes (Kyutai Eq. 5).
 
     Each axis is independently z-normalized within the group, then
     weighted and summed.
+
+    An axis whose group spread is below ``min_std`` contributes nothing. This
+    matters far more for the LLM judge than for the deterministic axes: the
+    judge emits integers on a 1-5 scale, so a group of G rollouts from one
+    segment routinely lands on the same score across the board. Dividing that
+    axis by a floor-clamped std would turn float noise into a full-magnitude
+    advantage and push the policy on a distinction the judge never drew.
     """
     n_axes = len(rewards_per_axis)
     if not rewards_per_axis or not rewards_per_axis[0]:
@@ -173,8 +181,54 @@ def decoupling_normalize(
     for ax_idx, axis_rewards in enumerate(rewards_per_axis):
         mean = sum(axis_rewards) / len(axis_rewards)
         var = sum((r - mean) ** 2 for r in axis_rewards) / len(axis_rewards)
-        std = max(var ** 0.5, 1e-8)
+        std = var ** 0.5
+        if std < min_std:
+            continue
         w = weights[ax_idx]
         for i, r in enumerate(axis_rewards):
             combined[i] += w * (r - mean) / std
     return combined
+
+
+# -- LLM judge reward -----------------------------------------------
+
+def judge_reward_axes(
+    judgements: list[dict[str, Any]],
+    score_keys: tuple[str, ...],
+    flag_keys: tuple[str, ...],
+    flag_penalty: float = 1.0,
+) -> tuple[list[list[float]], list[str]]:
+    """Split judge output into one reward axis per rubric dimension.
+
+    Returns (axes, names) where ``axes[i]`` holds one axis's reward for every
+    rollout in the group, ready to hand to decoupling_normalize.
+
+    The eight rubric scores stay separate rather than being averaged into one
+    number. Averaging first would let a large swing on one axis dominate the
+    normalization; keeping them apart means each dimension is z-normalized on
+    its own spread, which is the whole point of reward decoupling -- and it is
+    what lets a per-axis weight actually control that axis.
+
+    Scores are mapped from 1-5 onto 0-1 so an axis weight of 1.0 means the same
+    thing here as for the deterministic axes. Flags collapse into a single
+    penalty axis: they are rare, correlated, and individually near-constant
+    within a group, so as separate axes they would mostly be dropped by min_std
+    and otherwise fire at full z-scale on a single outlier.
+    """
+    if not judgements:
+        return [], []
+
+    axes: list[list[float]] = []
+    names: list[str] = []
+    for key in score_keys:
+        axes.append([
+            (float(j["scores"][key]) - 1.0) / 4.0 for j in judgements
+        ])
+        names.append(f"judge_{key}")
+
+    axes.append([
+        -flag_penalty * sum(1.0 for key in flag_keys if j["flags"].get(key))
+        for j in judgements
+    ])
+    names.append("judge_flags")
+    return axes, names
