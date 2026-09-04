@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N az_n_ft10k2
+#PBS -q xan_s
+#PBS -l select=1:res=middle
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# Full fine-tuning for the normal-frequency 10,000-dialogue corpus, v2.
+#
+# Differences from the 2026-09-02 job:
+#   * SRC_RUN_DIR points at the v2 corpus (shorter dialogues, mixed voices).
+#   * SKIP_AUTO_EVAL is NOT set, so the Full-Duplex-Bench-JA evaluation runs
+#     automatically once the best checkpoint is exported. Results land in
+#     eval_runs/full_duplex/<EVAL_MODEL_ID>/benchmark_results/summary.json.
+#
+# HP_DURATION_SEC stays at the base config's 170. The v2 dialogue job shortens
+# calls to fit that budget, which is the actual fix for chunks that start with
+# no opening greeting. Verify before training:
+#
+#   python3 -c "import json; d=sorted(json.loads(l)['duration'] for l in open('data/runs/aizuchi_normal_10000_v2/tts/merged/training_set/synthetic_moshi_train.jsonl')); n=len(d); print('p95=%.1f max=%.1f over170=%.1f%%' % (d[int(n*.95)], d[-1], 100*sum(1 for x in d if x>170)/n))"
+#
+# If over170 is still material, prefer regenerating with a smaller
+# AIZUCHI_ONLY_MAX_BLOCKS over raising HP_DURATION_SEC: full FT is already near
+# the A100 80GB limit at 170s (see experiments/fullft_base_config/HYPERPARAMS.md).
+# If you do raise it, drop HP_BATCH_SIZE rather than accepting an OOM.
+#
+# To train on the inner-thought variant instead, point SRC_RUN_DIR at the
+# directory produced by scripts/inject_inner_thoughts.py:
+#   qsub -V -v SRC_RUN_DIR=$PWD/data/runs/aizuchi_normal_10000_v2/tts/merged_thought \
+#       scripts/2026-09-04/aizuchi_normal_fullft_10000.pbs
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export RUN_ID="${RUN_ID:-aizuchi_normal_10000_v2_fullft}"
+export SRC_RUN_DIR="${SRC_RUN_DIR:-$PWD/data/runs/aizuchi_normal_10000_v2/tts/merged}"
+export SWEEP_PATTERNS="${SWEEP_PATTERNS:-f01}"
+# Keep chained full-FT jobs on this frequency-specific entrypoint.
+export SELF_PBS="scripts/2026-09-04/aizuchi_normal_fullft_10000.pbs"
+
+exec bash scripts/fullft_sweep.pbs
