@@ -3,8 +3,8 @@
 
 対話合成(generate_qwen3_tts_data.py)へクローン参照を渡すとき、参照 WAV と
 その書き起こしを手で転記するのは事故のもと。日本語のテキストをシェル引数へ
-貼り付けることになり、引用符・記号・改行で簡単に壊れる。参照の選別ロジックは
-clone_voice_examples.py と共有し、ここでは「取り出すだけ」を担う。
+貼り付けることになり、引用符・記号・改行で簡単に壊れる。ここでは参照の選別と
+clone_voice_examples.py が保存した結果からの取り出しだけを担う。
 
 解決元は 2 通り:
 
@@ -35,26 +35,74 @@ import sys
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+DEFAULT_MIN_REF_SEC = 3.0
+DEFAULT_MAX_REF_SEC = 12.0
 
-try:
-    from scripts.clone_voice_examples import (
-        DEFAULT_MAX_REF_SEC,
-        DEFAULT_MIN_REF_SEC,
-        find_segment_wav,
-        load_timeline,
-        select_references,
+
+def load_timeline(analysis_dir: Path) -> list[dict[str, Any]]:
+    path = analysis_dir / "timeline.jsonl"
+    if not path.is_file():
+        raise SystemExit(f"timeline.jsonl が見つかりません: {path}")
+    segs: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for index, line in enumerate(f):
+            line = line.strip()
+            if not line:
+                continue
+            segment = json.loads(line)
+            segment["_index"] = index
+            segs.append(segment)
+    return segs
+
+
+def find_segment_wav(analysis_dir: Path, speaker: str, index: int) -> Path | None:
+    matches = sorted((analysis_dir / "segments" / speaker).glob(f"{index:04d}_*.wav"))
+    return matches[0] if matches else None
+
+
+def _duration(segment: dict[str, Any]) -> float:
+    return float(segment["end"]) - float(segment["start"])
+
+
+def select_references(
+    segs: list[dict[str, Any]], speaker: str, min_sec: float, max_sec: float, n: int
+) -> list[dict[str, Any]]:
+    clean = [
+        segment
+        for segment in segs
+        if segment.get("speaker") == speaker
+        and float(segment.get("overlap_sec", 0.0)) == 0.0
+        and not segment.get("is_aizuchi", False)
+        and str(segment.get("text", "")).strip()
+    ]
+    in_range = sorted(
+        (segment for segment in clean if min_sec <= _duration(segment) <= max_sec),
+        key=_duration,
+        reverse=True,
     )
-except ImportError:  # スクリプト直接実行時（scripts/ が sys.path 先頭）
-    from clone_voice_examples import (  # type: ignore[no-redef]
-        DEFAULT_MAX_REF_SEC,
-        DEFAULT_MIN_REF_SEC,
-        find_segment_wav,
-        load_timeline,
-        select_references,
+    if len(in_range) >= n:
+        return in_range[:n]
+
+    rest = sorted(
+        (segment for segment in clean if segment not in in_range),
+        key=_duration,
+        reverse=True,
     )
+    picked = (in_range + rest)[:n]
+    out_of_range = [
+        segment
+        for segment in picked
+        if not min_sec <= _duration(segment) <= max_sec
+    ]
+    if out_of_range:
+        durations = [round(_duration(segment), 1) for segment in out_of_range]
+        print(
+            f"WARNING: 推奨長 {min_sec:.1f}〜{max_sec:.1f} 秒の区間が "
+            f"{len(in_range)} 件しかないため、レンジ外を "
+            f"{len(out_of_range)} 件使います (長さ: {durations})。",
+            file=sys.stderr,
+        )
+    return picked
 
 
 def resolve_from_analysis_dir(

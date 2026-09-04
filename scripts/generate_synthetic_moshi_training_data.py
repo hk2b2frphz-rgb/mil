@@ -2785,8 +2785,8 @@ AIZUCHI_ONLY_CLOSINGS = {
 AIZUCHI_FREQUENCY_PRESETS: dict[str, dict[str, Any]] = {
     "eager": {
         "label": "積極的",
-        # 切れ目の種類ごとに、そこで反応する確率。上限ではないので、長く話せば
-        # その分だけ相づちが増える -- 人が聞いているときと同じ振る舞いになる。
+        # 切れ目の種類ごとに、そこで反応する確率。長い発話ほど候補は増えるが、
+        # 不自然な連発を避けるため、最終的には max_per_turn で抑える。
         "rates": {"end": 0.90, "cont": 0.55, "weak": 0.20},
         "max_per_turn": 3,
         "min_chars": 10,
@@ -3140,27 +3140,35 @@ def pick_reaction_points(
     frequency: dict[str, Any],
     rng: random.Random,
 ) -> list[dict[str, Any]]:
-    """どの切れ目で反応するかを、切れ目の種類と確率だけで決める。
-
-    数の上限は置かない。上限を置くと、モデルはそこまで埋めようとし、こちらは
-    それを下げて帳尻を合わせることになる（実際そうなっていた）。
-    """
+    """頻度プリセットの確率・間隔・件数制限で反応位置を決める。"""
     rates = frequency.get("rates") or AIZUCHI_FREQUENCY_PRESETS["normal"]["rates"]
+    max_per_turn = max(0, int(frequency.get("max_per_turn", 0)))
+    min_chars = max(0, int(frequency.get("min_chars", 0)))
+    min_gap = max(0, int(frequency.get("min_gap", 0)))
+    min_chunk_chars = max(0, int(frequency.get("min_chunk_chars", 0)))
+    if not clauses or (min_chars and len("".join(clauses).strip()) < min_chars):
+        return []
+
     points: list[dict[str, Any]] = []
-    previous = -99
+    previous: int | None = None
+    chunk_start = 0
     for index, clause in enumerate(clauses, start=1):
         # 発話の最後は、句点を打っていなくても言い切った所。そこで話し手は黙る。
         kind = "end" if index == len(clauses) else clause_boundary_kind(clause)
         if rng.random() >= float(rates.get(kind, 0.0)):
             continue
-        # 隣の句に続けて打つと畳みかけて聞こえる。ただし、話が続く所（cont）の
-        # 直後に言い切り（end）が来るのはよくある形なので、そこは許す -- 一律に
-        # 隣を禁じると、end の手前の cont がほぼ全部消える。
-        gap = index - previous
-        if gap < 1 or (gap < 2 and kind != "end"):
+        # プリセットの min_gap は、直前の相づちとの間に必要な句数。文末だからと
+        # いって例外にすると、継続節と文末で相づちが連続してしまう。
+        if previous is not None and index - previous <= min_gap:
+            continue
+        chunk = "".join(clauses[chunk_start:index]).strip()
+        if min_chunk_chars and len(chunk) < min_chunk_chars:
             continue
         points.append({"after_clause": index, "kind": kind})
         previous = index
+        chunk_start = index
+        if max_per_turn and len(points) >= max_per_turn:
+            break
     return points
 
 

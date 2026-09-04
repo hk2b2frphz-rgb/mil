@@ -1808,6 +1808,13 @@ def build_segments_whole_utterance(
     merged_turns: set[int] = set()
     merged_text: dict[int, str] = {}
     aizuchi_overlay_sec: dict[int, float] = {}
+    # Each auto-overlapped aizuchi must stay anchored to the merged user
+    # segment that contains its clause boundary.  `previous_segment` cannot be
+    # used for this after the first aizuchi: the intervening user fragments are
+    # skipped below because they have been merged, so the previous rendered
+    # segment is then another aizuchi and later reactions collapse into a
+    # rapid-fire chain.
+    aizuchi_parent_user: dict[int, int] = {}
 
     fade_samples = int(0.01 * tts.sample_rate)
     user_audio = speaker_audio.get("user")
@@ -1855,6 +1862,7 @@ def build_segments_whole_utterance(
                         aizuchi_overlay_sec[a] = max(
                             0.0, min(clause_end, max(earliest, clause_end - lead))
                         )
+                        aizuchi_parent_user[a] = primary
             logger.debug(
                 "merged user turns %s into one segment (%.2fs)",
                 group, (last_exp_end - first_exp_start),
@@ -1896,6 +1904,7 @@ def build_segments_whole_utterance(
     # --- 6. Timeline placement --------------------------------------------
     cursor = lead_in_sec
     segments: list[AudioSegment] = []
+    segments_by_turn: dict[int, AudioSegment] = {}
     silences: list[dict[str, Any]] = []
     previous_segment: AudioSegment | None = None
 
@@ -1924,10 +1933,11 @@ def build_segments_whole_utterance(
         if gain != 1.0:
             pcm = np.asarray(pcm, dtype=np.float32) * gain
 
+        parent_user_segment = segments_by_turn.get(aizuchi_parent_user.get(i, -1))
         if turn.timing == "overlap_previous" and previous_segment is not None:
-            if i in aizuchi_overlay_sec and previous_segment.speaker != "moshi":
+            if i in aizuchi_overlay_sec and parent_user_segment is not None:
                 offset = aizuchi_overlay_sec[i]
-                start = previous_segment.start_sec + offset
+                start = parent_user_segment.start_sec + offset
                 logger.debug(
                     "aizuchi %r overlays at %.2fs into merged user segment",
                     turn.text[:10], offset,
@@ -1975,6 +1985,7 @@ def build_segments_whole_utterance(
             voice_role=turn.voice_role,
         )
         segments.append(segment)
+        segments_by_turn[i] = segment
         cursor = max(item.end_sec for item in segments) + gap_sec
         previous_segment = segment
 

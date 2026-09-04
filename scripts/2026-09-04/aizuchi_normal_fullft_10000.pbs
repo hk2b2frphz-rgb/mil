@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #PBS -S /bin/bash
-#PBS -N az_n_ft10k2
+#PBS -N az_n_ft10k3
 #PBS -q xan_s
 #PBS -l select=1:res=middle
 #PBS -l walltime=24:00:00
@@ -9,10 +9,12 @@
 
 # ASCII ONLY. Do not add non-ASCII text anywhere in this file.
 #
-# Full fine-tuning for the normal-frequency 10,000-dialogue corpus, v2.
+# Full fine-tuning for the corrected normal-frequency 10,000-dialogue corpus, v3.
+# Do not point this job back at v2: that corpus can contain collapsed,
+# rapid-fire backchannel placement.
 #
 # Differences from the 2026-09-02 job:
-#   * SRC_RUN_DIR points at the v2 corpus (shorter dialogues, mixed voices).
+#   * SRC_RUN_DIR points at the corrected v3 corpus (shorter dialogues, mixed voices).
 #   * SKIP_AUTO_EVAL is NOT set, so the Full-Duplex-Bench-JA evaluation runs
 #     automatically once the best checkpoint is exported. Results land in
 #     eval_runs/full_duplex/<EVAL_MODEL_ID>/benchmark_results/summary.json.
@@ -21,7 +23,7 @@
 # calls to fit that budget, which is the actual fix for chunks that start with
 # no opening greeting. Verify before training:
 #
-#   python3 -c "import json; d=sorted(json.loads(l)['duration'] for l in open('data/runs/aizuchi_normal_10000_v2/tts/merged/training_set/synthetic_moshi_train.jsonl')); n=len(d); print('p95=%.1f max=%.1f over170=%.1f%%' % (d[int(n*.95)], d[-1], 100*sum(1 for x in d if x>170)/n))"
+#   python3 -c "import json; d=sorted(json.loads(l)['duration'] for l in open('data/runs/aizuchi_normal_10000_v3/tts/merged/training_set/synthetic_moshi_train.jsonl')); n=len(d); print('p95=%.1f max=%.1f over170=%.1f%%' % (d[int(n*.95)], d[-1], 100*sum(1 for x in d if x>170)/n))"
 #
 # If over170 is still material, prefer regenerating with a smaller
 # AIZUCHI_ONLY_MAX_BLOCKS over raising HP_DURATION_SEC: full FT is already near
@@ -30,14 +32,15 @@
 #
 # To train on the inner-thought variant instead, point SRC_RUN_DIR at the
 # directory produced by scripts/inject_inner_thoughts.py:
-#   qsub -V -v SRC_RUN_DIR=$PWD/data/runs/aizuchi_normal_10000_v2/tts/merged_thought \
+#   qsub -V -v SRC_RUN_DIR=$PWD/data/runs/aizuchi_normal_10000_v3/tts/merged_thought \
 #       scripts/2026-09-04/aizuchi_normal_fullft_10000.pbs
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 
-export RUN_ID="${RUN_ID:-aizuchi_normal_10000_v2_fullft}"
-export SRC_RUN_DIR="${SRC_RUN_DIR:-$PWD/data/runs/aizuchi_normal_10000_v2/tts/merged}"
+export AIZUCHI_VERSION="v3"
+export RUN_ID="${RUN_ID:-aizuchi_normal_10000_${AIZUCHI_VERSION}_fullft}"
+export SRC_RUN_DIR="${SRC_RUN_DIR:-$PWD/data/runs/aizuchi_normal_10000_${AIZUCHI_VERSION}/tts/merged}"
 export SWEEP_PATTERNS="${SWEEP_PATTERNS:-f01}"
 # Keep chained full-FT jobs on this frequency-specific entrypoint.
 export SELF_PBS="scripts/2026-09-04/aizuchi_normal_fullft_10000.pbs"

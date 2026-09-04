@@ -14,7 +14,7 @@
 
 ## なぜ混合コーパスが要るのか
 
-現行の `aizuchi_normal_10000_v2` は `sanitize_aizuchi_only_turns`
+修正版の `aizuchi_normal_10000_v3` も `sanitize_aizuchi_only_turns`
 （[generate_synthetic_moshi_training_data.py:3195](../generate_synthetic_moshi_training_data.py)）
 が moshi 側の**語彙外発話を機械的に全部落とす**ので、学習後のモデルは
 「はい。」「そうですか…。」しか発話経験がありません。
@@ -36,16 +36,16 @@
 
 | stage | ファイル | 何をするか | 出力 |
 |---|---|---|---|
-| 0a | `10_dialogue_aizuchi.pbs` | （任意）相づちコーパスを作り直す | `data/runs/aizuchi_normal_10000_v2/dialogue` |
-| 0b | `20_tts_aizuchi.pbs` | （任意）その TTS | `data/runs/aizuchi_normal_10000_v2/tts/merged` |
+| 0a | `10_dialogue_aizuchi.pbs` | 修正版の相づちコーパスを生成 | `data/runs/aizuchi_normal_10000_v3/dialogue` |
+| 0b | `20_tts_aizuchi.pbs` | その TTS | `data/runs/aizuchi_normal_10000_v3/tts/merged` |
 | 1 | `11_dialogue_response.pbs` | **本応答**コーパスを生成（multi-agent） | `data/runs/response_10000_v1/dialogue` |
 | 2 | `21_tts_response.pbs` | その TTS | `data/runs/response_10000_v1/tts/merged` |
 | 3 | `30_mix_corpus.pbs` | 2 つを比率指定で混合 | `data/runs/mixed_normal_v1/mixed` |
 | 4 | `40_train_eval.pbs` | full-FT → best ckpt export → Full-Duplex-Bench-JA | `eval_runs/full_duplex/<MODEL_ID>/` |
 
-**stage 0a/0b は通常実行しません。** 相づち側は 2026-09-04 の成果物をそのまま
-再利用し、stage 3 が既定でそこを見ています。0a/0b はその 2026-09-04 のジョブを
-呼ぶだけの薄いラッパで、チューニング値は向こうに一元化してあります。
+**v2 の相づち成果物は再利用しません。** 複数相づちのタイムラインが連続配置される
+可能性があるため、stage 0a/0b で v3 を作成してから stage 3 へ進みます。0a/0b は
+2026-09-04 のジョブを呼ぶ薄いラッパで、チューニング値は向こうに一元化しています。
 
 ## 実行
 

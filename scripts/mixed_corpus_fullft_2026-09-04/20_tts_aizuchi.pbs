@@ -12,9 +12,9 @@
 # STAGE 0b (OPTIONAL) of the mixed-corpus pipeline.
 # See scripts/mixed_corpus_fullft_2026-09-04/README.md.
 #
-# Renders the AIZUCHI half. Normally you do NOT run this: the v2 corpus is
-# already rendered and stage 3 reuses it. Submit only after re-running
-# scripts/mixed_corpus_fullft_2026-09-04/10_dialogue_aizuchi.pbs.
+# Renders the corrected v3 AIZUCHI half. Submit after
+# scripts/mixed_corpus_fullft_2026-09-04/10_dialogue_aizuchi.pbs. Never resume
+# the old v2 TTS output into this run.
 #
 # Thin wrapper around the 2026-09-04 job, which also pins
 # CLONE_OUT_DIR_MOSHI=data/clone_examples/99999 -- the same moshi voice the
@@ -29,4 +29,5 @@
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 
+export AIZUCHI_VERSION="v3"
 exec bash scripts/2026-09-04/aizuchi_normal_tts_10000.pbs

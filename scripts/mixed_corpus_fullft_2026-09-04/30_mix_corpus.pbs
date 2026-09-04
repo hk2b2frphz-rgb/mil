@@ -32,11 +32,12 @@ cd "${PBS_O_WORKDIR:-$(pwd)}"
 export RESPONSE_VERSION="${RESPONSE_VERSION:-v1}"
 export NUM_CASES="${NUM_CASES:-10000}"
 export MIX_VERSION="${MIX_VERSION:-v1}"
+export AIZUCHI_VERSION="v3"
 
 # The aizuchi half is reused as-is from the 2026-09-04 pipeline. Regenerate it
 # with scripts/mixed_corpus_fullft_2026-09-04/10_dialogue_aizuchi.pbs + 20_tts_aizuchi.pbs only if
 # you actually need a fresh one.
-MIX_SRC_AIZUCHI="${MIX_SRC_AIZUCHI:-$PWD/data/runs/aizuchi_normal_10000_v2/tts/merged}"
+MIX_SRC_AIZUCHI="${MIX_SRC_AIZUCHI:-$PWD/data/runs/aizuchi_normal_10000_${AIZUCHI_VERSION}/tts/merged}"
 MIX_SRC_RESPONSE="${MIX_SRC_RESPONSE:-$PWD/data/runs/response_${NUM_CASES}_${RESPONSE_VERSION}/tts/merged}"
 
 MIX_TAKE_AIZUCHI="${MIX_TAKE_AIZUCHI:-all}"
