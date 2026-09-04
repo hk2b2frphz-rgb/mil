@@ -19,7 +19,7 @@
 #     automatically once the best checkpoint is exported. Results land in
 #     eval_runs/full_duplex/<EVAL_MODEL_ID>/benchmark_results/summary.json.
 #
-# HP_DURATION_SEC stays at the base config's 170. The v2 dialogue job shortens
+# HP_DURATION_SEC stays at the base config's 170. This v3 dialogue job shortens
 # calls to fit that budget, which is the actual fix for chunks that start with
 # no opening greeting. Verify before training:
 #

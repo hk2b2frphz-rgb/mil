@@ -91,6 +91,24 @@ qsub -V -v NU_PARAMETERS_TO_FINETUNE=depformer scripts/mixed_corpus_fullft_2026-
 qsub -V -v SKIP_AUTO_EVAL=1 scripts/mixed_corpus_fullft_2026-09-04/40_train_eval.pbs
 ```
 
+## 追加の比較実験
+
+normal v3 に加えて、次の 2 条件を固定名の PBS で実行できます。
+
+```bash
+# 実験1: 控えめな相づち（dialogue -> TTS -> full-FT）
+qsub -V scripts/2026-09-04/aizuchi_reserved_dialogue_10000.pbs
+qsub -V scripts/2026-09-04/aizuchi_reserved_tts_10000.pbs
+qsub -V scripts/2026-09-04/aizuchi_reserved_fullft_10000.pbs
+
+# 実験2: normal-v3 相づち 10,000 + 本応答 2,000
+qsub -V scripts/mixed_corpus_fullft_2026-09-04/31_mix_corpus_response20.pbs
+qsub -V scripts/mixed_corpus_fullft_2026-09-04/41_train_eval_response20.pbs
+```
+
+各行は直前の段階が正常終了してから投入します。reserved は normal v3 と頻度以外を
+揃え、mixed response-20% は相づち能力を保ちながら本応答を学べるかを比較します。
+
 混合は音声をコピーせず絶対パスで参照するだけなので、**stage 3 は数秒で終わり、
 比率のスイープが安い**のが利点です。TTS をやり直す必要はありません。
 
