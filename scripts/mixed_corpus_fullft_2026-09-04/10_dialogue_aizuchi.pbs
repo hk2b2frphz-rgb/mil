@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N mixft_dlg_aizu
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# STAGE 0a (OPTIONAL) of the mixed-corpus pipeline.
+# See scripts/mixed_corpus_fullft_2026-09-04/README.md.
+#
+# Regenerates the AIZUCHI half of the corpus. Normally you do NOT run this:
+# data/runs/aizuchi_normal_10000_v2 already exists from the 2026-09-04 round,
+# and stage 3 points at it by default. Submit this only when you want a fresh
+# backchannel corpus (different frequency profile, different block counts, ...).
+#
+# This is a thin wrapper around the 2026-09-04 job so the two rounds cannot
+# drift apart: all AIZUCHI_ONLY_* tuning lives in that file, not here.
+#
+# Submit:
+#   qsub -V scripts/mixed_corpus_fullft_2026-09-04/10_dialogue_aizuchi.pbs
+#
+# WARNING: writing to the same OUT_ROOT as the existing v2 corpus is refused by
+# the underlying generator unless OVERWRITE=1. Bump the version there rather
+# than forcing an overwrite of a corpus that a trained model already depends on.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+exec bash scripts/2026-09-04/aizuchi_normal_dialogue_10000.pbs

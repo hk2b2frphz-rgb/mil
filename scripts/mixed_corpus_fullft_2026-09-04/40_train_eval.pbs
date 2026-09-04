@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N mixft_train_eval
+#PBS -q xan_s
+#PBS -l select=1:res=middle
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# STAGE 4 of the mixed-corpus pipeline. See scripts/mixed_corpus_fullft_2026-09-04/README.md.
+#
+# Full fine-tuning on the mixed corpus, then automatic best-checkpoint export
+# and Full-Duplex-Bench-JA evaluation. SKIP_AUTO_EVAL is NOT set, so the eval
+# runs on its own once the checkpoint is exported; results land in
+# eval_runs/full_duplex/<EVAL_MODEL_ID>/benchmark_results/summary.json.
+#
+# WHAT IS BEING FINE-TUNED
+#   NU_PARAMETERS_TO_FINETUNE selects which parameter group moves. The
+#   launcher defaults to "all" (whole LM: tempformer + depformer + linears).
+#   Groups are defined in get_parameters() in the nu-dialogue finetune.py:
+#     all          tempformer + depformer (everything)
+#     tempformer   emb/text_emb/transformer/out_norm/text_linear
+#                    -> what is said, and pause/rate via the text padding stream
+#     depformer    depformer_in/emb/text_emb/depformer/linears
+#                    -> the 8 codebooks: pitch, intonation, timbre
+#     text_embedding  text_emb + depformer_text_emb only
+#   Keep "all" for this pipeline: the point of the mixed corpus is to teach
+#   both the content behaviour and its acoustic rendering. Switch to
+#   "depformer" only for the prosody-only ablation (content policy frozen).
+#
+# LOSS WEIGHTS
+#   The launcher does not pass --semantic_loss_weight / --acoustic_loss_weight,
+#   so finetune.py's defaults apply: semantic=100.0, acoustic=1.0. With 1
+#   semantic codebook and 7 acoustic ones, that puts ~93% of the audio loss on
+#   codebook 0 (content) and ~6.5% on codebooks 1-7 (prosody/timbre). If a run
+#   needs prosody to be the objective rather than a side effect, raise the
+#   acoustic weight -- that requires adding the flag to LAUNCH_CMD in
+#   scripts/run_nu_fullft_experiment.sh, it is not exposed as an env var yet.
+#
+# Submit:
+#   qsub -V scripts/mixed_corpus_fullft_2026-09-04/40_train_eval.pbs
+# Prosody-only ablation:
+#   qsub -V -v NU_PARAMETERS_TO_FINETUNE=depformer scripts/mixed_corpus_fullft_2026-09-04/40_train_eval.pbs
+# Train without the automatic benchmark:
+#   qsub -V -v SKIP_AUTO_EVAL=1 scripts/mixed_corpus_fullft_2026-09-04/40_train_eval.pbs
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export MIX_VERSION="${MIX_VERSION:-v1}"
+MIX_ROOT="${MIX_ROOT:-$PWD/data/runs/mixed_normal_${MIX_VERSION}}"
+
+export RUN_ID="${RUN_ID:-mixed_normal_${MIX_VERSION}_fullft}"
+export MLFLOW_EXPERIMENT_NAME="${MLFLOW_EXPERIMENT_NAME:-mixed_corpus_fullft}"
+export SRC_RUN_DIR="${SRC_RUN_DIR:-$MIX_ROOT/mixed}"
+export SWEEP_PATTERNS="${SWEEP_PATTERNS:-f01}"
+
+# Both halves are generated with the fixed opening greeting, so the benchmark
+# keeps reserving lead-in for it. Set to 0 only if the data was generated with
+# --no-opening-greeting.
+export FDB_OPENING_GREETING="${FDB_OPENING_GREETING:-1}"
+
+# Chained handoffs (patterns that do not fit this walltime) come back to this
+# same entrypoint rather than the generic sweep job.
+export SELF_PBS="scripts/mixed_corpus_fullft_2026-09-04/40_train_eval.pbs"
+
+test -s "$SRC_RUN_DIR/training_set/synthetic_moshi_train.jsonl" || {
+    echo "ERROR: no mixed manifest under $SRC_RUN_DIR" >&2
+    echo "       Run scripts/mixed_corpus_fullft_2026-09-04/30_mix_corpus.pbs first." >&2
+    exit 1
+}
+
+# The 170s chunking budget applies to the mixed manifest too. mix_summary.json
+# already reports p95/max/over-170s; surface it here so a bad mix is visible in
+# the training log rather than only in the data directory.
+if [[ -s "$MIX_ROOT/mixed/mix_summary.json" ]]; then
+    echo "===== mix summary ====="
+    python3 -c "import json,sys; d=json.load(open(sys.argv[1],encoding='utf-8')); print('ratio:', d['mix_ratio']); print('mixed:', d['mixed'])" \
+        "$MIX_ROOT/mixed/mix_summary.json" || true
+    echo "======================="
+fi
+
+exec bash scripts/fullft_sweep.pbs
