@@ -9,11 +9,7 @@
 
 # ASCII ONLY. Do not add non-ASCII text anywhere in this file.
 #
-# ENTRY POINT of this experiment. Submit this file; nothing has to run first.
-#
-# It reuses an ALREADY RENDERED response corpus rather than generating one.
-# 10_dialogue.pbs / 20_tts.pbs exist only for the case where no such corpus is
-# available, and are not on this path -- see the note under CORPUS below.
+# STAGE 3 of the GRPO pipeline: 10_dialogue -> 20_tts -> 30_grpo_train.
 #
 # Extracts GRPO segments from the rendered corpus, then hands off to
 # scripts/2026-09-04/grpo_judge_lora.pbs, which runs:
@@ -64,19 +60,17 @@ set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 source scripts/setup_proxy.sh
 
-CORPUS_ROOT="$PWD/data/runs/response_2000_v1"
+CORPUS_ROOT="$PWD/data/runs/grpo_response_2000_v1"
 MANIFEST="$CORPUS_ROOT/tts/merged/training_set/synthetic_moshi_train.jsonl"
 SEGMENT_DIR="$CORPUS_ROOT/grpo_segments"
 
 test -s "$MANIFEST" || {
     echo "ERROR: rendered corpus not found: $MANIFEST" >&2
-    echo "       Point CORPUS_ROOT at a rendered MULTI-AGENT corpus. Candidates:" >&2
-    echo "         data/runs/response_2000_v1        (2026-09-05 stage 2 output)" >&2
-    echo "         data/runs/mixed_normal_v1/mixed   (response half of the mix)" >&2
-    echo "       Do NOT use an aizuchi-only corpus: three of the four GRPO axes" >&2
-    echo "       come out empty on one." >&2
-    echo "       If no rendered response corpus exists, generate one with" >&2
-    echo "       10_dialogue.pbs -> 20_tts.pbs and set CORPUS_ROOT to its output." >&2
+    echo "       Run scripts/grpo_judge_lora_2026-09-04/10_dialogue.pbs first;" >&2
+    echo "       it chains through 20_tts.pbs back to this stage." >&2
+    echo "       To train on a corpus that already exists instead, point" >&2
+    echo "       CORPUS_ROOT at it. It must be MULTI-AGENT: on an aizuchi-only" >&2
+    echo "       corpus three of the four GRPO axes come out empty." >&2
     exit 1
 }
 

@@ -5,39 +5,32 @@ scoring the Full-Duplex-Bench-JA rubric. See `docs/grpo_judge_lora.md`.
 
 ## Run it
 
-One job. Nothing has to run first.
+Three stages, chained. Submit stage 1 and the rest follow.
 
 ```bash
-qsub -V scripts/grpo_judge_lora_2026-09-04/30_grpo_train.pbs
+qsub -V scripts/grpo_judge_lora_2026-09-04/10_dialogue.pbs
 ```
 
-`30_grpo_train.pbs` extracts GRPO segments from an already rendered corpus, then
-runs judge -> GRPO -> merge -> Full-Duplex-Bench-JA.
+| Stage | File | Queue | What it does |
+| --- | --- | --- | --- |
+| 1 | `10_dialogue.pbs` | `xan_s` / `res=small` | 2,000 multi-agent dialogues |
+| 2 | `20_tts.pbs` | `xvn_s` / `res=middle2` | Qwen3-TTS render to stereo WAV |
+| 3 | `30_grpo_train.pbs` | `xan_s` / `res=middle` | segments -> GRPO -> merge -> eval |
 
-| File | Queue | Role |
-| --- | --- | --- |
-| `30_grpo_train.pbs` | `xan_s` / `res=middle` | **entry point**: segments -> GRPO -> merge -> eval |
-| `10_dialogue.pbs` | `xan_s` / `res=small` | optional: 10,000 multi-agent dialogues |
-| `20_tts.pbs` | `xvn_s` / `res=middle2` | optional: Qwen3-TTS render to stereo WAV |
+If a rendered multi-agent corpus already exists, skip stages 1 and 2: point
+`CORPUS_ROOT` in `30_grpo_train.pbs` at it and submit that file alone.
 
 Every argument is hardcoded. These files are the experiment record, so there is
 nothing to reconstruct from a submit shell's environment later. To run a
 different corpus or version, copy the folder and edit the constants.
 
-## Why stages 1 and 2 are optional
+## Why 2,000 dialogues and not 10,000
 
 GRPO touches `segments_per_epoch * epochs = 8 * 100 = 800` segments over the
 whole run, round-robined across four axes — roughly **200 per axis**.
-`segment_extractor.py` caps extraction at **2000 per axis**, and even a
-2,000-dialogue corpus saturates that cap. Generating 10,000 fresh dialogues and
-rendering them would spend days of TTS on an order of magnitude more data than
-the run can consume.
-
-So `30_grpo_train.pbs` points `CORPUS_ROOT` at an existing corpus
-(`data/runs/response_2000_v1` by default). Run stages 1 and 2 only if no
-rendered response corpus exists, then edit `CORPUS_ROOT` to point at the output.
-Stage 2 deliberately does not chain into training: which corpus gets trained on
-is an edit, not something a chained job should decide.
+`segment_extractor.py` caps extraction at **2000 per axis**, and 2,000 dialogues
+at 5-8 pairs already saturates that cap. Rendering five times more would spend
+days of TTS on data the run cannot reach.
 
 If the run ever needs materially more exposure, raise `epochs` first and read
 the per-axis segment counts stage 3 prints — generating more data is the last
@@ -64,8 +57,9 @@ axes instead of four.
 ## Paths
 
 ```
-data/runs/response_2000_v1/
-  tts/merged/training_set/synthetic_moshi_train.jsonl   input corpus
+data/runs/grpo_response_2000_v1/
+  dialogue/llm_dialogues/dialogues.jsonl
+  tts/merged/training_set/synthetic_moshi_train.jsonl
   grpo_segments/{pause,turn_taking,backchannel,interruption}_segments.jsonl
 
 experiments/grpo/grpo_response_2000_v1/

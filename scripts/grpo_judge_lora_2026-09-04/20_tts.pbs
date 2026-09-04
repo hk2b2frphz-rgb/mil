@@ -9,7 +9,7 @@
 
 # ASCII ONLY. Do not add non-ASCII text anywhere in this file.
 #
-# OPTIONAL stage 2. Not on the default path; see the header of 10_dialogue.pbs.
+# STAGE 2 of the GRPO pipeline: 10_dialogue -> 20_tts -> 30_grpo_train.
 #
 # Renders the dialogues to stereo WAVs with Qwen3-TTS. Every setting is
 # hardcoded; see the note at the top of 10_dialogue.pbs.
@@ -29,22 +29,20 @@
 # Submit:
 #   qsub -V scripts/grpo_judge_lora_2026-09-04/20_tts.pbs
 #
-# This stage does NOT chain into training. 30_grpo_train.pbs hardcodes which
-# corpus it trains on, so pointing it at this output is a deliberate edit, not
-# something a chained job should decide.
+# This stage chains to 30_grpo_train.pbs once the merged manifest exists.
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 
-RUN_ROOT="$PWD/data/runs/grpo_response_10000_v1"
+RUN_ROOT="$PWD/data/runs/grpo_response_2000_v1"
 
 export CLONE_OUT_DIR_MOSHI="$PWD/data/clone_examples/99999"
 
-export SOURCE_BATCH_ID="qwen_grpo_response_10000_v1"
-export BATCH_ID="grpo_response_10000_v1_tts_vllm"
+export SOURCE_BATCH_ID="qwen_grpo_response_2000_v1"
+export BATCH_ID="grpo_response_2000_v1_tts_vllm"
 export DIALOGUES_JSONL="$RUN_ROOT/dialogue/llm_dialogues/dialogues.jsonl"
 export OUT_ROOT="$RUN_ROOT/tts"
-export NUM_DIALOGUES="10000"
+export NUM_DIALOGUES="2000"
 
 test -s "$DIALOGUES_JSONL" || {
     echo "ERROR: dialogues not found: $DIALOGUES_JSONL" >&2
@@ -68,7 +66,11 @@ if [[ ! -s "$MERGED" ]]; then
 fi
 
 echo "stage 2 done: $MERGED"
-echo
-echo "To train on this corpus, set CORPUS_ROOT in"
-echo "  scripts/grpo_judge_lora_2026-09-04/30_grpo_train.pbs"
-echo "to $RUN_ROOT, then submit that file."
+
+NEXT="scripts/grpo_judge_lora_2026-09-04/30_grpo_train.pbs"
+if command -v qsub >/dev/null 2>&1; then
+    echo "chaining -> $NEXT"
+    qsub -V "$NEXT"
+else
+    echo "WARNING: qsub not on PATH; submit $NEXT manually." >&2
+fi
