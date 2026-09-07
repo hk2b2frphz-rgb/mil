@@ -39,7 +39,12 @@
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
+REPO_ROOT="$PWD"
 [[ -f screw_poc/scripts/run_train.sh ]] || { echo "ERROR: run from repository root" >&2; exit 1; }
+# The weights should already be in the Hugging Face cache from 10_setup.pbs,
+# but the hf:// paths below still resolve through the hub. Source the proxy so
+# a cold cache on this node is a slow start rather than a failed job.
+[[ -f scripts/setup_proxy.sh ]] && source scripts/setup_proxy.sh
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 
 RAG_ROOT="${RAG_ROOT:-$(cd .. && pwd)/moshi-rag}"
@@ -48,8 +53,10 @@ JOB_ID="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"; JOB_ID="${JOB_ID%%.*}"
 CONDITIONER_PORT="${CONDITIONER_PORT:-8001}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
-[[ -d "$RAG_ROOT/moshi" ]] || {
-    echo "ERROR: moshi-rag not installed at $RAG_ROOT." >&2
+# No pyproject.toml at the clone root, so `uv run` cannot be used there.
+VENV_PY="$RAG_ROOT/.venv/bin/python"
+[[ -x "$VENV_PY" ]] || {
+    echo "ERROR: moshi-rag is not installed at $RAG_ROOT (no $VENV_PY)." >&2
     echo "       Run screw_poc/scripts/moshi_rag/10_setup.pbs first." >&2
     exit 1
 }
@@ -80,7 +87,7 @@ fi
 #    reference string into what gets summed into Moshi's transformer input.
 # ---------------------------------------------------------------------------
 cd "$RAG_ROOT"
-uv run python -m moshi.moshi.server_conditioner \
+"$VENV_PY" -m moshi.moshi.server_conditioner \
     --config "hf://kyutai/moshika-rag-pytorch-bf16/config.json" \
     --moshi-weight "hf://kyutai/moshika-rag-pytorch-bf16/model.safetensors" \
     --cuda-device 0 \
@@ -118,7 +125,7 @@ for variant in true altered empty; do
     fi
     mkdir -p "$out_dir"
     echo "[probe] ===== variant: ${variant} ====="
-    uv run python -m moshi.moshi.run_inference \
+    "$VENV_PY" -m moshi.moshi.run_inference \
         --input-dir "$in_dir" \
         --output-dir "$out_dir" \
         --use-gt-reference \
@@ -131,7 +138,7 @@ kill "$CONDITIONER_PID" 2>/dev/null || true
 # ---------------------------------------------------------------------------
 # 4) Line the three runs up side by side
 # ---------------------------------------------------------------------------
-cd "${PBS_O_WORKDIR:-$(pwd)}"
+cd "$REPO_ROOT"
 uv run python screw_poc/scripts/moshi_rag/compare_probe.py --probe-dir "$PROBE_OUT"
 
 echo "===== probe finished at $(date -Iseconds) ====="

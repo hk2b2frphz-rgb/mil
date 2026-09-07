@@ -75,17 +75,20 @@ if [[ ! -d .venv ]]; then
     # published for it, which avoids needing a Rust toolchain on the node.
     uv venv --python 3.12
 fi
-uv pip install -e ./moshi
-uv pip install rustymimi huggingface_hub
+# The clone has no pyproject.toml at its root (only under moshi/), so `uv run`
+# cannot resolve a project here. Address the interpreter directly instead.
+VENV_PY="$RAG_ROOT/.venv/bin/python"
+uv pip install --python "$VENV_PY" -e ./moshi
+uv pip install --python "$VENV_PY" rustymimi huggingface_hub
 
-echo "[setup] python: $(uv run python -c 'import sys; print(sys.version)')"
-uv run python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
-uv run python -c "import rustymimi; print('rustymimi ok')"
+echo "[setup] python: $("$VENV_PY" -c 'import sys; print(sys.version)')"
+"$VENV_PY" -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
+"$VENV_PY" -c "import rustymimi; print('rustymimi ok')"
 
 # ---------------------------------------------------------------------------
-# 3) Weights, so the probe job can run without the proxy
+# 3) Weights, so the probe job does not depend on a hub round trip
 # ---------------------------------------------------------------------------
-uv run python - <<'PY'
+"$VENV_PY" - <<'PY'
 from huggingface_hub import snapshot_download
 path = snapshot_download("kyutai/moshika-rag-pytorch-bf16")
 print("downloaded to", path)
