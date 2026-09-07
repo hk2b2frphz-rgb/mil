@@ -33,6 +33,27 @@
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
+# run_qwen_tts_vllm_common.sh sources this too, but the reachability check
+# below runs before it, and it has to run with the proxy already applied.
+# setup_proxy.sh is idempotent, so sourcing it twice costs nothing. It prints
+# "[proxy] enabled: host:port" or "[proxy] disabled" -- check that line in the
+# job log before assuming the proxy took effect.
+source scripts/setup_proxy.sh
+
+# Fail here, in seconds, rather than after the vLLM engine has come up: TTS
+# reaches the hub for the model and the tokenizer, and a name-resolution failure
+# at that point reads like a model error rather than a network one.
+if command -v curl >/dev/null 2>&1; then
+    if ! curl -sSf -o /dev/null --max-time 30 https://huggingface.co/api/models; then
+        echo "ERROR: cannot reach huggingface.co." >&2
+        echo "       http_proxy=${http_proxy:-<unset>}" >&2
+        echo "       Submit with the proxy, for example:" >&2
+        echo "         qsub -V -v PROXY_URL=http://<host>:<port> scripts/grpo_judge_lora_2026-09-04/20_tts.pbs" >&2
+        echo "       If every model is already cached, HF_HUB_OFFLINE=1 skips the hub." >&2
+        exit 1
+    fi
+    echo "[net] huggingface.co reachable"
+fi
 
 RUN_ROOT="$PWD/data/runs/grpo_response_2000_v1"
 

@@ -18,6 +18,17 @@ set -euo pipefail
 
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 
+# Every other production path sources this from its own runner
+# (run_dialogues_qwen_10000.pbs, run_experiment.pbs, fullft_sweep.pbs); the TTS
+# path was the one that did not, and relied on "#PBS -V" carrying a working
+# HTTP_PROXY in from the submit shell. Submitting with "-v PROXY_URL=..."
+# instead left the proxy inert here and every huggingface.co lookup failed on
+# name resolution. Sourcing it in the shared body fixes every scale wrapper at
+# once, which is what this file is for. It is idempotent, so a PBS wrapper that
+# already sourced it is unaffected.
+# shellcheck source=/dev/null
+source "$PWD/scripts/setup_proxy.sh"
+
 if [[ -z "${SOURCE_BATCH_ID:-}" ]]; then
     echo "ERROR: SOURCE_BATCH_ID must be set before sourcing this script." >&2
     echo "Submit one of scripts/run_qwen_tts_vllm_{1000,3000,10000}_4gpu.pbs." >&2

@@ -42,6 +42,14 @@
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
+# Nothing further down this chain sources it: run_dialogues_qwen_10000.pbs and
+# the Qwen3-TTS runners rely on "#PBS -V" already carrying a working HTTP_PROXY
+# in from the submit shell. Submitting with "-v PROXY_URL=..." instead sets a
+# variable only this file knows how to turn into http_proxy/https_proxy, so
+# without this line the proxy is silently inert and huggingface.co fails to
+# resolve. It prints "[proxy] enabled: host:port" or "[proxy] disabled" -- check
+# that line in the job log before assuming the proxy took effect.
+source scripts/setup_proxy.sh
 
 # 2,000 dialogues, not 10,000. GRPO touches segments_per_epoch * epochs =
 # 8 * 100 = 800 segments over a whole run, round-robined across four axes, so
