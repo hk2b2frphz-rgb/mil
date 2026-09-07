@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N screw_rag_probe
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# The decisive experiment: does an injected reference change what Moshi says?
+#
+# Same question audio is run three times with only the reference swapped:
+#   true     the value from our screw table
+#   altered  the same sentence with a different number, absent from the table
+#   empty    no reference at all
+#
+# If "true" and "altered" produce different spoken values, the model is reading
+# the injected reference, and knowledge can live outside the weights: swapping
+# the table changes the answer with no retraining. If both say the same value,
+# the model is answering from memory and the whole retrieval design does not
+# buy us anything for this PoC.
+#
+# The "empty" run is the safety case. With no reference for a diameter that is
+# not in the table, we want silence or a refusal, not an invented number.
+#
+# This runs entirely offline: run_inference uses a local STT (gradium_stt is
+# hardcoded to False there), and --use-gt-reference bypasses the retrieval
+# back end, so no LLM and no table server are involved yet.
+#
+# Submit (after 10_setup.pbs):
+#   qsub -V screw_poc/scripts/moshi_rag/20_reference_probe.pbs
+#
+# Variables:
+#   RAG_ROOT=<dir>     moshi-rag clone. Default: ../moshi-rag
+#   PROBE_OUT=<dir>    Output/resume directory.
+#   FORCE_AUDIO=1      Re-synthesise the question audio.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+[[ -f screw_poc/scripts/run_train.sh ]] || { echo "ERROR: run from repository root" >&2; exit 1; }
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+
+RAG_ROOT="${RAG_ROOT:-$(cd .. && pwd)/moshi-rag}"
+PROBE_OUT="${PROBE_OUT:-$PWD/screw_poc/artifacts/moshi_rag_probe}"
+JOB_ID="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"; JOB_ID="${JOB_ID%%.*}"
+CONDITIONER_PORT="${CONDITIONER_PORT:-8001}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+
+[[ -d "$RAG_ROOT/moshi" ]] || {
+    echo "ERROR: moshi-rag not installed at $RAG_ROOT." >&2
+    echo "       Run screw_poc/scripts/moshi_rag/10_setup.pbs first." >&2
+    exit 1
+}
+
+mkdir -p "$PROBE_OUT" screw_poc/artifacts/pbs_logs
+exec > >(tee -a "screw_poc/artifacts/pbs_logs/moshi_rag_probe_${JOB_ID}.log") 2>&1
+
+echo "===== MoshiRAG reference probe ====="
+echo "job_id:     ${PBS_JOBID:-n/a}"
+echo "host:       $(hostname)"
+echo "rag_root:   $RAG_ROOT"
+echo "probe_out:  $PROBE_OUT"
+echo "started_at: $(date -Iseconds)"
+echo "===================================="
+
+# ---------------------------------------------------------------------------
+# 1) Question audio and the three sidecar variants
+# ---------------------------------------------------------------------------
+if [[ "${FORCE_AUDIO:-0}" == "1" || ! -s "$PROBE_OUT/probe_manifest.jsonl" ]]; then
+    uv run python screw_poc/scripts/moshi_rag/build_probe_inputs.py \
+        --out-dir "$PROBE_OUT" --device cuda --dtype float16
+else
+    echo "[probe] reusing existing question audio"
+fi
+
+# ---------------------------------------------------------------------------
+# 2) Reference encoder. It holds the ARC encoder and the bridge that turn the
+#    reference string into what gets summed into Moshi's transformer input.
+# ---------------------------------------------------------------------------
+cd "$RAG_ROOT"
+uv run python -m moshi.moshi.server_conditioner \
+    --config "hf://kyutai/moshika-rag-pytorch-bf16/config.json" \
+    --moshi-weight "hf://kyutai/moshika-rag-pytorch-bf16/model.safetensors" \
+    --cuda-device 0 \
+    --conditioner reference_with_time \
+    --port "$CONDITIONER_PORT" &
+CONDITIONER_PID=$!
+trap 'kill "$CONDITIONER_PID" 2>/dev/null || true' EXIT
+
+echo "[probe] waiting for the reference encoder on port $CONDITIONER_PORT"
+for _ in $(seq 1 120); do
+    if curl -sf "http://localhost:${CONDITIONER_PORT}/" >/dev/null 2>&1; then break; fi
+    if ! kill -0 "$CONDITIONER_PID" 2>/dev/null; then
+        echo "ERROR: the reference encoder exited during startup" >&2
+        exit 1
+    fi
+    sleep 5
+done
+
+export REFERENCE_ENCODER_URL="http://localhost:${CONDITIONER_PORT}"
+# Not used with --use-gt-reference, but the client is constructed at startup,
+# so these have to be set to something.
+export LLM_BASE_URL="http://localhost:9/v1"
+export LLM_API_KEY="unused"
+export LLM_MODEL_NAME="unused"
+
+# ---------------------------------------------------------------------------
+# 3) One inference pass per variant, same audio each time
+# ---------------------------------------------------------------------------
+for variant in true altered empty; do
+    in_dir="$PROBE_OUT/inputs_${variant}"
+    out_dir="$PROBE_OUT/out_${variant}"
+    if [[ ! -d "$in_dir" ]]; then
+        echo "ERROR: missing $in_dir" >&2
+        exit 1
+    fi
+    mkdir -p "$out_dir"
+    echo "[probe] ===== variant: ${variant} ====="
+    uv run python -m moshi.moshi.run_inference \
+        --input-dir "$in_dir" \
+        --output-dir "$out_dir" \
+        --use-gt-reference \
+        --max-consecutive-silence-frames 40 \
+        --device cuda:0
+done
+
+kill "$CONDITIONER_PID" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# 4) Line the three runs up side by side
+# ---------------------------------------------------------------------------
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+uv run python screw_poc/scripts/moshi_rag/compare_probe.py --probe-dir "$PROBE_OUT"
+
+echo "===== probe finished at $(date -Iseconds) ====="

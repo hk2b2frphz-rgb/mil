@@ -9,12 +9,16 @@ from pathlib import Path
 
 from screw_poc.scripts.build_training_subsets import build_subset
 from screw_poc.scripts.generate_dialogues import (
+    DEFAULT_GLOSSARY,
     DEFAULT_KNOWLEDGE,
     DEFAULT_POLICY,
     generate_evaluation,
     generate_train,
+    load_glossary,
     load_knowledge,
     load_policy,
+    terms_in_answer,
+    validate_glossary,
     validate_inputs,
     write_jsonl,
 )
@@ -28,12 +32,14 @@ class ScrewPocTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.policy = load_policy(DEFAULT_POLICY)
         cls.knowledge = load_knowledge(DEFAULT_KNOWLEDGE)
+        cls.glossary = load_glossary(DEFAULT_GLOSSARY)
         validate_inputs(cls.policy, cls.knowledge)
+        validate_glossary(cls.policy, cls.glossary)
         cls.train = generate_train(
-            cls.knowledge, cls.policy, random.Random(cls.policy["seed"]), 1000
+            cls.knowledge, cls.policy, cls.glossary, random.Random(cls.policy["seed"]), 1000
         )
         cls.evaluation = generate_evaluation(
-            cls.knowledge, cls.policy, random.Random(cls.policy["seed"] + 1), 200
+            cls.knowledge, cls.policy, cls.glossary, random.Random(cls.policy["seed"] + 1), 200
         )
 
     def test_knowledge_and_voice_contract(self) -> None:
@@ -104,6 +110,81 @@ class ScrewPocTests(unittest.TestCase):
             self.assertTrue(asks[1].endswith("_L2"))
             self.assertTrue(asks[2].endswith("_L3"))
             self.assertEqual(patterns[-1], "ESCALATE")
+
+    def test_every_slot_question_can_be_asked_back_about(self) -> None:
+        """訊いておいて、その言葉の意味を答えられない項目を残さない。"""
+        for slot, entry in self.policy["slots"].items():
+            with self.subTest(slot=slot):
+                self.assertIn(entry["glossary_term"], self.glossary)
+
+    def test_glossary_explanations_are_locked_to_the_glossary_table(self) -> None:
+        allowed = {
+            f"EXPLAIN_{term.term_id}_WHAT": term.what_text
+            for term in self.glossary.values()
+        }
+        allowed.update(
+            {
+                f"EXPLAIN_{term.term_id}_WHERE": term.where_text
+                for term in self.glossary.values()
+            }
+        )
+        seen = 0
+        for dialogue in self.train + self.evaluation:
+            for turn in dialogue["turns"]:
+                pattern = turn.get("response_pattern", "")
+                if pattern.startswith("EXPLAIN_"):
+                    self.assertEqual(turn["text"], allowed[pattern])
+                    seen += 1
+        self.assertGreater(seen, 0)
+
+    def test_a_term_question_is_answered_instead_of_advancing_the_ladder(self) -> None:
+        """用語を訊かれた回では、聞き方の段階を進めずに意味を答える。"""
+        checked = 0
+        for dialogue in self.train:
+            patterns = dialogue["expected_response_patterns"]
+            for index, pattern in enumerate(patterns[:-1]):
+                if not pattern.startswith("ASK_"):
+                    continue
+                if not patterns[index + 1].startswith("EXPLAIN_"):
+                    continue
+                # 説明のあとに続く聞き返しがあるなら、段階は飛んでいないこと。
+                later = [p for p in patterns[index + 1:] if p.startswith("ASK_")]
+                if later:
+                    self.assertLessEqual(
+                        int(later[0][-1]), int(pattern[-1]) + 1, dialogue["id"]
+                    )
+                checked += 1
+        self.assertGreater(checked, 0)
+
+    def test_explain_flow_only_asks_about_terms_used_in_the_answer(self) -> None:
+        answers = {row.knowledge_id: row for row in self.knowledge}
+        explains = [row for row in self.train if row["flow"] == "explain"]
+        self.assertGreater(len(explains), 0)
+        for dialogue in explains:
+            item = answers[dialogue["knowledge_id"]]
+            allowed = {term.term_id for term in terms_in_answer(item, self.glossary)}
+            asked = {
+                turn["asked_about"]
+                for turn in dialogue["turns"]
+                if turn.get("asked_about")
+            }
+            self.assertTrue(asked)
+            self.assertTrue(asked <= allowed, dialogue["id"])
+
+    def test_where_questions_are_answered_with_a_location(self) -> None:
+        """『どこを見ればいいですか』に、言い換えた質問で返していないこと。"""
+        for dialogue in self.train + self.evaluation:
+            turns = dialogue["turns"]
+            for index, turn in enumerate(turns[:-1]):
+                if turn.get("text") not in set(self.policy["where_replies"]["train"]) | set(
+                    self.policy["where_replies"]["evaluation"]
+                ):
+                    continue
+                reply = turns[index + 1]
+                self.assertTrue(
+                    reply["response_pattern"].endswith("_WHERE"),
+                    f"{dialogue['id']}: {reply['response_pattern']}",
+                )
 
     def test_all_dialogues_are_strictly_sequential(self) -> None:
         for dialogue in self.train + self.evaluation:

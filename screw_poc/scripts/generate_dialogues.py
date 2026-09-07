@@ -26,7 +26,24 @@ import yaml
 POC_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_POLICY = POC_ROOT / "config" / "dialogue_policy.yaml"
 DEFAULT_KNOWLEDGE = POC_ROOT / "knowledge" / "screw_knowledge.csv"
+DEFAULT_GLOSSARY = POC_ROOT / "knowledge" / "screw_glossary.csv"
 DEFAULT_OUT = POC_ROOT / "artifacts"
+
+
+@dataclass(frozen=True)
+class Term:
+    """作業者が訊き返せる用語。回答と同じく、説明文も承認済みの固定文にする。"""
+
+    term_id: str
+    term: str
+    aliases: tuple[str, ...]
+    what_text: str
+    where_text: str
+    question_examples: tuple[str, ...]
+
+    @property
+    def surfaces(self) -> tuple[str, ...]:
+        return (self.term, *self.aliases)
 
 
 @dataclass(frozen=True)
@@ -53,6 +70,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
     parser.add_argument("--knowledge", type=Path, default=DEFAULT_KNOWLEDGE)
+    parser.add_argument("--glossary", type=Path, default=DEFAULT_GLOSSARY)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--train-count", type=int, default=None)
     parser.add_argument("--evaluation-count", type=int, default=None)
@@ -102,6 +120,52 @@ def load_knowledge(path: Path) -> list[Knowledge]:
                 )
             )
     return rows
+
+
+def load_glossary(path: Path) -> dict[str, Term]:
+    terms: dict[str, Term] = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        for raw in csv.DictReader(handle):
+            term = Term(
+                term_id=raw["term_id"].strip(),
+                term=raw["term"].strip(),
+                aliases=tuple(
+                    filter(None, (item.strip() for item in raw["aliases"].split("||")))
+                ),
+                what_text=raw["what_text"].strip(),
+                where_text=raw["where_text"].strip(),
+                question_examples=tuple(
+                    filter(None, (item.strip() for item in raw["question_examples"].split("||")))
+                ),
+            )
+            if term.term_id in terms:
+                raise ValueError(f"duplicate term_id: {term.term_id}")
+            terms[term.term_id] = term
+    if not terms:
+        raise ValueError(f"glossary is empty: {path}")
+    return terms
+
+
+def validate_glossary(policy: dict[str, Any], glossary: dict[str, Term]) -> None:
+    """訊き返せない項目を残さない。スロットは必ず用語に紐づける。"""
+    for term in glossary.values():
+        if not term.what_text or not term.where_text:
+            raise ValueError(f"{term.term_id}: what_text と where_text は必須です")
+        if not term.question_examples:
+            raise ValueError(f"{term.term_id}: question_examples が空です")
+    for slot, entry in (policy.get("slots") or {}).items():
+        term_id = entry.get("glossary_term")
+        if not term_id:
+            raise ValueError(f"slot {slot!r}: glossary_term がありません")
+        if term_id not in glossary:
+            raise ValueError(f"slot {slot!r}: 未定義の glossary_term={term_id!r}")
+    for key in ("meta_replies", "where_replies"):
+        table = policy.get(key) or {}
+        for split in ("train", "evaluation"):
+            if not table.get(split):
+                raise ValueError(f"{key}[{split}] が空です")
+    if "{term}" not in "".join(policy["meta_replies"]["train"]):
+        raise ValueError("meta_replies には {term} を含む型が要ります")
 
 
 def validate_inputs(policy: dict[str, Any], knowledge: list[Knowledge]) -> None:
@@ -300,6 +364,45 @@ def confirm_turn(slot: str, value: str, policy: dict[str, Any]) -> dict[str, Any
     return moshi_turn(text, "CONFIRM")
 
 
+def term_for_slot(slot: str, policy: dict[str, Any], glossary: dict[str, Term]) -> Term:
+    return glossary[policy["slots"][slot]["glossary_term"]]
+
+
+def terms_in_answer(item: Knowledge, glossary: dict[str, Term]) -> tuple[Term, ...]:
+    """回答文に実際に出てくる用語だけを、訊き返しの対象にする。
+
+    答えに出ていない言葉を作業者が訊き返すことはない。ここを緩めると、
+    文脈と無関係な用語説明が混ざって、対話が知識クイズになる。
+    """
+    text = item.final_text
+    return tuple(
+        term for term in glossary.values()
+        if any(surface in text for surface in term.surfaces)
+    )
+
+
+def explain_exchange(
+    term: Term,
+    kind: str,
+    policy: dict[str, Any],
+    rng: random.Random,
+    split: str,
+) -> list[dict[str, Any]]:
+    """用語や置き場所を訊かれたら、聞き方を変えるのではなく、それに答える。"""
+    if kind == "meta":
+        question = choose(rng, policy["meta_replies"][split]).format(term=term.term)
+        answer, suffix = term.what_text, "WHAT"
+    elif kind == "where":
+        question = choose(rng, policy["where_replies"][split])
+        answer, suffix = term.where_text, "WHERE"
+    else:
+        raise ValueError(f"unknown explain kind: {kind}")
+    return [
+        user_turn(question, asked_about=term.term_id),
+        moshi_turn(answer, f"EXPLAIN_{term.term_id}_{suffix}"),
+    ]
+
+
 def reaffirm_turn(value: str, policy: dict[str, Any]) -> dict[str, Any]:
     if speech_of(value, policy) == PLAIN:
         return user_turn(f"はい。見直しても{value}です。")
@@ -333,17 +436,54 @@ def collect_slots(
     item: Knowledge,
     slots: Iterable[str],
     policy: dict[str, Any],
+    glossary: dict[str, Term],
     rng: random.Random,
     split: str,
     turns: list[dict[str, Any]],
+    *,
+    detour: str | None = None,
 ) -> None:
-    """答えられる項目を、平易な訊き方から順に埋めていく。"""
-    for slot in slots:
+    """答えられる項目を、平易な訊き方から順に埋めていく。
+
+    detour を与えると、最初の項目で一度だけ用語または置き場所を訊き返し、
+    それに答えてもらってから値を言う筋になる。聞き返しの段階は下げない。
+    説明を聞いて答えられるようになる、というのが現場で一番多い形なので、
+    ここを正例として学習させる。
+    """
+    for index, slot in enumerate(slots):
         value = item.slot_values[slot]
         if already_said(turns, value):
             continue
         turns.append(ask_turn(slot, 0, policy))
+        if detour and index == 0:
+            term = term_for_slot(slot, policy, glossary)
+            turns.extend(explain_exchange(term, detour, policy, rng, split))
         turns.append(reveal_turn(slot, value, policy, rng, split))
+
+
+def descend_ladder(
+    slot: str,
+    policy: dict[str, Any],
+    glossary: dict[str, Term],
+    rng: random.Random,
+    split: str,
+    turns: list[dict[str, Any]],
+    *,
+    detour: tuple[int, str] | None = None,
+) -> None:
+    """三段階まで聞き方をやさしくしていく。
+
+    段階を下げるのは「分からない」と言われたときだけ。用語や置き場所を訊かれた
+    ときは、その段階に留まったまま答える。訊かれたことに答えずに言い換えだけを
+    返すと、何度も話しかけているのに何も答えていない、という挙動になる。
+    """
+    term = term_for_slot(slot, policy, glossary)
+    replies = pick_unknown_replies(policy, rng, split, 3)
+    for level, reply in enumerate(replies):
+        turns.append(ask_turn(slot, level, policy))
+        if detour and detour[0] == level:
+            turns.extend(explain_exchange(term, detour[1], policy, rng, split))
+        turns.append(user_turn(reply))
 
 
 def build_core_dialogue(
@@ -351,6 +491,7 @@ def build_core_dialogue(
     flow: str,
     sequence: int,
     policy: dict[str, Any],
+    glossary: dict[str, Term],
     rng: random.Random,
     split: str,
 ) -> dict[str, Any]:
@@ -369,18 +510,25 @@ def build_core_dialogue(
     if flow == "unresolved" and not (unanswerable or askable):
         flow = "direct"
 
+    # 用語を訊き返す筋は、答えの中に説明できる言葉があるときだけ成り立つ。
+    answer_terms = terms_in_answer(item, glossary)
+    if flow == "explain" and not answer_terms:
+        flow = "direct"
+    # 三通りを順に回して、同じ知識で毎回おなじ訊き返し方にならないようにする。
+    detour_kind = ("meta", "where", None)[sequence % 3]
+
     if flow == "direct":
         turns.append(user_turn(start_question(item, policy, rng, split, vague=False)))
         turns.append(final_turn(item))
     elif flow == "clarify":
         turns.append(user_turn(start_question(item, policy, rng, split, vague=True)))
-        collect_slots(item, askable, policy, rng, split, turns)
+        collect_slots(
+            item, askable, policy, glossary, rng, split, turns, detour=detour_kind
+        )
         if unanswerable:
             # 答えられない項目に当たったところで、言い換えて三度まで訊く。
             slot = unanswerable[sequence % len(unanswerable)]
-            for level, reply in enumerate(pick_unknown_replies(policy, rng, split, 3)):
-                turns.append(ask_turn(slot, level, policy))
-                turns.append(user_turn(reply))
+            descend_ladder(slot, policy, glossary, rng, split, turns)
         turns.append(final_turn(item))
     elif flow == "varied":
         turns.append(user_turn(start_question(item, policy, rng, split, vague=True)))
@@ -390,21 +538,31 @@ def build_core_dialogue(
         turns.append(reveal_turn(first, value, policy, rng, split, hedged=True))
         turns.append(confirm_turn(first, value, policy))
         turns.append(reaffirm_turn(value, policy))
-        collect_slots(item, remaining, policy, rng, split, turns)
+        collect_slots(item, remaining, policy, glossary, rng, split, turns)
         if unanswerable:
             slot = unanswerable[sequence % len(unanswerable)]
-            for level, reply in enumerate(pick_unknown_replies(policy, rng, split, 3)):
-                turns.append(ask_turn(slot, level, policy))
-                turns.append(user_turn(reply))
+            descend_ladder(slot, policy, glossary, rng, split, turns)
         turns.append(final_turn(item))
     elif flow == "unresolved":
         turns.append(user_turn(start_question(item, policy, rng, split, vague=True)))
         pool = unanswerable or askable
         target_slot = pool[sequence % len(pool)]
-        for level, reply in enumerate(pick_unknown_replies(policy, rng, split, 3)):
-            turns.append(ask_turn(target_slot, level, policy))
-            turns.append(user_turn(reply))
+        # 打ち切る前に、用語か置き場所は必ず一度答える。説明しても特定できない、
+        # という筋にしておかないと、訊き返しを浴びせて終わるだけの対話になる。
+        detour = (sequence % 3, detour_kind or "where")
+        descend_ladder(
+            target_slot, policy, glossary, rng, split, turns, detour=detour
+        )
         turns.append(moshi_turn(policy["response_patterns"]["ESCALATE"], "ESCALATE"))
+    elif flow == "explain":
+        # 答えたあとに、その答えの中の言葉を訊き返される筋。作業者が最初に
+        # 詰まるのは技術値そのものではなく、答えに出てくる用語のほうが多い。
+        turns.append(user_turn(start_question(item, policy, rng, split, vague=False)))
+        turns.append(final_turn(item))
+        term = answer_terms[sequence % len(answer_terms)]
+        turns.extend(explain_exchange(term, "meta", policy, rng, split))
+        if sequence % 2 == 0:
+            turns.extend(explain_exchange(term, "where", policy, rng, split))
     else:
         raise ValueError(f"unknown flow: {flow}")
 
@@ -455,15 +613,21 @@ def build_out_of_scope(
 
 
 def generate_train(
-    knowledge: list[Knowledge], policy: dict[str, Any], rng: random.Random, count: int
+    knowledge: list[Knowledge],
+    policy: dict[str, Any],
+    glossary: dict[str, Term],
+    rng: random.Random,
+    count: int,
 ) -> list[dict[str, Any]]:
     flows = policy["dataset"]["flows_per_knowledge"]
     dialogues: list[dict[str, Any]] = []
     for item in knowledge:
         sequence = 0
-        for flow in ("direct", "clarify", "varied", "unresolved"):
+        for flow in ("direct", "clarify", "varied", "unresolved", "explain"):
             for _ in range(int(flows[flow])):
-                dialogues.append(build_core_dialogue(item, flow, sequence, policy, rng, "train"))
+                dialogues.append(
+                    build_core_dialogue(item, flow, sequence, policy, glossary, rng, "train")
+                )
                 sequence += 1
     out_of_scope_count = count - len(dialogues)
     if out_of_scope_count < 0:
@@ -478,11 +642,15 @@ def generate_train(
 
 
 def generate_evaluation(
-    knowledge: list[Knowledge], policy: dict[str, Any], rng: random.Random, count: int
+    knowledge: list[Knowledge],
+    policy: dict[str, Any],
+    glossary: dict[str, Term],
+    rng: random.Random,
+    count: int,
 ) -> list[dict[str, Any]]:
-    flows = ("direct", "clarify", "varied", "unresolved", "clarify")
+    flows = ("direct", "clarify", "varied", "unresolved", "explain")
     dialogues = [
-        build_core_dialogue(item, flow, index, policy, rng, "evaluation")
+        build_core_dialogue(item, flow, index, policy, glossary, rng, "evaluation")
         for item in knowledge
         for index, flow in enumerate(flows)
     ]
@@ -527,14 +695,16 @@ def main() -> None:
     args = parse_args()
     policy = load_policy(args.policy)
     knowledge = load_knowledge(args.knowledge)
+    glossary = load_glossary(args.glossary)
     validate_inputs(policy, knowledge)
+    validate_glossary(policy, glossary)
     train_count = args.train_count or int(policy["dataset"]["train_dialogues"])
     evaluation_count = args.evaluation_count or int(policy["dataset"]["evaluation_dialogues"])
     seed = args.seed if args.seed is not None else int(policy["seed"])
 
-    train = generate_train(knowledge, policy, random.Random(seed), train_count)
+    train = generate_train(knowledge, policy, glossary, random.Random(seed), train_count)
     evaluation = generate_evaluation(
-        knowledge, policy, random.Random(seed + 1), evaluation_count
+        knowledge, policy, glossary, random.Random(seed + 1), evaluation_count
     )
     write_jsonl(args.out_dir / "train_dialogues.jsonl", train)
     write_jsonl(args.out_dir / "evaluation_dialogues.jsonl", evaluation)
@@ -542,6 +712,7 @@ def main() -> None:
         "version": 1,
         "seed": seed,
         "knowledge_rows": len(knowledge),
+        "glossary_terms": len(glossary),
         "voices": policy["voices"],
         "response_policy": "fixed-system-progressive-clarification",
         "train": summarize(train),

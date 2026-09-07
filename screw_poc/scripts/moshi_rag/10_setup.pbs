@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N screw_rag_setup
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# One-time setup for the MoshiRAG experiments: clone the upstream repository
+# next to this one, install it into its own uv environment, and pre-download
+# the model weights so the later jobs do not need the network.
+#
+# This job needs the proxy, because it clones from GitHub and pulls from
+# Hugging Face. The probe job that follows it does not.
+#
+# Submit:
+#   qsub -V screw_poc/scripts/moshi_rag/10_setup.pbs
+#
+# Variables:
+#   RAG_ROOT=<dir>   Where to clone moshi-rag. Default: ../moshi-rag
+#   FORCE_CLONE=1    Remove an existing clone and start again.
+#
+# Notes on requirements (from the upstream README):
+#   - The PyTorch front end is not quantized, so it needs a GPU with about
+#     24 GB of memory. An A100 is comfortable and can host the reference
+#     encoder on the same card.
+#   - rustymimi wheels want Python 3.12. On another version the Rust toolchain
+#     has to be present instead.
+#   - The retrieval back end is NOT installed here. We serve the screw table
+#     ourselves from screw_poc/scripts/reference_server.py, so no vLLM and no
+#     Gemma weights are required.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+[[ -f screw_poc/scripts/run_train.sh ]] || { echo "ERROR: run from repository root" >&2; exit 1; }
+[[ -f scripts/setup_proxy.sh ]] && source scripts/setup_proxy.sh
+
+RAG_ROOT="${RAG_ROOT:-$(cd .. && pwd)/moshi-rag}"
+JOB_ID="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"; JOB_ID="${JOB_ID%%.*}"
+HF_REPO="kyutai/moshika-rag-pytorch-bf16"
+
+mkdir -p screw_poc/artifacts/pbs_logs
+exec > >(tee -a "screw_poc/artifacts/pbs_logs/moshi_rag_setup_${JOB_ID}.log") 2>&1
+
+echo "===== MoshiRAG setup ====="
+echo "job_id:     ${PBS_JOBID:-n/a}"
+echo "host:       $(hostname)"
+echo "rag_root:   $RAG_ROOT"
+echo "hf_repo:    $HF_REPO"
+echo "started_at: $(date -Iseconds)"
+echo "=========================="
+
+# ---------------------------------------------------------------------------
+# 1) Clone
+# ---------------------------------------------------------------------------
+if [[ "${FORCE_CLONE:-0}" == "1" && -d "$RAG_ROOT" ]]; then
+    echo "[setup] removing existing clone"
+    rm -rf "$RAG_ROOT"
+fi
+if [[ -d "$RAG_ROOT/.git" ]]; then
+    echo "[setup] reusing existing clone at $RAG_ROOT"
+else
+    git clone --depth 1 https://github.com/kyutai-labs/moshi-rag.git "$RAG_ROOT"
+fi
+
+# ---------------------------------------------------------------------------
+# 2) Environment
+# ---------------------------------------------------------------------------
+cd "$RAG_ROOT"
+if [[ ! -d .venv ]]; then
+    # 3.12 is what the upstream README recommends; the rustymimi wheels are
+    # published for it, which avoids needing a Rust toolchain on the node.
+    uv venv --python 3.12
+fi
+uv pip install -e ./moshi
+uv pip install rustymimi huggingface_hub
+
+echo "[setup] python: $(uv run python -c 'import sys; print(sys.version)')"
+uv run python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
+uv run python -c "import rustymimi; print('rustymimi ok')"
+
+# ---------------------------------------------------------------------------
+# 3) Weights, so the probe job can run without the proxy
+# ---------------------------------------------------------------------------
+uv run python - <<'PY'
+from huggingface_hub import snapshot_download
+path = snapshot_download("kyutai/moshika-rag-pytorch-bf16")
+print("downloaded to", path)
+PY
+
+echo "===== setup finished at $(date -Iseconds) ====="
+echo "Next: qsub -V screw_poc/scripts/moshi_rag/20_reference_probe.pbs"
