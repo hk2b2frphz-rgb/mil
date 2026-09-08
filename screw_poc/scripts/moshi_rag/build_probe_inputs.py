@@ -39,7 +39,10 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.generate_qwen3_tts_data import Qwen3TTS  # noqa: E402
+# Import from the concrete directory: an installed package named `scripts`
+# can shadow this repository's scripts/ namespace package.
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+from generate_qwen3_tts_data import Qwen3TTS  # noqa: E402
 
 KNOWLEDGE = REPO_ROOT / "screw_poc" / "knowledge" / "screw_knowledge_en.csv"
 
