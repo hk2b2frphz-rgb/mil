@@ -7,19 +7,20 @@
 #PBS -j oe
 #PBS -V
 
-# Submit with depend=afterok:<probe-job-id> to reuse the probe audio.
+# Standalone job: generate private question audio, with no probe dependency.
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 REPO_ROOT="$PWD"
 [[ -f screw_poc/scripts/reference_server.py ]] || { echo "ERROR: run from repository root" >&2; exit 1; }
 [[ -f scripts/setup_proxy.sh ]] && source scripts/setup_proxy.sh
 RAG_ROOT="${RAG_ROOT:-$(cd .. && pwd)/moshi-rag}"
-PROBE_OUT="${PROBE_OUT:-$PWD/screw_poc/artifacts/moshi_rag_probe}"
 JOB_ID="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
 JOB_ID="${JOB_ID%%.*}"
 TABLE_OUT="${TABLE_OUT:-$PWD/screw_poc/artifacts/moshi_rag_table_${JOB_ID}}"
-CONDITIONER_PORT="${CONDITIONER_PORT:-8001}"
-TABLE_PORT="${TABLE_PORT:-8010}"
+INPUT_SOURCE="$TABLE_OUT/generated"
+# Separate defaults from 20_reference_probe.pbs, including inherited settings.
+CONDITIONER_PORT="${TABLE_CONDITIONER_PORT:-18001}"
+TABLE_PORT="${TABLE_PORT:-18010}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export NO_PROXY="localhost,127.0.0.1${NO_PROXY:+,$NO_PROXY}"
 export no_proxy="$NO_PROXY"
@@ -29,8 +30,12 @@ mkdir -p "$TABLE_OUT" screw_poc/artifacts/pbs_logs
 exec > >(tee -a "screw_poc/artifacts/pbs_logs/moshi_rag_table_${JOB_ID}.log") 2>&1
 echo "table_out: $TABLE_OUT"
 
+# Do not read audio that a concurrent probe may still be writing.
+uv run python screw_poc/scripts/moshi_rag/build_probe_inputs.py \
+    --out-dir "$INPUT_SOURCE" --device cuda --dtype float16
+
 # Copy only WAVs: no ground-truth text or reference can enter retrieval.
-"$VENV_PY" - "$PROBE_OUT" "$TABLE_OUT" <<'PY'
+"$VENV_PY" - "$INPUT_SOURCE" "$TABLE_OUT" <<'PY'
 import json, shutil, sys
 from pathlib import Path
 source, dest = map(Path, sys.argv[1:])
