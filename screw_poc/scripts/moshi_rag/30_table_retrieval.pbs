@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N screw_rag_table
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#PBS -V
+
+# Submit with depend=afterok:<probe-job-id> to reuse the probe audio.
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+REPO_ROOT="$PWD"
+[[ -f screw_poc/scripts/reference_server.py ]] || { echo "ERROR: run from repository root" >&2; exit 1; }
+[[ -f scripts/setup_proxy.sh ]] && source scripts/setup_proxy.sh
+RAG_ROOT="${RAG_ROOT:-$(cd .. && pwd)/moshi-rag}"
+PROBE_OUT="${PROBE_OUT:-$PWD/screw_poc/artifacts/moshi_rag_probe}"
+JOB_ID="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID="${JOB_ID%%.*}"
+TABLE_OUT="${TABLE_OUT:-$PWD/screw_poc/artifacts/moshi_rag_table_${JOB_ID}}"
+CONDITIONER_PORT="${CONDITIONER_PORT:-8001}"
+TABLE_PORT="${TABLE_PORT:-8010}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export NO_PROXY="localhost,127.0.0.1${NO_PROXY:+,$NO_PROXY}"
+export no_proxy="$NO_PROXY"
+VENV_PY="$RAG_ROOT/.venv/bin/python"
+[[ -x "$VENV_PY" ]] || { echo "ERROR: run 10_setup.pbs first" >&2; exit 1; }
+mkdir -p "$TABLE_OUT" screw_poc/artifacts/pbs_logs
+exec > >(tee -a "screw_poc/artifacts/pbs_logs/moshi_rag_table_${JOB_ID}.log") 2>&1
+echo "table_out: $TABLE_OUT"
+
+# Copy only WAVs: no ground-truth text or reference can enter retrieval.
+"$VENV_PY" - "$PROBE_OUT" "$TABLE_OUT" <<'PY'
+import json, shutil, sys
+from pathlib import Path
+source, dest = map(Path, sys.argv[1:])
+rows = [json.loads(line) for line in (source / 'probe_manifest.jsonl').read_text().splitlines() if line.strip()]
+ids = sorted({row['id'] for row in rows})
+if not ids:
+    raise SystemExit('ERROR: empty probe manifest')
+inputs = dest / 'inputs'
+inputs.mkdir(parents=True, exist_ok=False)
+for name in ids:
+    wav = source / 'audio' / f'{name}.wav'
+    if not wav.is_file() or wav.stat().st_size <= 44:
+        raise SystemExit(f'ERROR: missing or empty audio: {wav}')
+    shutil.copyfile(wav, inputs / wav.name)
+shutil.copyfile(source / 'probe_manifest.jsonl', dest / 'probe_manifest.jsonl')
+print(f'Prepared {len(ids)} questions without sidecars', flush=True)
+PY
+
+TABLE_PID=""
+CONDITIONER_PID=""
+cleanup() {
+    [[ -z "$TABLE_PID" ]] || kill "$TABLE_PID" 2>/dev/null || true
+    [[ -z "$CONDITIONER_PID" ]] || kill "$CONDITIONER_PID" 2>/dev/null || true
+}
+trap cleanup EXIT
+wait_service() {
+    local pid="$1" url="$2"
+    for _ in $(seq 1 120); do
+        kill -0 "$pid" 2>/dev/null || { echo "ERROR: service exited: $url" >&2; return 1; }
+        if curl --noproxy '*' -sf "$url" >/dev/null; then return 0; fi
+        sleep 5
+    done
+    echo "ERROR: service startup timed out: $url" >&2
+    return 1
+}
+uv run python screw_poc/scripts/reference_server.py --lang en --port "$TABLE_PORT" \
+    > "$TABLE_OUT/table_server.log" 2>&1 &
+TABLE_PID=$!
+wait_service "$TABLE_PID" "http://localhost:${TABLE_PORT}/v1/models"
+
+cd "$RAG_ROOT"
+"$VENV_PY" -m moshi.moshi.server_conditioner \
+    --config "hf://kyutai/moshika-rag-pytorch-bf16/config.json" \
+    --moshi-weight "hf://kyutai/moshika-rag-pytorch-bf16/model.safetensors" \
+    --cuda-device 0 --conditioner reference_with_time --port "$CONDITIONER_PORT" \
+    > "$TABLE_OUT/conditioner.log" 2>&1 &
+CONDITIONER_PID=$!
+wait_service "$CONDITIONER_PID" "http://localhost:${CONDITIONER_PORT}/"
+
+export REFERENCE_ENCODER_URL="http://localhost:${CONDITIONER_PORT}"
+export LLM_BASE_URL="http://localhost:${TABLE_PORT}/v1"
+export LLM_API_KEY="unused"
+export LLM_MODEL_NAME="table"
+# Prevent an inherited interactive-server configuration from selecting another backend.
+unset MOSHI_RETRIEVAL_LLMS_JSON
+"$VENV_PY" -m moshi.moshi.run_inference \
+    --input-dir "$TABLE_OUT/inputs" --output-dir "$TABLE_OUT/out" \
+    --max-consecutive-silence-frames 40 --device cuda:0
+
+# Upstream can log a per-question failure without failing the process.
+# Check all traces and retain raw fields for review; do not infer correctness.
+"$VENV_PY" - "$TABLE_OUT" <<'PY'
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+results = []
+for wav in sorted((root / 'inputs').glob('*.wav')):
+    trace = json.loads((root / 'out' / f'{wav.stem}.json').read_text())
+    if not isinstance(trace, dict) or 'model_text' not in trace:
+        raise SystemExit(f'ERROR: incomplete trace: {wav.stem}')
+    results.append({'id': wav.stem, 'trace': trace})
+(root / 'table_result.json').write_text(json.dumps(results, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(f'Wrote {len(results)} traces to {root / "table_result.json"}')
+PY
+echo "===== table retrieval finished at $(date -Iseconds) ====="
