@@ -20,9 +20,9 @@ qsub -V scripts/grpo_judge_lora_2026-09-04/10_dialogue.pbs
 If a rendered multi-agent corpus already exists, skip stages 1 and 2: point
 `CORPUS_ROOT` in `30_grpo_train.pbs` at it and submit that file alone.
 
-Every argument is hardcoded. These files are the experiment record, so there is
-nothing to reconstruct from a submit shell's environment later. To run a
-different corpus or version, copy the folder and edit the constants.
+Experiment settings are hardcoded. To run a different corpus or version, copy
+the folder and edit the constants. Stage 3 accepts SFT input/output settings
+through the environment as described below; selected paths are printed in the job log.
 
 ## Why 2,000 dialogues and not 10,000
 
@@ -66,15 +66,25 @@ experiments/grpo/grpo_response_2000_v1/
   config.yaml  checkpoints/  merged/  eval/  logs/  training_log.jsonl
 ```
 
-## Prerequisite
+## SFT merge inside the training job
 
-`merged_model/consolidated.safetensors` — the merged SFT model. GRPO's reference
-policy is that model with the adapters switched off, so stage 3 stops with an
-explicit error rather than aligning the untuned base by accident.
+Stage 3 reuses `merged_model/consolidated.safetensors` if it is a nonempty file.
+Otherwise it merges `SFT_LORA_CKPT` before segment extraction and GRPO, inside
+the same PBS job. No separate merge submission is needed. GRPO's reference
+policy is this merged SFT model with the GRPO adapters switched off.
 
 ```bash
-qsub -v LORA_CKPT=<sft>/consolidated/lora.safetensors,OUT_WEIGHT=$PWD/merged_model/consolidated.safetensors scripts/merge_lora.pbs
+qsub -v SFT_LORA_CKPT=/path/to/sft/consolidated/lora.safetensors scripts/grpo_judge_lora_2026-09-04/30_grpo_train.pbs
 ```
+
+Replace the adapter path with the actual SFT checkpoint. Optional environment
+settings: `MOSHI_WEIGHT` (merged output path), `MOSHI_FT_REPO` (defaults to
+`../moshi-finetune`), `SFT_HF_REPO` (defaults to `llm-jp/llm-jp-moshi-v1`), and
+`SFT_LORA_SCALING` (otherwise read by the merge script from the adapter config).
+Use the same base repository and scaling as SFT. An existing merged model takes
+precedence over the adapter setting; select a new `MOSHI_WEIGHT` and a new run
+when changing the SFT model. A failed merge stops the job, and output is published
+only after the merge succeeds so an interrupted write is not reused on retry.
 
 ## Resume
 

@@ -22,16 +22,19 @@
 # Needs 2 GPUs. res=middle is the class the LoRA jobs use; if it hands back one
 # GPU the runner stops with an explicit error rather than OOMing the judge.
 #
-# Every setting is hardcoded; see the note at the top of 10_dialogue.pbs.
+# Experiment settings are hardcoded; SFT input paths can be supplied via qsub.
 #
 # MOSHI_WEIGHT must be the MERGED SFT model. GRPO's reference policy is that
 # model with the adapters switched off, so pointing this at the untuned base
 # would have the KL term pulling the listener back toward a model that was
-# never fine-tuned. Produce it with:
+# never fine-tuned. If missing, this job merges SFT_LORA_CKPT first:
 #
-#   qsub -v LORA_CKPT=<sft>/consolidated/lora.safetensors,\
-#           OUT_WEIGHT=$PWD/merged_model/consolidated.safetensors \
-#        scripts/merge_lora.pbs
+#   qsub -v SFT_LORA_CKPT=/path/to/consolidated/lora.safetensors \
+#        scripts/grpo_judge_lora_2026-09-04/30_grpo_train.pbs
+#
+# Optional: MOSHI_WEIGHT (merged output), SFT_HF_REPO (SFT base repository),
+# SFT_LORA_SCALING (otherwise read adapter config), MOSHI_FT_REPO.
+# Existing nonempty MOSHI_WEIGHT is reused. Use a new output path for a new SFT.
 #
 # RESUME: re-submitting this same file continues the run. RUN_NAME is a fixed
 #   name, and the runner picks up the newest adapter already under
@@ -74,13 +77,46 @@ test -s "$MANIFEST" || {
     exit 1
 }
 
-export MOSHI_WEIGHT="$PWD/merged_model/consolidated.safetensors"
-test -s "$MOSHI_WEIGHT" || {
-    echo "ERROR: merged SFT weights not found: $MOSHI_WEIGHT" >&2
-    echo "       GRPO's reference policy comes from this file. Merge the SFT" >&2
-    echo "       adapter first with scripts/merge_lora.pbs (see the header)." >&2
-    exit 1
-}
+export MOSHI_WEIGHT="${MOSHI_WEIGHT:-$PWD/merged_model/consolidated.safetensors}"
+SFT_LORA_CKPT="${SFT_LORA_CKPT:-}"
+if [[ -s "$MOSHI_WEIGHT" && -f "$MOSHI_WEIGHT" ]]; then
+    echo "reusing merged SFT weights: $MOSHI_WEIGHT"
+else
+    if [[ ! -f "$SFT_LORA_CKPT" || ! -s "$SFT_LORA_CKPT" ]]; then
+        echo "ERROR: merged SFT weights missing: $MOSHI_WEIGHT" >&2
+        echo "Set SFT_LORA_CKPT to the SFT consolidated/lora.safetensors (see header)." >&2
+        exit 1
+    fi
+    MOSHI_FT_REPO="${MOSHI_FT_REPO:-$PWD/../moshi-finetune}"
+    test -f "$MOSHI_FT_REPO/pyproject.toml" || {
+        echo "ERROR: moshi-finetune project not found: $MOSHI_FT_REPO" >&2
+        exit 1
+    }
+    command -v uv >/dev/null 2>&1 || {
+        echo "ERROR: uv is not available on PATH." >&2
+        exit 1
+    }
+    # Publish only a completed merge, so interrupted writes cannot be reused.
+    mkdir -p "$(dirname "$MOSHI_WEIGHT")"
+    SFT_MERGE_TMP="$(mktemp "${MOSHI_WEIGHT}.tmp.XXXXXX")"
+    trap 'rm -f -- "$SFT_MERGE_TMP"' EXIT
+    merge_args=(
+        uv run --project "$MOSHI_FT_REPO" python "$PWD/scripts/merge_lora.py"
+        --lora-ckpt "$SFT_LORA_CKPT" --out "$SFT_MERGE_TMP"
+        --hf-repo "${SFT_HF_REPO:-llm-jp/llm-jp-moshi-v1}"
+    )
+    if [[ -n "${SFT_LORA_SCALING:-}" ]]; then
+        merge_args+=(--scaling "$SFT_LORA_SCALING")
+    fi
+    echo "merging SFT adapter: $SFT_LORA_CKPT -> $MOSHI_WEIGHT"
+    "${merge_args[@]}"
+    test -s "$SFT_MERGE_TMP" || {
+        echo "ERROR: SFT merge produced no weights." >&2
+        exit 1
+    }
+    mv -T -- "$SFT_MERGE_TMP" "$MOSHI_WEIGHT"
+    trap - EXIT
+fi
 
 # Segment extraction is cheap next to training and is skipped once it has run,
 # so it lives here rather than in its own stage.
