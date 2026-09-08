@@ -29,6 +29,7 @@ VENV_PY="$RAG_ROOT/.venv/bin/python"
 mkdir -p "$TABLE_OUT" screw_poc/artifacts/pbs_logs
 exec > >(tee -a "screw_poc/artifacts/pbs_logs/moshi_rag_table_${JOB_ID}.log") 2>&1
 echo "table_out: $TABLE_OUT"
+"$VENV_PY" -c "import torch, rustymimi; print('RAG Python dependencies available')"
 
 # Do not read audio that a concurrent probe may still be writing.
 uv run python screw_poc/scripts/moshi_rag/build_probe_inputs.py \

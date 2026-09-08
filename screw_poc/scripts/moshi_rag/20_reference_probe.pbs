@@ -72,6 +72,9 @@ echo "probe_out:  $PROBE_OUT"
 echo "started_at: $(date -Iseconds)"
 echo "===================================="
 
+# Detect incomplete setup before spending time on question synthesis.
+"$VENV_PY" -c "import torch, rustymimi; print('RAG Python dependencies available')"
+
 # ---------------------------------------------------------------------------
 # 1) Question audio and the three sidecar variants
 # ---------------------------------------------------------------------------
