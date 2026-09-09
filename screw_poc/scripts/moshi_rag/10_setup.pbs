@@ -112,8 +112,9 @@ uv pip check --python "$VENV_PY"
 echo "[setup] python: $("$VENV_PY" -c 'import sys; print(sys.version)')"
 "$VENV_PY" -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
 "$VENV_PY" -c "import rustymimi; print('rustymimi ok')"
-"$VENV_PY" -m moshi.moshi.server_conditioner --help >/dev/null
-"$VENV_PY" -m moshi.moshi.run_inference --help >/dev/null
+# Editable installation exposes moshi.*, not the source-tree moshi.moshi.*.
+"$VENV_PY" -m moshi.server_conditioner --help >/dev/null
+"$VENV_PY" -m moshi.run_inference --help >/dev/null
 
 # ---------------------------------------------------------------------------
 # 3) Weights, so the probe job does not depend on a hub round trip

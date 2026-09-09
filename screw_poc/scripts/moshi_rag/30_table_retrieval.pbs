@@ -66,7 +66,7 @@ wait_service() {
     local pid="$1" url="$2"
     for _ in $(seq 1 120); do
         kill -0 "$pid" 2>/dev/null || { echo "ERROR: service exited: $url" >&2; return 1; }
-        if curl --noproxy '*' -sf "$url" >/dev/null; then return 0; fi
+        if curl --noproxy '*' --max-time 5 -sf "$url" >/dev/null; then return 0; fi
         sleep 5
     done
     echo "ERROR: service startup timed out: $url" >&2
@@ -78,13 +78,13 @@ TABLE_PID=$!
 wait_service "$TABLE_PID" "http://localhost:${TABLE_PORT}/v1/models"
 
 cd "$RAG_ROOT"
-"$VENV_PY" -m moshi.moshi.server_conditioner \
+"$VENV_PY" -m moshi.server_conditioner \
     --config "hf://kyutai/moshika-rag-pytorch-bf16/config.json" \
     --moshi-weight "hf://kyutai/moshika-rag-pytorch-bf16/model.safetensors" \
     --cuda-device 0 --conditioner reference_with_time --port "$CONDITIONER_PORT" \
     > "$TABLE_OUT/conditioner.log" 2>&1 &
 CONDITIONER_PID=$!
-wait_service "$CONDITIONER_PID" "http://localhost:${CONDITIONER_PORT}/"
+wait_service "$CONDITIONER_PID" "http://localhost:${CONDITIONER_PORT}/health"
 
 export REFERENCE_ENCODER_URL="http://localhost:${CONDITIONER_PORT}"
 export LLM_BASE_URL="http://localhost:${TABLE_PORT}/v1"
@@ -92,7 +92,7 @@ export LLM_API_KEY="unused"
 export LLM_MODEL_NAME="table"
 # Prevent an inherited interactive-server configuration from selecting another backend.
 unset MOSHI_RETRIEVAL_LLMS_JSON
-"$VENV_PY" -m moshi.moshi.run_inference \
+"$VENV_PY" -m moshi.run_inference \
     --input-dir "$TABLE_OUT/inputs" --output-dir "$TABLE_OUT/out" \
     --max-consecutive-silence-frames 40 --device cuda:0
 

@@ -46,6 +46,8 @@ REPO_ROOT="$PWD"
 # a cold cache on this node is a slow start rather than a failed job.
 [[ -f scripts/setup_proxy.sh ]] && source scripts/setup_proxy.sh
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+export NO_PROXY="localhost,127.0.0.1${NO_PROXY:+,$NO_PROXY}"
+export no_proxy="$NO_PROXY"
 
 RAG_ROOT="${RAG_ROOT:-$(cd .. && pwd)/moshi-rag}"
 PROBE_OUT="${PROBE_OUT:-$PWD/screw_poc/artifacts/moshi_rag_probe}"
@@ -90,7 +92,7 @@ fi
 #    reference string into what gets summed into Moshi's transformer input.
 # ---------------------------------------------------------------------------
 cd "$RAG_ROOT"
-"$VENV_PY" -m moshi.moshi.server_conditioner \
+"$VENV_PY" -m moshi.server_conditioner \
     --config "hf://kyutai/moshika-rag-pytorch-bf16/config.json" \
     --moshi-weight "hf://kyutai/moshika-rag-pytorch-bf16/model.safetensors" \
     --cuda-device 0 \
@@ -100,14 +102,19 @@ CONDITIONER_PID=$!
 trap 'kill "$CONDITIONER_PID" 2>/dev/null || true' EXIT
 
 echo "[probe] waiting for the reference encoder on port $CONDITIONER_PORT"
+encoder_ready=0
 for _ in $(seq 1 120); do
-    if curl -sf "http://localhost:${CONDITIONER_PORT}/" >/dev/null 2>&1; then break; fi
     if ! kill -0 "$CONDITIONER_PID" 2>/dev/null; then
         echo "ERROR: the reference encoder exited during startup" >&2
         exit 1
     fi
+    if curl --noproxy '*' --max-time 5 -sf "http://localhost:${CONDITIONER_PORT}/health" >/dev/null 2>&1; then
+        encoder_ready=1
+        break
+    fi
     sleep 5
 done
+[[ "$encoder_ready" == 1 ]] || { echo "ERROR: reference encoder startup timed out" >&2; exit 1; }
 
 export REFERENCE_ENCODER_URL="http://localhost:${CONDITIONER_PORT}"
 # Not used with --use-gt-reference, but the client is constructed at startup,
@@ -128,7 +135,7 @@ for variant in true altered empty; do
     fi
     mkdir -p "$out_dir"
     echo "[probe] ===== variant: ${variant} ====="
-    "$VENV_PY" -m moshi.moshi.run_inference \
+    "$VENV_PY" -m moshi.run_inference \
         --input-dir "$in_dir" \
         --output-dir "$out_dir" \
         --use-gt-reference \
