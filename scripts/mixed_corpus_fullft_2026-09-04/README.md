@@ -14,7 +14,7 @@
 
 ## なぜ混合コーパスが要るのか
 
-応答を増やし、固定の終話文を除いた `aizuchi_normal_10000_v5` も `sanitize_aizuchi_only_turns`
+沈黙を外して応答を増やし、固定の終話文も除いた `aizuchi_normal_10000_v6` も `sanitize_aizuchi_only_turns`
 （[generate_synthetic_moshi_training_data.py:3195](../generate_synthetic_moshi_training_data.py)）
 が moshi 側の**語彙外発話を機械的に全部落とす**ので、学習後のモデルは
 「はい。」「そうですか…。」しか発話経験がありません。
@@ -36,15 +36,15 @@
 
 | stage | ファイル | 何をするか | 出力 |
 |---|---|---|---|
-| 0a | `10_dialogue_aizuchi.pbs` | 応答強化版の相づちコーパスを生成 | `data/runs/aizuchi_normal_10000_v5/dialogue` |
-| 0b | `20_tts_aizuchi.pbs` | その TTS | `data/runs/aizuchi_normal_10000_v5/tts/merged` |
+| 0a | `10_dialogue_aizuchi.pbs` | 沈黙なし・応答強化版の相づちコーパスを生成 | `data/runs/aizuchi_normal_10000_v6/dialogue` |
+| 0b | `20_tts_aizuchi.pbs` | その TTS | `data/runs/aizuchi_normal_10000_v6/tts/merged` |
 | 1 | `11_dialogue_response.pbs` | **本応答**コーパスを生成（multi-agent） | `data/runs/response_10000_v1/dialogue` |
 | 2 | `21_tts_response.pbs` | その TTS | `data/runs/response_10000_v1/tts/merged` |
-| 3 | `30_mix_corpus.pbs` | 2 つを比率指定で混合 | `data/runs/mixed_normal_v1/mixed` |
+| 3 | `30_mix_corpus.pbs` | 2 つを比率指定で混合 | `data/runs/mixed_normal_v6/mixed` |
 | 4 | `40_train_eval.pbs` | full-FT → best ckpt export → Full-Duplex-Bench-JA | `eval_runs/full_duplex/<MODEL_ID>/` |
 
 **旧版の相づち成果物は再利用しません。** v2には連続配置、v3には無反応が多い問題が
-あり、v4には固定の終話文が含まれるため、stage 0a/0b で v5 を作成してから stage 3 へ進みます。0a/0b は
+あり、v4には固定の終話文、v5には明示的な沈黙区間が含まれるため、stage 0a/0b で v6 を作成してから stage 3 へ進みます。0a/0b は
 2026-09-04 のジョブを呼ぶ薄いラッパで、チューニング値は向こうに一元化しています。
 
 ## 実行
@@ -93,7 +93,7 @@ qsub -V -v SKIP_AUTO_EVAL=1 scripts/mixed_corpus_fullft_2026-09-04/40_train_eval
 
 ## 追加の比較実験
 
-normal v5 に加えて、次の 3 条件を固定名の PBS で実行できます。
+normal v6 に加えて、次の 3 条件を固定名の PBS で実行できます。
 
 ```bash
 # 実験1: 控えめな相づち（dialogue -> TTS -> full-FT）
@@ -106,7 +106,7 @@ qsub -V scripts/2026-09-04/aizuchi_eager_dialogue_10000.pbs
 qsub -V scripts/2026-09-04/aizuchi_eager_tts_10000.pbs
 qsub -V scripts/2026-09-04/aizuchi_eager_fullft_10000.pbs
 
-# 実験3: normal-v5 相づち 10,000 + 本応答 2,000
+# 実験3: normal-v6 相づち 10,000 + 本応答 2,000
 qsub -V scripts/mixed_corpus_fullft_2026-09-04/31_mix_corpus_response20.pbs
 qsub -V scripts/mixed_corpus_fullft_2026-09-04/41_train_eval_response20.pbs
 ```

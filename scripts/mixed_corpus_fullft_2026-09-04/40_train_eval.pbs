@@ -49,7 +49,7 @@
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 
-export MIX_VERSION="${MIX_VERSION:-v1}"
+export MIX_VERSION="${MIX_VERSION:-v6}"
 MIX_ROOT="${MIX_ROOT:-$PWD/data/runs/mixed_normal_${MIX_VERSION}}"
 
 export RUN_ID="${RUN_ID:-mixed_normal_${MIX_VERSION}_fullft}"

@@ -580,6 +580,18 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--aizuchi-only-max-silences",
+        type=int,
+        default=int(
+            os.environ.get("AIZUCHI_ONLY_MAX_SILENCES")
+            or AIZUCHI_ONLY_DEFAULT_MAX_SILENCES
+        ),
+        help=(
+            "Maximum explicit silence turns in one aizuchi-only dialogue. "
+            "Set to 0 to suppress both planned silences and inline pause tags."
+        ),
+    )
+    parser.add_argument(
         "--aizuchi-only-silence-min-sec",
         type=float,
         default=float(os.environ.get("AIZUCHI_ONLY_SILENCE_MIN_SEC") or 2.5),
@@ -1750,7 +1762,7 @@ class LLMDialogueGenerator:
             DialogueTurn("moshi", AIZUCHI_ONLY_GREETING, note="固定の名乗り")
         ]
         used_probe_replies: set[str] = set()
-        silences_left = AIZUCHI_ONLY_MAX_SILENCES
+        silences_left = max(0, int(self.args.aizuchi_only_max_silences))
         case_id = str(use_case.get("id") or "aizuchi_only_dialogue")
         self.trace_event(
             {
@@ -2762,9 +2774,9 @@ AIZUCHI_ONLY_LIMITED_ONCE = frozenset({"そうだったんですね。", "そう
 # 沈黙が連続したときに1つへ畳む上限。これ以上長い無音は学習データとしてただの
 # 空白になる。
 AIZUCHI_ONLY_SILENCE_HARD_MAX = 12.0
-# 1対話に置いてよい沈黙の総数。これを超えたぶんは、userAI が書いた <<pause>> も
-# 計画側の沈黙も落とす。実測では制限なしで平均 7.0 回・通話の 40% が無音になった。
-AIZUCHI_ONLY_MAX_SILENCES = 2
+# 1対話に置いてよい沈黙の既定総数。これを超えたぶんは、userAI が書いた
+# <<pause>> も計画側の沈黙も落とす。normal v6 は PBS から 0 を指定する。
+AIZUCHI_ONLY_DEFAULT_MAX_SILENCES = 2
 # 1発話（userAI の1回の出力）に置いてよい沈黙。詰まる場所は1箇所で足りる。
 AIZUCHI_ONLY_MAX_PAUSES_PER_TURN = 1
 # 1対話に置いてよい「まだ聞いていますか?」の数。沈黙のたびに聞き返す人はいない。
@@ -2795,18 +2807,19 @@ AIZUCHI_FREQUENCY_PRESETS: dict[str, dict[str, Any]] = {
     },
     "normal": {
         "label": "普通",
-        "rates": {"end": 0.92, "cont": 0.50, "weak": 0.12},
-        "max_per_turn": 2,
+        "rates": {"end": 1.0, "cont": 0.75, "weak": 0.35},
+        "max_per_turn": 3,
         # normal は「静かでもよい」ではなく「連発せず、必ず受け止める」。
         # 位置が一つも確率選択されなかった場合は文末に一つ補う。
         "min_per_turn": 1,
-        "min_chars": 6,
+        "min_chars": 4,
         "min_gap": 1,
-        "min_chunk_chars": 6,
+        "min_chunk_chars": 4,
         "directive": (
-            "- 打ち方は「普通」です。意味の区切り・感情がこぼれた所を選んで受け止めます。\n"
-            "- 短すぎる発話でなければ最低一つは返します。長めの発話では、"
-            "十分に間隔を空けて二つまで返してかまいません。"
+            "- 打ち方は「普通（積極寄り）」です。意味の区切り・感情がこぼれた所を"
+            "こまめに受け止めます。\n"
+            "- ごく短い発話を除いて最低一つは返します。長めの発話では、"
+            "十分に間隔を空けて三つまで返してかまいません。"
         ),
     },
     "reserved": {
@@ -2885,7 +2898,12 @@ def plan_aizuchi_only_blocks(
     答えてもらったそばからまた聞き返す対話ができてしまう。
     """
     probe_rate = max(0.0, min(1.0, float(args.aizuchi_only_probe_rate)))
-    silence_rate = max(0.0, min(1.0, float(args.aizuchi_only_silence_rate)))
+    silence_enabled = max(0, int(args.aizuchi_only_max_silences)) > 0
+    silence_rate = (
+        max(0.0, min(1.0, float(args.aizuchi_only_silence_rate)))
+        if silence_enabled
+        else 0.0
+    )
     silence_min = float(args.aizuchi_only_silence_min_sec)
     silence_max = max(silence_min, float(args.aizuchi_only_silence_max_sec))
 
@@ -2910,7 +2928,13 @@ def plan_aizuchi_only_blocks(
         # 最後のブロックの後ろの沈黙も、話が終わった後の空白にしかならない。
         if not probe and index < num_blocks - 1 and rng.random() < silence_rate:
             trailing = round(rng.uniform(silence_min, silence_max), 1)
-        plans.append({"probe": probe, "trailing_silence": trailing})
+        plans.append(
+            {
+                "probe": probe,
+                "trailing_silence": trailing,
+                "allow_pause": silence_enabled,
+            }
+        )
         previous_silence = trailing is not None
     return plans
 
@@ -2939,10 +2963,12 @@ def build_aizuchi_only_user_prompt(
             "- 1〜2 文だけ。ここで話を先に進めません。沈黙のタグも書きません。"
         )
     else:
-        pause_directive = build_pause_directive(use_case) or (
-            f"\n- 言葉に詰まる位置にだけ <<pause:3.5>> と書いてかまいません"
-            f"（秒数は {PAUSE_MIN_SEC:.0f}〜{PAUSE_MAX_SEC:.0f}）。読点の代わりには使いません。"
-        )
+        pause_directive = ""
+        if plan.get("allow_pause", True):
+            pause_directive = build_pause_directive(use_case) or (
+                f"\n- 言葉に詰まる位置にだけ <<pause:3.5>> と書いてかまいません"
+                f"（秒数は {PAUSE_MIN_SEC:.0f}〜{PAUSE_MAX_SEC:.0f}）。読点の代わりには使いません。"
+            )
         directive = (
             "- 1〜2 文。ひと息で言える長さで切ります（長く続けません）。\n"
             "- 短く切っても、話題は変えません。今の話を続けるか、同じことを\n"

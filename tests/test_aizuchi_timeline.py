@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -14,9 +15,12 @@ from scripts.generate_synthetic_moshi_training_data import (
     AIZUCHI_FREQUENCY_PRESETS,
     AIZUCHI_ONLY_GREETING,
     DialogueTurn as SyntheticDialogueTurn,
+    build_aizuchi_only_user_prompt,
     complete_aizuchi_reactions,
+    plan_aizuchi_only_blocks,
     pick_reaction_points,
     sanitize_aizuchi_only_turns,
+    split_user_text_on_pauses,
 )
 
 
@@ -120,6 +124,49 @@ class AizuchiTimelineTest(unittest.TestCase):
         )
 
         self.assertEqual(points, [{"after_clause": 1, "kind": "end"}])
+
+    def test_normal_is_configured_for_dense_reactions(self) -> None:
+        frequency = AIZUCHI_FREQUENCY_PRESETS["normal"]
+
+        self.assertEqual(frequency["rates"]["end"], 1.0)
+        self.assertGreaterEqual(frequency["rates"]["cont"], 0.75)
+        self.assertEqual(frequency["max_per_turn"], 3)
+        self.assertEqual(frequency["min_per_turn"], 1)
+
+    def test_zero_silence_budget_disables_planned_and_inline_pauses(self) -> None:
+        args = SimpleNamespace(
+            aizuchi_only_probe_rate=1.0,
+            aizuchi_only_silence_rate=1.0,
+            aizuchi_only_silence_min_sec=2.0,
+            aizuchi_only_silence_max_sec=4.0,
+            aizuchi_only_max_silences=0,
+        )
+
+        plans = plan_aizuchi_only_blocks(random.Random(0), 6, args)
+        prompt = build_aizuchi_only_user_prompt(
+            {},
+            {
+                "opening_style": "率直",
+                "disclosure_pace": "普通",
+                "speech_texture": "短文",
+                "emotional_arc": "一定",
+                "topic_order": "時系列",
+            },
+            [],
+            0,
+            6,
+            plans[0],
+        )
+        split = split_user_text_on_pauses(
+            "言葉が出ません。<<pause:3.5>>でも続けます。",
+            random.Random(0),
+            max_pauses=0,
+        )
+
+        self.assertTrue(all(plan["trailing_silence"] is None for plan in plans))
+        self.assertTrue(all(not plan["allow_pause"] for plan in plans))
+        self.assertNotIn("<<pause", prompt.user)
+        self.assertEqual([turn.speaker for turn in split], ["user"])
 
     def test_missing_llm_reaction_is_filled_with_acknowledgement(self) -> None:
         completed = complete_aizuchi_reactions(

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #PBS -S /bin/bash
-#PBS -N az_n_dlg10k5
+#PBS -N az_n_dlg10k6
 #PBS -q xan_s
 #PBS -l select=1:res=small
 #PBS -l walltime=24:00:00
@@ -9,9 +9,9 @@
 
 # ASCII ONLY. Do not add non-ASCII text anywhere in this file.
 #
-# 10,000 listener-only dialogues, responsive-normal frequency, v5.
-# v5 keeps the responsive guarantees from v4 and removes learned closing
-# phrases so they cannot fire in the middle of a conversation.
+# 10,000 listener-only dialogues, talkative-normal frequency, v6.
+# v6 removes every explicit silence target and raises the reaction density.
+# It retains v5's removal of learned closing phrases.
 #
 # Why v2 exists (see also the block comment in experiments/lora_base_config/
 # config.yaml around duration_sec): moshi-finetune splits any dialogue longer
@@ -21,22 +21,22 @@
 # open with a backchannel instead -- which is exactly how the v1 aizuchi model
 # failed. The regular dialogue corpus stayed under 170s so 170 was enough
 # there; the aizuchi corpus is longer by design (the user monologues at length
-# with silences), so it has to be shortened at the source.
+# with long user turns), so it has to be shortened at the source.
 #
 # MAX_BLOCKS is therefore 6 rather than v3's 10. Measure the rendered result
 # before training and adjust if dialogues still run past 170s:
 #
-#   python3 -c "import json; d=sorted(json.loads(l)['duration'] for l in open('data/runs/aizuchi_normal_10000_v5/tts/merged/training_set/synthetic_moshi_train.jsonl')); n=len(d); print('p95=%.1f max=%.1f over170=%.1f%%' % (d[int(n*.95)], d[-1], 100*sum(1 for x in d if x>170)/n))"
+#   python3 -c "import json; d=sorted(json.loads(l)['duration'] for l in open('data/runs/aizuchi_normal_10000_v6/tts/merged/training_set/synthetic_moshi_train.jsonl')); n=len(d); print('p95=%.1f max=%.1f over170=%.1f%%' % (d[int(n*.95)], d[-1], 100*sum(1 for x in d if x>170)/n))"
 #
 # Every AIZUCHI_ONLY_* value below can be overridden at submit time, e.g.:
 #   qsub -V -v AIZUCHI_ONLY_MAX_BLOCKS=8 scripts/2026-09-04/aizuchi_normal_dialogue_10000.pbs
 #
-# Output goes to a new v5 root so no v4 rows with learned closings are resumed.
+# Output goes to a new v6 root so no v5 rows with silence targets are resumed.
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 
-export AIZUCHI_VERSION="v5"
+export AIZUCHI_VERSION="v6"
 export BATCH_ID="qwen_aizuchi_10000_normal_${AIZUCHI_VERSION}"
 export OUT_ROOT="$PWD/data/runs/aizuchi_normal_10000_${AIZUCHI_VERSION}/dialogue"
 export NUM_CASES="${NUM_CASES:-10000}"
@@ -48,12 +48,13 @@ export AIZUCHI_ONLY_FREQUENCY="normal"
 export AIZUCHI_ONLY_MIN_BLOCKS="${AIZUCHI_ONLY_MIN_BLOCKS:-4}"
 export AIZUCHI_ONLY_MAX_BLOCKS="${AIZUCHI_ONLY_MAX_BLOCKS:-6}"
 
-# Silence is reduced from v3 so the model does not learn to remain quiet after
-# ordinary user turns. Real pauses remain, but they are shorter and less common.
-export AIZUCHI_ONLY_SILENCE_RATE="${AIZUCHI_ONLY_SILENCE_RATE:-0.15}"
+# This experiment assumes the listener responds. Disable both planned silence
+# and userAI inline pause tags so periodic quiet stretches cannot be learned.
+export AIZUCHI_ONLY_MAX_SILENCES="0"
+export AIZUCHI_ONLY_SILENCE_RATE="0"
 export AIZUCHI_ONLY_SILENCE_MIN_SEC="${AIZUCHI_ONLY_SILENCE_MIN_SEC:-2.0}"
 export AIZUCHI_ONLY_SILENCE_MAX_SEC="${AIZUCHI_ONLY_SILENCE_MAX_SEC:-4.0}"
 
-export AIZUCHI_ONLY_PROBE_RATE="${AIZUCHI_ONLY_PROBE_RATE:-0.5}"
+export AIZUCHI_ONLY_PROBE_RATE="0"
 
 exec bash scripts/run_dialogues_qwen_10000.pbs
