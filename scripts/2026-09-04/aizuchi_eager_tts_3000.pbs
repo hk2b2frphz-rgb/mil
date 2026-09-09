@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N az_e_tts3k6
+#PBS -q xvn_s
+#PBS -l select=1:res=middle2
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# Qwen3-TTS for the eager, silence-free 3,000-dialogue corpus, v6.
+# Submit after scripts/2026-09-04/aizuchi_eager_dialogue_3000.pbs.
+# Re-submit this file to resume unfinished shards.
+#
+# Submit:
+#   qsub -V scripts/2026-09-04/aizuchi_eager_tts_3000.pbs
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+# Keep the same moshi clone voice as every other aizuchi and response corpus.
+# QWEN_VOICE_MODE is left unset on purpose: it defaults to "auto", which
+# resolves to "mixed" when only a moshi clone source is present.
+export CLONE_OUT_DIR_MOSHI="$PWD/data/clone_examples/99999"
+
+export AIZUCHI_VERSION="v6"
+export SOURCE_BATCH_ID="qwen_aizuchi_3000_eager_${AIZUCHI_VERSION}"
+export BATCH_ID="aizuchi_eager_3000_${AIZUCHI_VERSION}_tts_vllm"
+export DIALOGUES_JSONL="$PWD/data/runs/aizuchi_eager_3000_${AIZUCHI_VERSION}/dialogue/llm_dialogues/dialogues.jsonl"
+export OUT_ROOT="$PWD/data/runs/aizuchi_eager_3000_${AIZUCHI_VERSION}/tts"
+export NUM_DIALOGUES="${NUM_DIALOGUES:-3000}"
+
+exec bash scripts/run_qwen_tts_vllm_3000_4gpu.pbs
