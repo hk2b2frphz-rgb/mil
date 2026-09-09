@@ -10,7 +10,11 @@ from scripts.generate_qwen3_tts_data import (
     DialogueTurn,
     build_segments_whole_utterance,
 )
-from scripts.generate_synthetic_moshi_training_data import pick_reaction_points
+from scripts.generate_synthetic_moshi_training_data import (
+    AIZUCHI_FREQUENCY_PRESETS,
+    complete_aizuchi_reactions,
+    pick_reaction_points,
+)
 
 
 class _FakeTTS:
@@ -102,6 +106,26 @@ class AizuchiTimelineTest(unittest.TestCase):
         self.assertEqual(
             pick_reaction_points(["短いです。"], frequency, random.Random(0)),
             [],
+        )
+
+    def test_normal_guarantees_one_reaction_when_probability_misses(self) -> None:
+        frequency = dict(AIZUCHI_FREQUENCY_PRESETS["normal"])
+        frequency["rates"] = {"end": 0.0, "cont": 0.0, "weak": 0.0}
+
+        points = pick_reaction_points(
+            ["今日は少しつらかったです。"], frequency, random.Random(0)
+        )
+
+        self.assertEqual(points, [{"after_clause": 1, "kind": "end"}])
+
+    def test_missing_llm_reaction_is_filled_with_acknowledgement(self) -> None:
+        completed = complete_aizuchi_reactions(
+            [], [{"after_clause": 1, "kind": "end"}], []
+        )
+
+        self.assertEqual(
+            completed,
+            [{"after_clause": 1, "text": "そうなんですね。"}],
         )
 
 

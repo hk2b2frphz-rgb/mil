@@ -12,9 +12,9 @@
 # STAGE 0a (OPTIONAL) of the mixed-corpus pipeline.
 # See scripts/mixed_corpus_fullft_2026-09-04/README.md.
 #
-# Regenerates the corrected v3 AIZUCHI half of the corpus. v2 must not be
-# reused because its TTS timeline can collapse later backchannels into a rapid
-# chain. Stage 3 points at v3 by default.
+# Regenerates the responsive v4 AIZUCHI half of the corpus. Earlier versions
+# are kept separate so their quiet or rapid-fire targets cannot leak in.
+# Stage 3 points at v4 by default.
 #
 # This is a thin wrapper around the 2026-09-04 job so the two rounds cannot
 # drift apart: all AIZUCHI_ONLY_* tuning lives in that file, not here.
@@ -22,10 +22,10 @@
 # Submit:
 #   qsub -V scripts/mixed_corpus_fullft_2026-09-04/10_dialogue_aizuchi.pbs
 #
-# This v3 pipeline pins AIZUCHI_VERSION so an inherited v2 value cannot leak in.
+# This pipeline pins AIZUCHI_VERSION so an inherited old value cannot leak in.
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 
-export AIZUCHI_VERSION="v3"
+export AIZUCHI_VERSION="v4"
 exec bash scripts/2026-09-04/aizuchi_normal_dialogue_10000.pbs

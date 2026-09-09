@@ -1700,6 +1700,7 @@ class LLMDialogueGenerator:
             role_name="aizuchiAI",
         )
         reactions = parse_aizuchi_reactions(raw, clauses, points)
+        reactions = complete_aizuchi_reactions(reactions, points, visible_turns)
         self.trace_event(
             {
                 "event": "aizuchi_decision",
@@ -2802,15 +2803,18 @@ AIZUCHI_FREQUENCY_PRESETS: dict[str, dict[str, Any]] = {
     },
     "normal": {
         "label": "普通",
-        "rates": {"end": 0.70, "cont": 0.35, "weak": 0.08},
+        "rates": {"end": 0.92, "cont": 0.50, "weak": 0.12},
         "max_per_turn": 2,
-        "min_chars": 16,
-        "min_gap": 2,
-        "min_chunk_chars": 10,
+        # normal は「静かでもよい」ではなく「連発せず、必ず受け止める」。
+        # 位置が一つも確率選択されなかった場合は文末に一つ補う。
+        "min_per_turn": 1,
+        "min_chars": 6,
+        "min_gap": 1,
+        "min_chunk_chars": 6,
         "directive": (
             "- 打ち方は「普通」です。意味の区切り・感情がこぼれた所を選んで受け止めます。\n"
-            "- 自然なら 0 件でかまいません。発話の最後の句の後に置くのは、"
-            "受け止めが要る所だけです（毎回ではありません）。"
+            "- 短すぎる発話でなければ最低一つは返します。長めの発話では、"
+            "十分に間隔を空けて二つまで返してかまいません。"
         ),
     },
     "reserved": {
@@ -2864,7 +2868,8 @@ AIZUCHI_ONLY_AGENT_SYSTEM_PROMPT = """
 moshi は今回、相づち以外を一切話しません。声を出す位置はこちらで決めて渡すので、
 あなたはそこで何と言うかだけを決めます。
 傾聴の相づちは内容を持ちません。話を邪魔せず、「聞いている」ことだけを伝えます。
-ほとんどは「はい。」「ええ。」「うん、うん。」で足ります。
+短い「はい。」「ええ。」「うん、うん。」を中心にしつつ、事情や感情を受け止める
+場面では「そうなんですね。」「そうだったんですね。」「そうですか…。」も使います。
 JSONだけを出力してください。
 """.strip()
 
@@ -3020,6 +3025,24 @@ def build_aizuchi_only_agent_prompt(
     clauses = split_text_into_clauses(user_text)
     numbered = "\n".join(f"{i + 1}: {clause}" for i, clause in enumerate(clauses))
     recent = recent_aizuchi_texts(turns)
+    acknowledgement_words = {
+        "そうですか。",
+        "そうですか…。",
+        "そうでしたか。",
+        "そうだったんですね。",
+        "そうなんですね。",
+    }
+    has_acknowledgement = any(
+        turn.speaker == "moshi" and turn.text.strip() in acknowledgement_words
+        for turn in turns
+    )
+    acknowledgement_hint = (
+        "\n- この対話ではまだ事情を受け止める言葉を使っていません。今回が事実や感情の"
+        "区切りなら「そうなんですね。」「そうだったんですね。」「そうですか…。」を"
+        "優先します。"
+        if not has_acknowledgement
+        else ""
+    )
     forbidden = (
         "\n- 直前に使った語なので、今回は使いません: " + " / ".join(recent)
         if recent
@@ -3056,10 +3079,10 @@ def build_aizuchi_only_agent_prompt(
   はい。/ はい、はい。/ ええ。/ えぇ。/ ええ、ええ。/ うん。/ うん、うん。/
   あぁ…。/ あー…。/ はぁ…。/ そうですか。/ そうですか…。/ そうでしたか。/
   そうだったんですね。/ そうなんですね。/ 大丈夫ですよ。/ はい、大丈夫ですよ。
-- 相づちは話を邪魔しないためのものです。ほとんどは「はい。」「ええ。」「うん、うん。」
-  で足ります。長い語を選ぶのは、相手の気持ちがこぼれた所だけにします。
+- 短い相づちを中心にしつつ、事実を初めて知った区切りでは「そうなんですね。」、
+  過去のつらい出来事には「そうだったんですね。」も使います。同じ長い語は繰り返しません。
 - つらさがにじんだ所は「あぁ…。」、事実の区切りは「はい。」、静かな同意は「ええ。」、
-  ためらいや詫びには「大丈夫ですよ。」。{forbidden}
+  ためらいや詫びには「大丈夫ですよ。」。{acknowledgement_hint}{forbidden}
 - 「なるほど。」は使いません。相手の言葉を言い換えたり、返したりもしません。
 {example}
 JSONだけを返してください:
@@ -3135,6 +3158,52 @@ def parse_aizuchi_reactions(
     return sorted(out, key=lambda entry: entry["after_clause"])
 
 
+def complete_aizuchi_reactions(
+    reactions: list[dict[str, Any]],
+    points: list[dict[str, Any]],
+    turns: list[DialogueTurn],
+) -> list[dict[str, Any]]:
+    """LLM の欠落・直近語の再使用で、指定した反応位置を消さない。"""
+    provided = {int(item["after_clause"]): dict(item) for item in reactions}
+    used_in_dialogue = {
+        turn.text.strip()
+        for turn in turns
+        if turn.speaker == "moshi" and turn.text.strip()
+    }
+    recent = set(recent_aizuchi_texts(turns))
+    completed: dict[int, dict[str, Any]] = {}
+    for point in points:
+        index = int(point["after_clause"])
+        candidates = (
+            ["そうなんですね。", "そうですか…。", "ええ。", "はい。", "うん。"]
+            if point.get("kind") == "end"
+            else ["ええ。", "はい。", "うん。", "うん、うん。"]
+        )
+        proposed = str(provided.get(index, {}).get("text") or "").strip()
+        proposed_repeats = proposed in recent or (
+            proposed in AIZUCHI_ONLY_LIMITED_ONCE and proposed in used_in_dialogue
+        )
+        if proposed and not proposed_repeats:
+            text = proposed
+        else:
+            text = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if candidate not in recent
+                    and not (
+                        candidate in AIZUCHI_ONLY_LIMITED_ONCE
+                        and candidate in used_in_dialogue
+                    )
+                ),
+                "はい。",
+            )
+        completed[index] = {"after_clause": index, "text": text}
+        recent.add(text)
+        used_in_dialogue.add(text)
+    return [completed[index] for index in sorted(completed)]
+
+
 def pick_reaction_points(
     clauses: list[str],
     frequency: dict[str, Any],
@@ -3143,6 +3212,7 @@ def pick_reaction_points(
     """頻度プリセットの確率・間隔・件数制限で反応位置を決める。"""
     rates = frequency.get("rates") or AIZUCHI_FREQUENCY_PRESETS["normal"]["rates"]
     max_per_turn = max(0, int(frequency.get("max_per_turn", 0)))
+    min_per_turn = max(0, int(frequency.get("min_per_turn", 0)))
     min_chars = max(0, int(frequency.get("min_chars", 0)))
     min_gap = max(0, int(frequency.get("min_gap", 0)))
     min_chunk_chars = max(0, int(frequency.get("min_chunk_chars", 0)))
@@ -3169,6 +3239,10 @@ def pick_reaction_points(
         chunk_start = index
         if max_per_turn and len(points) >= max_per_turn:
             break
+    # normal は、確率抽選が全部外れて一発話まるごと無反応になるのを避ける。
+    # 最後の句だけを補うので、途中で連発することはない。
+    if min_per_turn and not points:
+        points.append({"after_clause": len(clauses), "kind": "end"})
     return points
 
 

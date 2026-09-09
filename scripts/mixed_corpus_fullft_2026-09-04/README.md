@@ -14,7 +14,7 @@
 
 ## なぜ混合コーパスが要るのか
 
-修正版の `aizuchi_normal_10000_v3` も `sanitize_aizuchi_only_turns`
+応答を増やした `aizuchi_normal_10000_v4` も `sanitize_aizuchi_only_turns`
 （[generate_synthetic_moshi_training_data.py:3195](../generate_synthetic_moshi_training_data.py)）
 が moshi 側の**語彙外発話を機械的に全部落とす**ので、学習後のモデルは
 「はい。」「そうですか…。」しか発話経験がありません。
@@ -36,15 +36,15 @@
 
 | stage | ファイル | 何をするか | 出力 |
 |---|---|---|---|
-| 0a | `10_dialogue_aizuchi.pbs` | 修正版の相づちコーパスを生成 | `data/runs/aizuchi_normal_10000_v3/dialogue` |
-| 0b | `20_tts_aizuchi.pbs` | その TTS | `data/runs/aizuchi_normal_10000_v3/tts/merged` |
+| 0a | `10_dialogue_aizuchi.pbs` | 応答強化版の相づちコーパスを生成 | `data/runs/aizuchi_normal_10000_v4/dialogue` |
+| 0b | `20_tts_aizuchi.pbs` | その TTS | `data/runs/aizuchi_normal_10000_v4/tts/merged` |
 | 1 | `11_dialogue_response.pbs` | **本応答**コーパスを生成（multi-agent） | `data/runs/response_10000_v1/dialogue` |
 | 2 | `21_tts_response.pbs` | その TTS | `data/runs/response_10000_v1/tts/merged` |
 | 3 | `30_mix_corpus.pbs` | 2 つを比率指定で混合 | `data/runs/mixed_normal_v1/mixed` |
 | 4 | `40_train_eval.pbs` | full-FT → best ckpt export → Full-Duplex-Bench-JA | `eval_runs/full_duplex/<MODEL_ID>/` |
 
-**v2 の相づち成果物は再利用しません。** 複数相づちのタイムラインが連続配置される
-可能性があるため、stage 0a/0b で v3 を作成してから stage 3 へ進みます。0a/0b は
+**旧版の相づち成果物は再利用しません。** v2には連続配置、v3には無反応が多い問題が
+あるため、stage 0a/0b で v4 を作成してから stage 3 へ進みます。0a/0b は
 2026-09-04 のジョブを呼ぶ薄いラッパで、チューニング値は向こうに一元化しています。
 
 ## 実行
@@ -81,8 +81,8 @@ TTS が 24h に収まらなかった場合は、**同じファイルをもう一
 qsub -V -v NUM_CASES=6000 scripts/mixed_corpus_fullft_2026-09-04/11_dialogue_response.pbs
 
 # 混合比だけ振り直す（stage 3 から。データは作り直さない）
-qsub -V -v MIX_TAKE_RESPONSE=2000,MIX_VERSION=v2 scripts/mixed_corpus_fullft_2026-09-04/30_mix_corpus.pbs
-qsub -V -v MIX_TAKE_RESPONSE=0.3,MIX_VERSION=v3  scripts/mixed_corpus_fullft_2026-09-04/30_mix_corpus.pbs
+qsub -V -v MIX_TAKE_RESPONSE=2000,MIX_VERSION=ratio2000 scripts/mixed_corpus_fullft_2026-09-04/30_mix_corpus.pbs
+qsub -V -v MIX_TAKE_RESPONSE=0.3,MIX_VERSION=ratio030  scripts/mixed_corpus_fullft_2026-09-04/30_mix_corpus.pbs
 
 # 韻律のみのアブレーション（テキスト方策を凍結し、depformer だけ動かす）
 qsub -V -v NU_PARAMETERS_TO_FINETUNE=depformer scripts/mixed_corpus_fullft_2026-09-04/40_train_eval.pbs
@@ -93,7 +93,7 @@ qsub -V -v SKIP_AUTO_EVAL=1 scripts/mixed_corpus_fullft_2026-09-04/40_train_eval
 
 ## 追加の比較実験
 
-normal v3 に加えて、次の 3 条件を固定名の PBS で実行できます。
+normal v4 に加えて、次の 3 条件を固定名の PBS で実行できます。
 
 ```bash
 # 実験1: 控えめな相づち（dialogue -> TTS -> full-FT）
@@ -106,12 +106,12 @@ qsub -V scripts/2026-09-04/aizuchi_eager_dialogue_10000.pbs
 qsub -V scripts/2026-09-04/aizuchi_eager_tts_10000.pbs
 qsub -V scripts/2026-09-04/aizuchi_eager_fullft_10000.pbs
 
-# 実験3: normal-v3 相づち 10,000 + 本応答 2,000
+# 実験3: normal-v4 相づち 10,000 + 本応答 2,000
 qsub -V scripts/mixed_corpus_fullft_2026-09-04/31_mix_corpus_response20.pbs
 qsub -V scripts/mixed_corpus_fullft_2026-09-04/41_train_eval_response20.pbs
 ```
 
-各行は直前の段階が正常終了してから投入します。reserved と eager は normal v3 と
+各行は直前の段階が正常終了してから投入します。reserved と eager は旧normal v3と
 頻度以外を揃え、mixed response-20% は相づち能力を保ちながら本応答を学べるかを
 比較します。
 
