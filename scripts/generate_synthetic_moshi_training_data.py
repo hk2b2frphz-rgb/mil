@@ -1849,13 +1849,9 @@ class LLMDialogueGenerator:
                 }
             )
 
-        # 話し手が締めたら、聞き手も挨拶で終える。切れたまま終わらない。
-        time_of_day = str(use_case.get("time_of_day") or "")
-        closing = AIZUCHI_ONLY_CLOSINGS[
-            "night" if ("夜" in time_of_day or "深夜" in time_of_day) else "day"
-        ]
-        if turns and turns[-1].speaker == "user":
-            turns.append(DialogueTurn("moshi", closing, note="固定の終話"))
+        # 終話文は学習させない。明示的な通話終了シグナルが無い実行環境では、
+        # 「おやすみなさい」「失礼いたします」を通常の相づち候補として誤発火
+        # するため、話し手が締めた後は moshi の沈黙で終える。
         clean_turns = sanitize_aizuchi_only_turns(turns)
         self.trace_event(
             {
@@ -2775,13 +2771,9 @@ AIZUCHI_ONLY_MAX_PAUSES_PER_TURN = 1
 # 実測では 1本あたり平均 1.9 回、最多 4 回まで出ていた。
 AIZUCHI_ONLY_MAX_PROBES = 1
 
-# 電話は名乗りから始まり、挨拶で終わる。相づちではないが、これが無いと通話に
-# ならない。第一声は固定（knowledge/decisions/0002）。
+# 電話の第一声は固定（knowledge/decisions/0002）。一方、終話文は明示的な
+# 通話終了シグナルなしでは会話途中に誤発火するため、教師データに含めない。
 AIZUCHI_ONLY_GREETING = "もしもし、こちら孤独孤立相談窓口になります。"
-AIZUCHI_ONLY_CLOSINGS = {
-    "night": "はい。おやすみなさい。",
-    "day": "はい。失礼いたします。",
-}
 
 AIZUCHI_FREQUENCY_PRESETS: dict[str, dict[str, Any]] = {
     "eager": {
@@ -3279,7 +3271,6 @@ def sanitize_aizuchi_only_turns(
         set(AIZUCHI_ONLY_VOCAB)
         | set(AIZUCHI_ONLY_PROBE_REPLIES)
         | {AIZUCHI_ONLY_GREETING}
-        | set(AIZUCHI_ONLY_CLOSINGS.values())
     )
     out: list[DialogueTurn] = []
     limited_used: dict[str, int] = {}
@@ -3301,16 +3292,9 @@ def sanitize_aizuchi_only_turns(
         if text not in allowed:
             continue
         is_probe_reply = text in AIZUCHI_ONLY_PROBE_REPLIES
-        # 名乗りと終話は相づちではないので、相づちの規則で落とさない。
+        # 名乗りは相づちではないので、相づちの規則で落とさない。
         if text == AIZUCHI_ONLY_GREETING and not out:
             out.append(turn)
-            continue
-        if text in AIZUCHI_ONLY_CLOSINGS.values():
-            while out and out[-1].speaker == "silence":
-                out.pop()
-            # 相づちの直後には置かない。話し手の言葉を受けて切るのが電話。
-            if out and out[-1].speaker == "user":
-                out.append(turn)
             continue
         previous = out[-1] if out else None
         if previous is None or previous.speaker == "moshi":

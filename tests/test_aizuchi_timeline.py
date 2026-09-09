@@ -12,8 +12,11 @@ from scripts.generate_qwen3_tts_data import (
 )
 from scripts.generate_synthetic_moshi_training_data import (
     AIZUCHI_FREQUENCY_PRESETS,
+    AIZUCHI_ONLY_GREETING,
+    DialogueTurn as SyntheticDialogueTurn,
     complete_aizuchi_reactions,
     pick_reaction_points,
+    sanitize_aizuchi_only_turns,
 )
 
 
@@ -126,6 +129,26 @@ class AizuchiTimelineTest(unittest.TestCase):
         self.assertEqual(
             completed,
             [{"after_clause": 1, "text": "そうなんですね。"}],
+        )
+
+    def test_closing_phrases_are_removed_from_aizuchi_training_data(self) -> None:
+        turns = [
+            SyntheticDialogueTurn("moshi", AIZUCHI_ONLY_GREETING),
+            SyntheticDialogueTurn("user", "今日はもう休みます。"),
+            SyntheticDialogueTurn("moshi", "はい。おやすみなさい。"),
+            SyntheticDialogueTurn("user", "聞いてくれてありがとう。"),
+            SyntheticDialogueTurn("moshi", "はい。失礼いたします。"),
+        ]
+
+        clean_turns = sanitize_aizuchi_only_turns(turns)
+
+        self.assertEqual(
+            [(turn.speaker, turn.text) for turn in clean_turns],
+            [
+                ("moshi", AIZUCHI_ONLY_GREETING),
+                ("user", "今日はもう休みます。"),
+                ("user", "聞いてくれてありがとう。"),
+            ],
         )
 
 

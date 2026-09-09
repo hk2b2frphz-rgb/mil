@@ -14,8 +14,8 @@
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 
-export MIX_VERSION="v4_r20"
-export RUN_ID="mixed_normal_v4_r20_fullft"
+export MIX_VERSION="v5_r20"
+export RUN_ID="mixed_normal_v5_r20_fullft"
 export MLFLOW_EXPERIMENT_NAME="mixed_corpus_fullft_response20"
 export MIX_ROOT="$PWD/data/runs/mixed_normal_${MIX_VERSION}"
 export SRC_RUN_DIR="$MIX_ROOT/mixed"

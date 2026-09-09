@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #PBS -S /bin/bash
-#PBS -N az_n_tts10k4
+#PBS -N az_n_tts10k5
 #PBS -q xvn_s
 #PBS -l select=1:res=middle2
 #PBS -l walltime=24:00:00
@@ -9,8 +9,8 @@
 
 # ASCII ONLY. Do not add non-ASCII text anywhere in this file.
 #
-# Qwen3-TTS for the responsive-normal 10,000-dialogue corpus, v4.
-# Keep v4 separate from earlier output so no stale dialogue or TTS shard is
+# Qwen3-TTS for the responsive-normal 10,000-dialogue corpus, v5.
+# Keep v5 separate from earlier output so no stale dialogue or TTS shard is
 # resumed into this more responsive corpus.
 # Re-submit this same file after walltime to resume unfinished shards.
 # Finished shards, dialogues and requests are all skipped on resume.
@@ -29,7 +29,7 @@
 # scripts/resolve_clone_refs.py picks the reference wav (and transcript, when
 # CLONE_MODE=in-context) out of it by REF_RANK.
 #
-# OUT_ROOT is a new v4 path, so the earlier output and its generation_config.json
+# OUT_ROOT is a new v5 path, so the earlier output and its generation_config.json
 # lock are untouched and there is nothing to delete first.
 
 set -euo pipefail
@@ -37,7 +37,7 @@ cd "${PBS_O_WORKDIR:-$(pwd)}"
 
 export CLONE_OUT_DIR_MOSHI="$PWD/data/clone_examples/99999"
 
-export AIZUCHI_VERSION="v4"
+export AIZUCHI_VERSION="v5"
 export SOURCE_BATCH_ID="qwen_aizuchi_10000_normal_${AIZUCHI_VERSION}"
 export BATCH_ID="aizuchi_normal_10000_${AIZUCHI_VERSION}_tts_vllm"
 export DIALOGUES_JSONL="$PWD/data/runs/aizuchi_normal_10000_${AIZUCHI_VERSION}/dialogue/llm_dialogues/dialogues.jsonl"

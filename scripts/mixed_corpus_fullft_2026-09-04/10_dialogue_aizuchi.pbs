@@ -12,9 +12,9 @@
 # STAGE 0a (OPTIONAL) of the mixed-corpus pipeline.
 # See scripts/mixed_corpus_fullft_2026-09-04/README.md.
 #
-# Regenerates the responsive v4 AIZUCHI half of the corpus. Earlier versions
+# Regenerates the responsive v5 AIZUCHI half of the corpus. Earlier versions
 # are kept separate so their quiet or rapid-fire targets cannot leak in.
-# Stage 3 points at v4 by default.
+# Stage 3 points at v5 by default.
 #
 # This is a thin wrapper around the 2026-09-04 job so the two rounds cannot
 # drift apart: all AIZUCHI_ONLY_* tuning lives in that file, not here.
@@ -27,5 +27,5 @@
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 
-export AIZUCHI_VERSION="v4"
+export AIZUCHI_VERSION="v5"
 exec bash scripts/2026-09-04/aizuchi_normal_dialogue_10000.pbs

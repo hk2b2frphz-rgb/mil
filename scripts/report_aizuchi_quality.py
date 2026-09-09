@@ -54,7 +54,9 @@ LATIN_RE = re.compile(r"[A-Za-z]{3,}")
 # 日本語には出てこない簡体字・中国語の助詞（Qwen 由来の混入を拾う）。
 CHINESE_RE = re.compile(r"[呢吧啊咱们这么吗儿说话时间里线呗什哪对]")
 # 終話の言い回し。対話の最後以外に出てきたら、締めそこねている。
-FAREWELL_RE = re.compile(r"失礼します|失礼いたします|さようなら|ご機嫌よう|また、?お電話|それでは、?また")
+FAREWELL_RE = re.compile(
+    r"おやすみ(?:なさい)?|失礼します|失礼いたします|さようなら|ご機嫌よう|また、?お電話|それでは、?また"
+)
 
 
 def load(path: Path) -> list[dict[str, Any]]:

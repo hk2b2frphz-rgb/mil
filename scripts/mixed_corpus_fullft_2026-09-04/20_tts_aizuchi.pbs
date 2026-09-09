@@ -12,7 +12,7 @@
 # STAGE 0b (OPTIONAL) of the mixed-corpus pipeline.
 # See scripts/mixed_corpus_fullft_2026-09-04/README.md.
 #
-# Renders the responsive v4 AIZUCHI half. Submit after
+# Renders the responsive v5 AIZUCHI half. Submit after
 # scripts/mixed_corpus_fullft_2026-09-04/10_dialogue_aizuchi.pbs. Never resume
 # an earlier TTS output into this run.
 #
@@ -29,5 +29,5 @@
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 
-export AIZUCHI_VERSION="v4"
+export AIZUCHI_VERSION="v5"
 exec bash scripts/2026-09-04/aizuchi_normal_tts_10000.pbs
