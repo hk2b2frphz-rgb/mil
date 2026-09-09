@@ -73,6 +73,23 @@ Otherwise it merges `SFT_LORA_CKPT` before segment extraction and GRPO, inside
 the same PBS job. No separate merge submission is needed. GRPO's reference
 policy is this merged SFT model with the GRPO adapters switched off.
 
+No path is required for the normal submission:
+
+```bash
+qsub scripts/grpo_judge_lora_2026-09-04/30_grpo_train.pbs
+```
+
+When `SFT_LORA_CKPT` is unset, search `experiments` (or `SFT_SEARCH_ROOT`) for
+the most recently modified nonempty `checkpoint_<step>/consolidated/lora.safetensors`
+with a nonempty sibling `config.json`. Directories containing `grpo` (case
+insensitive) and `checkpoint_epoch_*` checkpoints are excluded. Across multiple
+SFT experiments, modification time decides, not validation score or step count.
+The selected path is printed in the job log. An explicit adapter overrides
+discovery, and an existing merged model is always reused first. If there are
+no eligible adapters, the job stops: it cannot create SFT weights from nothing.
+
+To select a particular SFT checkpoint instead:
+
 ```bash
 qsub -v SFT_LORA_CKPT=/path/to/sft/consolidated/lora.safetensors scripts/grpo_judge_lora_2026-09-04/30_grpo_train.pbs
 ```

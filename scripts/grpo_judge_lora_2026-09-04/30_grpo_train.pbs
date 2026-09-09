@@ -34,6 +34,9 @@
 #
 # Optional: MOSHI_WEIGHT (merged output), SFT_HF_REPO (SFT base repository),
 # SFT_LORA_SCALING (otherwise read adapter config), MOSHI_FT_REPO.
+# Without SFT_LORA_CKPT, select the newest nonempty SFT adapter by modification
+# time under SFT_SEARCH_ROOT (default: experiments). Exclude GRPO directories
+# and require the SFT checkpoint_<step>/consolidated layout and config.json.
 # Existing nonempty MOSHI_WEIGHT is reused. Use a new output path for a new SFT.
 #
 # RESUME: re-submitting this same file continues the run. RUN_NAME is a fixed
@@ -82,6 +85,12 @@ SFT_LORA_CKPT="${SFT_LORA_CKPT:-}"
 if [[ -s "$MOSHI_WEIGHT" && -f "$MOSHI_WEIGHT" ]]; then
     echo "reusing merged SFT weights: $MOSHI_WEIGHT"
 else
+    if [[ -z "$SFT_LORA_CKPT" ]]; then
+        SFT_SEARCH_ROOT="${SFT_SEARCH_ROOT:-$PWD/experiments}"
+        echo "searching for latest SFT adapter: $SFT_SEARCH_ROOT"
+        SFT_LORA_CKPT="$(bash scripts/grpo/find_sft_adapter.sh "$SFT_SEARCH_ROOT")"
+        echo "auto-selected SFT adapter: $SFT_LORA_CKPT"
+    fi
     if [[ ! -f "$SFT_LORA_CKPT" || ! -s "$SFT_LORA_CKPT" ]]; then
         echo "ERROR: merged SFT weights missing: $MOSHI_WEIGHT" >&2
         echo "Set SFT_LORA_CKPT to the SFT consolidated/lora.safetensors (see header)." >&2
