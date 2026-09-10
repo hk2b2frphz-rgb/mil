@@ -13,6 +13,7 @@ from scripts.generate_qwen3_tts_data import (
 )
 from scripts.generate_synthetic_moshi_training_data import (
     AIZUCHI_FREQUENCY_PRESETS,
+    AIZUCHI_MIXED_FREQUENCY_POOL,
     AIZUCHI_ONLY_GREETING,
     DialogueTurn as SyntheticDialogueTurn,
     build_aizuchi_only_user_prompt,
@@ -132,6 +133,32 @@ class AizuchiTimelineTest(unittest.TestCase):
         self.assertGreaterEqual(frequency["rates"]["cont"], 0.75)
         self.assertEqual(frequency["max_per_turn"], 3)
         self.assertEqual(frequency["min_per_turn"], 1)
+
+    def test_flood_is_denser_than_normal(self) -> None:
+        flood = AIZUCHI_FREQUENCY_PRESETS["flood"]
+        normal = AIZUCHI_FREQUENCY_PRESETS["normal"]
+
+        for kind in ("end", "cont", "weak"):
+            self.assertGreaterEqual(flood["rates"][kind], normal["rates"][kind])
+        self.assertGreater(flood["max_per_turn"], normal["max_per_turn"])
+        self.assertLess(flood["min_gap"], normal["min_gap"])
+        self.assertEqual(flood["min_per_turn"], 1)
+
+    def test_flood_reacts_at_every_clause_boundary(self) -> None:
+        clauses = ["一つ目、", "二つ目、", "三つ目、", "四つ目。"]
+
+        points = pick_reaction_points(
+            clauses, AIZUCHI_FREQUENCY_PRESETS["flood"], random.Random(0)
+        )
+
+        self.assertEqual([point["after_clause"] for point in points], [1, 2, 3, 4])
+
+    def test_flood_is_excluded_from_the_mixed_pool(self) -> None:
+        self.assertNotIn("flood", AIZUCHI_MIXED_FREQUENCY_POOL)
+        self.assertEqual(
+            set(AIZUCHI_MIXED_FREQUENCY_POOL),
+            set(AIZUCHI_FREQUENCY_PRESETS) - {"flood"},
+        )
 
     def test_zero_silence_budget_disables_planned_and_inline_pauses(self) -> None:
         args = SimpleNamespace(

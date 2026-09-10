@@ -2822,6 +2822,24 @@ AIZUCHI_FREQUENCY_PRESETS: dict[str, dict[str, Any]] = {
             "十分に間隔を空けて三つまで返してかまいません。"
         ),
     },
+    "flood": {
+        "label": "連発",
+        # normal(v6) をさらに上回る密度を見るための上限側プリセット。どの切れ目でも
+        # ほぼ必ず反応し、読点だけの弱い切れ目でも入れる。min_gap=0 なので隣の句に
+        # 続けて置くことも許す（normal は 1 句空ける）。不自然になるのは想定内で、
+        # 「打ちすぎ」側の端を測るための条件。
+        "rates": {"end": 1.0, "cont": 1.0, "weak": 0.85},
+        "max_per_turn": 6,
+        "min_per_turn": 1,
+        "min_chars": 0,
+        "min_gap": 0,
+        "min_chunk_chars": 0,
+        "directive": (
+            "- 打ち方は「連発」です。相手の句の切れ目ごとに、ほぼ毎回受け止めます。\n"
+            "- 短い発話にも必ず一つ入れます。読点だけの切れ目にも入れてかまいません。\n"
+            "- 一発話に六つまで返してかまいません。間隔を空ける必要はありません。"
+        ),
+    },
     "reserved": {
         "label": "控えめ",
         "rates": {"end": 0.40, "cont": 0.12, "weak": 0.0},
@@ -2837,6 +2855,10 @@ AIZUCHI_FREQUENCY_PRESETS: dict[str, dict[str, Any]] = {
     },
 }
 AIZUCHI_FREQUENCY_CHOICES = tuple(AIZUCHI_FREQUENCY_PRESETS) + ("mixed",)
+# mixed が引くのは三条件だけ。flood は「打ちすぎ」側の端を測るための上限条件で、
+# 名前で選ばれたときにだけ使う -- mixed の分布に混ぜると、既存の mixed コーパスが
+# 黙って別物になる。
+AIZUCHI_MIXED_FREQUENCY_POOL = ("eager", "normal", "reserved")
 
 
 def resolve_aizuchi_frequency(
@@ -2844,7 +2866,7 @@ def resolve_aizuchi_frequency(
 ) -> tuple[str, dict[str, Any]]:
     """プリセット名を解決する。mixed は対話ごとに三つから引く。"""
     if name == "mixed":
-        name = rng.choice(list(AIZUCHI_FREQUENCY_PRESETS))
+        name = rng.choice(list(AIZUCHI_MIXED_FREQUENCY_POOL))
     try:
         return name, AIZUCHI_FREQUENCY_PRESETS[name]
     except KeyError:
