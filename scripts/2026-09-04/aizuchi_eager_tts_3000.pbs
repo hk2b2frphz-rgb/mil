@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #PBS -S /bin/bash
-#PBS -N az_e_tts3k6
+#PBS -N az_e_tts3k7
 #PBS -q xvn_s
 #PBS -l select=1:res=middle2
 #PBS -l walltime=24:00:00
@@ -9,7 +9,7 @@
 
 # ASCII ONLY. Do not add non-ASCII text anywhere in this file.
 #
-# Qwen3-TTS for the eager, silence-free 3,000-dialogue corpus, v6.
+# Qwen3-TTS for the eager, silence-free 3,000-dialogue corpus, v7.
 # Submit after scripts/2026-09-04/aizuchi_eager_dialogue_3000.pbs.
 # Re-submit this file to resume unfinished shards.
 #
@@ -24,7 +24,7 @@ cd "${PBS_O_WORKDIR:-$(pwd)}"
 # resolves to "mixed" when only a moshi clone source is present.
 export CLONE_OUT_DIR_MOSHI="$PWD/data/clone_examples/99999"
 
-export AIZUCHI_VERSION="v6"
+export AIZUCHI_VERSION="v7"
 export SOURCE_BATCH_ID="qwen_aizuchi_3000_eager_${AIZUCHI_VERSION}"
 export BATCH_ID="aizuchi_eager_3000_${AIZUCHI_VERSION}_tts_vllm"
 export DIALOGUES_JSONL="$PWD/data/runs/aizuchi_eager_3000_${AIZUCHI_VERSION}/dialogue/llm_dialogues/dialogues.jsonl"

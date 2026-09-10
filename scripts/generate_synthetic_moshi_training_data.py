@@ -2792,17 +2792,26 @@ AIZUCHI_FREQUENCY_PRESETS: dict[str, dict[str, Any]] = {
         "label": "積極的",
         # 切れ目の種類ごとに、そこで反応する確率。長い発話ほど候補は増えるが、
         # 不自然な連発を避けるため、最終的には max_per_turn で抑える。
-        "rates": {"end": 0.90, "cont": 0.55, "weak": 0.20},
-        "max_per_turn": 3,
-        "min_chars": 10,
-        "min_gap": 1,
-        "min_chunk_chars": 6,
+        #
+        # v6 で normal を talkative 化した際、eager は据え置かれたため
+        # eager < normal という名前と逆の状態になっていた。ここで normal を
+        # 明確に上回るよう引き上げる: 弱い切れ目でも半分は返し、min_gap=0 で
+        # 隣り合う句にも置ける（短い発話は句が 1-2 個しかなく、min_gap=1 では
+        # どれだけ rates を上げても 1 発話 1 件が上限になってしまう）。
+        # min_chunk_chars=4 が残るので「まあ、」のような数文字の断片では返さない。
+        # 密度は reserved < normal < eager < flood。
+        "rates": {"end": 1.0, "cont": 0.85, "weak": 0.5},
+        "max_per_turn": 4,
+        "min_per_turn": 1,
+        "min_chars": 0,
+        "min_gap": 0,
+        "min_chunk_chars": 4,
         "directive": (
             "- 打ち方は「積極的」です。相手が話しやすいよう、意味の区切りごとに"
             "こまめに受け止めます。\n"
-            "- 短い発話にも一つ入れてかまいません。発話の最後の句の後にも基本的に"
-            "一つ置きます。\n"
-            "- ただし一息の途中（読点だけの切れ目）には割り込みません。"
+            "- どの発話にも最低一つは返します。短い発話でも必ず一つ入れます。\n"
+            "- 一息の途中（読点だけの切れ目）にも、半分くらいは入れてかまいません。"
+            "一発話に四つまで返せます。"
         ),
     },
     "normal": {

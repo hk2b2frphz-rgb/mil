@@ -134,6 +134,24 @@ class AizuchiTimelineTest(unittest.TestCase):
         self.assertEqual(frequency["max_per_turn"], 3)
         self.assertEqual(frequency["min_per_turn"], 1)
 
+    def test_eager_is_denser_than_normal(self) -> None:
+        eager = AIZUCHI_FREQUENCY_PRESETS["eager"]
+        normal = AIZUCHI_FREQUENCY_PRESETS["normal"]
+
+        for kind in ("end", "cont", "weak"):
+            self.assertGreaterEqual(eager["rates"][kind], normal["rates"][kind])
+        self.assertGreaterEqual(eager["max_per_turn"], normal["max_per_turn"])
+        self.assertEqual(eager["min_per_turn"], 1)
+
+    def test_eager_reacts_to_a_one_clause_turn(self) -> None:
+        points = pick_reaction_points(
+            ["結局一人きりで家につくわけですからねえ。"],
+            AIZUCHI_FREQUENCY_PRESETS["eager"],
+            random.Random(3),
+        )
+
+        self.assertEqual(points, [{"after_clause": 1, "kind": "end"}])
+
     def test_flood_is_denser_than_normal(self) -> None:
         flood = AIZUCHI_FREQUENCY_PRESETS["flood"]
         normal = AIZUCHI_FREQUENCY_PRESETS["normal"]
