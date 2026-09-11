@@ -382,4 +382,26 @@ print(
     f"aggregate_audio_x={audio_sec / wall_sec:.3f} aggregate_rtf={rtf:.3f}"
 )
 PY
+
+# Smoke runs ask for the per-dialogue cost and the turn-taking numbers. Skipped
+# by default: the report reads every rendered WAV, which is fine for a handful
+# of dialogues and pointless for a few thousand.
+if [[ -n "${SMOKE_REPORT_LABEL:-}" ]]; then
+    echo "===== smoke report ====="
+    report_args=(
+        uv run python scripts/report_tts_smoke.py
+        --projection "${REPORT_PROJECTION:-3000}"
+        --json-out "$OUT_ROOT/smoke_report.json"
+    )
+    for ((i = 0; i < NUM_SHARDS; i++)); do
+        shard_tag="$(printf 'shard_%03d' "$i")"
+        label="$SMOKE_REPORT_LABEL"
+        if [[ "$NUM_SHARDS" -gt 1 ]]; then
+            label="${SMOKE_REPORT_LABEL}_${shard_tag}"
+        fi
+        report_args+=(--training-dir "$OUT_ROOT/$shard_tag/training_set" --label "$label")
+    done
+    "${report_args[@]}"
+fi
+
 echo "finished_at:     $(date -Iseconds)"

@@ -610,12 +610,17 @@ def main() -> int:
         manifest_path.write_text("", encoding="utf-8")
         dialogues_path.write_text("", encoding="utf-8")
 
+    load_started = time.time()
     renderer = KaburiRenderer(args)
+    load_elapsed = time.time() - load_started
+    logger.info("モデルのロードに %.1f 秒", load_elapsed)
 
     import torch
     import torchaudio
 
-    success = len(done_stems)
+    render_started = time.time()
+    initial_success = len(done_stems)
+    success = initial_success
     failed = 0
     for index, dialogue in enumerate(dialogues, start=1):
         if args.success_target is not None and success >= args.success_target:
@@ -729,7 +734,16 @@ def main() -> int:
                 len(rendered["chunks"]), mean_overlap, elapsed,
             )
 
+    render_elapsed = time.time() - render_started
+    rendered_now = success - initial_success
     logger.info("完了: 成功 %d 件 / 失敗 %d 件 -> %s", success, failed, manifest_path)
+    logger.info(
+        "所要時間: モデルロード %.1f 秒 + 合成 %.1f 秒 (%d 件, %.1f 秒/件)",
+        load_elapsed,
+        render_elapsed,
+        rendered_now,
+        render_elapsed / rendered_now if rendered_now else 0.0,
+    )
     if success == 0:
         return 1
     return 0
