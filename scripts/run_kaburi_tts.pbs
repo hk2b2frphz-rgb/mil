@@ -264,11 +264,14 @@ then
 fi
 
 # Reading a wav is the first thing the reference-pack build does, and it goes
-# through torchcodec, which fails on a CUDA mismatch only at that point. Check
-# it here rather than after downloading 5GB of weights.
-if ! "${KABURI_UV[@]}" scripts/kaburi_audio_io_check.py; then
+# through torchcodec, which fails on a CUDA mismatch only at that point. Probe
+# it here rather than after downloading 5GB of weights -- and repair it in
+# place, because being sent off to run the setup script again is no better than
+# the failure. A no-op when the environment is healthy. Serial: this runs once,
+# before any shard starts, so no two processes write the venv at the same time.
+# KABURI_AUTO_REPAIR=0 makes it report instead of repairing.
+if ! bash scripts/fix_kaburi_audio_io.sh; then
     echo "ERROR: torchaudio cannot read audio in the KABURI environment." >&2
-    echo "Re-run scripts/setup_kaburi_env.sh -- it repairs the torchcodec build." >&2
     echo "To retry the probe alone: bash scripts/run_kaburi_audio_check.sh" >&2
     exit 1
 fi

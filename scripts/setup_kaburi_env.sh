@@ -82,90 +82,12 @@ else:
     print("gpu: none visible here (the PBS job checks this again)")
 PY
 
-# torchaudio 2.9+ implements load/save through torchcodec, whose wheels are
-# built per CUDA major version. The PyPI default can disagree with the torch
-# that uv just installed, and then every wav read dies with
-# "libnvrtc.so.<N>: cannot open shared object file" -- not at import, but at
-# the first file access, which is the reference-pack build. Catch it here.
+# torchaudio 2.9+ reads and writes audio through torchcodec, and uv can resolve
+# a torchcodec built for a different CUDA than torch. That breaks every wav
+# access, but only on first file I/O, so it has to be probed rather than
+# imported. The same script runs in the render job's preflight.
 echo "[kaburi] audio I/O check"
-VENV_PYTHON="$KABURI_REPO/.venv/bin/python"
-
-# uv pip must cross the same proxy as uv sync did.
-PIP_TLS=()
-if [[ "${KABURI_NATIVE_TLS:-1}" == "1" ]]; then
-    PIP_TLS=("$(kaburi_tls_flag)")
-fi
-
-audio_io_ok() {
-    # Re-export first: a repair may have just created the nvidia/*/lib
-    # directory that the loader needs on LD_LIBRARY_PATH, and the path was
-    # built before that existed.
-    kaburi_export_ldpath
-    "${KABURI_UV[@]}" scripts/kaburi_audio_io_check.py
-}
-
-install_torchcodec_from() {  # install_torchcodec_from <index-url> [spec]
-    uv pip install --python "$VENV_PYTHON" ${PIP_TLS[@]+"${PIP_TLS[@]}"} \
-        --index-url "$1" --upgrade "${2:-torchcodec}"
-}
-
-if ! audio_io_ok; then
-    CUDA_TAG="$("${KABURI_UV[@]}" -c \
-        'import torch; v=torch.version.cuda or ""; print("cu"+v.replace(".",""))')"
-    if [[ -z "$CUDA_TAG" || "$CUDA_TAG" == "cu" ]]; then
-        CUDA_TAG="cpu"
-    fi
-
-    # 1. A torchcodec built for the same CUDA as this torch.
-    echo "[kaburi] repair 1/3: torchcodec from the $CUDA_TAG index"
-    install_torchcodec_from "https://download.pytorch.org/whl/$CUDA_TAG" || true
-
-    if ! audio_io_ok; then
-        # 2. The CPU build. Decoding a wav needs no GPU at all, and the CPU
-        #    wheel links none of the CUDA runtime that is missing here. This
-        #    only gives up GPU media decoding, which nothing in this pipeline
-        #    uses -- KABURI's own inference runs on the acoustic model.
-        echo "[kaburi] repair 2/3: CPU-only torchcodec"
-        install_torchcodec_from "https://download.pytorch.org/whl/cpu" || true
-    fi
-
-    if ! audio_io_ok; then
-        # 3. Keep whatever torchcodec is installed and give it the CUDA
-        #    runtime it asks for. Into the project venv, not a uv overlay, so
-        #    the .so's RPATH (relative to site-packages) can find it; audio_io_ok
-        #    also re-exports LD_LIBRARY_PATH for the case where it cannot.
-        NVRTC_MAJOR="$("${KABURI_UV[@]}" - <<'PY' || true
-import re
-try:
-    from torchcodec._core import _metadata  # noqa: F401
-except Exception as exc:
-    match = re.search(r"libnvrtc\.so\.(\d+)", str(exc))
-    print(match.group(1) if match else "")
-else:
-    print("")
-PY
-)"
-        NVRTC_MAJOR="$(printf '%s' "$NVRTC_MAJOR" | tr -dc '0-9')"
-        NVRTC_MAJOR="${NVRTC_MAJOR:-13}"
-        echo "[kaburi] repair 3/3: nvidia-cuda-nvrtc-cu$NVRTC_MAJOR"
-        uv pip install --python "$VENV_PYTHON" ${PIP_TLS[@]+"${PIP_TLS[@]}"} \
-            "nvidia-cuda-nvrtc-cu${NVRTC_MAJOR}" || true
-    fi
-
-    if ! audio_io_ok; then
-        echo >&2
-        echo "ERROR: torchaudio still cannot read audio in $KABURI_REPO/.venv" >&2
-        echo "Three repairs were tried: torchcodec from $CUDA_TAG, the CPU" >&2
-        echo "torchcodec, and the nvrtc runtime it asks for. From here, by hand:" >&2
-        echo "  $VENV_PYTHON -m pip index versions torchcodec   # what is available" >&2
-        echo "  uv pip install --python $VENV_PYTHON \\" >&2
-        echo "    --index-url https://download.pytorch.org/whl/cpu 'torchcodec<0.10'" >&2
-        echo "Verify with: bash scripts/run_kaburi_audio_check.sh" >&2
-        exit 1
-    fi
-    echo "[kaburi] audio I/O repaired"
-    "${KABURI_UV[@]}" -c 'import torchcodec; print("torchcodec:", torchcodec.__version__)'
-fi
+bash scripts/fix_kaburi_audio_io.sh
 
 echo
 echo "[kaburi] done. Point jobs at it with:"

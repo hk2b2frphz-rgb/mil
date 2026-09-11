@@ -55,8 +55,9 @@ qsub -V scripts/2026-09-04/aizuchi_normal_kaburi_tts_3000.pbs
   → TLS 傍受プロキシ。`SSL_CERT_FILE` か `KABURI_TORCH_FROM_PYPI=1`
 - `libnvrtc.so.13: cannot open shared object file`
   → torchaudio 2.9+ が load/save を torchcodec 経由にしており、その wheel の CUDA が
-  torch と食い違っている。setup が検知して自動修復する（`scripts/kaburi_audio_io_check.py`
-  で単体確認できる）
+  torch と食い違っている。`scripts/fix_kaburi_audio_io.sh` が自動修復する。setup と
+  レンダリングジョブの preflight の両方から呼ばれるので、**別途実行する必要は無い**
+  （健全なら何もしない）。単体確認は `bash scripts/run_kaburi_audio_check.sh`
 
 本番前に3対話だけ流して所要時間と重なりを測る smoke が両方式に用意してある。
 `scripts/report_tts_smoke.py` が対話あたりの秒数・RTF・3000本換算の見積もりと、
