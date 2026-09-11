@@ -97,27 +97,43 @@ if [[ "${KABURI_NATIVE_TLS:-1}" == "1" ]]; then
 fi
 
 audio_io_ok() {
+    # Re-export first: a repair may have just created the nvidia/*/lib
+    # directory that the loader needs on LD_LIBRARY_PATH, and the path was
+    # built before that existed.
+    kaburi_export_ldpath
     "${KABURI_UV[@]}" scripts/kaburi_audio_io_check.py
+}
+
+install_torchcodec_from() {  # install_torchcodec_from <index-url> [spec]
+    uv pip install --python "$VENV_PYTHON" ${PIP_TLS[@]+"${PIP_TLS[@]}"} \
+        --index-url "$1" --upgrade "${2:-torchcodec}"
 }
 
 if ! audio_io_ok; then
     CUDA_TAG="$("${KABURI_UV[@]}" -c \
         'import torch; v=torch.version.cuda or ""; print("cu"+v.replace(".",""))')"
     if [[ -z "$CUDA_TAG" || "$CUDA_TAG" == "cu" ]]; then
-        echo "ERROR: this torch reports no CUDA version; cannot pick a torchcodec build." >&2
-        exit 1
+        CUDA_TAG="cpu"
     fi
 
-    # First try: a torchcodec built for the same CUDA as this torch.
-    echo "[kaburi] repair 1/2: torchcodec from the $CUDA_TAG index"
-    uv pip install --python "$VENV_PYTHON" ${PIP_TLS[@]+"${PIP_TLS[@]}"} \
-        --index-url "https://download.pytorch.org/whl/$CUDA_TAG" \
-        --upgrade torchcodec || true
+    # 1. A torchcodec built for the same CUDA as this torch.
+    echo "[kaburi] repair 1/3: torchcodec from the $CUDA_TAG index"
+    install_torchcodec_from "https://download.pytorch.org/whl/$CUDA_TAG" || true
 
     if ! audio_io_ok; then
-        # Second try: keep the torchcodec that is installed and give it the
-        # CUDA runtime it was built against. Into the project venv, not a uv
-        # overlay, so the .so's RPATH (relative to site-packages) finds it.
+        # 2. The CPU build. Decoding a wav needs no GPU at all, and the CPU
+        #    wheel links none of the CUDA runtime that is missing here. This
+        #    only gives up GPU media decoding, which nothing in this pipeline
+        #    uses -- KABURI's own inference runs on the acoustic model.
+        echo "[kaburi] repair 2/3: CPU-only torchcodec"
+        install_torchcodec_from "https://download.pytorch.org/whl/cpu" || true
+    fi
+
+    if ! audio_io_ok; then
+        # 3. Keep whatever torchcodec is installed and give it the CUDA
+        #    runtime it asks for. Into the project venv, not a uv overlay, so
+        #    the .so's RPATH (relative to site-packages) can find it; audio_io_ok
+        #    also re-exports LD_LIBRARY_PATH for the case where it cannot.
         NVRTC_MAJOR="$("${KABURI_UV[@]}" - <<'PY' || true
 import re
 try:
@@ -131,7 +147,7 @@ PY
 )"
         NVRTC_MAJOR="$(printf '%s' "$NVRTC_MAJOR" | tr -dc '0-9')"
         NVRTC_MAJOR="${NVRTC_MAJOR:-13}"
-        echo "[kaburi] repair 2/2: nvidia-cuda-nvrtc-cu$NVRTC_MAJOR"
+        echo "[kaburi] repair 3/3: nvidia-cuda-nvrtc-cu$NVRTC_MAJOR"
         uv pip install --python "$VENV_PYTHON" ${PIP_TLS[@]+"${PIP_TLS[@]}"} \
             "nvidia-cuda-nvrtc-cu${NVRTC_MAJOR}" || true
     fi
@@ -139,14 +155,16 @@ PY
     if ! audio_io_ok; then
         echo >&2
         echo "ERROR: torchaudio still cannot read audio in $KABURI_REPO/.venv" >&2
-        echo "torchcodec and torch disagree about CUDA. From here, by hand:" >&2
+        echo "Three repairs were tried: torchcodec from $CUDA_TAG, the CPU" >&2
+        echo "torchcodec, and the nvrtc runtime it asks for. From here, by hand:" >&2
+        echo "  $VENV_PYTHON -m pip index versions torchcodec   # what is available" >&2
         echo "  uv pip install --python $VENV_PYTHON \\" >&2
-        echo "    --index-url https://download.pytorch.org/whl/$CUDA_TAG torchcodec" >&2
-        echo "  (or pin an older torchcodec that still targets CUDA 12)" >&2
-        echo "Verify with: $VENV_PYTHON scripts/kaburi_audio_io_check.py" >&2
+        echo "    --index-url https://download.pytorch.org/whl/cpu 'torchcodec<0.10'" >&2
+        echo "Verify with: bash scripts/run_kaburi_audio_check.sh" >&2
         exit 1
     fi
-    echo "[kaburi] torchcodec repaired"
+    echo "[kaburi] audio I/O repaired"
+    "${KABURI_UV[@]}" -c 'import torchcodec; print("torchcodec:", torchcodec.__version__)'
 fi
 
 echo

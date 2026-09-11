@@ -269,6 +269,7 @@ fi
 if ! "${KABURI_UV[@]}" scripts/kaburi_audio_io_check.py; then
     echo "ERROR: torchaudio cannot read audio in the KABURI environment." >&2
     echo "Re-run scripts/setup_kaburi_env.sh -- it repairs the torchcodec build." >&2
+    echo "To retry the probe alone: bash scripts/run_kaburi_audio_check.sh" >&2
     exit 1
 fi
 
