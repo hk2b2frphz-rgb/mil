@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N az_step_export
+#PBS -q xan_s
+#PBS -l select=1:res=middle
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# Export a completed full-FT step while training continues.
+# Submit from the repository root:
+#   qsub -v STEP_DIR=/absolute/path/checkpoints/nu_timestamp/step_120 \
+#     scripts/export_aizuchi_checkpoint.pbs
+# Optional: OUT_DIR, SNAPSHOT_DIR, STABLE_SECONDS (default 30).
+# Export options match export_fullft_checkpoint.pbs (MODEL_DTYPE, etc.).
+# Originals are only read. Copies are retained even if conversion fails.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+STEP_DIR="${STEP_DIR:?Pass the completed step_<N> directory with qsub -v STEP_DIR=...}"
+STEP_DIR="$(realpath -e "$STEP_DIR")"
+STEP_NAME="$(basename "$STEP_DIR")"
+if ! [[ "$STEP_NAME" =~ ^step_[0-9]+$ ]]; then
+    echo "ERROR: STEP_DIR must name a step_<N> directory." >&2
+    exit 1
+fi
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)_$$}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+# Deliberately ignore an inherited training RUN_ID.
+export RUN_ID="aizuchi_export_${STEP_NAME}_${JOB_ID_SHORT}"
+RUN_DIR="$PWD/exported_model/$RUN_ID"
+export OUT_DIR="$(realpath -m "${OUT_DIR:-$RUN_DIR/exported}")"
+SNAPSHOT_DIR="$(realpath -m "${SNAPSHOT_DIR:-$RUN_DIR/checkpoint/$STEP_NAME}")"
+export CHECKPOINT_TAG="${CHECKPOINT_TAG:-pytorch_model}"
+
+# Never sync/update the shared training environment during an export.
+export UV_NO_SYNC=1
+export PYTHONDONTWRITEBYTECODE=1
+command -v uv >/dev/null 2>&1 || { echo "ERROR: uv is required." >&2; exit 1; }
+
+echo "source_step:  $STEP_DIR"
+echo "snapshot:     $SNAPSHOT_DIR"
+echo "exported:     $OUT_DIR"
+uv run --no-sync python scripts/snapshot_fullft_checkpoint.py \
+    --step-dir "$STEP_DIR" \
+    --snapshot-dir "$SNAPSHOT_DIR" \
+    --out-dir "$OUT_DIR" \
+    --tag "$CHECKPOINT_TAG" \
+    --stable-seconds "${STABLE_SECONDS:-30}"
+
+# All conversion tools now see only the independent copy.
+export STEP_DIR="$SNAPSHOT_DIR"
+exec bash scripts/export_fullft_checkpoint.pbs
