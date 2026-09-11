@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N az_n_kab3k6
+#PBS -q xan_s
+#PBS -l select=1:res=middle
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# KABURI-TTS for the talkative, silence-free 3,000-dialogue corpus, v6.
+# Same corpus as aizuchi_normal_tts_3000.pbs (Qwen3-TTS), rendered by
+# KABURI-TTS instead, so the two training sets differ only in the TTS stage.
+#
+# Why: the Qwen3/Kokoro path synthesizes each utterance on its own and lays the
+# pieces out, which leaves almost no overlap between the two channels. KABURI
+# renders both speakers together and its gap model places the backchannels, so
+# the corpus actually contains the overlapping aizuchi the model is meant to
+# learn. Feed the result to aizuchi_normal_fullft_3000.pbs with
+# SRC_RUN_DIR=data/runs/aizuchi_normal_3000_v6/kaburi_tts/merged to compare.
+#
+# One A100 queue, two GPUs: the codec decodes in bfloat16, which V100 lacks.
+# Prerequisite (once per environment): bash scripts/setup_kaburi_env.sh
+#
+# Re-submit this file to resume unfinished shards.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export AIZUCHI_VERSION="v6"
+export SOURCE_BATCH_ID="qwen_aizuchi_3000_normal_${AIZUCHI_VERSION}"
+export BATCH_ID="aizuchi_normal_3000_${AIZUCHI_VERSION}_kaburi"
+export DIALOGUES_JSONL="$PWD/data/runs/aizuchi_normal_3000_${AIZUCHI_VERSION}/dialogue/llm_dialogues/dialogues.jsonl"
+export OUT_ROOT="$PWD/data/runs/aizuchi_normal_3000_${AIZUCHI_VERSION}/kaburi_tts"
+export NUM_DIALOGUES="${NUM_DIALOGUES:-3000}"
+
+exec bash scripts/run_kaburi_tts.pbs

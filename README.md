@@ -36,6 +36,24 @@ qsub -V scripts/run_qwen_tts_whole_utterance_3000_4gpu.pbs
 TTS のバックエンドは 1000 が Qwen3-TTS、3000/10000 は Kokoro（Qwen3-TTS では
 walltime 内に終わらないため）。
 
+### KABURI-TTS バックエンド
+
+上の経路は発話ごとに合成して並べるため、チャンネル間の重なりがほとんど残らない
+（[KABURI-TTS 論文](https://arxiv.org/abs/2609.07200) の Irodori 系ベースライン
+と同じ条件で、overlap 0.013 / 交替 11.6 回per分）。相槌のかぶりを含む学習データ
+が要る場合は、2話者を左右チャンネルへ同時にレンダリングする KABURI-TTS を使う。
+
+```bash
+bash scripts/setup_kaburi_env.sh            # 初回のみ（../kaburi-tts を用意）
+qsub -V scripts/2026-09-04/aizuchi_normal_kaburi_tts_3000.pbs
+```
+
+配置（間・かぶり）は KABURI の gap model が決めるので `LEAD_IN_SEC` / `GAP_SEC` /
+`--auto-overlap-aizuchi` は無い。発話境界は入力した音素ラスタから取るため MMS_FA も
+通さない。KABURI のキャンバスは30秒固定なので、対話は30秒以内のチャンクに切って
+合成し連結する（境界で韻律が途切れる）。codec が bfloat16 で復号するため A100
+（`xan_s`）で回す。出力の形は Qwen3/Kokoro 版と同じで、`merged/` 以降は共通。
+
 ## 2. 学習
 
 ハイパラは `experiments/<name>/config.yaml` で管理する。

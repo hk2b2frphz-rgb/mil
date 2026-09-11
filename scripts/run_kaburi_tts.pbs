@@ -1,0 +1,351 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N kaburi_tts
+#PBS -q xan_s
+#PBS -l select=1:res=middle
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# KABURI-TTS production body. Renders a dialogues.jsonl corpus into the same
+# Moshi fine-tune layout the Qwen3/Kokoro path produces, so everything from
+# merge_training_shards.py onwards is unchanged.
+#
+# Unlike the Qwen3/Kokoro path this does NOT synthesize per utterance and lay
+# the pieces out: KABURI renders both speakers at once on separate channels and
+# its gap model decides the overlaps and pauses. There is no LEAD_IN_SEC /
+# GAP_SEC / auto-overlap-aizuchi here, and no MMS_FA forced alignment -- the
+# utterance boundaries come straight from the phoneme raster that was fed in.
+#
+# KABURI's canvas is a fixed 30 seconds. Listening dialogues run 2-3 minutes, so
+# generate_kaburi_tts_data.py cuts each dialogue into chunks that fit and
+# concatenates the rendered chunks (prosody is discontinuous at the seams).
+#
+# A100 queue on purpose: the codec decodes in bfloat16, which V100 (sm70) does
+# not support in hardware.
+#
+# Submit a wrapper such as scripts/2026-09-04/aizuchi_normal_kaburi_tts_3000.pbs
+# rather than this file. Re-submit to resume: finished shards are skipped and
+# an unfinished shard continues per dialogue.
+#
+# Useful overrides:
+#   KABURI_REPO=/path/to/kaburi-tts     (default: ../kaburi-tts)
+#   KABURI_REF_PACK=/path/to/refpack    (default: bundled assets/test_refpack)
+#   NUM_SHARDS=2 CUDA_VISIBLE_DEVICES=0,1
+#   NUM_DIALOGUES=all
+#   CHUNK_SEC=26 CHUNK_GAP_SEC=0.3 MIN_FIT_SCALE=0.9
+#   CFG_SCALE=2.5 NUM_STEPS=32 SAMPLE_RATE=24000
+#   FRESH=1   # ignore existing output and start a new timestamped run
+#   RESUME=0  # force a clean re-render into the same directory
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+if [[ -f "$PWD/scripts/setup_proxy.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$PWD/scripts/setup_proxy.sh"
+fi
+# shellcheck source=/dev/null
+source "$PWD/scripts/run_id_utils.sh"
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH." >&2
+    exit 1
+}
+
+if [[ -z "${SOURCE_BATCH_ID:-}" && -z "${DIALOGUES_JSONL:-}" ]]; then
+    echo "ERROR: set SOURCE_BATCH_ID or DIALOGUES_JSONL before running this body." >&2
+    exit 1
+fi
+export SOURCE_BATCH_ID="${SOURCE_BATCH_ID:-kaburi_source}"
+
+export KABURI_REPO="${KABURI_REPO:-$PWD/../kaburi-tts}"
+if [[ ! -d "$KABURI_REPO/kaburi_tts" ]]; then
+    echo "ERROR: KABURI-TTS checkout not found: $KABURI_REPO" >&2
+    echo "Run scripts/setup_kaburi_env.sh first." >&2
+    exit 1
+fi
+export KABURI_REF_PACK="${KABURI_REF_PACK:-$KABURI_REPO/assets/test_refpack}"
+if [[ ! -s "$KABURI_REF_PACK/manifest.jsonl" ]]; then
+    echo "ERROR: reference pack has no manifest.jsonl: $KABURI_REF_PACK" >&2
+    exit 1
+fi
+
+default_batch_id="${SOURCE_BATCH_ID}_kaburi"
+if [[ "${FRESH:-0}" == "1" ]]; then
+    export BATCH_ID="${BATCH_ID:-$(default_run_id "$default_batch_id")}"
+else
+    export BATCH_ID="${BATCH_ID:-$default_batch_id}"
+fi
+if ! [[ "$BATCH_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "ERROR: BATCH_ID may contain only letters, digits, dot, underscore, hyphen." >&2
+    exit 1
+fi
+export RUN_ID="$BATCH_ID"
+export DIALOGUES_JSONL="${DIALOGUES_JSONL:-$PWD/data/runs/${SOURCE_BATCH_ID}/llm_dialogues/dialogues.jsonl}"
+export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/$BATCH_ID}"
+
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+IFS=',' read -r -a GPU_IDS <<< "$CUDA_VISIBLE_DEVICES"
+export NUM_SHARDS="${NUM_SHARDS:-${#GPU_IDS[@]}}"
+export NUM_DIALOGUES="${NUM_DIALOGUES:-all}"
+export SPARE_RATIO="${SPARE_RATIO:-0.15}"
+export CHUNK_SEC="${CHUNK_SEC:-26}"
+export CHUNK_GAP_SEC="${CHUNK_GAP_SEC:-0.3}"
+export MIN_FIT_SCALE="${MIN_FIT_SCALE:-0.9}"
+export CFG_SCALE="${CFG_SCALE:-2.5}"
+export NUM_STEPS="${NUM_STEPS:-32}"
+export SAMPLE_RATE="${SAMPLE_RATE:-24000}"
+export SEED="${SEED:-0}"
+export LOG_EVERY="${LOG_EVERY:-20}"
+export VERBOSE="${VERBOSE:-0}"
+export RESUME="${RESUME:-auto}"
+
+if ! [[ "$NUM_SHARDS" =~ ^[0-9]+$ ]] || [[ "$NUM_SHARDS" -lt 1 ]]; then
+    echo "ERROR: NUM_SHARDS must be a positive integer: $NUM_SHARDS" >&2
+    exit 1
+fi
+if [[ "${#GPU_IDS[@]}" -lt "$NUM_SHARDS" ]]; then
+    echo "ERROR: CUDA_VISIBLE_DEVICES has ${#GPU_IDS[@]} GPU(s), but NUM_SHARDS=$NUM_SHARDS" >&2
+    exit 1
+fi
+if [[ "$NUM_DIALOGUES" != "all" ]]; then
+    if ! [[ "$NUM_DIALOGUES" =~ ^[0-9]+$ ]] || [[ "$NUM_DIALOGUES" -lt 1 ]]; then
+        echo "ERROR: NUM_DIALOGUES must be a positive integer or 'all': $NUM_DIALOGUES" >&2
+        exit 1
+    fi
+fi
+if [[ ! -s "$DIALOGUES_JSONL" ]]; then
+    echo "ERROR: dialogues JSONL was not found or is empty: $DIALOGUES_JSONL" >&2
+    exit 1
+fi
+
+if [[ "$RESUME" == "auto" ]]; then
+    if compgen -G "$OUT_ROOT/shard_*/training_set/synthetic_moshi_train.jsonl" >/dev/null 2>&1; then
+        RESUME=1
+    else
+        RESUME=0
+    fi
+fi
+if [[ "$RESUME" != "0" && "$RESUME" != "1" ]]; then
+    echo "ERROR: RESUME must be 0, 1, or auto: $RESUME" >&2
+    exit 1
+fi
+
+mkdir -p "$OUT_ROOT" "$OUT_ROOT/logs" experiments/pbs_logs
+JOB_TAG="${PBS_JOBID:-local}"
+JOB_TAG="${JOB_TAG%%.*}"
+JOB_LOG="experiments/pbs_logs/${BATCH_ID}_${JOB_TAG:-local}.log"
+JOB_STARTED_EPOCH="$(date +%s)"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
+echo "===== KABURI-TTS production ====="
+echo "job_id:        ${PBS_JOBID:-n/a}"
+echo "host:          $(hostname)"
+echo "kaburi_repo:   $KABURI_REPO"
+echo "ref_pack:      $KABURI_REF_PACK"
+echo "source_batch:  $SOURCE_BATCH_ID"
+echo "dialogues:     $DIALOGUES_JSONL"
+echo "out_root:      $OUT_ROOT"
+echo "resume:        $RESUME"
+echo "num_dialogues: $NUM_DIALOGUES"
+echo "num_shards:    $NUM_SHARDS"
+echo "spare_ratio:   $SPARE_RATIO"
+echo "gpus:          $CUDA_VISIBLE_DEVICES"
+echo "chunking:      chunk_sec=$CHUNK_SEC gap=$CHUNK_GAP_SEC min_fit=$MIN_FIT_SCALE"
+echo "decode:        cfg_scale=$CFG_SCALE steps=$NUM_STEPS sample_rate=$SAMPLE_RATE"
+echo "started_at:    $(date -Iseconds)"
+echo "================================="
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+fi
+
+# KABURI runs in its own uv project (torch cu128, python <3.12); the main env is
+# cu121 and cannot host it. pyopenjtalk is pulled in on top so the word-level
+# alignment split uses morphemes instead of the regex fallback.
+KABURI_UV=(uv run --project "$KABURI_REPO" --with pyopenjtalk python)
+
+echo "===== step 0/3: environment preflight ====="
+"${KABURI_UV[@]}" - <<'PY'
+import torch
+import torchaudio  # noqa: F401
+if not torch.cuda.is_available():
+    raise SystemExit("CUDA is unavailable in the KABURI environment")
+major, minor = torch.cuda.get_device_capability()
+if (major, minor) < (8, 0):
+    raise SystemExit(
+        f"KABURI decodes the codec in bfloat16 and needs sm80+, found sm{major}{minor}"
+    )
+import kaburi_tts  # noqa: F401
+from irodori_tts.codec import DACVAECodec  # noqa: F401
+print("kaburi/irodori/torch preflight ok")
+PY
+
+echo "===== step 1/3: split dialogues ====="
+uv run python - "$DIALOGUES_JSONL" "$OUT_ROOT" "$NUM_SHARDS" "$NUM_DIALOGUES" "$SPARE_RATIO" <<'PY'
+import json
+import math
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+out_root = Path(sys.argv[2])
+num_shards = int(sys.argv[3])
+limit_arg = sys.argv[4]
+limit = None if limit_arg == "all" else int(limit_arg)
+spare_ratio = float(sys.argv[5])
+
+rows = [line for line in src.read_text(encoding="utf-8").splitlines() if line.strip()]
+if limit is not None:
+    rows = rows[:limit]
+if not rows:
+    raise SystemExit("No dialogue rows selected")
+
+n = len(rows)
+counts = [0 for _ in range(num_shards)]
+spare_counts = [0 for _ in range(num_shards)]
+for i in range(num_shards):
+    shard_dir = out_root / "shard_{:03d}".format(i)
+    shard_dir.mkdir(parents=True, exist_ok=True)
+
+    primary = [row for j, row in enumerate(rows) if j % num_shards == i]
+    primary_count = len(primary)
+
+    # Spares absorb per-dialogue failures (a chunk whose realizer drops every
+    # utterance, say) so the shard still reaches its primary count.
+    spare_n = math.ceil(primary_count * spare_ratio) if primary_count > 0 else 0
+    spares = []
+    start = (i * 37) % n
+    k = 0
+    while len(spares) < spare_n:
+        spares.append(rows[(start + k) % n])
+        k += 1
+
+    selected = primary + spares
+    (shard_dir / "dialogues.jsonl").write_text(
+        "\n".join(selected) + ("\n" if selected else ""), encoding="utf-8")
+    (shard_dir / "success_target.txt").write_text(f"{primary_count}\n", encoding="utf-8")
+
+    counts[i] = primary_count
+    spare_counts[i] = len(spares)
+
+summary = {
+    "source": str(src),
+    "selected_dialogues": n,
+    "num_shards": num_shards,
+    "spare_ratio": spare_ratio,
+    "counts": counts,
+    "spare_counts": spare_counts,
+}
+(out_root / "split_summary.json").write_text(
+    json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+print(json.dumps(summary, ensure_ascii=False))
+PY
+
+echo "===== step 2/3: render shards in parallel ====="
+pids=()
+for ((i = 0; i < NUM_SHARDS; i++)); do
+    shard_tag="$(printf 'shard_%03d' "$i")"
+    shard_dir="$OUT_ROOT/$shard_tag"
+    shard_dialogues="$shard_dir/dialogues.jsonl"
+    shard_training="$shard_dir/training_set"
+    shard_log="$OUT_ROOT/logs/${shard_tag}.log"
+    gpu_id="${GPU_IDS[$i]}"
+
+    if [[ ! -s "$shard_dialogues" ]]; then
+        echo "ERROR: split shard is empty: $shard_dialogues" >&2
+        exit 1
+    fi
+    success_target="$(cat "$shard_dir/success_target.txt")"
+
+    shard_manifest="$shard_training/synthetic_moshi_train.jsonl"
+    if [[ "$RESUME" == "1" && -s "$shard_manifest" ]]; then
+        have="$(grep -c . "$shard_manifest" 2>/dev/null || echo 0)"
+        if [[ "$have" -ge "$success_target" ]]; then
+            echo "skipped $shard_tag: already complete ($have/$success_target rows)"
+            continue
+        fi
+        echo "resuming $shard_tag: $have/$success_target rows rendered so far"
+    fi
+
+    (
+        set -euo pipefail
+        echo "[$shard_tag] gpu=$gpu_id dialogues=$shard_dialogues out=$shard_training target=$success_target resume=$RESUME"
+        render_args=(
+            "${KABURI_UV[@]}" scripts/generate_kaburi_tts_data.py
+            --dialogues-jsonl "$shard_dialogues"
+            --out-dir "$shard_training"
+            --kaburi-repo "$KABURI_REPO"
+            --ref-pack "$KABURI_REF_PACK"
+            --device cuda
+            --success-target "$success_target"
+            --chunk-sec "$CHUNK_SEC"
+            --chunk-gap-sec "$CHUNK_GAP_SEC"
+            --min-fit-scale "$MIN_FIT_SCALE"
+            --cfg-scale "$CFG_SCALE"
+            --num-steps "$NUM_STEPS"
+            --sample-rate "$SAMPLE_RATE"
+            --seed "$SEED"
+            --log-every "$LOG_EVERY"
+        )
+        if [[ "$RESUME" == "1" ]]; then
+            render_args+=(--resume)
+        fi
+        if [[ "$VERBOSE" == "1" ]]; then
+            render_args+=(--verbose)
+        fi
+        CUDA_VISIBLE_DEVICES="$gpu_id" "${render_args[@]}"
+        test -s "$shard_training/synthetic_moshi_train.jsonl"
+        echo "[$shard_tag] done"
+    ) > "$shard_log" 2>&1 &
+    pid="$!"
+    pids+=("$pid")
+    echo "started $shard_tag on gpu $gpu_id (pid=$pid, log=$shard_log)"
+done
+
+failed=0
+for pid in "${pids[@]:-}"; do
+    [[ -z "$pid" ]] && continue
+    if ! wait "$pid"; then
+        failed=1
+    fi
+done
+if [[ "$failed" != "0" ]]; then
+    echo "ERROR: at least one KABURI shard failed. Logs: $OUT_ROOT/logs/shard_*.log" >&2
+    exit 1
+fi
+
+echo "===== step 3/3: merge shard manifests ====="
+uv run python scripts/merge_training_shards.py \
+    --batch-dir "$OUT_ROOT" \
+    --out-dir "$OUT_ROOT/merged" \
+    --expected-shards "$NUM_SHARDS"
+
+MERGED_MANIFEST="$OUT_ROOT/merged/training_set/synthetic_moshi_train.jsonl"
+test -s "$MERGED_MANIFEST"
+MERGED_ROWS="$(grep -c . "$MERGED_MANIFEST" || true)"
+echo "merged_manifest: $MERGED_MANIFEST"
+echo "merged_rows:     $MERGED_ROWS"
+uv run python - "$MERGED_MANIFEST" "$JOB_STARTED_EPOCH" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+manifest = Path(sys.argv[1])
+started = float(sys.argv[2])
+rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
+dialogues = len(rows)
+audio_sec = sum(float(row.get("duration") or 0.0) for row in rows)
+wall_sec = max(time.time() - started, 1e-9)
+rtf = wall_sec / audio_sec if audio_sec > 0 else 0.0
+print(
+    "performance: "
+    f"dialogues={dialogues} audio_sec={audio_sec:.2f} wall_sec={wall_sec:.2f} "
+    f"aggregate_audio_x={audio_sec / wall_sec:.3f} aggregate_rtf={rtf:.3f}"
+)
+PY
+echo "finished_at:     $(date -Iseconds)"
