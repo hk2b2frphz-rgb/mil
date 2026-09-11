@@ -347,7 +347,21 @@ print(json.dumps(summary, ensure_ascii=False))
 PY
 
 echo "===== step 2/3: render shards in parallel ====="
+# A single shard is the interactive case (the smokes), and there is nothing to
+# interleave, so stream it to the terminal as well as the log -- otherwise the
+# first run looks hung for as long as Hugging Face takes to hand over 5GB of
+# weights. With more than one shard the outputs would interleave into noise, so
+# those stay in their own logs. STREAM_SHARD_LOG forces either way.
+STREAM_SHARD_LOG="${STREAM_SHARD_LOG:-auto}"
+if [[ "$STREAM_SHARD_LOG" == "auto" ]]; then
+    if [[ "$NUM_SHARDS" -eq 1 ]]; then
+        STREAM_SHARD_LOG=1
+    else
+        STREAM_SHARD_LOG=0
+    fi
+fi
 pids=()
+tail_pids=()
 for ((i = 0; i < NUM_SHARDS; i++)); do
     shard_tag="$(printf 'shard_%03d' "$i")"
     shard_dir="$OUT_ROOT/$shard_tag"
@@ -409,9 +423,19 @@ for ((i = 0; i < NUM_SHARDS; i++)); do
     pid="$!"
     pids+=("$pid")
     echo "started $shard_tag on gpu $gpu_id (pid=$pid, log=$shard_log)"
+    if [[ "$STREAM_SHARD_LOG" == "1" ]]; then
+        # Follow the log until the shard exits. --pid makes tail stop on its
+        # own, so nothing is left behind when the render finishes or dies.
+        touch "$shard_log"
+        tail -n +1 -f --pid="$pid" "$shard_log" &
+        tail_pids+=("$!")
+    fi
 done
 
 failed=0
+for pid in ${tail_pids[@]+"${tail_pids[@]}"}; do
+    wait "$pid" 2>/dev/null || true
+done
 for pid in "${pids[@]:-}"; do
     [[ -z "$pid" ]] && continue
     if ! wait "$pid"; then
