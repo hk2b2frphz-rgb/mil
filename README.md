@@ -70,6 +70,20 @@ bash scripts/run_tts_smoke.sh kaburi 3
 bash scripts/run_tts_smoke.sh both 3
 ```
 
+タイミングの作り方は3種類あり、音響モデルは共通で「どの発話をいつ始めるか」だけが違う。
+`RASTER_MODE`（本番）/ smoke の引数で選ぶ。
+
+| モード | 実体 | 学習データに使えるか |
+| --- | --- | --- |
+| `pred`（既定） | realizer + gap model（上流の最新版, `kaburi_tts/raster/`） | 使える |
+| `stat` | 学習コーパスの統計配置（`kaburi_tts/placement/`、論文の統計配置条件） | 使える |
+| `paper` | 論文版の単一 timing predictor（`kaburi_tts/predictor/`） | **使えない**（発話単位のタイミングを返さないので alignments が書けない。聴き比べと重なり計測専用で、`ALLOW_MISSING_ALIGNMENTS=1` が要る） |
+
+```bash
+bash scripts/run_tts_smoke.sh kaburi-all 3   # 3モードを順に流して並べる
+RASTER_MODE=stat qsub -V scripts/2026-09-04/aizuchi_normal_kaburi_tts_3000.pbs
+```
+
 配置（間・かぶり）は KABURI の gap model が決めるので `LEAD_IN_SEC` / `GAP_SEC` /
 `--auto-overlap-aizuchi` は無い。発話境界は入力した音素ラスタから取るため MMS_FA も
 通さない。KABURI のキャンバスは30秒固定なので、対話は30秒以内のチャンクに切って

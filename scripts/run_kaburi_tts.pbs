@@ -51,6 +51,9 @@
 #                                       (see scripts/kaburi_uv_env.sh)
 #   NUM_SHARDS=2 CUDA_VISIBLE_DEVICES=0,1
 #   NUM_DIALOGUES=all
+#   RASTER_MODE=pred|stat|paper         which timing model places the
+#                                       utterances (paper also needs
+#                                       ALLOW_MISSING_ALIGNMENTS=1)
 #   CHUNK_SEC=26 CHUNK_GAP_SEC=0.3 MIN_FIT_SCALE=0.9
 #   CFG_SCALE=2.5 NUM_STEPS=32 SAMPLE_RATE=24000
 #   FRESH=1   # ignore existing output and start a new timestamped run
@@ -105,7 +108,31 @@ if [[ -z "${KABURI_REF_PACK:-}" ]]; then
     fi
 fi
 
-default_batch_id="${SOURCE_BATCH_ID}_kaburi"
+# Timing source. pred = realizer + gap model (upstream's current release),
+# stat = statistical placement from the training corpus, paper = the paper's
+# single timing predictor. The acoustic model is the same in all three; only
+# the decision of when each utterance starts differs. paper returns no
+# per-utterance timing, so it cannot produce training alignments -- it is for
+# listening and for the turn-taking numbers, and the renderer refuses it
+# without ALLOW_MISSING_ALIGNMENTS=1.
+export RASTER_MODE="${RASTER_MODE:-pred}"
+export ALLOW_MISSING_ALIGNMENTS="${ALLOW_MISSING_ALIGNMENTS:-0}"
+case "$RASTER_MODE" in
+    pred|stat) ;;
+    paper)
+        if [[ "$ALLOW_MISSING_ALIGNMENTS" != "1" ]]; then
+            echo "ERROR: RASTER_MODE=paper writes no training alignments." >&2
+            echo "Set ALLOW_MISSING_ALIGNMENTS=1 if this run is for listening only." >&2
+            exit 1
+        fi
+        ;;
+    *)
+        echo "ERROR: RASTER_MODE must be pred, stat, or paper: $RASTER_MODE" >&2
+        exit 1
+        ;;
+esac
+
+default_batch_id="${SOURCE_BATCH_ID}_kaburi_${RASTER_MODE}"
 if [[ "${FRESH:-0}" == "1" ]]; then
     export BATCH_ID="${BATCH_ID:-$(default_run_id "$default_batch_id")}"
 else
@@ -187,6 +214,7 @@ echo "num_shards:    $NUM_SHARDS"
 echo "spare_ratio:   $SPARE_RATIO"
 echo "gpus:          $CUDA_VISIBLE_DEVICES"
 echo "chunking:      chunk_sec=$CHUNK_SEC gap=$CHUNK_GAP_SEC min_fit=$MIN_FIT_SCALE"
+echo "timing_mode:   $RASTER_MODE"
 echo "decode:        cfg_scale=$CFG_SCALE steps=$NUM_STEPS sample_rate=$SAMPLE_RATE"
 echo "started_at:    $(date -Iseconds)"
 echo "================================="
@@ -331,6 +359,7 @@ for ((i = 0; i < NUM_SHARDS; i++)); do
             --out-dir "$shard_training"
             --kaburi-repo "$KABURI_REPO"
             --ref-pack "$KABURI_REF_PACK"
+            --mode "$RASTER_MODE"
             --device cuda
             --success-target "$success_target"
             --chunk-sec "$CHUNK_SEC"
@@ -342,6 +371,9 @@ for ((i = 0; i < NUM_SHARDS; i++)); do
             --seed "$SEED"
             --log-every "$LOG_EVERY"
         )
+        if [[ "$RASTER_MODE" == "paper" ]]; then
+            render_args+=(--allow-missing-alignments)
+        fi
         if [[ "$RESUME" == "1" ]]; then
             render_args+=(--resume)
         fi

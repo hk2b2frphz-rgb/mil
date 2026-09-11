@@ -31,6 +31,15 @@
 #            split utterances into morphemes, and falls back to a regex if it
 #            is missing (coarser word timings in the training data).
 #
+#   Path     KABURI's pyproject sets `package = false`, so `uv sync` installs
+#            its dependencies and never the kaburi_tts / irodori_tts packages
+#            themselves -- upstream runs its own scripts from inside that
+#            checkout, where the interpreter puts them on sys.path for free.
+#            Anything run from THIS repo gets "No module named kaburi_tts"
+#            instead, so kaburi_uv_run exports PYTHONPATH with the checkout and
+#            its scripts/ directory (where synth_with_predictor lives, which
+#            the paper timing mode imports).
+#
 # Usage:
 #   source scripts/kaburi_uv_env.sh
 #   kaburi_uv_run KABURI_UV            # -> KABURI_UV=(uv run --project ... python)
@@ -56,6 +65,17 @@ kaburi_uv_flags() {
     __kaburi_flags_out=(${__kaburi_flags[@]+"${__kaburi_flags[@]}"})
 }
 
+kaburi_export_pythonpath() {
+    # uv passes the environment through, so this reaches both `uv run` and a
+    # bare KABURI_PYTHON. Idempotent: re-sourcing must not stack duplicates.
+    local want="$KABURI_REPO:$KABURI_REPO/scripts"
+    case ":${PYTHONPATH:-}:" in
+        *":$KABURI_REPO:"*) ;;
+        *) export PYTHONPATH="${PYTHONPATH:+$want:$PYTHONPATH}"
+           export PYTHONPATH="${PYTHONPATH:-$want}" ;;
+    esac
+}
+
 kaburi_uv_run() {
     local __out_name="$1"
     local -n __run_out="$__out_name"
@@ -65,6 +85,9 @@ kaburi_uv_run() {
             echo "ERROR: KABURI_PYTHON is not executable: $KABURI_PYTHON" >&2
             return 1
         fi
+        if [[ -n "${KABURI_REPO:-}" ]]; then
+            kaburi_export_pythonpath
+        fi
         __run_out=("$KABURI_PYTHON")
         return 0
     fi
@@ -73,6 +96,8 @@ kaburi_uv_run() {
         echo "ERROR: KABURI_REPO must be set before calling kaburi_uv_run." >&2
         return 1
     fi
+
+    kaburi_export_pythonpath
 
     local -a run_flags
     kaburi_uv_flags run_flags
