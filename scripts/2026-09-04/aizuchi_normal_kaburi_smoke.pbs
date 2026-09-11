@@ -15,42 +15,21 @@
 #   qsub -V scripts/2026-09-04/aizuchi_normal_kaburi_smoke.pbs
 #   NUM_DIALOGUES=10 qsub -V scripts/2026-09-04/aizuchi_normal_kaburi_smoke.pbs
 #
-# Prints, via scripts/report_tts_smoke.py:
-#   * seconds per dialogue and RTF, plus a projection to the full 3000, so the
-#     walltime of the production job can be decided from a measurement rather
-#     than a guess. The renderer logs model load separately from synthesis --
-#     at NUM_DIALOGUES=3 the load dominates and the per-dialogue figure from
-#     the log is the one to project from.
-#   * overlap / silence / switches-per-minute of the rendered stereo, the same
-#     metrics as Table III of the KABURI-TTS paper. This is the number the
-#     whole exercise is about: the Qwen3/Kokoro layout lands near overlap 0.013
-#     and 11.6 switches/min, real dialogue near 0.076 and 35.4.
+# This is scripts/run_tts_smoke.sh with a queue attached. On an interactive
+# node run that directly instead:
 #
-# Run scripts/2026-09-04/aizuchi_normal_qwen_smoke.pbs on the SAME dialogues to
-# get the other side of that comparison, then report_tts_smoke.py can take both
-# --training-dir arguments at once and print them side by side.
+#   bash scripts/run_tts_smoke.sh kaburi 3
 #
-# Output goes to a fresh timestamped directory every submission (smoke runs are
-# cheap and comparing two of them is the point), so nothing here resumes.
+# The report at the end gives seconds per dialogue and a projection to the full
+# 3000 -- so the production walltime comes from a measurement -- plus overlap,
+# silence and switches-per-minute of the rendered stereo, which is the point of
+# the exercise: the Qwen3/Kokoro layout lands near overlap 0.013 and 11.6
+# switches/min, real dialogue near 0.076 and 35.4.
+#
+# scripts/2026-09-04/aizuchi_normal_qwen_smoke.pbs is the other arm, and
+# `run_tts_smoke.sh both` runs the pair and prints them side by side.
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
-# shellcheck source=/dev/null
-source "$PWD/scripts/run_id_utils.sh"
 
-export CLONE_OUT_DIR_MOSHI="${CLONE_OUT_DIR_MOSHI:-$PWD/data/clone_examples/99999}"
-
-export AIZUCHI_VERSION="${AIZUCHI_VERSION:-v6}"
-export SOURCE_BATCH_ID="qwen_aizuchi_3000_normal_${AIZUCHI_VERSION}"
-export DIALOGUES_JSONL="${DIALOGUES_JSONL:-$PWD/data/runs/aizuchi_normal_3000_${AIZUCHI_VERSION}/dialogue/llm_dialogues/dialogues.jsonl}"
-export BATCH_ID="${BATCH_ID:-$(default_run_id "aizuchi_normal_3000_${AIZUCHI_VERSION}_kaburi_smoke")}"
-export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/smoke/$BATCH_ID}"
-export NUM_DIALOGUES="${NUM_DIALOGUES:-3}"
-export NUM_SHARDS=1
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-export SPARE_RATIO="${SPARE_RATIO:-0}"
-export RESUME=0
-export LOG_EVERY=1
-export SMOKE_REPORT_LABEL="${SMOKE_REPORT_LABEL:-kaburi}"
-
-exec bash scripts/run_kaburi_tts.pbs
+exec bash scripts/run_tts_smoke.sh kaburi "${NUM_DIALOGUES:-3}"

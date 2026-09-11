@@ -17,13 +17,17 @@
 #   qsub -V scripts/2026-09-04/aizuchi_normal_qwen_smoke.pbs
 #   NUM_DIALOGUES=10 qsub -V scripts/2026-09-04/aizuchi_normal_qwen_smoke.pbs
 #
+# Interactive node equivalent:
+#
+#   bash scripts/run_tts_smoke.sh qwen 3
+#
 # Settings are exactly aizuchi_normal_tts_3000.pbs (vLLM-Omni engine, V100
 # queue, mixed voice mode) with the dialogue count cut down, so the timings
 # here scale to that job. Needs .venv-vllm-omni -- see
 # scripts/setup_vllm_omni_v100_env.sh.
 #
-# Both smokes write into data/runs/smoke/ and leave their output in place, so
-# afterwards the two can be printed side by side:
+# Both smokes leave their output under data/runs/smoke/, so afterwards the two
+# can be printed side by side:
 #
 #   uv run python scripts/report_tts_smoke.py \
 #       --training-dir data/runs/smoke/<kaburi_run>/shard_000/training_set --label kaburi \
@@ -31,30 +35,5 @@
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
-# shellcheck source=/dev/null
-source "$PWD/scripts/run_id_utils.sh"
 
-# Same clone voice as the production aizuchi jobs and as the KABURI smoke.
-export CLONE_OUT_DIR_MOSHI="${CLONE_OUT_DIR_MOSHI:-$PWD/data/clone_examples/99999}"
-
-export AIZUCHI_VERSION="${AIZUCHI_VERSION:-v6}"
-export SOURCE_BATCH_ID="qwen_aizuchi_3000_normal_${AIZUCHI_VERSION}"
-export DIALOGUES_JSONL="${DIALOGUES_JSONL:-$PWD/data/runs/aizuchi_normal_3000_${AIZUCHI_VERSION}/dialogue/llm_dialogues/dialogues.jsonl}"
-export BATCH_ID="${BATCH_ID:-$(default_run_id "aizuchi_normal_3000_${AIZUCHI_VERSION}_qwen_smoke")}"
-export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/smoke/$BATCH_ID}"
-export NUM_DIALOGUES="${NUM_DIALOGUES:-3}"
-export NUM_SHARDS=1
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-export SPARE_RATIO="${SPARE_RATIO:-0}"
-export RESUME=0
-export LOG_EVERY=1
-
-# Not exec: the report below runs once the render returns.
-bash scripts/run_qwen_tts_vllm_3000_4gpu.pbs
-
-echo "===== smoke report ====="
-uv run python scripts/report_tts_smoke.py \
-    --training-dir "$OUT_ROOT/shard_000/training_set" \
-    --label "${SMOKE_REPORT_LABEL:-qwen3}" \
-    --projection "${REPORT_PROJECTION:-3000}" \
-    --json-out "$OUT_ROOT/smoke_report.json"
+exec bash scripts/run_tts_smoke.sh qwen "${NUM_DIALOGUES:-3}"
