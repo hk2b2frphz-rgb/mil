@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N realign_tsv
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -V
+
+# Re-align hand-made annotation TSV timestamps to the audio
+# (scripts/realign_annotation_tsv.py). The transcription, speaker labels and
+# utterance order are trusted; only the timestamps are rebuilt.
+#
+# Runs in the main project env: faster-whisper for the coarse pass, torchaudio
+# MMS_FA for per-utterance forced alignment, silero-vad for boundary snapping,
+# pyopenjtalk for readings. No NeMo, no isolated env.
+#
+# Required:
+#   qsub -v WAVS=/path/to/dialogues scripts/run_realign_annotation.pbs
+#
+# Multiple files (comma separated) or globs also work:
+#   qsub -v 'WAVS=/path/a.wav,/path/b.wav' scripts/run_realign_annotation.pbs
+#   qsub -v 'WAVS=/path/sessions/*.wav'    scripts/run_realign_annotation.pbs
+#
+# Optional:
+#   OUT_DIR=data/test_data/realign        (default)
+#   WHISPER_MODEL=large-v3
+#   EXTRA_ARGS="--check-only"             (diagnose the drift only, no output TSV)
+#   EXTRA_ARGS="--refresh-asr"            (ignore the cached transcription)
+#
+# The original TSV is never modified. Check the result in Audacity: open the
+# WAV, then File > Import > Labels on <out>/<stem>/labels/all.txt (new) and
+# original.txt (old) to see them as two label tracks.
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+WAVS="${WAVS:?Set WAVS to one or more input wav paths or a folder (comma separated, glob ok)}"
+OUT_DIR="${OUT_DIR:-data/test_data/realign}"
+
+IFS=',' read -r -a wav_patterns <<< "$WAVS"
+wav_files=()
+for pat in "${wav_patterns[@]}"; do
+    for f in $pat; do
+        wav_files+=("$f")
+    done
+done
+if [[ ${#wav_files[@]} -eq 0 ]]; then
+    echo "ERROR: no inputs matched: $WAVS" >&2
+    exit 1
+fi
+
+mkdir -p "$OUT_DIR"
+LOG_FILE="${LOG_FILE:-$OUT_DIR/run.log}"
+
+{
+    echo "===== realign annotation tsv ====="
+    echo "job:     ${PBS_JOBID:-manual}"
+    echo "started: $(date -Is)"
+    echo "inputs:  ${wav_files[*]}"
+    echo "out_dir: $OUT_DIR"
+} | tee "$LOG_FILE"
+
+export PYTHONUNBUFFERED=1
+
+# shellcheck disable=SC2086
+uv run python -u scripts/realign_annotation_tsv.py \
+    "${wav_files[@]}" \
+    --out-dir "$OUT_DIR" \
+    ${WHISPER_MODEL:+--whisper-model "$WHISPER_MODEL"} \
+    ${EXTRA_ARGS:-} 2>&1 | tee -a "$LOG_FILE"
+
+echo "done: $OUT_DIR (log: $LOG_FILE)" | tee -a "$LOG_FILE"

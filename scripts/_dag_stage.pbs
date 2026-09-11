@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -j oe
+#PBS -V
+
+# Generic self-chaining stage wrapper for run_experiment_dag.py.
+#
+# Do NOT qsub this by hand normally -- the driver submits it, injecting the
+# stage's resources via `qsub -q/-l` and passing STAGE + CONFIG via `-v`.
+# It runs one stage's body and, on success, submits the stage's `next:` (again
+# through this wrapper), so the pipeline self-chains with no central job.
+#
+# Deliberately has NO #PBS -q / -l resource directives: the queue, select, and
+# walltime come from the driver's qsub command line, per-stage from the YAML.
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+# qsub -V carries PROXY_URL (or the PROXY_HOST/PORT form) from the submitter
+# into every self-chained job. Normalize it here so the stage body and its
+# child qsub both receive the conventional HTTP(S)_PROXY variables.
+# Credentials stay in the submit environment, never in the DAG YAML.
+# shellcheck source=/dev/null
+source "$PWD/scripts/setup_proxy.sh"
+
+: "${STAGE:?STAGE not set (this wrapper is meant to be submitted by run_experiment_dag.py)}"
+: "${CONFIG:?CONFIG not set}"
+
+command -v uv >/dev/null 2>&1 || { echo "ERROR: uv not on PATH" >&2; exit 1; }
+
+# The driver applies proxy + this stage's env, runs the body, and (on success)
+# qsubs the next stage. Submitting the next stage requires qsub on this node.
+command -v qsub >/dev/null 2>&1 || {
+    echo "WARNING: qsub not available on this node; the next stage will NOT be" >&2
+    echo "         auto-submitted. Chain from the login node instead." >&2
+}
+
+exec uv run python scripts/run_experiment_dag.py --run-stage "$STAGE" --config "$CONFIG"

@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N real_dialogue_pipe
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII characters anywhere in this file
+# (not even in comments) -- the job dies immediately at submission.
+#
+# Preprocessing for a real-dialogue 1ch WAV. Just point it at a WAV.
+#
+#   diarization + transcription + turn-level test clips
+#   (scripts/analyze_real_dialogue.py)
+#
+# Source separation used to run here as a second stage. It has been dropped;
+# see docs/real_dialogue_evaluation.md.
+#
+# Usage (this is all you need):
+#   qsub -v 'WAVS=/path/dialogue1.wav' scripts/run_real_dialogue_pipeline.pbs
+#
+# Multiple files (comma separated, glob ok):
+#   qsub -v 'WAVS=/path/a.wav,/path/b.wav' scripts/run_real_dialogue_pipeline.pbs
+#   qsub -v 'WAVS=/path/sessions/*.wav'    scripts/run_real_dialogue_pipeline.pbs
+#
+# Optional:
+#   OUT_DIR=data/real_dialogue/<name>  output root (default: data/real_dialogue/<jobid>)
+#   WHISPER_MODEL=large-v3
+#   DIAR_UV_WITH                       extra --with args for the uv env
+#   DIAR_EXTRA_ARGS                    extra CLI args for analyze_real_dialogue.py:
+#                                        --turn-gap-sec 3.0    merge gap for test_wav
+#                                        --turn-max-sec 30.0   cap on one clip
+#                                        --turn-min-sec 0.5    drop clips shorter than this
+#                                        --min-segment-sec 0.02
+#                                        --num-speakers 2
+#                                        --skip-asr
+#
+# Diarization runs in an isolated uv env (--no-project) because streaming
+# Sortformer v2 needs a newer NeMo than the main project env can hold.
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+WAVS="${WAVS:?Set WAVS to one or more input wav paths (comma separated, glob ok)}"
+
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+OUT_DIR="${OUT_DIR:-data/real_dialogue/${JOB_ID_SHORT}}"
+
+# comma separated -> array. globs are expanded here.
+IFS=',' read -r -a wav_patterns <<< "$WAVS"
+wav_files=()
+for pat in "${wav_patterns[@]}"; do
+    for f in $pat; do
+        wav_files+=("$f")
+    done
+done
+if [[ ${#wav_files[@]} -eq 0 ]]; then
+    echo "ERROR: no wav files matched: $WAVS" >&2
+    exit 1
+fi
+for f in "${wav_files[@]}"; do
+    if [[ ! -f "$f" ]]; then
+        echo "ERROR: not a file: $f" >&2
+        exit 1
+    fi
+done
+
+mkdir -p "$OUT_DIR"
+LOG_FILE="${LOG_FILE:-$OUT_DIR/pipeline.log}"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+export PYTHONUNBUFFERED=1
+
+banner() {
+    echo ""
+    echo "=================================================================="
+    echo "$1"
+    echo "  time: $(date -Is)"
+    echo "=================================================================="
+}
+
+banner "real dialogue preprocessing pipeline - start"
+echo "job:      ${JOB_ID_RAW}"
+echo "host:     $(hostname)"
+echo "inputs:   ${wav_files[*]}"
+echo "out_dir:  $OUT_DIR"
+echo "log:      $LOG_FILE"
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=name,memory.total --format=csv
+fi
+
+# per-WAV output dirs. Created up front so the guidance below can print real paths.
+analysis_dirs=()
+for f in "${wav_files[@]}"; do
+    stem="$(basename "$f")"
+    stem="${stem%.*}"
+    analysis_dirs+=("$OUT_DIR/$stem")
+done
+
+banner "diarization + transcription + test clips"
+echo "diarization: nvidia/diar_streaming_sortformer_4spk-v2 (CC-BY-4.0, no token needed)"
+echo "asr:         faster-whisper ${WHISPER_MODEL:-large-v3}"
+echo "This is the slowest part for long recordings."
+
+# shellcheck disable=SC2086
+uv run --no-project --python 3.11 \
+    --index-url https://download.pytorch.org/whl/cu121 \
+    --extra-index-url https://pypi.org/simple \
+    --with 'torch==2.5.1' \
+    --with 'torchvision==0.20.1' \
+    --with 'torchaudio==2.5.1' \
+    --with 'nemo_toolkit[asr]>=2.5.0' \
+    --with faster-whisper \
+    --with librosa \
+    --with soundfile \
+    --with 'numpy<2' \
+    ${DIAR_UV_WITH:-} \
+    python -u scripts/analyze_real_dialogue.py \
+    "${wav_files[@]}" \
+    --out-dir "$OUT_DIR" \
+    ${WHISPER_MODEL:+--whisper-model "$WHISPER_MODEL"} \
+    ${DIAR_EXTRA_ARGS:-}
+
+# ------------------------------------------------------------- results / next
+banner "results and next steps"
+
+for d in "${analysis_dirs[@]}"; do
+    echo "------------------------------------------------------------------"
+    echo "$d"
+    echo "  [test input -- this is the deliverable]"
+    echo "    clips:  $d/test_wav/A/ , $d/test_wav/B/"
+    echo "    review: $d/test_wav/turns_review.tsv"
+    echo "    meta:   $d/test_wav/turns.jsonl"
+    echo "  [for checking diarization quality]"
+    echo "    solo tracks:      $d/speaker_A_solo.wav , $d/speaker_B_solo.wav"
+    echo "    L/R side by side: $d/stereo_diarized.wav"
+    echo "    unmerged pieces:  $d/segments/A/ , $d/segments/B/"
+    echo "    stats:            $d/stats.json"
+    if [[ -f "$d/test_wav/turns_review.tsv" ]]; then
+        clips=$(( $(wc -l < "$d/test_wav/turns_review.tsv") - 1 ))
+        echo "  test clips written: $clips"
+    fi
+done
+
+echo ""
+echo "=================================================================="
+echo "next steps (manual)"
+echo "=================================================================="
+echo ""
+echo "1) Listen to test_wav/ and edit turns_review.tsv by hand."
+echo "   keep=0 drops a clip. You can also fix start_sec/end_sec/speaker/text,"
+echo "   split a clip by copying its row, or add rows freely."
+echo "   Clips with _ov in the name overlap the other speaker, so the other"
+echo "   voice bleeds through -- the recording is 1ch and nothing removes it."
+echo "   Drop those if the other voice would leak the answer."
+echo ""
+echo "2) Apply the edits. The TSV is the source of truth, the wavs are output."
+echo "   rebuild.py sits next to the TSV, takes no arguments, needs no GPU,"
+echo "   and does not need the original recording."
+for d in "${analysis_dirs[@]}"; do
+    echo "     uv run python $d/test_wav/rebuild.py"
+done
+echo "   Add --dry-run first to see how many clips survive."
+echo ""
+echo "3) Decide which speaker is the counselor and drop an empty marker file"
+for d in "${analysis_dirs[@]}"; do
+    echo "     touch $d/counselor_B.txt     # counselor is B"
+    echo "     touch $d/counselor_A.txt     # counselor is A (exactly one of the two)"
+done
+echo ""
+echo "4) If the automatic merge was wrong everywhere rather than in a few"
+echo "   places, re-run the whole job with a different gap instead:"
+echo "     qsub -v 'WAVS=...,OUT_DIR=...,DIAR_EXTRA_ARGS=--turn-gap-sec 1.5' \\"
+echo "       scripts/run_real_dialogue_pipeline.pbs"
+echo ""
+echo "log: $LOG_FILE"
+echo "finished_at: $(date -Iseconds)"

@@ -9,6 +9,7 @@ Outputs: response.wav, transcript.jsonl, transcript.txt, meta.json per trial.
 """
 
 import argparse
+import hashlib
 import inspect
 import json
 import logging
@@ -109,6 +110,27 @@ def collect_input_files(inputs: list[str]) -> list[Path]:
         else:
             logger.warning("Input path not found, skipping: %s", inp)
     return files
+
+
+def build_unique_labels(input_files: list[Path]) -> dict[Path, str]:
+    """Map each input path to a unique output label.
+
+    Inputs that share a filename stem (e.g. ``hello.wav`` from two different
+    directories) would otherwise write to the same ``out_dir/<stem>/seed_N``
+    directory and overwrite each other. For colliding stems we append a short
+    hash of the resolved path to keep outputs distinct.
+    """
+    from collections import Counter
+
+    stem_counts = Counter(p.stem for p in input_files)
+    labels: dict[Path, str] = {}
+    for p in input_files:
+        if stem_counts[p.stem] > 1:
+            digest = hashlib.sha1(str(p.resolve()).encode("utf-8")).hexdigest()[:8]
+            labels[p] = f"{p.stem}_{digest}"
+        else:
+            labels[p] = p.stem
+    return labels
 
 
 def collect_text_prompts(args: argparse.Namespace) -> list[str]:
@@ -487,6 +509,18 @@ def run_trial(
     # ---- Fix seed --------------------------------------------------------
     seed_all(seed)
 
+    # Moving one 80-ms frame to CUDA at a time adds an allocation and a
+    # host-to-device transfer to every streaming step.  The complete trial is
+    # only a few MB, so stage it on the target device once and take views in
+    # the loop.  Padding is done before the transfer to keep the final frame
+    # byte-for-byte equivalent to the former per-frame np.pad path.
+    padded_samples = n_steps * frame_size
+    if len(full_pcm) < padded_samples:
+        full_pcm = np.pad(full_pcm, (0, padded_samples - len(full_pcm)))
+    trial_pcm = torch.from_numpy(
+        np.ascontiguousarray(full_pcm[:padded_samples], dtype=np.float32)
+    ).to(device)
+
     audio_frames: list[torch.Tensor] = []   # each: (num_codebooks, 1) cpu
     text_events: list[dict] = []
     first_audio_step: Optional[int] = None
@@ -498,19 +532,9 @@ def run_trial(
             with mimi.streaming(1):
                 for step in range(n_steps):
                     start = step * frame_size
-                    chunk_np = full_pcm[start: start + frame_size]
-
-                    # Pad last chunk if shorter than frame_size
-                    if len(chunk_np) < frame_size:
-                        chunk_np = np.pad(
-                            chunk_np, (0, frame_size - len(chunk_np))
-                        )
-
                     # (1, 1, frame_size)
                     chunk = (
-                        torch.from_numpy(chunk_np)
-                        .float()
-                        .to(device)
+                        trial_pcm[start: start + frame_size]
                         .unsqueeze(0)
                         .unsqueeze(0)
                     )
@@ -525,8 +549,12 @@ def run_trial(
                         continue
 
                     # Split text token and audio tokens
-                    text_id = int(out[0, 0, 0].item())
-                    audio_tok = out[0, 1:, :].cpu()  # (num_codebooks, 1)
+                    # Transfer the tiny combined text/audio result once.  A
+                    # separate scalar .item() followed by .cpu() causes two
+                    # CUDA synchronizations per generated frame.
+                    out_cpu = out[0].cpu()
+                    text_id = int(out_cpu[0, 0].item())
+                    audio_tok = out_cpu[1:, :]  # (num_codebooks, 1)
                     if _audio_tokens_are_decodable(audio_tok):
                         if first_audio_step is None:
                             first_audio_step = step
@@ -713,6 +741,7 @@ def save_trial_outputs(
     mimi,
     acoustic_delay: int,
     wall_time: float,
+    trial_label: str | None = None,
 ) -> None:
     """Write response.wav, transcript.jsonl, transcript.txt, meta.json."""
     import sphn  # type: ignore[import]
@@ -720,7 +749,8 @@ def save_trial_outputs(
     sample_rate = int(mimi.sample_rate)
     frame_rate = float(mimi.frame_rate)
 
-    trial_dir = out_dir / input_path.stem / f"seed_{seed}"
+    label = trial_label or input_path.stem
+    trial_dir = out_dir / label / f"seed_{seed}"
     trial_dir.mkdir(parents=True, exist_ok=True)
 
     audio_frames = trial_result["audio_frames"]
@@ -1036,6 +1066,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    if args.silence_sec < 0:
+        logger.error("--silence-sec must be >= 0 (got %s).", args.silence_sec)
+        sys.exit(2)
+
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1046,6 +1080,7 @@ def main() -> None:
         logger.error("No input WAV files or text prompts found. Exiting.")
         return
     logger.info("Found %d input file(s).", len(input_files))
+    input_labels = build_unique_labels(input_files)
 
     # ---- Parse seeds --------------------------------------------------------
     if args.seeds is not None:
@@ -1135,6 +1170,7 @@ def main() -> None:
                     mimi=mimi,
                     acoustic_delay=acoustic_delay,
                     wall_time=wall_time,
+                    trial_label=input_labels.get(input_path),
                 )
 
                 first_step = result["first_response_step"]

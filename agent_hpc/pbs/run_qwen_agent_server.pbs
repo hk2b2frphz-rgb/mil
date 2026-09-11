@@ -1,0 +1,441 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N fd_infer
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# Long-lived inference server for local coding agents (Claude Code, Codex CLI, ...).
+#
+#   compute node : vLLM  (OpenAI API, bound to 127.0.0.1)
+#                    ^
+#                    | localhost
+#                  LiteLLM proxy (Anthropic API + OpenAI API, bound to 0.0.0.0)
+#                    ^
+#                    | SSH tunnel that YOU open from the local PC
+#                  local PC : ANTHROPIC_BASE_URL=http://127.0.0.1:8787
+#
+# The job writes the node address / port / api key of the running server into
+# ENDPOINT_FILE (default: $HOME/.miltoka/agent_endpoint.json, plus a .txt and a
+# .env twin next to it) so the local side can read it and build the tunnel
+# command without guessing which node PBS picked.
+#
+# Submit:
+#   qsub -V agent_hpc/pbs/run_qwen_agent_server.pbs
+# Overrides:
+#   PROXY_PORT=41234 LOCAL_PORT=8787 AGENT_API_KEY=mysecret \
+#     qsub -V agent_hpc/pbs/run_qwen_agent_server.pbs
+#
+# Stop it with: qdel <jobid>
+#
+# To survive walltime, submit with CHAIN=1 (off by default -- see "chaining"
+# below) and end the chain later with: touch ~/.miltoka/stop_agent_server
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+if [[ -f "$PWD/scripts/setup_proxy.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$PWD/scripts/setup_proxy.sh"
+fi
+
+command -v uv >/dev/null 2>&1 || { echo "ERROR: uv is not on PATH." >&2; exit 1; }
+command -v curl >/dev/null 2>&1 || { echo "ERROR: curl is not on PATH." >&2; exit 1; }
+
+JOB_START_EPOCH="$(date +%s)"
+JOB_TAG="${PBS_JOBID%%.*}"
+JOB_NUM="${JOB_TAG//[^0-9]/}"
+
+mkdir -p experiments/pbs_logs
+JOB_LOG="experiments/pbs_logs/qwen_agent_srv_${JOB_TAG:-local}.log"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
+# ---------------------------------------------------------------- ports / model
+# vLLM stays on loopback; only the proxy port is reachable from the login node.
+if [[ -z "${PROXY_PORT:-}" ]]; then
+    if [[ -n "$JOB_NUM" ]]; then
+        PROXY_PORT="$((41000 + (10#$JOB_NUM % 2000)))"
+    else
+        PROXY_PORT="41000"
+    fi
+fi
+export PROXY_PORT
+export VLLM_PORT="${VLLM_PORT:-$((PROXY_PORT + 2000))}"
+
+# Qwen3.6-27B beats Qwen3-Coder-Next on every coding benchmark despite the name
+# (Terminal-Bench 2.0 59.3 vs 36.2, SWE-bench Verified 77.2 vs 70.6), and being
+# a 27B dense model it fits one A100 80GB in bf16 at ~54GB -- no quantization,
+# so none of the AWQ-on-Ampere risk. The same weights are already cached here
+# from the dialogue-generation jobs.
+export VLLM_MODEL="${VLLM_MODEL:-Qwen/Qwen3.6-27B}"
+# Short alias the agent asks for; the proxy maps it onto $VLLM_MODEL.
+export AGENT_MODEL_ALIAS="${AGENT_MODEL_ALIAS:-qwen-agent}"
+# The model tops out at 256K, but the KV cache has to live in whatever the 54GB
+# of weights leave behind. Most of its 64 layers use linear attention, so the
+# cache is lighter than the length suggests; drop to 65536 if vLLM says it
+# cannot fit.
+export MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
+export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
+export UV_TORCH_BACKEND="${UV_TORCH_BACKEND:-cu129}"
+# Pinned to 0.21.0: vLLM 0.22+ hard-require CUDA 13, which the 570.x driver cannot run.
+export VLLM_VERSION="${VLLM_VERSION:-0.21.0}"
+export VLLM_CUDA_MODULE="${VLLM_CUDA_MODULE:-}"
+export VLLM_ENV_DIR="${VLLM_ENV_DIR:-.venv_vllm_agent}"
+export PROXY_ENV_DIR="${PROXY_ENV_DIR:-.venv_agent_proxy}"
+# Qwen3.6-27B carries a vision encoder we never use here. Declaring zero of each
+# skips multimodal profiling, which otherwise costs startup time and memory.
+if [[ ! -v VLLM_LIMIT_MM_PER_PROMPT ]]; then
+    export VLLM_LIMIT_MM_PER_PROMPT='{"image": 0, "video": 0}'
+else
+    export VLLM_LIMIT_MM_PER_PROMPT
+fi
+# Coding agents need tool calls. Qwen3.6 and Qwen3-Coder both emit Qwen's own
+# tool format; 'hermes' is for the older plain Qwen3 chat models.
+export VLLM_TOOL_CALL_PARSER="${VLLM_TOOL_CALL_PARSER:-qwen3_coder}"
+# Qwen3.6-27B thinks by default, so the trace needs parsing out of the answer.
+# Clear this when serving a non-thinking model such as Qwen3-Coder.
+export VLLM_REASONING_PARSER="${VLLM_REASONING_PARSER:-qwen3}"
+
+# ------------------------------------------------------------------- chaining
+# OFF by default, and deliberately so: a server that resurrects itself will
+# quietly hold the one A100 you wanted for a training run. Turn it on only for
+# stretches where the agent is what the GPU is for.
+#   CHAIN=1 qsub -V agent_hpc/pbs/run_qwen_agent_server.pbs
+# End a running chain (the current job keeps serving until walltime):
+#   touch ~/.miltoka/stop_agent_server
+# Verified separately by agent_hpc/pbs/test_chain_v100.pbs.
+CHAIN="${CHAIN:-0}"
+CHAIN_INDEX="${CHAIN_INDEX:-1}"
+MAX_CHAIN_JOBS="${MAX_CHAIN_JOBS:-7}"
+CHAIN_STOP_FILE="${CHAIN_STOP_FILE:-$HOME/.miltoka/stop_agent_server}"
+# Submit the successor this long before walltime, so it is already queued when
+# PBS kills us and the gap in service is only the model load time.
+CHAIN_LEAD_SEC="${CHAIN_LEAD_SEC:-1200}"
+# A server that died this fast never served anything; resubmitting it would
+# just burn A100 slots on the same failure.
+MIN_JOB_SEC="${MIN_JOB_SEC:-600}"
+SELF_PBS="${SELF_PBS:-agent_hpc/pbs/run_qwen_agent_server.pbs}"
+
+for value in "$CHAIN_INDEX" "$MAX_CHAIN_JOBS" "$CHAIN_LEAD_SEC"; do
+    if ! [[ "$value" =~ ^[0-9]+$ ]] || [[ "$value" -lt 1 ]]; then
+        echo "ERROR: CHAIN_INDEX / MAX_CHAIN_JOBS / CHAIN_LEAD_SEC must be positive integers." >&2
+        exit 1
+    fi
+done
+if [[ "$CHAIN_INDEX" -gt "$MAX_CHAIN_JOBS" ]]; then
+    echo "ERROR: CHAIN_INDEX=$CHAIN_INDEX exceeds MAX_CHAIN_JOBS=$MAX_CHAIN_JOBS." >&2
+    exit 1
+fi
+
+# Ask PBS what walltime we actually got rather than trusting the directive at
+# the top of this file, which someone may have overridden with qsub -l.
+WALLTIME_SEC="${WALLTIME_SEC:-}"
+if [[ -z "$WALLTIME_SEC" && -n "${PBS_JOBID:-}" ]] && command -v qstat >/dev/null 2>&1; then
+    WALLTIME_HMS="$(qstat -f "$PBS_JOBID" 2>/dev/null \
+        | tr -d ' \t' | grep -m1 '^Resource_List.walltime=' | cut -d= -f2 || true)"
+    if [[ "$WALLTIME_HMS" =~ ^([0-9]+):([0-9]{2}):([0-9]{2})$ ]]; then
+        WALLTIME_SEC=$(( 10#${BASH_REMATCH[1]} * 3600 + 10#${BASH_REMATCH[2]} * 60 + 10#${BASH_REMATCH[3]} ))
+    fi
+fi
+WALLTIME_SEC="${WALLTIME_SEC:-86400}"
+
+# ------------------------------------------------------------------- endpoint io
+ENDPOINT_FILE="${ENDPOINT_FILE:-$HOME/.miltoka/agent_endpoint.json}"
+ENDPOINT_DIR="$(dirname "$ENDPOINT_FILE")"
+ENDPOINT_BASE="${ENDPOINT_FILE%.json}"
+ENDPOINT_TXT="${ENDPOINT_BASE}.txt"
+ENDPOINT_ENV="${ENDPOINT_BASE}.env"
+mkdir -p "$ENDPOINT_DIR"
+chmod 700 "$ENDPOINT_DIR" 2>/dev/null || true
+
+# A per-job secret so a stray port on the cluster network is not an open LLM.
+AGENT_API_KEY="${AGENT_API_KEY:-}"
+if [[ -z "$AGENT_API_KEY" ]]; then
+    AGENT_API_KEY="sk-hpc-$(head -c 18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+fi
+export AGENT_API_KEY
+
+NODE_HOST="$(hostname -f 2>/dev/null || hostname)"
+NODE_IP="$(hostname -i 2>/dev/null | awk '{print $1}')"
+if [[ -z "${NODE_IP:-}" || "$NODE_IP" == 127.* ]]; then
+    NODE_IP="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1)"
+fi
+NODE_IP="${NODE_IP:-$NODE_HOST}"
+LOGIN_HOST="${LOGIN_HOST:-${PBS_O_HOST:-unknown-login-host}}"
+LOCAL_PORT="${LOCAL_PORT:-8787}"
+SSH_USER="${SSH_USER:-$(id -un)}"
+SSH_TUNNEL="ssh -N -L ${LOCAL_PORT}:${NODE_IP}:${PROXY_PORT} ${SSH_USER}@${LOGIN_HOST}"
+
+write_endpoint() {
+    local status="$1"
+    local tmp="${ENDPOINT_FILE}.tmp.$$"
+    cat > "$tmp" <<JSON
+{
+  "status": "${status}",
+  "job_id": "${PBS_JOBID:-local}",
+  "node_host": "${NODE_HOST}",
+  "node_ip": "${NODE_IP}",
+  "login_host": "${LOGIN_HOST}",
+  "ssh_user": "${SSH_USER}",
+  "proxy_port": ${PROXY_PORT},
+  "vllm_port": ${VLLM_PORT},
+  "local_port": ${LOCAL_PORT},
+  "model": "${VLLM_MODEL}",
+  "model_alias": "${AGENT_MODEL_ALIAS}",
+  "api_key": "${AGENT_API_KEY}",
+  "anthropic_base_url": "http://127.0.0.1:${LOCAL_PORT}",
+  "openai_base_url": "http://127.0.0.1:${LOCAL_PORT}/v1",
+  "ssh_tunnel": "${SSH_TUNNEL}",
+  "job_log": "${PWD}/${JOB_LOG}",
+  "updated_at": "$(date -Iseconds)"
+}
+JSON
+    mv "$tmp" "$ENDPOINT_FILE"
+    chmod 600 "$ENDPOINT_FILE" 2>/dev/null || true
+
+    cat > "$ENDPOINT_ENV" <<ENVEOF
+# source this on the LOCAL PC after the tunnel is up
+export ANTHROPIC_BASE_URL="http://127.0.0.1:${LOCAL_PORT}"
+export ANTHROPIC_AUTH_TOKEN="${AGENT_API_KEY}"
+export ANTHROPIC_MODEL="${AGENT_MODEL_ALIAS}"
+export ANTHROPIC_SMALL_FAST_MODEL="${AGENT_MODEL_ALIAS}"
+export OPENAI_BASE_URL="http://127.0.0.1:${LOCAL_PORT}/v1"
+export OPENAI_API_KEY="${AGENT_API_KEY}"
+ENVEOF
+    chmod 600 "$ENDPOINT_ENV" 2>/dev/null || true
+
+    cat > "$ENDPOINT_TXT" <<TXTEOF
+status     : ${status}
+job_id     : ${PBS_JOBID:-local}
+node       : ${NODE_HOST} (${NODE_IP})
+proxy_port : ${PROXY_PORT}
+model      : ${VLLM_MODEL}  (alias: ${AGENT_MODEL_ALIAS})
+api_key    : ${AGENT_API_KEY}
+updated_at : $(date -Iseconds)
+
+Open the tunnel from the local PC:
+  ${SSH_TUNNEL}
+
+Then, in the local shell:
+  ANTHROPIC_BASE_URL=http://127.0.0.1:${LOCAL_PORT}
+  ANTHROPIC_AUTH_TOKEN=${AGENT_API_KEY}
+  ANTHROPIC_MODEL=${AGENT_MODEL_ALIAS}
+TXTEOF
+    chmod 600 "$ENDPOINT_TXT" 2>/dev/null || true
+}
+
+write_endpoint "starting"
+
+echo "===== Qwen agent server ====="
+echo "job_id:       ${PBS_JOBID:-n/a}"
+echo "node:         ${NODE_HOST} (${NODE_IP})"
+echo "login_host:   ${LOGIN_HOST}"
+echo "model:        ${VLLM_MODEL} (alias ${AGENT_MODEL_ALIAS})"
+echo "vllm_port:    ${VLLM_PORT} (127.0.0.1 only)"
+echo "proxy_port:   ${PROXY_PORT} (0.0.0.0)"
+echo "endpoint:     ${ENDPOINT_FILE}"
+echo "job_log:      ${JOB_LOG}"
+echo "started_at:   $(date -Iseconds)"
+echo "tunnel:       ${SSH_TUNNEL}"
+echo "============================="
+
+if [[ -n "$VLLM_CUDA_MODULE" ]]; then
+    if ! command -v module >/dev/null 2>&1; then
+        for module_init in /etc/profile.d/modules.sh /usr/share/Modules/init/bash; do
+            if [[ -f "$module_init" ]]; then
+                # shellcheck source=/dev/null
+                source "$module_init"
+                break
+            fi
+        done
+    fi
+    command -v module >/dev/null 2>&1 || {
+        echo "ERROR: environment modules unavailable; cannot load $VLLM_CUDA_MODULE." >&2
+        exit 1
+    }
+    module load "$VLLM_CUDA_MODULE"
+fi
+
+# ------------------------------------------------------------------- install
+CPU_ARCH="$(uname -m)"
+VLLM_WHEEL_URL="${VLLM_WHEEL_URL:-https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu129-cp38-abi3-manylinux_2_34_${CPU_ARCH}.whl}"
+VLLM_INSTALL_SPEC="${VLLM_INSTALL_SPEC:-$VLLM_WHEEL_URL}"
+VLLM_PYTHON="$VLLM_ENV_DIR/bin/python"
+VLLM_BIN="$VLLM_ENV_DIR/bin/vllm"
+
+[[ -d "$VLLM_ENV_DIR" ]] || uv venv "$VLLM_ENV_DIR"
+export PATH="$(cd "$VLLM_ENV_DIR" && pwd)/bin:$PATH"
+# shellcheck disable=SC2086
+uv pip install --python "$VLLM_PYTHON" ${VLLM_BUILD_TOOLS:-ninja cmake}
+uv pip install --python "$VLLM_PYTHON" "$VLLM_INSTALL_SPEC" --torch-backend="$UV_TORCH_BACKEND"
+
+# LiteLLM lives in its own venv so it can never move the pinned vLLM deps.
+PROXY_PYTHON="$PROXY_ENV_DIR/bin/python"
+PROXY_BIN="$PROXY_ENV_DIR/bin/litellm"
+[[ -d "$PROXY_ENV_DIR" ]] || uv venv "$PROXY_ENV_DIR"
+uv pip install --python "$PROXY_PYTHON" "litellm[proxy]${LITELLM_VERSION:+==$LITELLM_VERSION}"
+
+# ------------------------------------------------------------------- vllm serve
+vllm_args=(
+    "$VLLM_BIN" serve "$VLLM_MODEL"
+    --served-model-name "$VLLM_MODEL" "$AGENT_MODEL_ALIAS"
+    --tensor-parallel-size "$TENSOR_PARALLEL_SIZE"
+    --host 127.0.0.1
+    --port "$VLLM_PORT"
+    --max-model-len "$MAX_MODEL_LEN"
+    --gpu-memory-utilization "$VLLM_GPU_MEMORY_UTILIZATION"
+    --enable-auto-tool-choice
+    --tool-call-parser "$VLLM_TOOL_CALL_PARSER"
+)
+if [[ -n "$VLLM_REASONING_PARSER" ]]; then
+    vllm_args+=(--reasoning-parser "$VLLM_REASONING_PARSER")
+fi
+if [[ "${VLLM_ENFORCE_EAGER:-0}" == "1" ]]; then
+    vllm_args+=(--enforce-eager)
+fi
+if [[ -n "${VLLM_QWEN_CHAT_TEMPLATE_KWARGS:-}" ]]; then
+    vllm_args+=(--default-chat-template-kwargs "$VLLM_QWEN_CHAT_TEMPLATE_KWARGS")
+fi
+if [[ -n "$VLLM_LIMIT_MM_PER_PROMPT" ]]; then
+    vllm_args+=(--limit-mm-per-prompt "$VLLM_LIMIT_MM_PER_PROMPT")
+fi
+
+"${vllm_args[@]}" &
+VLLM_PID=$!
+
+PROXY_PID=""
+cleanup() {
+    write_endpoint "stopped" || true
+    if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
+        kill "$PROXY_PID"; wait "$PROXY_PID" 2>/dev/null || true
+    fi
+    if kill -0 "$VLLM_PID" 2>/dev/null; then
+        kill "$VLLM_PID"; wait "$VLLM_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+echo "waiting for vLLM ($VLLM_MODEL) to become ready (no health-check timeout)..."
+while true; do
+    if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+        echo "ERROR: vLLM exited before serving $VLLM_MODEL (port ${VLLM_PORT} may be held)." >&2
+        exit 1
+    fi
+    if curl --fail --silent --show-error \
+        "http://127.0.0.1:${VLLM_PORT}/v1/models" 2>/dev/null | grep -qF "$VLLM_MODEL"; then
+        break
+    fi
+    sleep 5
+done
+echo "vLLM is ready; starting the Anthropic-compatible proxy."
+
+# ------------------------------------------------------------------- proxy
+LITELLM_CONFIG="${LITELLM_CONFIG:-$ENDPOINT_DIR/litellm_agent_${JOB_TAG:-local}.yaml}"
+cat > "$LITELLM_CONFIG" <<YAML
+model_list:
+  - model_name: ${AGENT_MODEL_ALIAS}
+    litellm_params:
+      model: hosted_vllm/${VLLM_MODEL}
+      api_base: http://127.0.0.1:${VLLM_PORT}/v1
+      api_key: none
+  - model_name: "*"
+    litellm_params:
+      model: hosted_vllm/${VLLM_MODEL}
+      api_base: http://127.0.0.1:${VLLM_PORT}/v1
+      api_key: none
+
+litellm_settings:
+  drop_params: true
+
+general_settings:
+  master_key: ${AGENT_API_KEY}
+YAML
+chmod 600 "$LITELLM_CONFIG" 2>/dev/null || true
+
+"$PROXY_BIN" --config "$LITELLM_CONFIG" --host 0.0.0.0 --port "$PROXY_PORT" &
+PROXY_PID=$!
+
+echo "waiting for the proxy on 0.0.0.0:${PROXY_PORT}..."
+while true; do
+    if ! kill -0 "$PROXY_PID" 2>/dev/null; then
+        echo "ERROR: LiteLLM proxy exited (port ${PROXY_PORT} may be held)." >&2
+        exit 1
+    fi
+    if curl --fail --silent "http://127.0.0.1:${PROXY_PORT}/health/liveliness" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 3
+done
+
+write_endpoint "ready"
+echo "READY at $(date -Iseconds)"
+echo "endpoint file: ${ENDPOINT_FILE}"
+echo "open the tunnel on the local PC:"
+echo "  ${SSH_TUNNEL}"
+
+submit_successor() {
+    local next_index=$(( CHAIN_INDEX + 1 ))
+
+    if [[ -e "$CHAIN_STOP_FILE" ]]; then
+        echo "[chain] stop file present ($CHAIN_STOP_FILE); this is the last link."
+        return 1
+    fi
+    if [[ "$next_index" -gt "$MAX_CHAIN_JOBS" ]]; then
+        echo "[chain] reached MAX_CHAIN_JOBS=${MAX_CHAIN_JOBS}; not resubmitting."
+        return 1
+    fi
+    local elapsed=$(( $(date +%s) - JOB_START_EPOCH ))
+    if [[ "$elapsed" -lt "$MIN_JOB_SEC" ]]; then
+        echo "[chain] served only ${elapsed}s (< ${MIN_JOB_SEC}s); refusing to resubmit." >&2
+        return 1
+    fi
+    command -v qsub >/dev/null 2>&1 || {
+        echo "[chain] qsub is not available on this node; cannot resubmit." >&2
+        return 1
+    }
+
+    # AGENT_API_KEY is deliberately NOT carried over: each link mints its own,
+    # and connect.ps1 re-reads the endpoint file anyway.
+    local next_id
+    next_id="$(qsub -V \
+        -v "CHAIN=1,CHAIN_INDEX=${next_index},MAX_CHAIN_JOBS=${MAX_CHAIN_JOBS},CHAIN_STOP_FILE=${CHAIN_STOP_FILE},CHAIN_LEAD_SEC=${CHAIN_LEAD_SEC},SELF_PBS=${SELF_PBS},VLLM_MODEL=${VLLM_MODEL},AGENT_MODEL_ALIAS=${AGENT_MODEL_ALIAS},MAX_MODEL_LEN=${MAX_MODEL_LEN},ENDPOINT_FILE=${ENDPOINT_FILE},LOCAL_PORT=${LOCAL_PORT}" \
+        "$SELF_PBS")" || {
+        echo "[chain] qsub failed; this is the last link." >&2
+        return 1
+    }
+    echo "[chain] link ${next_index}/${MAX_CHAIN_JOBS} queued as ${next_id}"
+    return 0
+}
+
+if [[ "$CHAIN" == "1" ]]; then
+    CHAIN_DEADLINE=$(( JOB_START_EPOCH + WALLTIME_SEC - CHAIN_LEAD_SEC ))
+    echo "[chain] link ${CHAIN_INDEX}/${MAX_CHAIN_JOBS}; successor at $(date -Iseconds -d "@${CHAIN_DEADLINE}" 2>/dev/null || echo "+$(( WALLTIME_SEC - CHAIN_LEAD_SEC ))s")"
+else
+    CHAIN_DEADLINE=""
+    echo "[chain] disabled (pass CHAIN=1 to keep the server alive across walltime)"
+fi
+SUCCESSOR_SUBMITTED=0
+
+# Keep the job alive until walltime / qdel; die if either server dies.
+while true; do
+    if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+        echo "ERROR: vLLM died at $(date -Iseconds)." >&2
+        exit 1
+    fi
+    if ! kill -0 "$PROXY_PID" 2>/dev/null; then
+        echo "ERROR: LiteLLM proxy died at $(date -Iseconds)." >&2
+        exit 1
+    fi
+    # Hand over before PBS kills us: a trap is not enough, since walltime
+    # expiry can arrive as SIGKILL and never run it.
+    if [[ -n "$CHAIN_DEADLINE" && "$SUCCESSOR_SUBMITTED" == "0" \
+          && "$(date +%s)" -ge "$CHAIN_DEADLINE" ]]; then
+        SUCCESSOR_SUBMITTED=1
+        submit_successor || true
+    fi
+    sleep 30
+done

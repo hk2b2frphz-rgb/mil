@@ -1,0 +1,69 @@
+# GRPO interactivity alignment config — loneliness counseling domain
+#
+# Reproduces the Kyutai Multi-Faceted Interactivity Alignment paper
+# (arxiv 2606.11167) on 2x A100 80GB.
+#
+# Prerequisites:
+#   1. Generate dialogue data: qsub scripts/run_dialogues_qwen_1000.pbs
+#   2. Extract segments:
+#        python scripts/grpo/segment_extractor.py \
+#          --manifest data/runs/qwen_dialogues_1000/training_set/synthetic_moshi_train.jsonl \
+#          --out-dir data/runs/qwen_dialogues_1000/grpo_segments
+#   3. Set segment_dir below to the output dir
+#
+# Launch:
+#   qsub scripts/run_grpo.pbs
+
+# --- Model ---
+hf_repo: "llm-jp/llm-jp-moshi-v1"
+
+# --- GRPO core (Kyutai paper, adapted for 2x A100) ---
+lr: 2.0e-7
+epochs: 100
+segments_per_epoch: 8    # paper=32
+group_size: 8            # paper G=16
+kl_beta: 0.01
+clip_epsilon: 0.2
+adam_beta1: 0.9
+adam_beta2: 0.95
+weight_decay: 0.1
+grad_clip: 2.0
+
+# Context: recording preceding segment, prepended to input.
+# Linearly scheduled 0 → 30s over 100 epochs; prepended with prob 0.5.
+max_context_sec: 30.0
+context_prob: 0.5
+
+# --- Segment data (output of segment_extractor.py) ---
+# Set this to the directory containing {pause,turn_taking,backchannel,interruption}_segments.jsonl
+segment_dir: ""          # e.g. "data/runs/qwen_dialogues_1000/grpo_segments"
+
+# --- Reward axes ---
+pause_threshold_sec: 1.0
+backchannel_window_sec: 1.0
+backchannel_max_dur_sec: 1.0
+
+# Reward weights per axis [pause, turn, backchannel, interruption]
+reward_weights: [1.0, 1.0, 1.0, 1.0]
+
+# LLM judge (applied to turn_taking and interruption only, per Kyutai paper)
+judge_model: "Qwen/Qwen3.6-27B"
+judge_max_tokens: 8
+judge_temperature: 0.0
+judge_weight: 1.0
+
+# --- Inference (Kyutai paper Section 4.3) ---
+temp: 0.7               # text token temperature
+temp_text: 0.7
+temp_audio: 0.8          # audio token temperature
+top_k_audio: 250
+
+# --- Checkpointing ---
+save_dir: "experiments/grpo"
+save_every: 5
+log_every: 1
+
+# --- Hardware ---
+nproc: 2
+seed: 42
+disable_triton: false
