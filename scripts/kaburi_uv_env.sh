@@ -59,13 +59,27 @@
 # KABURI_PYTHON overrides everything: if it is set, the arrays become just that
 # interpreter, for an environment built by hand outside uv.
 
+kaburi_tls_flag() {
+    # uv renamed --native-tls to --system-certs and warns on every call that
+    # still uses the old name. Ask this uv which one it takes, once per shell.
+    if [[ -z "${KABURI_TLS_FLAG:-}" ]]; then
+        if uv help sync 2>/dev/null | grep -q -- '--system-certs'; then
+            KABURI_TLS_FLAG="--system-certs"
+        else
+            KABURI_TLS_FLAG="--native-tls"
+        fi
+        export KABURI_TLS_FLAG
+    fi
+    printf '%s' "$KABURI_TLS_FLAG"
+}
+
 kaburi_uv_flags() {
     # The internal name is prefixed so a caller passing its own "flags" array
     # does not collide with it -- a nameref onto a same-named local in the same
     # scope is a circular reference and bash refuses it.
     local -a __kaburi_flags=()
     if [[ "${KABURI_NATIVE_TLS:-1}" == "1" ]]; then
-        __kaburi_flags+=(--native-tls)
+        __kaburi_flags+=("$(kaburi_tls_flag)")
     fi
     if [[ "${KABURI_TORCH_FROM_PYPI:-0}" == "1" ]]; then
         __kaburi_flags+=(--no-sources)
