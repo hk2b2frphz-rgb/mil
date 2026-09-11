@@ -48,6 +48,11 @@ bash scripts/setup_kaburi_env.sh            # 初回のみ（../kaburi-tts を�
 qsub -V scripts/2026-09-04/aizuchi_normal_kaburi_tts_3000.pbs
 ```
 
+`uv sync` が torch の wheel で `invalid peer certificate: UnknownIssuer` や
+`download-r2.pytorch.org` への接続失敗で落ちる場合は、TLS 傍受プロキシが原因。
+対処（`SSL_CERT_FILE`、`KABURI_TORCH_FROM_PYPI=1`）は
+`scripts/setup_kaburi_env.sh` と `scripts/kaburi_uv_env.sh` の冒頭に書いてある。
+
 本番前に3対話だけ流して所要時間と重なりを測る smoke が両方式に用意してある。
 `scripts/report_tts_smoke.py` が対話あたりの秒数・RTF・3000本換算の見積もりと、
 論文 Table III と同じ定義の overlap / silence / switches-per-min を出す。

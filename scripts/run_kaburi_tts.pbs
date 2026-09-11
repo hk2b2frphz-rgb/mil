@@ -42,6 +42,13 @@
 #                                       bundled DEMO_F2 synthetic voice)
 #   KABURI_REF_PACK=/path/to/refpack    use a prebuilt pack and skip all of the
 #                                       above
+#   KABURI_TORCH_FROM_PYPI=1            resolve torch from PyPI instead of the
+#                                       pinned cu128 index, for a proxy that
+#                                       cannot reach download-r2.pytorch.org.
+#                                       Must match how the env was synced.
+#   KABURI_NATIVE_TLS=0                 stop passing --native-tls to uv
+#   KABURI_PYTHON=/path/to/python       an interpreter built outside uv
+#                                       (see scripts/kaburi_uv_env.sh)
 #   NUM_SHARDS=2 CUDA_VISIBLE_DEVICES=0,1
 #   NUM_DIALOGUES=all
 #   CHUNK_SEC=26 CHUNK_GAP_SEC=0.3 MIN_FIT_SCALE=0.9
@@ -189,12 +196,15 @@ if command -v nvidia-smi >/dev/null 2>&1; then
 fi
 
 # KABURI runs in its own uv project (torch cu128, python <3.12); the main env is
-# cu121 and cannot host it. pyopenjtalk is pulled in on top so the word-level
-# alignment split uses morphemes instead of the regex fallback.
-KABURI_UV=(uv run --project "$KABURI_REPO" --with pyopenjtalk python)
+# cu121 and cannot host it. scripts/kaburi_uv_env.sh decides the TLS and index
+# flags -- read it before changing anything about how uv is called here.
+# shellcheck source=/dev/null
+source "$PWD/scripts/kaburi_uv_env.sh"
+kaburi_uv_run KABURI_UV
+echo "kaburi_uv:     ${KABURI_UV[*]}"
 
 echo "===== step 0/3: environment preflight ====="
-"${KABURI_UV[@]}" - <<'PY'
+if ! "${KABURI_UV[@]}" - <<'PY'
 import torch
 import torchaudio  # noqa: F401
 if not torch.cuda.is_available():
@@ -208,6 +218,13 @@ import kaburi_tts  # noqa: F401
 from irodori_tts.codec import DACVAECodec  # noqa: F401
 print("kaburi/irodori/torch preflight ok")
 PY
+then
+    echo "ERROR: the KABURI environment is not usable." >&2
+    echo "Run scripts/setup_kaburi_env.sh first. If it failed on the torch wheel," >&2
+    echo "its header lists the proxy/TLS workarounds (SSL_CERT_FILE," >&2
+    echo "KABURI_TORCH_FROM_PYPI=1); they have to be set here as well." >&2
+    exit 1
+fi
 
 if [[ "$BUILD_REF_PACK" == "1" ]]; then
     echo "===== step 0b: speaker reference pack ====="

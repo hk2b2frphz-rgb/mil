@@ -87,7 +87,11 @@ if [[ ! -s "$MOSHI_REF_WAV" ]]; then
     exit 1
 fi
 
-KABURI_UV=(uv run --project "$KABURI_REPO" python)
+export KABURI_REPO
+# shellcheck source=/dev/null
+source "$REPO_ROOT/scripts/kaburi_uv_env.sh"
+kaburi_uv_run KABURI_UV
+
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
