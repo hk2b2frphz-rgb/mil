@@ -2,6 +2,7 @@
 
 Full-FT（nu-dialogue / DeepSpeed ZeRO）の保存済み `step_<N>` を指定します。
 リポジトリのルートで実行してください。LoRA用ではありません。
+標準の実行先はV100側の `xvn_s / res=middle2` です。
 
 ```bash
 qsub -v STEP_DIR=/absolute/path/checkpoints/nu_timestamp/step_120 \

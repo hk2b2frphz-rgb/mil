@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #PBS -S /bin/bash
 #PBS -N az_step_export
-#PBS -q xan_s
-#PBS -l select=1:res=middle
+#PBS -q xvn_s
+#PBS -l select=1:res=middle2
 #PBS -l walltime=12:00:00
 #PBS -j oe
 #PBS -V
