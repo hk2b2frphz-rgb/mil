@@ -46,6 +46,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
+# The PBS bodies below cd to PBS_O_WORKDIR. In an interactive PBS session that
+# variable is already set, pointing at wherever the session was started (the
+# home directory, typically), which would send them out of the repo. Point it
+# at the repo for everything this script launches.
+export PBS_O_WORKDIR="$REPO_ROOT"
 # shellcheck source=/dev/null
 source "$REPO_ROOT/scripts/run_id_utils.sh"
 

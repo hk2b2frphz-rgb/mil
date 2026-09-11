@@ -7,10 +7,12 @@
 #
 #   TLS      On a cluster behind a TLS-inspecting proxy, uv's bundled
 #            certificate store does not know the proxy's CA and every download
-#            dies with "invalid peer certificate: UnknownIssuer". --native-tls
-#            makes uv use the machine's own certificate store instead, which is
-#            where such a CA is installed. It is a no-op elsewhere, so it is on
-#            by default; set KABURI_NATIVE_TLS=0 to drop it.
+#            dies with "invalid peer certificate: UnknownIssuer". --system-certs
+#            (--native-tls on older uv; kaburi_tls_flag asks uv which name it
+#            takes, since the old one now warns) makes uv use the machine's own
+#            certificate store instead, which is where such a CA is installed.
+#            It is a no-op elsewhere, so it is on by default; set
+#            KABURI_NATIVE_TLS=0 to drop it.
 #
 #            If the CA is not in the system store either, point uv at it
 #            directly instead -- uv honours both of these:

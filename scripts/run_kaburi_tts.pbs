@@ -61,7 +61,16 @@
 
 set -euo pipefail
 
-cd "${PBS_O_WORKDIR:-$(pwd)}"
+# PBS_O_WORKDIR is where qsub was run, which is this repo for a submitted job.
+# An interactive PBS session sets it too -- usually to the home directory --
+# and following it there breaks every relative path below. Trust it only when
+# it actually holds this repo, else fall back to where this file lives.
+KABURI_BODY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -n "${PBS_O_WORKDIR:-}" && -f "$PBS_O_WORKDIR/scripts/run_kaburi_tts.pbs" ]]; then
+    cd "$PBS_O_WORKDIR"
+else
+    cd "$KABURI_BODY_DIR"
+fi
 if [[ -f "$PWD/scripts/setup_proxy.sh" ]]; then
     # shellcheck source=/dev/null
     source "$PWD/scripts/setup_proxy.sh"
