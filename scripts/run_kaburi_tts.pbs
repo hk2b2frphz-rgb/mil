@@ -263,6 +263,15 @@ then
     exit 1
 fi
 
+# Reading a wav is the first thing the reference-pack build does, and it goes
+# through torchcodec, which fails on a CUDA mismatch only at that point. Check
+# it here rather than after downloading 5GB of weights.
+if ! "${KABURI_UV[@]}" scripts/kaburi_audio_io_check.py; then
+    echo "ERROR: torchaudio cannot read audio in the KABURI environment." >&2
+    echo "Re-run scripts/setup_kaburi_env.sh -- it repairs the torchcodec build." >&2
+    exit 1
+fi
+
 if [[ "$BUILD_REF_PACK" == "1" ]]; then
     echo "===== step 0b: speaker reference pack ====="
     bash scripts/make_kaburi_ref_pack.sh "$KABURI_REF_PACK"

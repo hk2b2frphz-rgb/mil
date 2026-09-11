@@ -33,6 +33,13 @@
 #            split utterances into morphemes, and falls back to a regex if it
 #            is missing (coarser word timings in the training data).
 #
+#   Codec    torchaudio 2.9+ reads and writes audio through torchcodec, whose
+#            wheels are per CUDA major version. A mismatch with torch shows up
+#            as "libnvrtc.so.<N>: cannot open shared object file" on the first
+#            wav access, not at import. setup_kaburi_env.sh detects that and
+#            repairs the venv, so `uv run` here passes --no-sync: an exact
+#            re-sync would put the broken wheel back.
+#
 #   Path     KABURI's pyproject sets `package = false`, so `uv sync` installs
 #            its dependencies and never the kaburi_tts / irodori_tts packages
 #            themselves -- upstream runs its own scripts from inside that
@@ -78,6 +85,23 @@ kaburi_export_pythonpath() {
     esac
 }
 
+kaburi_export_ldpath() {
+    # torchcodec's shared objects look for the CUDA runtime libraries shipped
+    # as nvidia-* wheels. They normally resolve through an RPATH relative to
+    # site-packages; when a repair installs one afterwards that can miss, so
+    # name the directories explicitly. Same trick as setup_gemma_runtime.sh.
+    local venv_lib="$KABURI_REPO/.venv/lib"
+    [[ -d "$venv_lib" ]] || return 0
+    local dir
+    while IFS= read -r dir; do
+        case ":${LD_LIBRARY_PATH:-}:" in
+            *":$dir:"*) ;;
+            *) export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$dir:$LD_LIBRARY_PATH}"
+               export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-$dir}" ;;
+        esac
+    done < <(find "$venv_lib" -type d -path '*/site-packages/nvidia/*/lib' 2>/dev/null | sort)
+}
+
 kaburi_uv_run() {
     local __out_name="$1"
     local -n __run_out="$__out_name"
@@ -89,6 +113,7 @@ kaburi_uv_run() {
         fi
         if [[ -n "${KABURI_REPO:-}" ]]; then
             kaburi_export_pythonpath
+            kaburi_export_ldpath
         fi
         __run_out=("$KABURI_PYTHON")
         return 0
@@ -100,10 +125,15 @@ kaburi_uv_run() {
     fi
 
     kaburi_export_pythonpath
+    kaburi_export_ldpath
 
     local -a run_flags
     kaburi_uv_flags run_flags
-    __run_out=(uv run --project "$KABURI_REPO"
+    # --no-sync: setup_kaburi_env.sh owns this environment, and it may have had
+    # to repair torchcodec on top of what the lockfile says. uv sync is exact,
+    # so letting `uv run` re-sync would undo that repair on every call. Re-run
+    # the setup script after changing dependencies.
+    __run_out=(uv run --project "$KABURI_REPO" --no-sync
                ${run_flags[@]+"${run_flags[@]}"} --with pyopenjtalk python)
 }
 

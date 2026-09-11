@@ -48,10 +48,15 @@ bash scripts/setup_kaburi_env.sh            # 初回のみ（../kaburi-tts を�
 qsub -V scripts/2026-09-04/aizuchi_normal_kaburi_tts_3000.pbs
 ```
 
-`uv sync` が torch の wheel で `invalid peer certificate: UnknownIssuer` や
-`download-r2.pytorch.org` への接続失敗で落ちる場合は、TLS 傍受プロキシが原因。
-対処（`SSL_CERT_FILE`、`KABURI_TORCH_FROM_PYPI=1`）は
-`scripts/setup_kaburi_env.sh` と `scripts/kaburi_uv_env.sh` の冒頭に書いてある。
+セットアップで詰まりやすい2点は `scripts/setup_kaburi_env.sh` と
+`scripts/kaburi_uv_env.sh` の冒頭に対処を書いてある。
+
+- `invalid peer certificate: UnknownIssuer` / `download-r2.pytorch.org` に繋がらない
+  → TLS 傍受プロキシ。`SSL_CERT_FILE` か `KABURI_TORCH_FROM_PYPI=1`
+- `libnvrtc.so.13: cannot open shared object file`
+  → torchaudio 2.9+ が load/save を torchcodec 経由にしており、その wheel の CUDA が
+  torch と食い違っている。setup が検知して自動修復する（`scripts/kaburi_audio_io_check.py`
+  で単体確認できる）
 
 本番前に3対話だけ流して所要時間と重なりを測る smoke が両方式に用意してある。
 `scripts/report_tts_smoke.py` が対話あたりの秒数・RTF・3000本換算の見積もりと、

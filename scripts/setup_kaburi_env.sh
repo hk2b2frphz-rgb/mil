@@ -82,6 +82,73 @@ else:
     print("gpu: none visible here (the PBS job checks this again)")
 PY
 
+# torchaudio 2.9+ implements load/save through torchcodec, whose wheels are
+# built per CUDA major version. The PyPI default can disagree with the torch
+# that uv just installed, and then every wav read dies with
+# "libnvrtc.so.<N>: cannot open shared object file" -- not at import, but at
+# the first file access, which is the reference-pack build. Catch it here.
+echo "[kaburi] audio I/O check"
+VENV_PYTHON="$KABURI_REPO/.venv/bin/python"
+
+# uv pip must cross the same proxy as uv sync did.
+PIP_TLS=()
+if [[ "${KABURI_NATIVE_TLS:-1}" == "1" ]]; then
+    PIP_TLS=("$(kaburi_tls_flag)")
+fi
+
+audio_io_ok() {
+    "${KABURI_UV[@]}" scripts/kaburi_audio_io_check.py
+}
+
+if ! audio_io_ok; then
+    CUDA_TAG="$("${KABURI_UV[@]}" -c \
+        'import torch; v=torch.version.cuda or ""; print("cu"+v.replace(".",""))')"
+    if [[ -z "$CUDA_TAG" || "$CUDA_TAG" == "cu" ]]; then
+        echo "ERROR: this torch reports no CUDA version; cannot pick a torchcodec build." >&2
+        exit 1
+    fi
+
+    # First try: a torchcodec built for the same CUDA as this torch.
+    echo "[kaburi] repair 1/2: torchcodec from the $CUDA_TAG index"
+    uv pip install --python "$VENV_PYTHON" ${PIP_TLS[@]+"${PIP_TLS[@]}"} \
+        --index-url "https://download.pytorch.org/whl/$CUDA_TAG" \
+        --upgrade torchcodec || true
+
+    if ! audio_io_ok; then
+        # Second try: keep the torchcodec that is installed and give it the
+        # CUDA runtime it was built against. Into the project venv, not a uv
+        # overlay, so the .so's RPATH (relative to site-packages) finds it.
+        NVRTC_MAJOR="$("${KABURI_UV[@]}" - <<'PY' || true
+import re
+try:
+    from torchcodec._core import _metadata  # noqa: F401
+except Exception as exc:
+    match = re.search(r"libnvrtc\.so\.(\d+)", str(exc))
+    print(match.group(1) if match else "")
+else:
+    print("")
+PY
+)"
+        NVRTC_MAJOR="$(printf '%s' "$NVRTC_MAJOR" | tr -dc '0-9')"
+        NVRTC_MAJOR="${NVRTC_MAJOR:-13}"
+        echo "[kaburi] repair 2/2: nvidia-cuda-nvrtc-cu$NVRTC_MAJOR"
+        uv pip install --python "$VENV_PYTHON" ${PIP_TLS[@]+"${PIP_TLS[@]}"} \
+            "nvidia-cuda-nvrtc-cu${NVRTC_MAJOR}" || true
+    fi
+
+    if ! audio_io_ok; then
+        echo >&2
+        echo "ERROR: torchaudio still cannot read audio in $KABURI_REPO/.venv" >&2
+        echo "torchcodec and torch disagree about CUDA. From here, by hand:" >&2
+        echo "  uv pip install --python $VENV_PYTHON \\" >&2
+        echo "    --index-url https://download.pytorch.org/whl/$CUDA_TAG torchcodec" >&2
+        echo "  (or pin an older torchcodec that still targets CUDA 12)" >&2
+        echo "Verify with: $VENV_PYTHON scripts/kaburi_audio_io_check.py" >&2
+        exit 1
+    fi
+    echo "[kaburi] torchcodec repaired"
+fi
+
 echo
 echo "[kaburi] done. Point jobs at it with:"
 echo "  export KABURI_REPO=$KABURI_REPO"
