@@ -28,6 +28,15 @@
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 
+# Same listener voice as the Qwen3 corpora (aizuchi_normal_tts_3000.pbs and the
+# mixed-corpus stages all clone from this directory), so the two training sets
+# differ in the TTS stage and not in who is speaking. The reference pack is
+# built from it once and cached under data/kaburi_ref_packs/.
+# The user side has no counterpart to inherit -- the Qwen3 path drives it with
+# a CustomVoice preset, not a reference wav -- so it falls back to KABURI's
+# bundled DEMO_F2 voice. Set USER_REF_WAV or CLONE_OUT_DIR_USER to override.
+export CLONE_OUT_DIR_MOSHI="$PWD/data/clone_examples/99999"
+
 export AIZUCHI_VERSION="v6"
 export SOURCE_BATCH_ID="qwen_aizuchi_3000_normal_${AIZUCHI_VERSION}"
 export BATCH_ID="aizuchi_normal_3000_${AIZUCHI_VERSION}_kaburi"

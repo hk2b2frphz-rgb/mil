@@ -32,7 +32,16 @@
 #
 # Useful overrides:
 #   KABURI_REPO=/path/to/kaburi-tts     (default: ../kaburi-tts)
-#   KABURI_REF_PACK=/path/to/refpack    (default: bundled assets/test_refpack)
+#   CLONE_OUT_DIR_MOSHI=...             clone_voice_examples.py output for the
+#                                       listener voice; a reference pack is
+#                                       built from it and cached under
+#                                       data/kaburi_ref_packs/ (REF_RANK /
+#                                       CLONE_MODE select which ref, same as
+#                                       the Qwen3 jobs)
+#   USER_REF_WAV / CLONE_OUT_DIR_USER   user-side voice (default: KABURI's
+#                                       bundled DEMO_F2 synthetic voice)
+#   KABURI_REF_PACK=/path/to/refpack    use a prebuilt pack and skip all of the
+#                                       above
 #   NUM_SHARDS=2 CUDA_VISIBLE_DEVICES=0,1
 #   NUM_DIALOGUES=all
 #   CHUNK_SEC=26 CHUNK_GAP_SEC=0.3 MIN_FIT_SCALE=0.9
@@ -67,10 +76,26 @@ if [[ ! -d "$KABURI_REPO/kaburi_tts" ]]; then
     echo "Run scripts/setup_kaburi_env.sh first." >&2
     exit 1
 fi
-export KABURI_REF_PACK="${KABURI_REF_PACK:-$KABURI_REPO/assets/test_refpack}"
-if [[ ! -s "$KABURI_REF_PACK/manifest.jsonl" ]]; then
-    echo "ERROR: reference pack has no manifest.jsonl: $KABURI_REF_PACK" >&2
-    exit 1
+# Speaker references. With a moshi clone source (the same
+# data/clone_examples/<id> the Qwen3 jobs clone the listener voice from), the
+# pack is built once from it and cached under data/kaburi_ref_packs/. Without
+# one, fall back to KABURI's bundled two-voice pack.
+export REF_RANK="${REF_RANK:-1}"
+export CLONE_MODE="${CLONE_MODE:-in-context}"
+BUILD_REF_PACK=0
+if [[ -z "${KABURI_REF_PACK:-}" ]]; then
+    if [[ -n "${CLONE_OUT_DIR_MOSHI:-}${MOSHI_REF_WAV:-}" ]]; then
+        if [[ -n "${CLONE_OUT_DIR_MOSHI:-}" ]]; then
+            ref_pack_tag="$(basename "$CLONE_OUT_DIR_MOSHI")_ref$(printf '%02d' "$REF_RANK")_${CLONE_MODE}"
+        else
+            ref_pack_tag="$(basename "${MOSHI_REF_WAV%.*}")"
+        fi
+        export KABURI_REF_PACK="$PWD/data/kaburi_ref_packs/$ref_pack_tag"
+        BUILD_REF_PACK=1
+    else
+        export KABURI_REF_PACK="$KABURI_REPO/assets/test_refpack"
+        echo "WARNING: no CLONE_OUT_DIR_MOSHI/MOSHI_REF_WAV; using the bundled demo voices." >&2
+    fi
 fi
 
 default_batch_id="${SOURCE_BATCH_ID}_kaburi"
@@ -183,6 +208,15 @@ import kaburi_tts  # noqa: F401
 from irodori_tts.codec import DACVAECodec  # noqa: F401
 print("kaburi/irodori/torch preflight ok")
 PY
+
+if [[ "$BUILD_REF_PACK" == "1" ]]; then
+    echo "===== step 0b: speaker reference pack ====="
+    bash scripts/make_kaburi_ref_pack.sh "$KABURI_REF_PACK"
+fi
+if [[ ! -s "$KABURI_REF_PACK/manifest.jsonl" ]]; then
+    echo "ERROR: reference pack has no manifest.jsonl: $KABURI_REF_PACK" >&2
+    exit 1
+fi
 
 echo "===== step 1/3: split dialogues ====="
 uv run python - "$DIALOGUES_JSONL" "$OUT_ROOT" "$NUM_SHARDS" "$NUM_DIALOGUES" "$SPARE_RATIO" <<'PY'
