@@ -86,7 +86,9 @@ STAMP="$(run_id_stamp)"
 resolve_source_dir() {
     local candidate rank best_rank=-1 best=""
     while IFS= read -r candidate; do
-        compgen -G "$candidate/*.json" >/dev/null 2>&1 || continue
+        # wav と JSON は <training_set>/data_stereo/ の下。training_set 直下を
+        # 見ても何も無い。
+        compgen -G "$candidate/data_stereo/*.json" >/dev/null 2>&1 || continue
         rank=0
         [[ "$candidate" == *"/merged/"* ]] && rank=$((rank + 2))
         [[ "$candidate" != *kaburi* ]] && rank=$((rank + 1))
@@ -133,8 +135,10 @@ if [[ -z "$SOURCE_DIR" ]]; then
     echo "  bash scripts/run_kaburi_bank_dialogues.sh 3" >&2
     exit 1
 fi
-if ! compgen -G "$SOURCE_DIR/*.json" >/dev/null; then
+if ! compgen -G "$SOURCE_DIR/data_stereo/*.json" >/dev/null \
+   && ! compgen -G "$SOURCE_DIR/*.json" >/dev/null; then
     echo "ERROR: no dialogue JSON under SOURCE_DIR: $SOURCE_DIR" >&2
+    echo "Expected $SOURCE_DIR/data_stereo/<stem>.json" >&2
     exit 1
 fi
 if [[ -z "${BANK_DIR:-}" ]]; then
@@ -215,6 +219,6 @@ uv run python scripts/report_tts_smoke.py \
     --training-dir "$BANK_OUT" --label "kaburi-$RASTER_MODE placement + bank"
 
 echo
-echo "listen: $SOURCE_DIR  vs  $BANK_OUT"
+echo "listen: $SOURCE_DIR/data_stereo  vs  $BANK_OUT/data_stereo"
 echo "swaps:  $BANK_OUT/bank_swaps.jsonl"
 echo "finished_at: $(date -Iseconds)"

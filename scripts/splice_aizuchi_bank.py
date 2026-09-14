@@ -61,6 +61,19 @@ FADE_SEC = 0.005
 DEFAULT_MAX_CHARS = 6
 
 
+def stereo_dir(training_dir: Path) -> Path:
+    """training_set の中で wav と JSON が置かれている場所。
+
+    このリポの TTS はどの経路も <training_set>/data_stereo/<stem>.{wav,json} に
+    書く（report_tts_smoke.py もそこを見る）。data_stereo そのものを渡された
+    場合も通す。
+    """
+    nested = training_dir / "data_stereo"
+    if nested.is_dir():
+        return nested
+    return training_dir
+
+
 def load_bank(
     bank_dir: Path,
     text: str | None,
@@ -388,9 +401,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     import torch
     import torchaudio
 
-    json_paths = sorted(args.training_dir.glob("*.json"))
+    source_dir = stereo_dir(args.training_dir)
+    json_paths = sorted(source_dir.glob("*.json"))
     if not json_paths:
-        raise SystemExit(f"training_set に JSON がありません: {args.training_dir}")
+        raise SystemExit(
+            f"対話 JSON がありません: {source_dir}"
+            "（<training_set>/data_stereo/<stem>.json を探します）"
+        )
     # 配置で絞り込むときは、--limit を入力ファイルの頭から数えてはいけない。
     # 既存コーパスの先頭 N 本が、配置を取った N 本とは限らない。
     limit = max(0, int(args.limit))
@@ -418,7 +435,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[placement] {len(placements)} 対話ぶんの配置を読みました")
     rng = random.Random(args.seed)
 
-    args.out_dir.mkdir(parents=True, exist_ok=True)
+    # 出力も同じ形にしておく。そうでないと merge_training_shards.py も
+    # report_tts_smoke.py も読めない。
+    out_stereo = args.out_dir / "data_stereo"
+    out_stereo.mkdir(parents=True, exist_ok=True)
     report_path = args.out_dir / "bank_swaps.jsonl"
     report_path.unlink(missing_ok=True)
 
@@ -504,14 +524,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "turns_text_rewritten": False,
         }
 
-        out_wav = args.out_dir / wav_path.name
+        out_wav = out_stereo / wav_path.name
         torchaudio.save(
             str(out_wav),
             torch.from_numpy(spliced).to(torch.float32),
             sample_rate,
             channels_first=True,
         )
-        (args.out_dir / json_path.name).write_text(
+        (out_stereo / json_path.name).write_text(
             json.dumps(payload, ensure_ascii=False, indent=1) + "\n", encoding="utf-8"
         )
         with report_path.open("a", encoding="utf-8") as handle:

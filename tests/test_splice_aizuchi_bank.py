@@ -298,6 +298,29 @@ class RetimedSpliceTest(unittest.TestCase):
         )
 
 
+class LayoutTest(unittest.TestCase):
+    def test_a_training_set_resolves_to_its_data_stereo(self) -> None:
+        # Every TTS route in this repo writes <training_set>/data_stereo/. The
+        # splice looked at the training_set itself and so found nothing, even
+        # for corpora that were there.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            training_set = Path(directory) / "training_set"
+            (training_set / "data_stereo").mkdir(parents=True)
+            self.assertEqual(
+                splice.stereo_dir(training_set), training_set / "data_stereo"
+            )
+
+    def test_data_stereo_itself_is_accepted(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "data_stereo"
+            path.mkdir()
+            self.assertEqual(splice.stereo_dir(path), path)
+
+
 class PlacementIndexTest(unittest.TestCase):
     def test_placements_are_keyed_by_dialogue_id_not_filename(self) -> None:
         # Sharding renumbers stems, so sample_00001 in a shard is a different

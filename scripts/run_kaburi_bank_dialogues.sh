@@ -131,6 +131,6 @@ uv run python scripts/report_tts_smoke.py \
     --training-dir "$BANK_OUT" --label "kaburi-$RASTER_MODE+bank"
 
 echo
-echo "listen:  $PLAIN_DIR  vs  $BANK_OUT"
+echo "listen:  $PLAIN_DIR/data_stereo  vs  $BANK_OUT/data_stereo"
 echo "swaps:   $BANK_OUT/bank_swaps.jsonl"
 echo "finished_at: $(date -Iseconds)"
