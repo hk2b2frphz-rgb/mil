@@ -43,6 +43,13 @@ cd "$REPO_ROOT"
 export PBS_O_WORKDIR="$REPO_ROOT"
 # shellcheck source=/dev/null
 source "$REPO_ROOT/scripts/run_id_utils.sh"
+# The timing model still pulls its text tokenizer from huggingface.co, and the
+# reference pack decodes with the codec, so a compute node needs the proxy just
+# as the render job does -- it is only the acoustic checkpoint that is skipped.
+if [[ -f "$REPO_ROOT/scripts/setup_proxy.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$REPO_ROOT/scripts/setup_proxy.sh"
+fi
 
 export KABURI_REPO="${KABURI_REPO:-$REPO_ROOT/../kaburi-tts}"
 if [[ ! -d "$KABURI_REPO/kaburi_tts" ]]; then
