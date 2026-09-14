@@ -68,6 +68,11 @@ F0_CANDIDATES = 4
 OCTAVE_PENALTY = 0.25
 # text 内の F0 sd が平均のこの割合を超えたら、値ではなく計測を疑う目印を出す。
 F0_SUSPECT_RATIO = 0.15
+# group の中央値からこの倍率を超えて離れた尺は外れとして別勘定にする。相槌で
+# 中央値の 2.5 倍というのは、散ったのではなく壊れている(低温での繰り返し、
+# 無音の垂れ流し)方を先に疑う長さ。cv は外れ 1 本で簡単に跳ねるので、外れを
+# 抜いた cv も並べて出す -- でないと「広がった」と「壊れた」を取り違える。
+OUTLIER_RATIO = 2.5
 # 無音判定は report_tts_smoke.py と同じ「ピークの 5%」。
 SILENCE_RATIO = 0.05
 # 有声区間をいくつに割るか。60ms 以上の無声が入ったら別の区間として数える。
@@ -482,9 +487,30 @@ def suspect_reason(samples: Sequence[dict[str, Any]], pitch: dict[str, float]) -
     return "unstable"
 
 
+def split_outliers(
+    durations: Sequence[float],
+) -> tuple[list[float], list[float], list[float]]:
+    """尺を (中心, 長すぎ, 短すぎ) に割る。基準は group 自身の中央値。"""
+    usable = [value for value in durations if value > 0]
+    if not usable:
+        return [], [], []
+    center = float(np.median(usable))
+    if center <= 0:
+        return list(durations), [], []
+    long_tail = [value for value in durations if value > OUTLIER_RATIO * center]
+    short_tail = [value for value in durations if value < center / OUTLIER_RATIO]
+    kept = [
+        value
+        for value in durations
+        if center / OUTLIER_RATIO <= value <= OUTLIER_RATIO * center
+    ]
+    return kept, long_tail, short_tail
+
+
 def summarize_group(group: dict[str, Any]) -> dict[str, Any]:
     samples = group["samples"]
     durations = [s["measure"]["speech_sec"] for s in samples]
+    kept, long_tail, short_tail = split_outliers(durations)
     pitches = [s["measure"]["f0_median_hz"] for s in samples if s["measure"]["f0_median_hz"] > 0]
     runs = [s["measure"]["n_voiced_runs"] for s in samples]
     beats = [s["measure"].get("n_beats", 0) for s in samples]
@@ -501,6 +527,10 @@ def summarize_group(group: dict[str, Any]) -> dict[str, Any]:
         "n": len(samples),
         "unique_audio": len(digests),
         "speech_sec": _spread(durations),
+        # 外れを抜いた尺。cv の跳ねが本当の広がりなのか尾なのかはここで分かる。
+        "speech_sec_trimmed": _spread(kept),
+        "outlier_long": len(long_tail),
+        "outlier_short": len(short_tail),
         "f0_median_hz": pitch,
         "f0_head_hz": _spread(heads),
         "f0_step_semitones": _spread(steps),
@@ -591,6 +621,12 @@ def temperature_effect(summaries: Sequence[dict[str, Any]]) -> list[dict[str, An
                 "text": text,
                 "temperatures": [s["temperature"] for s in group],
                 "duration_cv": [s["speech_sec"]["cv"] for s in group],
+                "duration_cv_trimmed": [
+                    s.get("speech_sec_trimmed", s["speech_sec"])["cv"] for s in group
+                ],
+                "outliers": [
+                    s.get("outlier_long", 0) + s.get("outlier_short", 0) for s in group
+                ],
                 "duration_mean": [s["speech_sec"]["mean"] for s in group],
                 "duration_min": [s["speech_sec"]["min"] for s in group],
                 "duration_max": [s["speech_sec"]["max"] for s in group],
@@ -630,6 +666,9 @@ def build_report(
             "samples": total,
             "unique_audio": unique,
             "duplicate_audio": total - unique,
+            "outliers": sum(
+                s.get("outlier_long", 0) + s.get("outlier_short", 0) for s in summaries
+            ),
             "groups": len(summaries),
             "texts": len({s["text"] for s in summaries}),
             "within_group_duration_cv_mean": round(
@@ -685,18 +724,24 @@ def format_report(report: dict[str, Any]) -> str:
 
     lines.append("## 尺")
     lines.append("")
-    lines.append("| group | n | mean | sd | cv | min | max | 隣 | d |")
-    lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |")
+    lines.append("| group | n | mean | sd | cv | cv* | 外れ | min | max | 隣 | d |")
+    lines.append(
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |"
+    )
     for group in report["groups"]:
         duration = group["speech_sec"]
+        trimmed = group.get("speech_sec_trimmed", duration)
+        outliers = group.get("outlier_long", 0) + group.get("outlier_short", 0)
         lines.append(
-            "| {key} | {n} | {mean:.3f} | {sd:.3f} | {cv:.3f} | {low:.3f} | "
-            "{high:.3f} | {near} | {d:.2f} |".format(
+            "| {key} | {n} | {mean:.3f} | {sd:.3f} | {cv:.3f} | {cvt:.3f} | {out} | "
+            "{low:.3f} | {high:.3f} | {near} | {d:.2f} |".format(
                 key=group["key"],
                 n=group["n"],
                 mean=duration["mean"],
                 sd=duration["sd"],
                 cv=duration["cv"],
+                cvt=trimmed["cv"],
+                out=outliers,
                 low=duration["min"],
                 high=duration["max"],
                 near=group["nearest_text"] or "-",
@@ -741,18 +786,24 @@ def format_report(report: dict[str, Any]) -> str:
     if report.get("temperature_effect"):
         lines.append("## temperature を振ったとき (同じ text)")
         lines.append("")
-        lines.append("| text | T | n | 尺 mean | cv | min | max | uniq | within DTW |")
-        lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+        lines.append(
+            "| text | T | n | 尺 mean | cv | cv* | 外れ | min | max | uniq | within DTW |"
+        )
+        lines.append(
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+        )
         for row in report["temperature_effect"]:
             for i, temperature in enumerate(row["temperatures"]):
                 lines.append(
-                    "| {text} | {t:g} | {n} | {mean:.3f} | {cv:.3f} | {low:.3f} | "
-                    "{high:.3f} | {uniq} | {dtw:.3f} |".format(
+                    "| {text} | {t:g} | {n} | {mean:.3f} | {cv:.3f} | {cvt:.3f} | "
+                    "{out} | {low:.3f} | {high:.3f} | {uniq} | {dtw:.3f} |".format(
                         text=row["text"] if i == 0 else "",
                         t=temperature,
                         n=row["n"][i],
                         mean=row["duration_mean"][i],
                         cv=row["duration_cv"][i],
+                        cvt=row["duration_cv_trimmed"][i],
+                        out=row["outliers"][i],
                         low=row["duration_min"][i],
                         high=row["duration_max"][i],
                         uniq=row["unique_audio"][i],
@@ -783,6 +834,10 @@ def format_report(report: dict[str, Any]) -> str:
         f"(uniq {totals['unique_audio']})  <- ここが大きいならサンプリングは効いていない"
     )
     lines.append(
+        f"- 尺の外れ: {totals['outliers']} 本 "
+        f"(中央値の {OUTLIER_RATIO:g} 倍を超えた/下回った)  <- 壊れている疑い"
+    )
+    lines.append(
         f"- group 内の尺のばらつき: cv {totals['within_group_duration_cv_mean']:.3f} "
         f"(sd {totals['within_group_duration_sd_mean_sec']:.3f}s)"
     )
@@ -810,6 +865,11 @@ def format_report(report: dict[str, Any]) -> str:
     lines.append("")
     lines.append("読み方:")
     lines.append("- group 内 cv が 0 に近ければ、同じ入力をいくら投げても貯まらない。")
+    lines.append(
+        f"- cv* は中央値の {OUTLIER_RATIO:g} 倍を外れた尺を抜いた cv。cv が大きいのに"
+    )
+    lines.append("  cv* が小さければ、広がったのではなく尾を引いているだけ。外れの")
+    lines.append("  列が立っている group は、数える前に聴いて壊れていないか見ること。")
     lines.append("- 分離比が低い理由は 2 つある: 平均が近いか、group 内が広いか。")
     lines.append("  区別は d の列で付く。d<1 は隣と分布が重なっている、つまり 1 本引いて")
     lines.append("  狙った長さは出ない -- 引いて測って選ぶ運用が要る、ということ。")
@@ -876,7 +936,11 @@ def apply_sampling_overrides(backend: Any, overrides: dict[str, Any]) -> dict[st
                     rejected.append(name)
                 continue
             setattr(params[0], name, value)
-            applied[name] = value
+            # A sweep rewrites the same key per pass; keep every value it used,
+            # or the report would claim only the last one was ever applied.
+            seen = applied.setdefault(name, [])
+            if value not in seen:
+                seen.append(value)
         return params
 
     backend._sampling_params_list = patched  # type: ignore[method-assign]

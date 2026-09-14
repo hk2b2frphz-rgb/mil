@@ -277,6 +277,46 @@ class ReportTest(unittest.TestCase):
         self.assertIn("要確認", probe.format_report(report))
 
 
+class OutlierTest(unittest.TestCase):
+    def test_a_runaway_draw_is_split_out_of_the_spread(self) -> None:
+        # The case that made a lower temperature look more diverse: one draw
+        # five times the median length. cv counts it, cv* does not.
+        lengths = [0.30, 0.32, 0.34, 0.30, 1.70]
+        kept, long_tail, short_tail = probe.split_outliers(lengths)
+        self.assertEqual(long_tail, [1.70])
+        self.assertEqual(short_tail, [])
+        self.assertEqual(len(kept), 4)
+
+    def test_a_collapsed_draw_counts_too(self) -> None:
+        kept, long_tail, short_tail = probe.split_outliers([0.30, 0.32, 0.34, 0.05])
+        self.assertEqual(short_tail, [0.05])
+        self.assertEqual(long_tail, [])
+        self.assertEqual(len(kept), 3)
+
+    def test_an_empty_group_does_not_raise(self) -> None:
+        self.assertEqual(probe.split_outliers([]), ([], [], []))
+
+    def test_the_trimmed_cv_undoes_a_tail_driven_spread(self) -> None:
+        tailed = probe.build_report(
+            [
+                {
+                    "text": "un",
+                    "temperature": None,
+                    "samples": [
+                        sample("un", tone(180.0, seconds))
+                        for seconds in (0.30, 0.32, 0.34, 0.30, 1.70)
+                    ],
+                }
+            ],
+            {},
+        )
+        group = tailed["groups"][0]
+        self.assertEqual(group["outlier_long"], 1)
+        self.assertEqual(tailed["totals"]["outliers"], 1)
+        self.assertLess(group["speech_sec_trimmed"]["cv"], group["speech_sec"]["cv"] / 2)
+        self.assertIn("外れ", probe.format_report(tailed))
+
+
 class TemperatureTest(unittest.TestCase):
     def group(self, temperature: float, jitter: float) -> dict:
         rng = np.random.default_rng(int(temperature * 100))
