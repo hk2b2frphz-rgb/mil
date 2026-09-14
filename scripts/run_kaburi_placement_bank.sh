@@ -3,8 +3,13 @@ set -euo pipefail
 
 # Borrow KABURI's timing only, and put banked backchannels at it. No GPU.
 #
-#   SOURCE_DIR=data/runs/<qwen_run>/shard_000/training_set \
-#     bash scripts/run_kaburi_placement_bank.sh
+#   bash scripts/run_kaburi_placement_bank.sh 3
+#   SOURCE_DIR=data/runs/<other_run>/training_set \
+#     bash scripts/run_kaburi_placement_bank.sh 3
+#
+# SOURCE_DIR defaults to whatever the preset was already synthesized into --
+# data/runs/<corpus>/tts/{merged,shard_*}/training_set, else the newest Qwen
+# smoke run for it. It is printed either way.
 #
 # This is the "use only the turn-taking positions" route, as opposed to
 # scripts/run_kaburi_bank_dialogues.sh, which renders the whole dialogue with
@@ -65,12 +70,47 @@ MATCH_TOP_K="${MATCH_TOP_K:-5}"
 SEED="${SEED:-0}"
 STAMP="$(run_id_stamp)"
 
+# Resolve the corpus this preset was already synthesized into, in the order the
+# TTS job writes it: the merged set first, then a shard, then a smoke run.
+# Dialogues are matched by id, not by filename, so a shard that holds a slice
+# of the corpus (with its own sample_00001) is as usable as the merged set.
+resolve_source_dir() {
+    local qwen_root="$REPO_ROOT/data/runs/$CORPUS_ROOT/tts"
+    local candidate
+    for candidate in \
+        "$qwen_root/merged/training_set" \
+        "$qwen_root"/shard_*/training_set; do
+        if compgen -G "$candidate/*.json" >/dev/null 2>&1; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    # Newest first, so a smoke run from today wins over one from last week.
+    while IFS= read -r candidate; do
+        if compgen -G "$candidate/*.json" >/dev/null 2>&1; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done < <(ls -1dt "$REPO_ROOT"/data/runs/smoke/"${CORPUS_ROOT}"_qwen_smoke_*/shard_*/training_set 2>/dev/null || true)
+    return 1
+}
+
 if [[ -z "${SOURCE_DIR:-}" ]]; then
-    echo "ERROR: SOURCE_DIR is required: an already rendered training_set whose" >&2
-    echo "user-side audio should be kept (the Qwen3 or Kokoro corpus)." >&2
-    echo "Candidates on this machine:" >&2
+    SOURCE_DIR="$(resolve_source_dir || true)"
+    if [[ -n "$SOURCE_DIR" ]]; then
+        echo "[source] using $SOURCE_DIR"
+        echo "[source] set SOURCE_DIR to override"
+    fi
+fi
+if [[ -z "$SOURCE_DIR" ]]; then
+    echo "ERROR: no rendered corpus found for $CORPUS_ROOT." >&2
+    echo "SOURCE_DIR must be an already rendered training_set whose user-side" >&2
+    echo "audio is kept (the Qwen3 or Kokoro output for these dialogues)." >&2
+    echo "Looked under data/runs/$CORPUS_ROOT/tts/{merged,shard_*}/training_set" >&2
+    echo "and data/runs/smoke/${CORPUS_ROOT}_qwen_smoke_*/." >&2
+    echo "Every training_set on this machine:" >&2
     find "$REPO_ROOT/data/runs" -maxdepth 5 -type d -name training_set 2>/dev/null \
-        | head -n 10 >&2 || true
+        | head -n 20 >&2 || true
     exit 1
 fi
 if ! compgen -G "$SOURCE_DIR/*.json" >/dev/null; then

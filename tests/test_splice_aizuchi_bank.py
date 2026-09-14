@@ -298,6 +298,31 @@ class RetimedSpliceTest(unittest.TestCase):
         )
 
 
+class PlacementIndexTest(unittest.TestCase):
+    def test_placements_are_keyed_by_dialogue_id_not_filename(self) -> None:
+        # Sharding renumbers stems, so sample_00001 in a shard is a different
+        # dialogue from sample_00001 in the placement run. Only the id holds.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            for stem, dialogue_id in (("sample_00001_a", "d-042"), ("sample_00002_b", "d-007")):
+                (path / f"{stem}.placement.json").write_text(
+                    json.dumps({"id": dialogue_id, "stem": stem, "placements": []}),
+                    encoding="utf-8",
+                )
+            index = splice.load_placements(path)
+            self.assertEqual(sorted(index), ["d-007", "d-042"])
+            self.assertEqual(index["d-042"]["stem"], "sample_00001_a")
+
+    def test_an_empty_placement_directory_is_refused(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(SystemExit):
+                splice.load_placements(Path(directory))
+
+
 class BankLoadTest(unittest.TestCase):
     def build_bank(self, directory: Path) -> None:
         records = []

@@ -189,10 +189,16 @@ F0 は自己相関の候補を複数残し、発話全体の代表 F0 から離�
 そのまま使い、聞き手チャンネルだけを差し替える。
 
 ```bash
-SOURCE_DIR=data/runs/<qwen_run>/shard_000/training_set \
-  bash scripts/run_kaburi_placement_bank.sh 3
-qsub -V scripts/2026-09-15/aizuchi_normal_placement_bank.pbs   # SOURCE_DIR を渡す
+bash scripts/run_kaburi_placement_bank.sh 3
+qsub -V scripts/2026-09-15/aizuchi_normal_placement_bank.pbs
 ```
+
+`SOURCE_DIR`（user 側の音声を借りる既存コーパス）は既定で、そのプリセットが
+すでに合成されている先を順に探す: `data/runs/<corpus>/tts/merged/training_set`
+→ 同 `shard_*/training_set` → 最新の Qwen3 smoke。解決した先は必ず表示する。
+
+対話の対応は**ファイル名ではなく dialogue id** で取る。シャードに割ると
+`sample_00001` が振り直されるので、名前で合わせると別の対話が対になる。
 
 移すのは**差（gap）**。相槌ごとに「相手が言い終えてから何秒後に、あるいは何秒前に
 反応したか」を KABURI の時間軸で測り、既存側の実際の時間軸に当てはめる。負の差＝

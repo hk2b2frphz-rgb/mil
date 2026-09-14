@@ -11,12 +11,13 @@
 #
 # KABURI's timing, an existing corpus's audio, banked backchannels. No GPU.
 #
-#   SOURCE_DIR=data/runs/<qwen_run>/shard_000/training_set \
+#   qsub -V scripts/2026-09-15/aizuchi_normal_placement_bank.pbs
+#   SOURCE_DIR=data/runs/<other_run>/training_set \
 #     qsub -V scripts/2026-09-15/aizuchi_normal_placement_bank.pbs
 #
 # Interactive node equivalent:
 #
-#   SOURCE_DIR=... bash scripts/run_kaburi_placement_bank.sh 3
+#   bash scripts/run_kaburi_placement_bank.sh 3
 #
 # The counterpart to aizuchi_normal_kaburi_bank.pbs. That one renders the whole
 # dialogue with KABURI and so needs an A100 for the bfloat16 codec. This one
@@ -31,9 +32,16 @@
 #
 # SOURCE_DIR is an already rendered training_set whose user-side audio is kept
 # as-is. Its listener channel is replaced: the backchannels move to KABURI's
-# gaps and are re-voiced from the bank. BANK_DIR defaults to the newest
-# data/runs/diversity/* -- the temperature sweep is the better stock, being one
-# word and 150 draws of it.
+# gaps and are re-voiced from the bank. It defaults to whatever this preset was
+# already synthesized into -- the merged Qwen3 set, else a shard of it, else
+# the newest Qwen3 smoke run -- and the resolved path is printed.
+#
+# Dialogues are paired by id rather than by filename, so a shard holding a
+# slice of the corpus works as well as the merged set: sharding renumbers the
+# sample_NNNNN stems, and matching those would pair up different dialogues.
+#
+# BANK_DIR defaults to the newest data/runs/diversity/* -- the temperature
+# sweep is the better stock, being one word and 150 draws of it.
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"

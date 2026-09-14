@@ -206,6 +206,24 @@ def retime_backchannels(
     return new_starts
 
 
+def load_placements(placement_dir: Path) -> dict[str, dict[str, Any]]:
+    """配置 JSON を対話 ID で引けるようにする。
+
+    ファイル名(stem)では引かない。既存のコーパスはシャードに割ってから
+    合成しているので sample_00001 の番号は振り直されており、同じ名前が別の
+    対話を指す。metadata.dialogue.id なら、どう割られていても同じものを指す。
+    """
+    index: dict[str, dict[str, Any]] = {}
+    for path in sorted(placement_dir.glob("*.placement.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        key = str(payload.get("id") or "")
+        if key:
+            index[key] = payload
+    if not index:
+        raise SystemExit(f"配置 JSON がありません（または id が無い）: {placement_dir}")
+    return index
+
+
 def pick_clip(
     clips: Sequence[dict[str, Any]],
     target_sec: float,
@@ -373,8 +391,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     json_paths = sorted(args.training_dir.glob("*.json"))
     if not json_paths:
         raise SystemExit(f"training_set に JSON がありません: {args.training_dir}")
-    if args.limit > 0:
-        json_paths = json_paths[: args.limit]
+    # 配置で絞り込むときは、--limit を入力ファイルの頭から数えてはいけない。
+    # 既存コーパスの先頭 N 本が、配置を取った N 本とは限らない。
+    limit = max(0, int(args.limit))
+    if limit and args.placement_dir is None:
+        json_paths = json_paths[:limit]
 
     vocab: set[str] | None = None
     if args.aizuchi_vocab_file is not None:
@@ -390,6 +411,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.bank_temperature,
         not args.keep_bank_outliers,
     )
+    placements = (
+        load_placements(args.placement_dir) if args.placement_dir is not None else None
+    )
+    if placements is not None:
+        print(f"[placement] {len(placements)} 対話ぶんの配置を読みました")
     rng = random.Random(args.seed)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -398,6 +424,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     total_swaps = 0
     retimed_total = 0
+    processed = 0
+    missing = 0
     errors: list[float] = []
     moves: list[float] = []
     for json_path in json_paths:
@@ -411,16 +439,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"[skip] alignments_utterance が空です: {json_path.name}")
             continue
 
+        # 配置を先に引く。持っていない対話の wav を読む意味は無く、既存コーパスは
+        # 数千本あるのに配置は数本ということがある。
+        placement = None
+        if placements is not None:
+            dialogue_id = str(
+                (payload.get("metadata", {}).get("dialogue", {}) or {}).get("id") or ""
+            )
+            placement = placements.get(dialogue_id)
+            if placement is None:
+                missing += 1
+                continue
+
         wav, sample_rate = torchaudio.load(str(wav_path))
         stereo = wav.numpy().astype(np.float64)
 
         new_starts: dict[int, float] = {}
-        if args.placement_dir is not None:
-            placement_path = args.placement_dir / f"{json_path.stem}.placement.json"
-            if not placement_path.is_file():
-                print(f"[skip] 配置がありません: {placement_path.name}")
-                continue
-            placement = json.loads(placement_path.read_text(encoding="utf-8"))
+        if placement is not None:
             gaps = backchannel_gaps(
                 placement.get("placements", []), args.aizuchi_max_chars, vocab
             )
@@ -484,13 +519,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 handle.write(
                     json.dumps({"stem": json_path.stem, **swap}, ensure_ascii=False) + "\n"
                 )
+        processed += 1
         total_swaps += len(swaps)
         errors.extend(swap["length_error_sec"] for swap in swaps)
         moves.extend(swap["moved_sec"] for swap in swaps if swap["moved_sec"])
         print(f"[ok] {json_path.stem}: {len(swaps)} 箇所を差し替え -> {out_wav.name}")
+        if limit and processed >= limit:
+            break
 
     print()
-    print(f"対話 {len(json_paths)} 本 / 差し替え {total_swaps} 箇所")
+    print(f"対話 {processed} 本 / 差し替え {total_swaps} 箇所")
+    if missing:
+        print(f"  配置が無くて飛ばしたもの: {missing} 本")
     if errors:
         absolute = [abs(value) for value in errors]
         print(
