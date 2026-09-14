@@ -70,29 +70,41 @@ MATCH_TOP_K="${MATCH_TOP_K:-5}"
 SEED="${SEED:-0}"
 STAMP="$(run_id_stamp)"
 
-# Resolve the corpus this preset was already synthesized into, in the order the
-# TTS job writes it: the merged set first, then a shard, then a smoke run.
-# Dialogues are matched by id, not by filename, so a shard that holds a slice
-# of the corpus (with its own sample_00001) is as usable as the merged set.
+# Find where this preset was already synthesized. The TTS job's output root
+# depends on which wrapper submitted it -- data/runs/<corpus>/tts for the
+# aizuchi wrappers, data/runs/<BATCH_ID> when OUT_ROOT was left to default --
+# so search any run directory whose name carries the corpus, rather than the
+# one path this repo's own wrapper happens to use.
+#
+# Ranking, best first:
+#   merged over a shard          the whole corpus rather than a slice
+#   a non-KABURI render          a KABURI render already has KABURI's timing,
+#                                so borrowing it back proves nothing
+#   newer over older
+#
+# A slice is perfectly usable: dialogues are paired by id, not by filename.
 resolve_source_dir() {
-    local qwen_root="$REPO_ROOT/data/runs/$CORPUS_ROOT/tts"
-    local candidate
-    for candidate in \
-        "$qwen_root/merged/training_set" \
-        "$qwen_root"/shard_*/training_set; do
-        if compgen -G "$candidate/*.json" >/dev/null 2>&1; then
-            printf '%s' "$candidate"
-            return 0
-        fi
-    done
-    # Newest first, so a smoke run from today wins over one from last week.
+    local candidate rank best_rank=-1 best=""
     while IFS= read -r candidate; do
-        if compgen -G "$candidate/*.json" >/dev/null 2>&1; then
-            printf '%s' "$candidate"
-            return 0
+        compgen -G "$candidate/*.json" >/dev/null 2>&1 || continue
+        rank=0
+        [[ "$candidate" == *"/merged/"* ]] && rank=$((rank + 2))
+        [[ "$candidate" != *kaburi* ]] && rank=$((rank + 1))
+        if (( rank > best_rank )); then
+            best_rank=$rank
+            best="$candidate"
         fi
-    done < <(ls -1dt "$REPO_ROOT"/data/runs/smoke/"${CORPUS_ROOT}"_qwen_smoke_*/shard_*/training_set 2>/dev/null || true)
-    return 1
+    done < <(
+        {
+            ls -1dt "$REPO_ROOT"/data/runs/"$CORPUS_ROOT"/tts/merged/training_set 2>/dev/null
+            ls -1dt "$REPO_ROOT"/data/runs/"$CORPUS_ROOT"/tts/shard_*/training_set 2>/dev/null
+            ls -1dt "$REPO_ROOT"/data/runs/*"$CORPUS_ROOT"*/merged/training_set 2>/dev/null
+            ls -1dt "$REPO_ROOT"/data/runs/*"$CORPUS_ROOT"*/shard_*/training_set 2>/dev/null
+            ls -1dt "$REPO_ROOT"/data/runs/smoke/*"$CORPUS_ROOT"*/shard_*/training_set 2>/dev/null
+        } || true
+    )
+    [[ -n "$best" ]] || return 1
+    printf '%s' "$best"
 }
 
 if [[ -z "${SOURCE_DIR:-}" ]]; then
@@ -103,14 +115,22 @@ if [[ -z "${SOURCE_DIR:-}" ]]; then
     fi
 fi
 if [[ -z "$SOURCE_DIR" ]]; then
-    echo "ERROR: no rendered corpus found for $CORPUS_ROOT." >&2
+    echo "ERROR: nothing rendered found for $CORPUS_ROOT." >&2
+    echo >&2
     echo "SOURCE_DIR must be an already rendered training_set whose user-side" >&2
-    echo "audio is kept (the Qwen3 or Kokoro output for these dialogues)." >&2
-    echo "Looked under data/runs/$CORPUS_ROOT/tts/{merged,shard_*}/training_set" >&2
-    echo "and data/runs/smoke/${CORPUS_ROOT}_qwen_smoke_*/." >&2
-    echo "Every training_set on this machine:" >&2
-    find "$REPO_ROOT/data/runs" -maxdepth 5 -type d -name training_set 2>/dev/null \
-        | head -n 20 >&2 || true
+    echo "audio is kept, for THESE dialogues:" >&2
+    echo "  $DIALOGUES_JSONL" >&2
+    echo >&2
+    echo "Every training_set on this machine (pick one over the same corpus," >&2
+    echo "or set AIZUCHI_PRESET to the one that does have a render):" >&2
+    find "$REPO_ROOT/data/runs" -maxdepth 6 -type d -name training_set 2>/dev/null \
+        | head -n 40 >&2 || true
+    echo >&2
+    echo "If there is no render of this corpus at all, make one first:" >&2
+    echo "  bash scripts/run_tts_smoke.sh qwen 3     # V100, needs .venv-vllm-omni" >&2
+    echo "or render and splice in one go on an A100 instead, which needs no" >&2
+    echo "existing corpus because KABURI supplies the whole dialogue:" >&2
+    echo "  bash scripts/run_kaburi_bank_dialogues.sh 3" >&2
     exit 1
 fi
 if ! compgen -G "$SOURCE_DIR/*.json" >/dev/null; then
