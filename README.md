@@ -176,11 +176,40 @@ F0 は自己相関の候補を複数残し、発話全体の代表 F0 から離�
 
 ### 相槌バンクの差し込み（KABURI × Qwen3）
 
-配置は KABURI、音はバンク、という分担を実際に聴いてみるための最小の実験。
-KABURI で普通にレンダリングしたあと、**出来上がったステレオ WAV の左（聞き手）
-チャンネルの相槌区間だけ**を、多様性プローブで作り置きした wav に差し替える。
-合成し直さないので、配置も相手の発話も 1 サンプル動かない＝差し替え前後で
-そのまま A/B できる。
+配置は KABURI、音はバンクという分担を実際に聴いてみるための実験。経路は 2 つ
+あり、**KABURI に何をさせるか**が違う。
+
+| | KABURI | 音源 | GPU |
+| --- | --- | --- | --- |
+| 配置のみ | いつ相槌を打つか（realizer + gap model） | 既存のレンダリング済みコーパス | **不要** |
+| 全合成 | いつ + 相手の発話の音も | KABURI の出力 | A100 |
+
+**配置のみ（既定で試すならこちら）。** KABURI の音は 1 サンプルも使わないので、
+音響モデルを積む必要が無い。既存の Qwen3/Kokoro コーパスの user チャンネルを
+そのまま使い、聞き手チャンネルだけを差し替える。
+
+```bash
+SOURCE_DIR=data/runs/<qwen_run>/shard_000/training_set \
+  bash scripts/run_kaburi_placement_bank.sh 3
+qsub -V scripts/2026-09-15/aizuchi_normal_placement_bank.pbs   # SOURCE_DIR を渡す
+```
+
+移すのは**差（gap）**。相槌ごとに「相手が言い終えてから何秒後に、あるいは何秒前に
+反応したか」を KABURI の時間軸で測り、既存側の実際の時間軸に当てはめる。負の差＝
+食い込みが、Qwen3 経路には出てこなかったもの。user の音声は伸縮も移動もしない。
+相槌の対応は**出てくる順**で取り、本数が合わない対話は黙って通さずスキップする。
+
+`--placement-only` は `generate_kaburi_tts_data.py` のフラグで、acoustic model を
+ロードしないまま配置だけ JSON に出す。5GB のチェックポイントも A100 も要らない。
+
+```bash
+uv run python scripts/generate_kaburi_tts_data.py --placement-only \
+  --dialogues-jsonl <jsonl> --out-dir <dir> --ref-pack <pack> --device cpu --mode pred
+```
+
+**全合成。** KABURI で普通にレンダリングしたあと、出来上がったステレオ WAV の
+相槌区間だけを差し替える。合成し直さないので配置も相手の発話も 1 サンプル動かず、
+差し替え前後をそのまま A/B できる。
 
 ```bash
 qsub -V scripts/2026-09-15/aizuchi_normal_kaburi_bank.pbs

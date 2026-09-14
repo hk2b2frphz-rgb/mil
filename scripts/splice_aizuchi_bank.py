@@ -141,6 +141,71 @@ def is_backchannel(text: str, max_chars: int, vocab: set[str] | None) -> bool:
     return len(stripped) <= max_chars
 
 
+def backchannel_gaps(
+    placements: Sequence[dict[str, Any]], max_chars: int, vocab: set[str] | None
+) -> list[float]:
+    """KABURI の配置から、相槌ごとの「相手の発話の終わりからの差」を取り出す。
+
+    上流の配置式は start_i = max(0, prev_any_end + gap_i)。相槌について意味が
+    あるのは「相手が言い終えてから何秒後に(あるいは何秒前に)反応したか」なので、
+    直前に始まっている相手の発話の終わりを基準に測る。負なら食い込み。
+
+    この差だけを既存の音声へ移せば、KABURI の音は 1 サンプルも要らない --
+    使うのはタイミングだけ、という元の狙いそのもの。
+    """
+    rows = sorted(placements, key=lambda row: row["start_sec"])
+    gaps: list[float] = []
+    for row in rows:
+        if row["label"] != MAIN_LABEL or not is_backchannel(
+            str(row["text"]), max_chars, vocab
+        ):
+            continue
+        start = float(row["start_sec"])
+        prior = [
+            float(other["end_sec"])
+            for other in rows
+            if other["label"] != MAIN_LABEL and float(other["start_sec"]) < start
+        ]
+        gaps.append(round(start - (max(prior) if prior else 0.0), 4))
+    return gaps
+
+
+def retime_backchannels(
+    rows: Sequence[Sequence[Any]],
+    gaps: Sequence[float],
+    max_chars: int,
+    vocab: set[str] | None,
+    duration_sec: float,
+) -> dict[int, float]:
+    """既存の音声の相槌に KABURI の差を当てはめ、{行番号: 新しい開始秒} を返す。
+
+    対応は「相槌の出てくる順番」で取る。時刻順に並べた k 番目の相槌に k 番目の
+    差を当てる。本数が合わないときは何も返さない -- 途中でずれた対応を黙って
+    通すより、その対話を飛ばした方がよい。
+    """
+    indexed = sorted(range(len(rows)), key=lambda i: rows[i][1][0])
+    targets = [
+        i
+        for i in indexed
+        if rows[i][2] == MAIN_LABEL and is_backchannel(str(rows[i][0]), max_chars, vocab)
+    ]
+    if len(targets) != len(gaps):
+        return {}
+
+    new_starts: dict[int, float] = {}
+    for position, row_index in enumerate(targets):
+        start = float(rows[row_index][1][0])
+        prior = [
+            float(rows[i][1][1])
+            for i in indexed
+            if rows[i][2] != MAIN_LABEL and float(rows[i][1][0]) < start
+        ]
+        base = max(prior) if prior else 0.0
+        moved = base + float(gaps[position])
+        new_starts[row_index] = min(max(0.0, moved), max(0.0, duration_sec - 0.01))
+    return new_starts
+
+
 def pick_clip(
     clips: Sequence[dict[str, Any]],
     target_sec: float,
@@ -171,13 +236,29 @@ def splice_dialogue(
     args: argparse.Namespace,
     rng: random.Random,
     vocab: set[str] | None,
+    new_starts: dict[int, float] | None = None,
 ) -> tuple[np.ndarray, list[list[Any]], list[dict[str, Any]]]:
-    """左チャンネルの相槌区間を差し替え、新しい波形と alignments を返す。"""
+    """左チャンネルの相槌区間を差し替え、新しい波形と alignments を返す。
+
+    new_starts が与えられたら、消す位置(元の相槌があったところ)と置く位置
+    (KABURI の差を当てはめたところ)を分ける。
+    """
     out = stereo.copy()
     new_rows: list[list[Any]] = []
     swaps: list[dict[str, Any]] = []
+    new_starts = new_starts or {}
 
-    for text, (start, end), label in rows:
+    # 消すのが先。移動させると、後の相槌の元位置に先の相槌を書いたあとで
+    # 消してしまうことがある。
+    for row_index, (text, (start, end), label) in enumerate(rows):
+        if label == MAIN_LABEL and is_backchannel(
+            str(text), args.aizuchi_max_chars, vocab
+        ):
+            erase_from = min(out.shape[-1], int(round(float(start) * sample_rate)))
+            erase_to = min(out.shape[-1], int(round(float(end) * sample_rate)))
+            out[LEFT_CHANNEL, erase_from:erase_to] = 0.0
+
+    for row_index, (text, (start, end), label) in enumerate(rows):
         if label != MAIN_LABEL or not is_backchannel(
             str(text), args.aizuchi_max_chars, vocab
         ):
@@ -185,6 +266,8 @@ def splice_dialogue(
             continue
 
         slot_sec = float(end) - float(start)
+        moved_to = new_starts.get(row_index)
+        place_at = float(start) if moved_to is None else float(moved_to)
         clip = pick_clip(clips, slot_sec, args.match_top_k, rng)
         signal = clip["signal"]
         if clip["sample_rate"] != sample_rate:
@@ -197,13 +280,19 @@ def splice_dialogue(
                 signal,
             )
 
-        begin = int(round(float(start) * sample_rate))
-        if begin >= out.shape[-1]:
+        slot_begin = int(round(place_at * sample_rate))
+        if slot_begin >= out.shape[-1]:
             new_rows.append([text, [start, end], label])
             continue
-        slot_begin = begin
-        slot_end = min(out.shape[-1], int(round(float(end) * sample_rate)))
-        original = out[LEFT_CHANNEL, slot_begin:slot_end]
+        # 音量合わせの基準は元の相槌。もう消してあるので、消す前に取った
+        # チャンネル全体の控えから読む。
+        original_begin = int(round(float(start) * sample_rate))
+        original = stereo[
+            LEFT_CHANNEL,
+            min(stereo.shape[-1], original_begin) : min(
+                stereo.shape[-1], int(round(float(end) * sample_rate))
+            ),
+        ]
 
         placed = fade(signal.astype(np.float64), sample_rate)
         if args.gain == "match" and original.size:
@@ -215,16 +304,16 @@ def splice_dialogue(
         if peak > 1.0:
             placed = placed / peak
 
-        # 元の相槌を消してから置く。差し替え先が短ければ残りは無音になる。
-        out[LEFT_CHANNEL, slot_begin:slot_end] = 0.0
+        # 消すのは上で済ませてある。ここは置くだけ。
         stop = min(out.shape[-1], slot_begin + placed.size)
         written = stop - slot_begin
         # 相手の発話に食い込むのは相槌として自然なので、区間をはみ出しても
         # 切らずにそのまま置く。切るのは対話の末尾に当たったときだけ。
         out[LEFT_CHANNEL, slot_begin:stop] += placed[:written]
 
-        placed_end = round(slot_begin / sample_rate + written / sample_rate, 4)
-        new_rows.append([clip["text"], [float(start), placed_end], label])
+        placed_start = slot_begin / sample_rate
+        placed_end = round(placed_start + written / sample_rate, 4)
+        new_rows.append([clip["text"], [round(placed_start, 4), placed_end], label])
         swaps.append(
             {
                 "original_text": text,
@@ -235,7 +324,9 @@ def splice_dialogue(
                 "placed_sec": round(written / sample_rate, 4),
                 "length_error_sec": round(written / sample_rate - slot_sec, 4),
                 "truncated": bool(written < placed.size),
-                "start_sec": round(float(start), 4),
+                "original_start_sec": round(float(start), 4),
+                "start_sec": round(placed_start, 4),
+                "moved_sec": round(placed_start - float(start), 4),
             }
         )
 
@@ -252,6 +343,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--training-dir", type=Path, required=True)
     parser.add_argument("--bank-dir", type=Path, required=True)
+    parser.add_argument(
+        "--placement-dir",
+        type=Path,
+        default=None,
+        help=(
+            "generate_kaburi_tts_data.py --placement-only の出力。渡すと、相槌を"
+            " KABURI が置いた間に合わせて動かしてから差し替える（KABURI の音は"
+            "使わないので GPU 不要）"
+        ),
+    )
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--bank-text", default="うん", help="空文字でバンク全体を使う")
     parser.add_argument("--bank-temperature", type=float, default=None)
@@ -296,7 +397,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     report_path.unlink(missing_ok=True)
 
     total_swaps = 0
+    retimed_total = 0
     errors: list[float] = []
+    moves: list[float] = []
     for json_path in json_paths:
         wav_path = json_path.with_suffix(".wav")
         if not wav_path.is_file():
@@ -310,8 +413,32 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         wav, sample_rate = torchaudio.load(str(wav_path))
         stereo = wav.numpy().astype(np.float64)
+
+        new_starts: dict[int, float] = {}
+        if args.placement_dir is not None:
+            placement_path = args.placement_dir / f"{json_path.stem}.placement.json"
+            if not placement_path.is_file():
+                print(f"[skip] 配置がありません: {placement_path.name}")
+                continue
+            placement = json.loads(placement_path.read_text(encoding="utf-8"))
+            gaps = backchannel_gaps(
+                placement.get("placements", []), args.aizuchi_max_chars, vocab
+            )
+            duration = stereo.shape[-1] / sample_rate
+            new_starts = retime_backchannels(
+                rows, gaps, args.aizuchi_max_chars, vocab, duration
+            )
+            if not new_starts and gaps:
+                # 本数が合わない = 対応が取れない。黙ってずらすより飛ばす。
+                print(
+                    f"[skip] 相槌の本数が配置と合いません: {json_path.name} "
+                    f"(KABURI {len(gaps)} 箇所)"
+                )
+                continue
+            retimed_total += len(new_starts)
+
         spliced, new_rows, swaps = splice_dialogue(
-            stereo, sample_rate, rows, clips, args, rng, vocab
+            stereo, sample_rate, rows, clips, args, rng, vocab, new_starts
         )
         if not swaps:
             print(f"[skip] 相槌が見つかりません: {json_path.name}")
@@ -337,6 +464,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "gain": args.gain,
             "seed": args.seed,
             "n_swapped": len(swaps),
+            "n_retimed": len(new_starts),
+            "placement_dir": str(args.placement_dir) if args.placement_dir else None,
             "turns_text_rewritten": False,
         }
 
@@ -357,6 +486,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
         total_swaps += len(swaps)
         errors.extend(swap["length_error_sec"] for swap in swaps)
+        moves.extend(swap["moved_sec"] for swap in swaps if swap["moved_sec"])
         print(f"[ok] {json_path.stem}: {len(swaps)} 箇所を差し替え -> {out_wav.name}")
 
     print()
@@ -369,6 +499,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         over = sum(1 for value in errors if value > 0)
         print(f"  うち区間より長くなった: {over}/{len(errors)} (相手に食い込む方向)")
+    if moves:
+        absolute = [abs(value) for value in moves]
+        earlier = sum(1 for value in moves if value < 0)
+        print(
+            f"KABURI の間へ移動: {retimed_total} 箇所 / 中央値 "
+            f"{statistics.median(absolute):.3f}s / 最大 {max(absolute):.3f}s"
+        )
+        print(f"  うち前倒し(食い込む方向): {earlier}/{len(moves)}")
     print(f"出力: {args.out_dir}")
     print(f"内訳: {report_path}")
     return 0

@@ -35,6 +35,10 @@ def clip(seconds: float, amplitude: float = 0.3) -> dict:
     }
 
 
+def backchannel_gaps_of(placements) -> list[float]:
+    return splice.backchannel_gaps(placements, 6, None)
+
+
 def default_args(**overrides) -> argparse.Namespace:
     values = {
         "aizuchi_max_chars": 6,
@@ -184,6 +188,114 @@ class SpliceTest(unittest.TestCase):
             default_args(), random.Random(0), None,
         )
         self.assertLessEqual(float(np.max(np.abs(out))), 1.0)
+
+
+class GapTransferTest(unittest.TestCase):
+    def placements(self) -> list[dict]:
+        # The listener cuts in 0.2s BEFORE the user finishes -- the overlap the
+        # Qwen path never produces and the whole reason to borrow KABURI's
+        # timing rather than its audio.
+        return [
+            {
+                "label": "SPEAKER_USER",
+                "text": "今日は本当に疲れてしまって",
+                "start_sec": 0.0,
+                "end_sec": 2.0,
+            },
+            {"label": "SPEAKER_MAIN", "text": "うん", "start_sec": 1.8, "end_sec": 2.1},
+        ]
+
+    def test_an_overlapping_backchannel_yields_a_negative_gap(self) -> None:
+        self.assertEqual(backchannel_gaps_of(self.placements()), [-0.2])
+
+    def test_a_backchannel_before_any_user_turn_is_measured_from_zero(self) -> None:
+        rows = [{"label": "SPEAKER_MAIN", "text": "うん", "start_sec": 0.5, "end_sec": 0.8}]
+        self.assertEqual(backchannel_gaps_of(rows), [0.5])
+
+    def test_long_listener_turns_are_not_counted(self) -> None:
+        rows = self.placements() + [
+            {
+                "label": "SPEAKER_MAIN",
+                "text": "それは大変でしたね、よく話してくれました",
+                "start_sec": 3.0,
+                "end_sec": 5.0,
+            }
+        ]
+        self.assertEqual(len(backchannel_gaps_of(rows)), 1)
+
+    def test_the_gap_moves_the_backchannel_on_the_real_timeline(self) -> None:
+        # Existing render: the listener waits 0.5s after the user finishes.
+        rows = [
+            ["今日は本当に疲れてしまって", [0.0, 3.0], "SPEAKER_USER"],
+            ["ええ", [3.5, 3.9], "SPEAKER_MAIN"],
+        ]
+        moved = splice.retime_backchannels(rows, [-0.2], 6, None, 10.0)
+        # KABURI's -0.2s applied to the real user end of 3.0.
+        self.assertAlmostEqual(moved[1], 2.8, places=3)
+
+    def test_a_mismatched_count_refuses_rather_than_guessing(self) -> None:
+        rows = [
+            ["今日は本当に疲れてしまって", [0.0, 3.0], "SPEAKER_USER"],
+            ["ええ", [3.5, 3.9], "SPEAKER_MAIN"],
+        ]
+        self.assertEqual(splice.retime_backchannels(rows, [-0.2, 0.3], 6, None, 10.0), {})
+
+    def test_a_move_never_lands_outside_the_file(self) -> None:
+        rows = [
+            ["今日は本当に疲れてしまって", [0.0, 3.0], "SPEAKER_USER"],
+            ["ええ", [3.5, 3.9], "SPEAKER_MAIN"],
+        ]
+        self.assertEqual(splice.retime_backchannels(rows, [-99.0], 6, None, 10.0)[1], 0.0)
+        self.assertLessEqual(
+            splice.retime_backchannels(rows, [99.0], 6, None, 10.0)[1], 10.0
+        )
+
+
+class RetimedSpliceTest(unittest.TestCase):
+    def test_the_old_position_is_cleared_and_the_new_one_carries_the_audio(self) -> None:
+        stereo = np.zeros((2, SAMPLE_RATE * 4))
+        stereo[0, int(3.5 * SAMPLE_RATE) : int(3.9 * SAMPLE_RATE)] = tone(200.0, 0.4, 0.5)
+        rows = [
+            ["今日は本当に疲れてしまって", [0.0, 3.0], "SPEAKER_USER"],
+            ["ええ", [3.5, 3.9], "SPEAKER_MAIN"],
+        ]
+        out, new_rows, swaps = splice.splice_dialogue(
+            stereo, SAMPLE_RATE, rows, [clip(0.3)], default_args(),
+            random.Random(0), None, {1: 2.8},
+        )
+        old = out[0, int(3.5 * SAMPLE_RATE) : int(3.9 * SAMPLE_RATE)]
+        new = out[0, int(2.8 * SAMPLE_RATE) : int(3.05 * SAMPLE_RATE)]
+        self.assertEqual(float(np.max(np.abs(old))), 0.0)
+        self.assertGreater(float(np.max(np.abs(new))), 0.0)
+        self.assertAlmostEqual(swaps[0]["moved_sec"], -0.7, places=2)
+        main = [row for row in new_rows if row[2] == "SPEAKER_MAIN"][0]
+        self.assertAlmostEqual(main[1][0], 2.8, places=2)
+
+    def test_moving_one_backchannel_does_not_erase_another(self) -> None:
+        # Erasing after placing would wipe a clip written into the slot a later
+        # backchannel used to occupy.
+        stereo = np.zeros((2, SAMPLE_RATE * 6))
+        for begin in (1.0, 2.0):
+            start = int(begin * SAMPLE_RATE)
+            burst = tone(200.0, 0.3, 0.5)
+            stereo[0, start : start + burst.size] = burst
+        rows = [
+            ["ええ", [1.0, 1.3], "SPEAKER_MAIN"],
+            ["ええ", [2.0, 2.3], "SPEAKER_MAIN"],
+        ]
+        out, _rows, swaps = splice.splice_dialogue(
+            stereo, SAMPLE_RATE, rows, [clip(0.3)], default_args(),
+            random.Random(0), None, {0: 2.0, 1: 4.0},
+        )
+        self.assertEqual(len(swaps), 2)
+        first = out[0, int(2.0 * SAMPLE_RATE) : int(2.3 * SAMPLE_RATE)]
+        second = out[0, int(4.0 * SAMPLE_RATE) : int(4.3 * SAMPLE_RATE)]
+        self.assertGreater(float(np.max(np.abs(first))), 0.0)
+        self.assertGreater(float(np.max(np.abs(second))), 0.0)
+        self.assertEqual(
+            float(np.max(np.abs(out[0, int(1.0 * SAMPLE_RATE) : int(1.3 * SAMPLE_RATE)]))),
+            0.0,
+        )
 
 
 class BankLoadTest(unittest.TestCase):

@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Borrow KABURI's timing only, and put banked backchannels at it. No GPU.
+#
+#   SOURCE_DIR=data/runs/<qwen_run>/shard_000/training_set \
+#     bash scripts/run_kaburi_placement_bank.sh
+#
+# This is the "use only the turn-taking positions" route, as opposed to
+# scripts/run_kaburi_bank_dialogues.sh, which renders the whole dialogue with
+# KABURI and needs an A100 for the codec. Nothing of KABURI's audio is used
+# here, so nothing of KABURI's audio has to be produced:
+#
+#   KABURI   when the listener reacts -- realizer + gap model, CPU, seconds
+#   SOURCE   the user's speech -- an existing rendered corpus, already on disk
+#   bank     what the backchannel sounds like -- a diversity run
+#
+# What transfers is the gap: for each backchannel, how long after (or before)
+# the user's utterance ends the listener comes in. Negative gaps are the
+# overlap the Qwen path never produces. The gap is measured on KABURI's
+# timeline and applied to the source's real one, so the user's audio is never
+# stretched or moved -- only the backchannel is, and then replaced.
+#
+# Backchannels are matched by order of appearance. If the counts disagree the
+# dialogue is skipped rather than silently misaligned, so a mismatch shows up
+# as a skip line and not as backchannels landing in the wrong places.
+#
+# Needs the KABURI checkout (scripts/setup_kaburi_env.sh) for the timing model
+# and a reference pack, both of which build on CPU. It does NOT need the
+# acoustic checkpoint to be usable, and never loads it.
+#
+# Overrides: SOURCE_DIR, BANK_DIR, BANK_TEXT, BANK_TEMPERATURE, MATCH_TOP_K,
+# DIALOGUES_JSONL, AIZUCHI_PRESET, NUM_DIALOGUES, RASTER_MODE, OUT_ROOT, SEED.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+export PBS_O_WORKDIR="$REPO_ROOT"
+# shellcheck source=/dev/null
+source "$REPO_ROOT/scripts/run_id_utils.sh"
+
+export KABURI_REPO="${KABURI_REPO:-$REPO_ROOT/../kaburi-tts}"
+if [[ ! -d "$KABURI_REPO/kaburi_tts" ]]; then
+    echo "ERROR: KABURI-TTS checkout not found: $KABURI_REPO" >&2
+    echo "Run scripts/setup_kaburi_env.sh first." >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+source "$REPO_ROOT/scripts/kaburi_uv_env.sh"
+kaburi_uv_run KABURI_UV
+
+AIZUCHI_PRESET="${AIZUCHI_PRESET:-normal}"
+case "$AIZUCHI_PRESET" in
+    normal) PRESET_VERSION="v6" ;;
+    eager)  PRESET_VERSION="v7" ;;
+    flood)  PRESET_VERSION="v6" ;;
+    *) echo "ERROR: AIZUCHI_PRESET must be normal, eager or flood" >&2; exit 1 ;;
+esac
+AIZUCHI_VERSION="${AIZUCHI_VERSION:-$PRESET_VERSION}"
+CORPUS_ROOT="aizuchi_${AIZUCHI_PRESET}_3000_${AIZUCHI_VERSION}"
+DIALOGUES_JSONL="${DIALOGUES_JSONL:-$REPO_ROOT/data/runs/$CORPUS_ROOT/dialogue/llm_dialogues/dialogues.jsonl}"
+RASTER_MODE="${RASTER_MODE:-pred}"
+NUM_DIALOGUES="${NUM_DIALOGUES:-${1:-3}}"
+MATCH_TOP_K="${MATCH_TOP_K:-5}"
+SEED="${SEED:-0}"
+STAMP="$(run_id_stamp)"
+
+if [[ -z "${SOURCE_DIR:-}" ]]; then
+    echo "ERROR: SOURCE_DIR is required: an already rendered training_set whose" >&2
+    echo "user-side audio should be kept (the Qwen3 or Kokoro corpus)." >&2
+    echo "Candidates on this machine:" >&2
+    find "$REPO_ROOT/data/runs" -maxdepth 5 -type d -name training_set 2>/dev/null \
+        | head -n 10 >&2 || true
+    exit 1
+fi
+if ! compgen -G "$SOURCE_DIR/*.json" >/dev/null; then
+    echo "ERROR: no dialogue JSON under SOURCE_DIR: $SOURCE_DIR" >&2
+    exit 1
+fi
+if [[ -z "${BANK_DIR:-}" ]]; then
+    BANK_DIR="$(ls -1dt "$REPO_ROOT"/data/runs/diversity/*/ 2>/dev/null | head -n 1 || true)"
+    BANK_DIR="${BANK_DIR%/}"
+fi
+if [[ -z "$BANK_DIR" || ! -s "$BANK_DIR/samples.jsonl" ]]; then
+    echo "ERROR: bank not found. Pass BANK_DIR=<a diversity run directory>." >&2
+    exit 1
+fi
+if [[ ! -s "$DIALOGUES_JSONL" ]]; then
+    echo "ERROR: dialogues JSONL not found: $DIALOGUES_JSONL" >&2
+    exit 1
+fi
+
+OUT_ROOT="${OUT_ROOT:-$REPO_ROOT/data/runs/smoke/${CORPUS_ROOT}_placement_bank_${STAMP}}"
+PLACEMENT_OUT="$OUT_ROOT/kaburi_placement"
+BANK_OUT="$OUT_ROOT/shard_000/training_set"
+
+# The reference pack only supplies the speaker names and the template chunk id
+# that the timing model conditions on; building it decodes on CPU.
+KABURI_REF_PACK="${KABURI_REF_PACK:-}"
+if [[ -z "$KABURI_REF_PACK" ]]; then
+    KABURI_REF_PACK="$REPO_ROOT/data/kaburi_ref_packs/placement_only"
+    CLONE_OUT_DIR_MOSHI="${CLONE_OUT_DIR_MOSHI:-$REPO_ROOT/data/clone_examples/99999}" \
+    REF_PACK_DEVICE=cpu \
+        bash scripts/make_kaburi_ref_pack.sh "$KABURI_REF_PACK"
+fi
+
+echo "===== KABURI placement + bank (CPU) ====="
+echo "repo:        $REPO_ROOT"
+echo "dialogues:   $DIALOGUES_JSONL"
+echo "source:      $SOURCE_DIR"
+echo "bank:        $BANK_DIR"
+echo "timing:      $RASTER_MODE"
+echo "n:           $NUM_DIALOGUES"
+echo "out:         $OUT_ROOT"
+echo "started_at:  $(date -Iseconds)"
+echo "========================================="
+
+echo
+echo ">>> 1/2 KABURI placement (no acoustic model) -> $PLACEMENT_OUT"
+mkdir -p "$PLACEMENT_OUT"
+"${KABURI_UV[@]}" scripts/generate_kaburi_tts_data.py \
+    --dialogues-jsonl "$DIALOGUES_JSONL" \
+    --out-dir "$PLACEMENT_OUT" \
+    --kaburi-repo "$KABURI_REPO" \
+    --ref-pack "$KABURI_REF_PACK" \
+    --mode "$RASTER_MODE" \
+    --device cpu \
+    --placement-only \
+    --num-dialogues "$NUM_DIALOGUES" \
+    --log-every 1
+
+echo
+echo ">>> 2/2 retime and splice -> $BANK_OUT"
+SPLICE_ARGS=(
+    --training-dir "$SOURCE_DIR"
+    --bank-dir "$BANK_DIR"
+    --placement-dir "$PLACEMENT_OUT/placement"
+    --out-dir "$BANK_OUT"
+    --match-top-k "$MATCH_TOP_K"
+    --seed "$SEED"
+    --limit "$NUM_DIALOGUES"
+)
+[[ -n "${BANK_TEXT:-}" ]] && SPLICE_ARGS+=(--bank-text "$BANK_TEXT")
+[[ -n "${BANK_TEMPERATURE:-}" ]] && SPLICE_ARGS+=(--bank-temperature "$BANK_TEMPERATURE")
+uv run python scripts/splice_aizuchi_bank.py "${SPLICE_ARGS[@]}"
+
+echo
+echo "===== report ====="
+# The source row is the Qwen-style baseline (backchannels appended, little
+# overlap); the bank row should show KABURI's gaps pulling them in.
+uv run python scripts/report_tts_smoke.py \
+    --projection "${REPORT_PROJECTION:-3000}" \
+    --json-out "$OUT_ROOT/report_placement_bank_${STAMP}.json" \
+    --training-dir "$SOURCE_DIR" --label "source" \
+    --training-dir "$BANK_OUT" --label "kaburi-$RASTER_MODE placement + bank"
+
+echo
+echo "listen: $SOURCE_DIR  vs  $BANK_OUT"
+echo "swaps:  $BANK_OUT/bank_swaps.jsonl"
+echo "finished_at: $(date -Iseconds)"

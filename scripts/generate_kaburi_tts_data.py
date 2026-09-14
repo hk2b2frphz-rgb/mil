@@ -256,12 +256,9 @@ class KaburiRenderer:
 
         import torch
         import yaml
-        from irodori_tts.codec import DACVAECodec
         from irodori_tts.tokenizer import PretrainedTextTokenizer
-        from kaburi_tts.acoustic.infer import build_model, load_acoustic_checkpoint
         from kaburi_tts.raster.pipeline import FIT_MARGIN, T as RASTER_T
         from kaburi_tts.raster.models import MAX_UTTS
-        from kaburi_tts.two_stream.dataset import Normal2StreamDataset
         from kaburi_tts.two_stream.loss import build_phone_class_table_8
 
         if int(RASTER_T) != CANVAS_FRAMES:
@@ -305,20 +302,16 @@ class KaburiRenderer:
         self.soft_phone = (
             str(self.config.get("phone_condition", {}).get("mode", "hard")) == "soft"
         )
-        self.dataset = Normal2StreamDataset(
-            str(manifest),
-            text_tokenizer=self.tokenizer,
-            max_text_len=self.max_text_len,
-            latent_T=CANVAS_FRAMES,
-            speaker_balanced=False,
-            soft_phone=self.soft_phone,
-            soft_boundary_radius=self.boundary_radius,
-        )
-        self.acoustic = build_model(self.config, self.device)
-        load_acoustic_checkpoint(self.acoustic, args.acoustic_ckpt, self.device)
         self.pct8 = build_phone_class_table_8(data_config["phone_vocab_path"]).to(self.device)
-        self.codec = DACVAECodec.load(device=str(self.device), dtype=torch.bfloat16)
-        self.sample_rate = int(self.codec.sample_rate)
+        # acoustic model / codec / template dataset は合成にしか要らない。配置だけ
+        # 取りたいとき（--placement-only）は GPU も 5GB のチェックポイントも要らず
+        # CPU で足りるので、ここではロードせず render_chunk が初めて呼ばれたときに
+        # 積む。タイミングモデルの方は _init_raster が device="cpu" で積んでいる。
+        self._acoustic_args = args
+        self.dataset = None
+        self.acoustic = None
+        self.codec = None
+        self._sample_rate = 0
 
         self.cfg_scale = float(args.cfg_scale)
         self.num_steps = int(args.num_steps)
@@ -340,14 +333,52 @@ class KaburiRenderer:
             self._init_paper(args)
 
         logger.info(
-            "KABURI ready: mode=%s timing=%s activity_gate=%s speakers=%s/%s sr=%d",
+            "KABURI ready: mode=%s timing=%s activity_gate=%s speakers=%s/%s "
+            "(acoustic model not loaded yet)",
             self.mode,
             self.timing_release,
             "on" if self.gate_on else "off",
             self.speaker_a,
             self.speaker_b,
-            self.sample_rate,
         )
+
+    # -- 合成側の遅延ロード -------------------------------------------------
+
+    @property
+    def sample_rate(self) -> int:
+        """codec の出力レート。触ると acoustic 側のロードが走る。"""
+        self._ensure_acoustic()
+        return self._sample_rate
+
+    @property
+    def acoustic_loaded(self) -> bool:
+        return self.acoustic is not None
+
+    def _ensure_acoustic(self) -> None:
+        if self.acoustic is not None:
+            return
+        import torch
+        from irodori_tts.codec import DACVAECodec
+        from kaburi_tts.acoustic.infer import build_model, load_acoustic_checkpoint
+        from kaburi_tts.two_stream.dataset import Normal2StreamDataset
+
+        args = self._acoustic_args
+        logger.info("loading the KABURI acoustic model onto %s", self.device)
+        self.dataset = Normal2StreamDataset(
+            str(self.manifest),
+            text_tokenizer=self.tokenizer,
+            max_text_len=self.max_text_len,
+            latent_T=CANVAS_FRAMES,
+            speaker_balanced=False,
+            soft_phone=self.soft_phone,
+            soft_boundary_radius=self.boundary_radius,
+        )
+        acoustic = build_model(self.config, self.device)
+        load_acoustic_checkpoint(acoustic, args.acoustic_ckpt, self.device)
+        self.codec = DACVAECodec.load(device=str(self.device), dtype=torch.bfloat16)
+        self._sample_rate = int(self.codec.sample_rate)
+        self.acoustic = acoustic
+        logger.info("acoustic model ready: sr=%d", self._sample_rate)
 
     # -- モード別のタイミングモデル ---------------------------------------
 
@@ -570,6 +601,7 @@ class KaburiRenderer:
 
     def render_chunk(self, rasters, seed: int):
         """ラスタ -> (2ch 波形, 有効フレーム数, overlap 率)。"""
+        self._ensure_acoustic()
         import torch
         import kaburi_tts.placement.baselines as SPB
         from kaburi_tts.acoustic.infer import synth
@@ -711,6 +743,79 @@ class KaburiRenderer:
         )
         return (phone_a, phone_b, act_a, act_b), None, {**(meta or {}), "n_utts": len(utts)}
 
+    def plan_dialogue(
+        self, dialogue: dict[str, Any], args: argparse.Namespace
+    ) -> dict[str, Any]:
+        """合成せずに配置だけ取る。acoustic model も GPU も要らない。
+
+        render_dialogue と同じチャンク分割・同じオフセット計算をするので、
+        返ってくる時刻は実際にレンダリングした場合と一致する。チャンクの尺は
+        render_chunk が波形を切るのと同じ式 -- 最後に発話のあるフレーム +8 --
+        で出しており、こちらはラスタから直接分かる。
+
+        タイミングだけ要る用途（既存の音声に KABURI の間を当てはめる）は、
+        音響モデルを積む意味が無いのでこちらを使う。
+        """
+        import torch
+
+        turns = dialogue["turns"]
+        dialogue_id = str(dialogue.get("id") or "dialogue")
+        planned = self.plan_chunks(turns, dialogue_id, args.chunk_sec, args.min_fit_scale)
+        # チャンクは turns のスライスなので、辞書そのものの同一性で元の位置に
+        # 戻せる。既存の音声へ当てはめるとき、時刻順では対応が付かない
+        # （重なった相槌は相手より前に来る）ので turn_index が要る。
+        turn_index_of = {id(turn): index for index, turn in enumerate(turns)}
+
+        rows: list[dict[str, Any]] = []
+        chunk_meta: list[dict[str, Any]] = []
+        offset_sec = 0.0
+        for chunk_idx, (chunk, rasters, spans, meta) in enumerate(planned):
+            if chunk_idx:
+                offset_sec += float(args.chunk_gap_sec)
+            _phone_a, _phone_b, act_a, act_b = rasters
+            act = torch.maximum(act_a, act_b)
+            nonzero = torch.nonzero(act > 0)
+            active_frames = int(nonzero[-1]) + 1 if len(nonzero) else 0
+            # render_chunk は (active_frames + 8) フレームで切る。キャンバスより
+            # 長くなる場合は切らないので、そこで頭打ちにする。
+            chunk_sec = min((active_frames + 8) / FPS, CANVAS_FRAMES / FPS)
+            if spans is not None:
+                for turn_index, start, end in spans:
+                    turn = chunk[turn_index]
+                    rows.append(
+                        {
+                            "turn_index": turn_index_of.get(id(turn), -1),
+                            "chunk_index": chunk_idx,
+                            "speaker": turn["speaker"],
+                            "label": LABEL_OF_SPEAKER[turn["speaker"]],
+                            "text": turn["text"],
+                            "start_sec": round(offset_sec + start, 4),
+                            "end_sec": round(offset_sec + end, 4),
+                        }
+                    )
+            chunk_meta.append(
+                {
+                    "chunk_index": chunk_idx,
+                    "n_utts": int(meta.get("n_utts", len(chunk))),
+                    "n_turns_in": len(chunk),
+                    "fit_scale": round(float(meta.get("fit_scale", 1.0)), 4),
+                    "overlap": round(
+                        float(((act_a > 0.5) & (act_b > 0.5)).float().mean()), 4
+                    ),
+                    "active_frames": active_frames,
+                    "offset_sec": round(offset_sec, 4),
+                    "chunk_sec": round(chunk_sec, 4),
+                }
+            )
+            offset_sec += chunk_sec
+
+        rows.sort(key=lambda row: row["start_sec"])
+        return {
+            "placements": rows,
+            "chunks": chunk_meta,
+            "duration_sec": round(offset_sec, 4),
+        }
+
     def render_dialogue(
         self,
         dialogue: dict[str, Any],
@@ -848,6 +953,14 @@ def parse_args() -> argparse.Namespace:
         help="タイミングの作り方: pred=realizer+gap(最新版) / stat=統計配置 / paper=論文版predictor",
     )
     parser.add_argument(
+        "--placement-only",
+        action="store_true",
+        help=(
+            "合成せず配置だけ出す。acoustic model を積まないので GPU も"
+            " チェックポイントも要らず CPU で動く。out-dir/placement/ に書く"
+        ),
+    )
+    parser.add_argument(
         "--allow-missing-alignments",
         action="store_true",
         help="paper モード用。発話単位のタイミングが取れないまま書き出すことを明示的に許す",
@@ -914,12 +1027,93 @@ def parse_args() -> argparse.Namespace:
     paper_group.add_argument("--gap-bias-frames", type=float, default=0.0)
 
     args = parser.parse_args()
+    if args.placement_only and args.mode == "paper":
+        parser.error(
+            "--placement-only は --mode paper では使えません。"
+            "論文版の timing predictor は発話単位のタイミングを返さないので、"
+            "取り出せる配置がありません。"
+        )
     if args.mode == "paper" and not args.allow_missing_alignments:
         parser.error(
             "--mode paper は発話単位のタイミングを返さないため学習用の alignments を "
             "書けません。聴き比べ用と割り切るなら --allow-missing-alignments を付けてください。"
         )
     return args
+
+
+def run_placement_only(
+    renderer: "KaburiRenderer",
+    dialogues: list[dict[str, Any]],
+    out_dir: Path,
+    args: argparse.Namespace,
+) -> int:
+    """配置だけ取って JSON に落とす。合成はしない。
+
+    音響モデルを積まないので GPU は要らず、CPU で数秒。既存の音声へ KABURI の
+    間を当てはめたいときはこちらで、5GB のチェックポイントも A100 も要らない。
+    """
+    placement_dir = out_dir / "placement"
+    placement_dir.mkdir(parents=True, exist_ok=True)
+    index_path = out_dir / "placements.jsonl"
+    index_path.write_text("", encoding="utf-8")
+
+    started = time.time()
+    success = 0
+    failed = 0
+    for dialogue in dialogues:
+        stem = dialogue["_stem"]
+        dialogue_id = str(dialogue.get("id") or stem)
+        if dialogue.get("_g2p_failed"):
+            failed += 1
+            continue
+        try:
+            planned = renderer.plan_dialogue(dialogue, args)
+        except Exception as exc:  # noqa: BLE001 - 1 本落ちても続ける
+            failed += 1
+            logger.warning("対話 %s の配置に失敗したのでスキップします: %s", dialogue_id, exc)
+            continue
+        payload = {
+            "id": dialogue.get("id"),
+            "stem": stem,
+            "title": dialogue.get("title"),
+            "mode": args.mode,
+            "timing_release": renderer.timing_release,
+            "ref_pack": str(args.ref_pack),
+            "chunk_sec": args.chunk_sec,
+            "chunk_gap_sec": args.chunk_gap_sec,
+            "min_fit_scale": args.min_fit_scale,
+            "fps": FPS,
+            "duration_sec": planned["duration_sec"],
+            "chunks": planned["chunks"],
+            "placements": planned["placements"],
+            "turns": [
+                {k: v for k, v in turn.items() if not k.startswith("_")}
+                for turn in dialogue["turns"]
+            ],
+        }
+        (placement_dir / f"{stem}.placement.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=1) + "\n", encoding="utf-8"
+        )
+        append_jsonl(
+            index_path,
+            {
+                "id": dialogue.get("id"),
+                "stem": stem,
+                "n_placements": len(planned["placements"]),
+                "duration_sec": planned["duration_sec"],
+            },
+        )
+        success += 1
+
+    elapsed = time.time() - started
+    logger.info(
+        "配置のみ: 成功 %d / 失敗 %d / %.1f 秒 (%.3f 秒per対話, acoustic model %s)",
+        success, failed, elapsed,
+        elapsed / success if success else 0.0,
+        "loaded" if renderer.acoustic_loaded else "not loaded",
+    )
+    logger.info("出力: %s", placement_dir)
+    return 0 if success else 1
 
 
 def main() -> int:
@@ -982,6 +1176,9 @@ def main() -> int:
     renderer = KaburiRenderer(args)
     load_elapsed = time.time() - load_started
     logger.info("モデルのロードに %.1f 秒", load_elapsed)
+
+    if args.placement_only:
+        return run_placement_only(renderer, pending, out_dir, args)
 
     import torch
     import torchaudio
