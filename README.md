@@ -174,6 +174,39 @@ F0 は自己相関の候補を複数残し、発話全体の代表 F0 から離�
 `跳ね(st)` は島から島への半音差＝アクセントの大きさで、これ自体が検索の
 マッチング条件に使える量でもある。
 
+### 相槌バンクの差し込み（KABURI × Qwen3）
+
+配置は KABURI、音はバンク、という分担を実際に聴いてみるための最小の実験。
+KABURI で普通にレンダリングしたあと、**出来上がったステレオ WAV の左（聞き手）
+チャンネルの相槌区間だけ**を、多様性プローブで作り置きした wav に差し替える。
+合成し直さないので、配置も相手の発話も 1 サンプル動かない＝差し替え前後で
+そのまま A/B できる。
+
+```bash
+qsub -V scripts/2026-09-15/aizuchi_normal_kaburi_bank.pbs
+bash scripts/run_kaburi_bank_dialogues.sh 3        # インタラクティブノード
+```
+
+差し替え先は **KABURI が空けた区間の長さに近い順**に並べ、上位 `MATCH_TOP_K`
+本から 1 本引く（毎回いちばん近いものを取ると同じ音ばかりが並ぶため）。区間より
+長い音はそのまま相手に食い込ませる（切らない）。相槌のかぶりはむしろそれが
+自然なので、区間は「始まる位置」であって「収める箱」ではない。
+
+`BANK_DIR` は既定で `data/runs/diversity/` の最新。1 語だけのバンクで構わない
+（温度スイープの出力が向く）。実録音 116 件では「うん」だけで 28 件、上位 4 語で
+76% を占めていて、いま合成に使っている語彙とほぼ重ならない。
+
+差し替えだけ CPU で何度でもやり直せる。
+
+```bash
+uv run python scripts/splice_aizuchi_bank.py \
+  --training-dir <dir> --bank-dir <bank> --out-dir <dir>_k1 --match-top-k 1
+```
+
+何をどこに差したかは `bank_swaps.jsonl`。`metadata.aizuchi_bank` にも残る。
+音と `alignments` は差し替え後に揃えてあるが、`metadata.dialogue.turns` は
+「何を言わせるつもりだったか」の記録として元のまま残してある。
+
 ## 2. 学習
 
 ハイパラは `experiments/<name>/config.yaml` で管理する。
