@@ -228,6 +228,39 @@ class ReportTest(unittest.TestCase):
         self.assertLess(wide["groups"][0]["nearest_d"], 1.0)
         self.assertEqual(wide["totals"]["nearest_d_overlapping"], 2)
 
+    def test_two_islands_are_read_as_accent_not_as_a_tracker_fault(self) -> None:
+        # What "sokka" looks like: a geminate stop splits the voiced part in
+        # two, the halves sit at different pitches, and the whole-utterance
+        # median lands on whichever half happens to be longer. The voice is
+        # steady; the summary statistic is not.
+        low_first = np.concatenate(
+            [tone(130.0, 0.30), silence(0.10), tone(200.0, 0.12)]
+        )
+        high_first = np.concatenate(
+            [tone(130.0, 0.12), silence(0.10), tone(200.0, 0.30)]
+        )
+        samples = [sample("sokka", low_first), sample("sokka", high_first)]
+        for entry in samples:
+            self.assertEqual(entry["measure"]["n_voiced_runs"], 2)
+            self.assertGreater(entry["measure"]["f0_step_semitones"], 3.0)
+        report = probe.build_report(
+            [{"text": "sokka", "temperature": None, "samples": samples}], {}
+        )
+        group = report["groups"][0]
+        self.assertTrue(group["f0_suspect"])
+        self.assertEqual(group["f0_suspect_reason"], "accent")
+        # The first island is the stable read, which is the point of the
+        # column: run order is fixed for a given word, so the head stays put
+        # while the whole-utterance median flips between the islands.
+        self.assertLess(group["f0_head_hz"]["sd"], group["f0_median_hz"]["sd"])
+
+    def test_an_octave_split_is_named_as_such(self) -> None:
+        samples = [sample("un", tone(f0, 0.4)) for f0 in (180.0, 180.0, 360.0)]
+        report = probe.build_report(
+            [{"text": "un", "temperature": None, "samples": samples}], {}
+        )
+        self.assertEqual(report["groups"][0]["f0_suspect_reason"], "octave")
+
     def test_a_wild_f0_is_flagged_rather_than_averaged_away(self) -> None:
         wild = [sample("sokkaa", tone(f0, 0.5)) for f0 in (90.0, 120.0, 260.0)]
         steady = [sample("un", tone(f0, 0.5)) for f0 in (178.0, 180.0, 182.0)]
@@ -239,8 +272,8 @@ class ReportTest(unittest.TestCase):
             {},
         )
         flagged = report["totals"]["f0_suspect_groups"]
-        self.assertIn("sokkaa", flagged)
-        self.assertNotIn("un", flagged)
+        self.assertEqual(len(flagged), 1)
+        self.assertTrue(flagged[0].startswith("sokkaa("), flagged)
         self.assertIn("要確認", probe.format_report(report))
 
 

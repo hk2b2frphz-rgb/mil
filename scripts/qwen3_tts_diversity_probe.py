@@ -304,6 +304,26 @@ def measure(signal: np.ndarray, sample_rate: int) -> dict[str, Any]:
         )
 
     runs = voiced_runs(f0)
+    # 有声区間ごとの F0。「そっか」のように促音で 2 つに割れる語は、発話全体の
+    # 中央値がどちらの島に付くかで大きく振れる -- それは声が暴れているのでは
+    # なく要約の仕方の問題なので、いちばん長い島の F0 も併せて持っておく。
+    run_f0 = [
+        round(float(np.median(f0[run_start:run_end][f0[run_start:run_end] > 0])), 2)
+        for run_start, run_end in runs
+        if np.any(f0[run_start:run_end] > 0)
+    ]
+    # 先頭の島の F0。同じ語なら島の並び順は変わらないので、発話全体の中央値と
+    # 違って draw をまたいで比べられる。「そっか」で振れているのが声なのか
+    # 「そ」と「か」のどちらが長いかなのかは、この列が分ける。
+    head = run_f0[0] if run_f0 else 0.0
+    # 島から島への跳ね。日本語のアクセントはここに出る。
+    step = 0.0
+    if len(run_f0) >= 2:
+        step = max(
+            abs(float(_semitones(np.asarray(right), left)))
+            for left, right in zip(run_f0, run_f0[1:])
+            if left > 0
+        )
     return {
         "duration_sec": round(signal.size / sample_rate, 4),
         "speech_sec": round((end - start) * HOP_SEC, 4),
@@ -329,6 +349,9 @@ def measure(signal: np.ndarray, sample_rate: int) -> dict[str, Any]:
             else 0.0
         ),
         "f0_slope_semitones_per_sec": round(slope, 2),
+        "f0_head_hz": round(head, 2),
+        "f0_run_hz": run_f0,
+        "f0_step_semitones": round(step, 2),
         "n_voiced_runs": len(runs),
         "n_beats": energy_beats(rms),
         "voiced_run_sec": [round((run_end - run_start) * HOP_SEC, 3) for run_start, run_end in runs],
@@ -432,6 +455,33 @@ def listening_picks(samples: Sequence[dict[str, Any]]) -> dict[str, str]:
     }
 
 
+def suspect_reason(samples: Sequence[dict[str, Any]], pitch: dict[str, float]) -> str:
+    """F0 が開いた理由を、値そのものから当てる。
+
+    オクターブなら各サンプルの F0 は group 中央値のちょうど 2 倍か半分の近くに
+    溜まる。そうでなく、発話が 2 つ以上の有声島に割れていて島から島への跳ねが
+    大きいなら、暴れているのは計測ではなくアクセント -- 発話全体の中央値が
+    どちらの島に付くかで振れているだけで、F0 頭 の列を見れば落ち着いている。
+    """
+    if pitch["mean"] <= 0:
+        return ""
+    values = [s["measure"]["f0_median_hz"] for s in samples if s["measure"]["f0_median_hz"] > 0]
+    if not values:
+        return ""
+    center = float(np.median(values))
+    if center > 0 and any(
+        abs(abs(math.log2(value / center)) - 1.0) < 0.15 for value in values
+    ):
+        return "octave"
+    runs = statistics.fmean([s["measure"]["n_voiced_runs"] for s in samples])
+    steps = statistics.fmean(
+        [s["measure"].get("f0_step_semitones", 0.0) for s in samples]
+    )
+    if runs >= 1.8 and steps >= 3.0:
+        return "accent"
+    return "unstable"
+
+
 def summarize_group(group: dict[str, Any]) -> dict[str, Any]:
     samples = group["samples"]
     durations = [s["measure"]["speech_sec"] for s in samples]
@@ -439,7 +489,11 @@ def summarize_group(group: dict[str, Any]) -> dict[str, Any]:
     runs = [s["measure"]["n_voiced_runs"] for s in samples]
     beats = [s["measure"].get("n_beats", 0) for s in samples]
     digests = {s["audio_sha1"] for s in samples}
+    heads = [s["measure"].get("f0_head_hz", 0.0) for s in samples]
+    heads = [value for value in heads if value > 0]
+    steps = [s["measure"].get("f0_step_semitones", 0.0) for s in samples]
     pitch = _spread(pitches)
+    suspect = bool(pitch["mean"] > 0 and pitch["sd"] > F0_SUSPECT_RATIO * pitch["mean"])
     return {
         "key": group_key(group),
         "text": group["text"],
@@ -448,9 +502,13 @@ def summarize_group(group: dict[str, Any]) -> dict[str, Any]:
         "unique_audio": len(digests),
         "speech_sec": _spread(durations),
         "f0_median_hz": pitch,
-        # F0 が平均の F0_SUSPECT_RATIO を超えて開いたら、声ではなく計測を疑う。
-        # オクターブの取り違えが残っていればここに出る。
-        "f0_suspect": bool(pitch["mean"] > 0 and pitch["sd"] > F0_SUSPECT_RATIO * pitch["mean"]),
+        "f0_head_hz": _spread(heads),
+        "f0_step_semitones": _spread(steps),
+        # F0 が平均の F0_SUSPECT_RATIO を超えて開いたら、値をそのまま読まない。
+        # 理由まで出すのは、オクターブの取り違え(計測の問題)と、アクセントで
+        # 中央値が振れているだけ(声は落ち着いている)とで、次の手が違うため。
+        "f0_suspect": suspect,
+        "f0_suspect_reason": suspect_reason(samples, pitch) if suspect else "",
         "n_voiced_runs": _spread(runs),
         "n_beats": _spread(beats),
         "within_dtw": mean_pairwise_dtw([s["features"] for s in samples]),
@@ -589,7 +647,11 @@ def build_report(
             "dtw_separation": round(between_dtw / mean_within_dtw, 3)
             if mean_within_dtw > 0
             else 0.0,
-            "f0_suspect_groups": [s["key"] for s in summaries if s["f0_suspect"]],
+            "f0_suspect_groups": [
+                f"{s['key']}({s['f0_suspect_reason']})"
+                for s in summaries
+                if s["f0_suspect"]
+            ],
             "f0_median_spread_hz": _spread(group_pitch),
         },
     }
@@ -645,21 +707,33 @@ def format_report(report: dict[str, Any]) -> str:
 
     lines.append("## 韻律と形")
     lines.append("")
-    lines.append("| group | F0 med | sd | 拍 | 有声区間 | uniq | within DTW | |")
-    lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
+    lines.append(
+        "| group | F0 med | sd | F0 頭 | sd | 跳ね(st) | 拍 | 有声区間 | uniq | within DTW | |"
+    )
+    lines.append(
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"
+    )
     for group in report["groups"]:
         pitch = group["f0_median_hz"]
+        head = group.get("f0_head_hz", {"mean": 0.0, "sd": 0.0})
         lines.append(
-            "| {key} | {pm:.1f} | {ps:.1f} | {beats:.1f} | {runs:.1f} | {uniq} | "
-            "{dtw:.3f} | {flag} |".format(
+            "| {key} | {pm:.1f} | {ps:.1f} | {mm:.1f} | {ms:.1f} | {step:.1f} | "
+            "{beats:.1f} | {runs:.1f} | {uniq} | {dtw:.3f} | {flag} |".format(
                 key=group["key"],
                 pm=pitch["mean"],
                 ps=pitch["sd"],
+                mm=head["mean"],
+                ms=head["sd"],
+                step=group.get("f0_step_semitones", {"mean": 0.0})["mean"],
                 beats=group["n_beats"]["mean"],
                 runs=group["n_voiced_runs"]["mean"],
                 uniq=group["unique_audio"],
                 dtw=group["within_dtw"],
-                flag="要確認" if group["f0_suspect"] else "",
+                flag=(
+                    f"要確認({group['f0_suspect_reason']})"
+                    if group["f0_suspect"]
+                    else ""
+                ),
             )
         )
     lines.append("")
@@ -728,6 +802,10 @@ def format_report(report: dict[str, Any]) -> str:
         lines.append(
             "- F0 要確認 (sd が平均の "
             f"{F0_SUSPECT_RATIO:.0%} 超): {', '.join(totals['f0_suspect_groups'])}"
+        )
+        lines.append(
+            "  octave=計測の取り違え / accent=島から島への跳ねで中央値が振れている"
+            "(F0 頭 の列を見る) / unstable=どちらでもない"
         )
     lines.append("")
     lines.append("読み方:")
