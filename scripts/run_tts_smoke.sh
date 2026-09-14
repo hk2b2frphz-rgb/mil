@@ -40,8 +40,20 @@ set -euo pipefail
 #   bash scripts/setup_kaburi_env.sh          (KABURI arm)
 #   bash scripts/setup_vllm_omni_v100_env.sh  (Qwen3 arm)
 #
-# Overrides: NUM_DIALOGUES, CUDA_VISIBLE_DEVICES, AIZUCHI_VERSION,
-# DIALOGUES_JSONL, CLONE_OUT_DIR_MOSHI, REPORT_PROJECTION.
+# AIZUCHI_PRESET picks which listener-only corpus to render. The presets differ
+# only in how often the listener reacts (AIZUCHI_FREQUENCY_PRESETS in
+# scripts/generate_synthetic_moshi_training_data.py), so rendering two of them
+# through the same TTS is how the backchannel policy is isolated:
+#
+#   AIZUCHI_PRESET=eager bash scripts/run_tts_smoke.sh kaburi-pred 3
+#
+# Each preset has its own corpus root and its own version, because the presets
+# were regenerated at different times -- eager is v7, since its v6 attempt came
+# out sparser than normal-v6 and the preset was raised afterwards. reserved
+# exists only at the 10,000 scale (v3), so reach it through DIALOGUES_JSONL.
+#
+# Overrides: NUM_DIALOGUES, CUDA_VISIBLE_DEVICES, AIZUCHI_PRESET,
+# AIZUCHI_VERSION, DIALOGUES_JSONL, CLONE_OUT_DIR_MOSHI, REPORT_PROJECTION.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -71,9 +83,21 @@ if ! [[ "$NUM_DIALOGUES" =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 
-AIZUCHI_VERSION="${AIZUCHI_VERSION:-v6}"
-SOURCE_BATCH_ID="qwen_aizuchi_3000_normal_${AIZUCHI_VERSION}"
-DIALOGUES_JSONL="${DIALOGUES_JSONL:-$REPO_ROOT/data/runs/aizuchi_normal_3000_${AIZUCHI_VERSION}/dialogue/llm_dialogues/dialogues.jsonl}"
+AIZUCHI_PRESET="${AIZUCHI_PRESET:-normal}"
+case "$AIZUCHI_PRESET" in
+    normal) PRESET_VERSION="v6" ;;
+    eager)  PRESET_VERSION="v7" ;;
+    flood)  PRESET_VERSION="v6" ;;
+    *)
+        echo "ERROR: AIZUCHI_PRESET must be normal, eager or flood: $AIZUCHI_PRESET" >&2
+        echo "reserved exists only at the 10,000 scale; pass DIALOGUES_JSONL for it." >&2
+        exit 1
+        ;;
+esac
+AIZUCHI_VERSION="${AIZUCHI_VERSION:-$PRESET_VERSION}"
+CORPUS_ROOT="aizuchi_${AIZUCHI_PRESET}_3000_${AIZUCHI_VERSION}"
+SOURCE_BATCH_ID="qwen_aizuchi_3000_${AIZUCHI_PRESET}_${AIZUCHI_VERSION}"
+DIALOGUES_JSONL="${DIALOGUES_JSONL:-$REPO_ROOT/data/runs/$CORPUS_ROOT/dialogue/llm_dialogues/dialogues.jsonl}"
 CLONE_OUT_DIR_MOSHI="${CLONE_OUT_DIR_MOSHI:-$REPO_ROOT/data/clone_examples/99999}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 REPORT_PROJECTION="${REPORT_PROJECTION:-3000}"
@@ -81,7 +105,8 @@ STAMP="$(run_id_stamp)"
 
 if [[ ! -s "$DIALOGUES_JSONL" ]]; then
     echo "ERROR: dialogues JSONL was not found or is empty: $DIALOGUES_JSONL" >&2
-    echo "Generate it first with scripts/2026-09-04/aizuchi_normal_dialogue_3000.pbs" >&2
+    echo "Generate it first with" >&2
+    echo "  qsub -V scripts/2026-09-04/aizuchi_${AIZUCHI_PRESET}_dialogue_3000.pbs" >&2
     exit 1
 fi
 if ! command -v nvidia-smi >/dev/null 2>&1; then
@@ -93,6 +118,7 @@ echo "repo:          $REPO_ROOT"
 echo "dialogues:     $DIALOGUES_JSONL"
 echo "num_dialogues: $NUM_DIALOGUES"
 echo "gpu:           $CUDA_VISIBLE_DEVICES"
+echo "aizuchi:       $AIZUCHI_PRESET ($AIZUCHI_VERSION)"
 echo "moshi clone:   $CLONE_OUT_DIR_MOSHI"
 echo "started_at:    $(date -Iseconds)"
 echo "================================"
@@ -104,7 +130,7 @@ REPORT_LABELS=()
 
 run_kaburi() {  # run_kaburi <pred|stat|paper>
     local mode="$1"
-    local batch_id="aizuchi_normal_3000_${AIZUCHI_VERSION}_kaburi_${mode}_smoke_${STAMP}"
+    local batch_id="${CORPUS_ROOT}_kaburi_${mode}_smoke_${STAMP}"
     local out_root="$REPO_ROOT/data/runs/smoke/$batch_id"
     local training_dir="$out_root/shard_000/training_set"
     echo
@@ -123,17 +149,17 @@ run_kaburi() {  # run_kaburi <pred|stat|paper>
         if [[ "$mode" == "paper" ]]; then
             export ALLOW_MISSING_ALIGNMENTS=1
         fi
-        export SMOKE_REPORT_LABEL="kaburi-$mode"
+        export SMOKE_REPORT_LABEL="$AIZUCHI_PRESET/kaburi-$mode"
         bash scripts/run_kaburi_tts.pbs
     )
     elapsed="$(( $(date +%s) - started ))"
     echo "<<< KABURI-TTS (timing=$mode) finished in ${elapsed}s wall (model load included)"
     REPORT_DIRS+=("$training_dir")
-    REPORT_LABELS+=("kaburi-$mode")
+    REPORT_LABELS+=("$AIZUCHI_PRESET/kaburi-$mode")
 }
 
 run_qwen() {
-    local batch_id="aizuchi_normal_3000_${AIZUCHI_VERSION}_qwen_smoke_${STAMP}"
+    local batch_id="${CORPUS_ROOT}_qwen_smoke_${STAMP}"
     local out_root="$REPO_ROOT/data/runs/smoke/$batch_id"
     QWEN_TRAINING_DIR="$out_root/shard_000/training_set"
     echo
@@ -150,7 +176,7 @@ run_qwen() {
     elapsed="$(( $(date +%s) - started ))"
     echo "<<< Qwen3-TTS finished in ${elapsed}s wall (model load included)"
     REPORT_DIRS+=("$QWEN_TRAINING_DIR")
-    REPORT_LABELS+=("${SMOKE_REPORT_LABEL_QWEN:-qwen3}")
+    REPORT_LABELS+=("${SMOKE_REPORT_LABEL_QWEN:-$AIZUCHI_PRESET/qwen3}")
 }
 
 case "$BACKEND" in
@@ -170,7 +196,7 @@ echo "===== report ====="
 report_args=(
     uv run python scripts/report_tts_smoke.py
     --projection "$REPORT_PROJECTION"
-    --json-out "$REPO_ROOT/data/runs/smoke/report_${BACKEND}_${STAMP}.json"
+    --json-out "$REPO_ROOT/data/runs/smoke/report_${AIZUCHI_PRESET}_${BACKEND}_${STAMP}.json"
 )
 for i in "${!REPORT_DIRS[@]}"; do
     report_args+=(--training-dir "${REPORT_DIRS[$i]}" --label "${REPORT_LABELS[$i]}")

@@ -90,6 +90,14 @@ bash scripts/run_tts_smoke.sh kaburi-all 3   # 3モードを順に流して並�
 RASTER_MODE=stat qsub -V scripts/2026-09-04/aizuchi_normal_kaburi_tts_3000.pbs
 ```
 
+相槌の頻度プリセットは `AIZUCHI_PRESET` で切り替える。コーパスはプリセットごとに
+別ルート・別バージョン（normal=v6 / eager=v7 / flood=v6。eager が v7 なのは v6 の
+eager が normal-v6 より薄く出てしまい、プリセットを引き上げ直したため）。
+
+```bash
+AIZUCHI_PRESET=eager bash scripts/run_tts_smoke.sh kaburi-pred 3
+```
+
 配置（間・かぶり）は KABURI の gap model が決めるので `LEAD_IN_SEC` / `GAP_SEC` /
 `--auto-overlap-aizuchi` は無い。発話境界は入力した音素ラスタから取るため MMS_FA も
 通さない。KABURI のキャンバスは30秒固定なので、対話は30秒以内のチャンクに切って
