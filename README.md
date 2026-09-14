@@ -104,6 +104,33 @@ AIZUCHI_PRESET=eager bash scripts/run_tts_smoke.sh kaburi-pred 3
 合成し連結する（境界で韻律が途切れる）。codec が bfloat16 で復号するため A100
 （`xan_s`）で回す。出力の形は Qwen3/Kokoro 版と同じで、`merged/` 以降は共通。
 
+### Qwen3-TTS の多様性プローブ
+
+相槌を大量に作り置きして、欲しい間・韻律のものを検索で引く――という案を
+試すなら、先に「同じ参照音声で作った相槌が、そもそも散らばるのか」を見ておく。
+参照 1 本で相槌 20 種 x 10 本 = 200 本を合成し、散らばりを 2 つに分けて測る。
+
+| | 何を見るか |
+| --- | --- |
+| text 内 | 同じ文字列を投げ直したときのばらつき。サンプリング由来 |
+| text 間 | 「うーん」「うーーん」「うぅん」のように書き方を変えたときのへだたり |
+
+```bash
+qsub -V scripts/2026-09-14/qwen3_tts_diversity_probe.pbs
+bash scripts/run_qwen3_tts_diversity.sh          # インタラクティブノード
+TEMPERATURE=1.2 bash scripts/run_qwen3_tts_diversity.sh
+```
+
+出力は `data/runs/diversity/<batch>/report.md`。1 音ごとに尺・F0・有声区間の数を
+取り、text ごとの表と、text 間 / text 内の分離比を出す。text 内 cv が 0 近辺なら
+同じ文字列を投げ直しても貯まらない（バンクは書き方で作るしかない）。既定の
+sampling params もそのまま報告に載る。`--temperature` などは production の
+バックエンドには手を入れず、このプローブの中だけで stage-0 に差し込む。
+
+既定の 20 種は実録音（116 件）で上位を占めた うん / うーん / そっか / うんうん を
+中心に伸ばし方と表記を振ったもの。いずれも今の合成語彙には無い語なので、
+そもそも出せるのかの確認も兼ねている。`TEXTS_FILE` で差し替えられる。
+
 ## 2. 学習
 
 ハイパラは `experiments/<name>/config.yaml` で管理する。
