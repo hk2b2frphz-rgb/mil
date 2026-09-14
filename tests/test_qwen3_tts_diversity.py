@@ -88,6 +88,68 @@ class DistanceTest(unittest.TestCase):
         self.assertEqual(probe.dtw_distance(features, np.zeros((0, 2))), 0.0)
 
 
+class OctaveGuardTest(unittest.TestCase):
+    def test_a_sub_peak_near_the_reference_beats_a_stronger_octave_away(self) -> None:
+        # The failure this guard exists for: one frame's best ACF peak sits an
+        # octave off, and the group's F0 sd blows up (sokkaa read 66 Hz sd).
+        self.assertEqual(
+            probe.choose_candidate([(360.0, 0.90), (180.0, 0.80)], reference=180.0),
+            180.0,
+        )
+
+    def test_a_clearly_better_candidate_still_wins(self) -> None:
+        # The penalty is a tiebreaker, not an override: a real octave jump that
+        # scores far higher must survive.
+        self.assertEqual(
+            probe.choose_candidate([(360.0, 0.95), (180.0, 0.40)], reference=180.0),
+            360.0,
+        )
+
+    def test_without_a_reference_the_top_candidate_is_taken(self) -> None:
+        self.assertEqual(
+            probe.choose_candidate([(200.0, 0.9), (100.0, 0.8)], reference=0.0), 200.0
+        )
+        self.assertEqual(probe.choose_candidate([], reference=180.0), 0.0)
+
+    def test_the_reference_ignores_a_minority_of_octave_errors(self) -> None:
+        frames = [[(180.0, 0.9)]] * 8 + [[(360.0, 0.9)]] * 2
+        self.assertEqual(probe.reference_f0(frames), 180.0)
+
+    def test_a_steady_tone_is_not_moved_by_the_guard(self) -> None:
+        f0 = probe.estimate_f0(tone(180.0, 0.6), SAMPLE_RATE)
+        voiced = f0[f0 > 0]
+        self.assertGreater(voiced.size, 10)
+        self.assertLess(float(np.std(voiced)), 6.0)
+
+
+class BeatTest(unittest.TestCase):
+    def beats(self, signal: np.ndarray) -> int:
+        return probe.energy_beats(probe.frame_rms(signal, SAMPLE_RATE))
+
+    def test_one_continuous_sound_is_one_beat(self) -> None:
+        self.assertEqual(self.beats(tone(180.0, 0.5)), 1)
+
+    def test_two_sounds_split_by_a_dip_are_two_beats(self) -> None:
+        # What "unun" should look like, and what voiced_runs cannot see when the
+        # two halves are joined without an unvoiced gap.
+        signal = np.concatenate(
+            [tone(180.0, 0.25), tone(180.0, 0.08, amplitude=0.02), tone(170.0, 0.25)]
+        )
+        self.assertEqual(self.beats(signal), 2)
+        self.assertEqual(
+            probe.measure(signal, SAMPLE_RATE)["n_voiced_runs"], 1
+        )
+
+    def test_a_shallow_dip_is_not_a_beat(self) -> None:
+        signal = np.concatenate(
+            [tone(180.0, 0.25), tone(180.0, 0.08, amplitude=0.28), tone(170.0, 0.25)]
+        )
+        self.assertEqual(self.beats(signal), 1)
+
+    def test_silence_has_no_beats(self) -> None:
+        self.assertEqual(self.beats(silence(0.3)), 0)
+
+
 class ReportTest(unittest.TestCase):
     def build(self, jitter: float) -> dict:
         rng = np.random.default_rng(0)
@@ -103,7 +165,7 @@ class ReportTest(unittest.TestCase):
                 )
                 for _ in range(5)
             ]
-            groups.append({"text": text, "samples": samples})
+            groups.append({"text": text, "temperature": None, "samples": samples})
         return probe.build_report(groups, {"run_id": "test"})
 
     def test_identical_outputs_are_counted_as_duplicates(self) -> None:
@@ -111,7 +173,8 @@ class ReportTest(unittest.TestCase):
         # every time, and a bank of 200 is really a bank of 20.
         one = sample("un", tone(180.0, 0.4))
         report = probe.build_report(
-            [{"text": "un", "samples": [one, dict(one), dict(one)]}], {}
+            [{"text": "un", "temperature": None, "samples": [one, dict(one), dict(one)]}],
+            {},
         )
         self.assertEqual(report["totals"]["samples"], 3)
         self.assertEqual(report["totals"]["unique_audio"], 1)
@@ -122,8 +185,8 @@ class ReportTest(unittest.TestCase):
         quiet = self.build(jitter=0.1)
         noisy = self.build(jitter=1.0)
         self.assertLess(
-            quiet["totals"]["within_text_duration_cv_mean"],
-            noisy["totals"]["within_text_duration_cv_mean"],
+            quiet["totals"]["within_group_duration_cv_mean"],
+            noisy["totals"]["within_group_duration_cv_mean"],
         )
 
     def test_separation_falls_as_the_within_text_spread_grows(self) -> None:
@@ -141,6 +204,130 @@ class ReportTest(unittest.TestCase):
         self.assertIn("| un |", rendered)
         self.assertIn("| uuun |", rendered)
         self.assertIn("分離比", rendered)
+
+    def spread_groups(self, durations_a, durations_b) -> dict:
+        return probe.build_report(
+            [
+                {
+                    "text": name,
+                    "temperature": None,
+                    "samples": [sample(name, tone(180.0, seconds)) for seconds in lengths],
+                }
+                for name, lengths in (("un", durations_a), ("uuun", durations_b))
+            ],
+            {},
+        )
+
+    def test_nearest_d_falls_below_one_once_the_groups_overlap(self) -> None:
+        # d is the column that tells "the means are close" apart from "each
+        # group is wide"; the overall ratio cannot. Same two means in both
+        # reports, so only the within-group spread moves.
+        tight = self.spread_groups([0.38, 0.40, 0.42], [0.53, 0.55, 0.57])
+        wide = self.spread_groups([0.10, 0.40, 0.70], [0.25, 0.55, 0.85])
+        self.assertGreater(tight["groups"][0]["nearest_d"], 1.0)
+        self.assertLess(wide["groups"][0]["nearest_d"], 1.0)
+        self.assertEqual(wide["totals"]["nearest_d_overlapping"], 2)
+
+    def test_a_wild_f0_is_flagged_rather_than_averaged_away(self) -> None:
+        wild = [sample("sokkaa", tone(f0, 0.5)) for f0 in (90.0, 120.0, 260.0)]
+        steady = [sample("un", tone(f0, 0.5)) for f0 in (178.0, 180.0, 182.0)]
+        report = probe.build_report(
+            [
+                {"text": "sokkaa", "temperature": None, "samples": wild},
+                {"text": "un", "temperature": None, "samples": steady},
+            ],
+            {},
+        )
+        flagged = report["totals"]["f0_suspect_groups"]
+        self.assertIn("sokkaa", flagged)
+        self.assertNotIn("un", flagged)
+        self.assertIn("要確認", probe.format_report(report))
+
+
+class TemperatureTest(unittest.TestCase):
+    def group(self, temperature: float, jitter: float) -> dict:
+        rng = np.random.default_rng(int(temperature * 100))
+        return {
+            "text": "un",
+            "temperature": temperature,
+            "samples": [
+                sample("un", tone(180.0, 0.4 + rng.normal(0.0, jitter)))
+                for _ in range(5)
+            ],
+        }
+
+    def test_groups_are_keyed_by_text_and_temperature(self) -> None:
+        report = probe.build_report(
+            [self.group(0.7, 0.01), self.group(1.3, 0.06)], {}
+        )
+        keys = [group["key"] for group in report["groups"]]
+        self.assertEqual(keys, ["un @T0.7", "un @T1.3"])
+        self.assertEqual(report["totals"]["texts"], 1)
+        self.assertEqual(report["totals"]["groups"], 2)
+
+    def test_the_effect_table_lines_the_temperatures_up(self) -> None:
+        report = probe.build_report(
+            [self.group(0.7, 0.01), self.group(1.3, 0.06)], {}
+        )
+        rows = report["temperature_effect"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["temperatures"], [0.7, 1.3])
+        # Wider draws at the higher temperature: that is the whole question.
+        self.assertLess(rows[0]["duration_cv"][0], rows[0]["duration_cv"][1])
+        self.assertIn("temperature を振ったとき", probe.format_report(report))
+
+    def test_one_temperature_alone_produces_no_effect_table(self) -> None:
+        report = probe.build_report([self.group(0.7, 0.01)], {})
+        self.assertEqual(report["temperature_effect"], [])
+
+    def test_cross_temperature_pairs_are_not_counted_as_between_text(self) -> None:
+        # Same word at two temperatures is not "two spellings"; counting it as
+        # such would inflate the separation ratio.
+        same = probe.build_report([self.group(0.7, 0.01), self.group(1.3, 0.01)], {})
+        self.assertEqual(same["totals"]["between_text_dtw_mean"], 0.0)
+
+
+class SamplesTest(unittest.TestCase):
+    def test_records_group_by_text_and_temperature_in_first_seen_order(self) -> None:
+        records = [
+            {"text": "un", "temperature": 0.7},
+            {"text": "sokka", "temperature": 0.7},
+            {"text": "un", "temperature": 1.3},
+            {"text": "un", "temperature": 0.7},
+        ]
+        groups = probe.group_samples(records)
+        self.assertEqual(
+            [(g["text"], g["temperature"], len(g["samples"])) for g in groups],
+            [("un", 0.7, 2), ("sokka", 0.7, 1), ("un", 1.3, 1)],
+        )
+
+    def test_wav_round_trips_through_the_reader(self) -> None:
+        import tempfile
+
+        signal = tone(180.0, 0.3)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "a.wav"
+            probe.write_wav(path, signal, SAMPLE_RATE)
+            restored, rate = probe.read_wav(path)
+            self.assertEqual(rate, SAMPLE_RATE)
+            self.assertEqual(restored.size, signal.size)
+            # 16bit quantization is the only loss.
+            self.assertLess(float(np.max(np.abs(restored - signal))), 1e-3)
+
+    def test_temperatures_parse(self) -> None:
+        self.assertEqual(probe.parse_temperatures("0.7, 1.0,1.3"), [0.7, 1.0, 1.3])
+        self.assertEqual(probe.parse_temperatures(""), [None])
+
+    def test_listening_picks_span_the_extremes(self) -> None:
+        samples = [
+            {"measure": {"speech_sec": 0.9}, "wav": "long.wav"},
+            {"measure": {"speech_sec": 0.2}, "wav": "short.wav"},
+            {"measure": {"speech_sec": 0.5}, "wav": "mid.wav"},
+        ]
+        picks = probe.listening_picks(samples)
+        self.assertEqual(picks["shortest"], "short.wav")
+        self.assertEqual(picks["longest"], "long.wav")
+        self.assertEqual(picks["median"], "mid.wav")
 
 
 class PlanTest(unittest.TestCase):

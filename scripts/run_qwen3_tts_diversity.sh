@@ -7,7 +7,17 @@ set -euo pipefail
 #   bash scripts/run_qwen3_tts_diversity.sh                # 20 texts x 10 = 200
 #   REPEATS=20 bash scripts/run_qwen3_tts_diversity.sh     # 20 texts x 20 = 400
 #   TEXTS_FILE=my.txt bash scripts/run_qwen3_tts_diversity.sh
-#   TEMPERATURE=1.2 bash scripts/run_qwen3_tts_diversity.sh
+#
+# One string, many draws, across temperatures -- how far the SAME input can be
+# pushed, with the text held still so nothing is confounded by content:
+#
+#   TEXTS=<word> REPEATS=50 TEMPERATURE_SWEEP=0.7,1.0,1.3 \
+#     bash scripts/run_qwen3_tts_diversity.sh
+#
+# Re-measuring needs no GPU and no vLLM, and must not re-synthesize: rebuilding
+# the audio would give a different bank to compare against.
+#
+#   uv run python scripts/qwen3_tts_diversity_probe.py --out-dir <dir> --reanalyze
 #
 # The question behind it: a bank of pre-synthesized backchannels is only worth
 # building if the bank has variety in it. This measures the two places variety
@@ -20,9 +30,13 @@ set -euo pipefail
 # resolved from data/clone_examples/99999, the voice every Qwen3 corpus in this
 # repo already uses, so the numbers describe the voice actually in production.
 #
-# Overrides: REPEATS, LIMIT, TEXTS_FILE, CLONE_OUT_DIR_MOSHI, REF_RANK,
-# CLONE_MODE, OUT_DIR, BATCH_ID, TTS_BATCH_SIZE, MAX_NEW_TOKENS,
-# TEMPERATURE, TOP_P, TOP_K, SEED, CUDA_VISIBLE_DEVICES, VLLM_PYTHON.
+# Overrides: REPEATS, LIMIT, TEXTS, TEXTS_FILE, CLONE_OUT_DIR_MOSHI, REF_RANK,
+# CLONE_MODE, OUT_DIR, BATCH_ID, TTS_BATCH_SIZE, MAX_NEW_TOKENS, TEMPERATURE,
+# TEMPERATURE_SWEEP, TOP_P, TOP_K, SEED, CUDA_VISIBLE_DEVICES, VLLM_PYTHON.
+#
+# TEMPERATURE_SWEEP runs the whole plan once per temperature on one engine
+# load, so REPEATS is per temperature: one word at REPEATS=50 with three
+# temperatures is 150 samples, grouped as three.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -119,7 +133,9 @@ PROBE_ARGS=(
 )
 [[ -n "$REF_TEXT" ]] && PROBE_ARGS+=(--ref-text "$REF_TEXT")
 [[ -n "${TEXTS_FILE:-}" ]] && PROBE_ARGS+=(--texts-file "$TEXTS_FILE")
+[[ -n "${TEXTS:-}" ]] && PROBE_ARGS+=(--texts "$TEXTS")
 [[ -n "${TEMPERATURE:-}" ]] && PROBE_ARGS+=(--temperature "$TEMPERATURE")
+[[ -n "${TEMPERATURE_SWEEP:-}" ]] && PROBE_ARGS+=(--temperature-sweep "$TEMPERATURE_SWEEP")
 [[ -n "${TOP_P:-}" ]] && PROBE_ARGS+=(--top-p "$TOP_P")
 [[ -n "${TOP_K:-}" ]] && PROBE_ARGS+=(--top-k "$TOP_K")
 [[ -n "${SEED:-}" ]] && PROBE_ARGS+=(--seed "$SEED")
@@ -129,6 +145,8 @@ echo "repo:       $REPO_ROOT"
 echo "model:      $QWEN_CLONE_MODEL"
 echo "reference:  $REF_WAV ($CLONE_MODE, rank $REF_RANK)"
 echo "repeats:    $REPEATS  limit: $LIMIT"
+echo "texts:      ${TEXTS:-${TEXTS_FILE:-(default 20)}}"
+echo "temps:      ${TEMPERATURE_SWEEP:-${TEMPERATURE:-(engine default)}}"
 echo "out_dir:    $OUT_DIR"
 echo "gpu:        $CUDA_VISIBLE_DEVICES"
 echo "started_at: $(date -Iseconds)"

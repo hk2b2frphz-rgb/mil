@@ -121,15 +121,44 @@ bash scripts/run_qwen3_tts_diversity.sh          # インタラクティブノ�
 TEMPERATURE=1.2 bash scripts/run_qwen3_tts_diversity.sh
 ```
 
-出力は `data/runs/diversity/<batch>/report.md`。1 音ごとに尺・F0・有声区間の数を
-取り、text ごとの表と、text 間 / text 内の分離比を出す。text 内 cv が 0 近辺なら
-同じ文字列を投げ直しても貯まらない（バンクは書き方で作るしかない）。既定の
-sampling params もそのまま報告に載る。`--temperature` などは production の
-バックエンドには手を入れず、このプローブの中だけで stage-0 に差し込む。
+出力は `data/runs/diversity/<batch>/report.md`。1 音ごとに尺・F0・拍・有声区間を
+取り、group ごとの表、隣の group との隔たり `d`、全体の分離比を出す。
+
+- group 内 cv が 0 近辺 → 同じ入力をいくら投げても貯まらない
+- `d` < 1 → 隣と分布が重なる。1 本引いて狙った長さは出ない（引いて測って選ぶ）
+- 分離比だけだと「平均が近い」のか「group 内が広い」のか区別できないので `d` を見る
 
 既定の 20 種は実録音（116 件）で上位を占めた うん / うーん / そっか / うんうん を
 中心に伸ばし方と表記を振ったもの。いずれも今の合成語彙には無い語なので、
-そもそも出せるのかの確認も兼ねている。`TEXTS_FILE` で差し替えられる。
+そもそも出せるのかの確認も兼ねている。`TEXTS_FILE` / `TEXTS` で差し替えられる。
+
+#### 同じ text のまま温度で散らすか
+
+表記を変えれば散って当然なので、バンクを厚く積むときに効くのは「同じ入力で
+どこまで散るか」の方。text を固定して温度だけ振る:
+
+```bash
+qsub -V scripts/2026-09-14/qwen3_tts_temperature_sweep.pbs
+TEXTS=<word> REPEATS=50 TEMPERATURE_SWEEP=0.7,1.0,1.3 bash scripts/run_qwen3_tts_diversity.sh
+```
+
+温度ごとに group が分かれ（`うん @T1.3`）、`## temperature を振ったとき` の表に
+並ぶ。`REPEATS` は温度あたりの本数で、エンジンは 1 回しか積まない。既定の
+sampling params も報告に載る。`--temperature` などは production のバックエンドに
+手を入れず、このプローブの中だけで stage-0 に差し込む。
+
+#### 測り直し
+
+測り方を変えたときは合成し直さない。作り直すと別の音になって前の結果と
+比べられないため。GPU も vLLM も要らない:
+
+```bash
+uv run python scripts/qwen3_tts_diversity_probe.py --out-dir <dir> --reanalyze
+```
+
+F0 は自己相関の候補を複数残し、発話全体の代表 F0 から離れた候補に罰則を付けて
+選ぶ（オクターブ飛びの抑制）。それでも group 内の F0 sd が平均の 15% を超えたら
+`要確認` を立てて、値を信じる前に計測を疑えるようにしてある。
 
 ## 2. 学習
 
