@@ -41,15 +41,37 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.alignment_words import (  # noqa: E402
-    get_segmenter_name,
-    split_utterance_alignments,
-)
-from scripts.qwen3_tts_diversity_probe import (  # noqa: E402
-    measure,
-    read_wav,
-    split_outliers,
-)
+
+def _load_sibling(name: str):
+    """scripts/<name>.py をファイルパスから読む。
+
+    "from scripts.x import y" は使えない。このパイプラインは PYTHONPATH に
+    kaburi-tts の側も載せて動くので、トップレベルの "scripts" がどちらの
+    ディレクトリに解決されるかが環境で変わる（向こうにも scripts/ がある）。
+    名前空間パッケージとして両方が混ざれば通るが、片方にでも __init__.py が
+    あれば通常パッケージになって一方だけが見え、"No module named
+    scripts.alignment_words" になる。パスで指せばその曖昧さが無い。
+    """
+    import importlib.util
+
+    path = REPO_ROOT / "scripts" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"_mil_{name}", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"{path} を読み込めません")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_alignment_words = _load_sibling("alignment_words")
+get_segmenter_name = _alignment_words.get_segmenter_name
+split_utterance_alignments = _alignment_words.split_utterance_alignments
+
+_probe = _load_sibling("qwen3_tts_diversity_probe")
+measure = _probe.measure
+read_wav = _probe.read_wav
+split_outliers = _probe.split_outliers
 
 # 左が moshi(聞き手)、右が user。KABURI の出力もこの並び。
 MAIN_LABEL = "SPEAKER_MAIN"
