@@ -386,18 +386,26 @@ qsub -V scripts/2026-09-15/real_aizuchi_fullft_500.pbs     # 4. full-FT       A1
   （`--from-emotional-state`）と違い対話全体で値が変わらないのはむしろ狙い
   通りで、学習用途に使ってよい
 
-  **注意:** タグは挨拶の直前の無音に収める必要があり、無音が無い対話では
-  置けずに skip される。密度タグが置けない対話は、生成時に付けたはずの頻度が
-  モデルに伝わらないまま学習データに混ざる（条件付け精度に直接効く）ので、
-  実行後の `WARNING: ... density_tag_dropped` を必ず確認すること
-  （`--chars-per-sec` を上げてタグを短時間に詰めるか収まらなければ根本的に
-  生成側で挨拶前の無音を確保する必要がある）
+  **注意:** タグは挨拶の直前の無音に収める必要があるが、この対話生成
+  パイプラインが使う KABURI レンダラーは無音ターンを明示的なタイミングとして
+  扱わず（無音ターンは落として自前のタイミングモデルで間を作る）、生成側
+  からは挨拶の前に無音がどれだけあるか制御できない。無音が足りない対話では
+  タグが置けずに skip され、生成時に付けたはずの頻度がモデルに伝わらないまま
+  学習データに混ざってしまう（条件付け精度に直接効く）
+- `--pad-lead-in-sec`。上の問題を「偶然の無音を当てにする」のではなく
+  「確実な予約済みスロットにする」ことで解決する。音声の先頭に固定秒数の
+  無音を実際に足し、`alignments_utterance` の全タイムスタンプをその分だけ
+  後ろへずらしてからタグを挿す。`--from-aizuchi-density` と併用することを
+  推奨する。挿入後は `WARNING: ... density_tag_dropped` が出ないこと
+  （＝全対話にタグが乗ったこと）を確認する。それでも出る場合は
+  `--pad-lead-in-sec` の値がタグの長さに対して短すぎる
 
 - 使い方は `scripts/2026-09-15/real_aizuchi_fullft_500.pbs` のコメント参照。
   step 1（対話生成）を `AIZUCHI_DENSITY_MIXED=1` で回してから
-  `inject_inner_thoughts.py --from-aizuchi-density` を step 3 の出力に対して
-  実行し、その `--out-dir` を fullft の `SRC_RUN_DIR` に渡す
-  （`aizuchi_normal_fullft_10000.pbs` の inner-thought 版と同じパターン）
+  `inject_inner_thoughts.py --from-aizuchi-density --pad-lead-in-sec 3.0` を
+  step 3 の出力に対して実行し、その `--out-dir` を fullft の `SRC_RUN_DIR`
+  に渡す（`aizuchi_normal_fullft_10000.pbs` の inner-thought 版と同じ
+  パターン）
 
 推論側で同じタグをモデルのテキストストリームの先頭に与えて頻度を選ばせる
 実装は、学習コード自体（`../moshi-finetune-nu-dialogue`）が別リポジトリに

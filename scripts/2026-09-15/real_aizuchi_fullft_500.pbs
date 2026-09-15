@@ -26,14 +26,21 @@
 #
 # To train the frequency-conditioned variant instead (step 1 run with
 # AIZUCHI_DENSITY_MIXED=1, so each dialogue's metadata carries a distinct
-# aizuchi_frequency_label), run scripts/inject_inner_thoughts.py
-# --from-aizuchi-density over the step-3 stereo output first and point
-# SRC_RUN_DIR at its --out-dir, same pattern as
+# aizuchi_frequency_label), run:
+#   python3 scripts/inject_inner_thoughts.py \
+#       --data-dir  <step-3 stereo output>/training_set/data_stereo \
+#       --out-dir   <...>/data_stereo_density \
+#       --from-aizuchi-density --pad-lead-in-sec 3.0
+# then point SRC_RUN_DIR at its --out-dir, same pattern as
 # scripts/2026-09-04/aizuchi_normal_fullft_10000.pbs's inner-thought variant.
-# Check the printed WARNING for density_tag_dropped before training on it --
-# a dialogue whose greeting has no lead-in silence loses its tag silently
-# otherwise, and trains as unconditioned data mislabeled with a frequency
-# nothing in the audio actually reflects.
+#
+# --pad-lead-in-sec matters here, not just belt-and-suspenders: the KABURI
+# renderer this pipeline uses drops silence turns and builds timing itself,
+# so generation has no way to guarantee silence before the greeting. Without
+# padding, a dialogue whose greeting has no natural lead-in silence loses its
+# tag, and trains as unconditioned data mislabeled with a frequency nothing
+# in the audio actually reflects. Confirm this by checking the printed
+# WARNING for density_tag_dropped is absent before training on it.
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"

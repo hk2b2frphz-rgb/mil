@@ -11,12 +11,23 @@
     テキストを置き、相づちに到達する前に必ずユーザー発話へ依存した予測を
     通す。テキストストリームが内容依存になるので、聴かなければ当たらない。
 
-音声は一切変更しない:
+音声は基本的に変更しない:
     Moshi のテキストストリームと音声ストリームは別系統でトークン化され
     (`tools.tokenize_text --word_transcript_dir` と `tools.tokenize_audio`)、
     `tools.prepare_dataset` で後から突き合わされる。よって sidecar JSON の
     alignments にだけ手を入れれば、その区間の音声は無音のままで、内心は
     読み上げられない。音声トークンも再利用できる。
+
+    例外が --pad-lead-in-sec（--from-aizuchi-density 用）。相槌頻度のタグは
+    対話ごとに値が変わってはいけないので置き場所は冒頭挨拶の直前の1箇所しか
+    無いが、KABURI レンダラーは無音ターンを明示的なタイミングとして扱わず
+    (`generate_kaburi_tts_data.py` の `load_dialogues` を参照。無音ターンは
+    落として自前のタイミングモデルで間を作る)、対話生成側から無音の長さを
+    保証する手段が無い。生まれつき無音が足りない対話ではタグが skip され、
+    生成時に付けたはずの頻度がモデルに伝わらないまま学習データに混ざって
+    しまう。--pad-lead-in-sec は音声の先頭に固定長の無音を足してから全ての
+    タイムスタンプをその分だけ後ろにずらし、タグの置き場所を偶然の無音では
+    なく確実な予約済みスロットにする。
 
 1 エントリ = 1 単語:
     moshi-finetune の Interleaver はエントリ開始フレームからトークンを
@@ -89,10 +100,24 @@ def parse_args() -> argparse.Namespace:
                           "aizuchi-only モードで記録する相槌頻度）から、対話の"
                           "冒頭挨拶の直前に読み上げないタグを1つだけ置く。"
                           "モデルに相槌頻度を条件付けさせるためのもの。挨拶の"
-                          "前に無音が無い対話では置き場所が無く skip される点に"
-                          "注意（統計の skip_gap_too_short / skip_no_anchor を"
-                          "確認すること）。emotional_state と違い対話内で"
-                          "不変であることが狙いなので学習用途に使ってよい")
+                          "前に無音が無い対話では置き場所が無く skip される"
+                          "（統計の skip_gap_too_short / skip_no_anchor / "
+                          "WARNING の density_tag_dropped を確認すること）。"
+                          "--pad-lead-in-sec と併用すると置き場所を保証できる。"
+                          "emotional_state と違い対話内で不変であることが狙い"
+                          "なので学習用途に使ってよい")
+    parser.add_argument("--pad-lead-in-sec", type=float, default=0.0,
+                        help="0 より大きいと、音声の先頭にこの秒数の無音を足し"
+                             "全タイムスタンプをその分だけ後ろへずらしてから"
+                             "タグを挿す。KABURI レンダラーは無音ターンを"
+                             "落として自前でタイミングを作るため、生成側からは"
+                             "冒頭の無音の長さを保証できない。--from-aizuchi-"
+                             "density のタグは対話に1個しか置き場所が無く、"
+                             "そこが skip されると頻度がモデルに伝わらないまま"
+                             "学習データに混ざるので、既定の 0（無音を足さず"
+                             "元の音声のまま）ではなくこちらを使うことを推奨"
+                             "する。--wav の指定は無視され、対話ごとに新しい"
+                             "WAV を書き出す。soundfile が必要")
     parser.add_argument("--chars-per-sec", type=float, default=DEFAULT_CHARS_PER_SEC)
     parser.add_argument("--gap-margin-sec", type=float, default=DEFAULT_GAP_MARGIN_SEC)
     parser.add_argument("--wav", choices=["symlink", "copy", "none"], default="symlink",
@@ -106,7 +131,28 @@ def parse_args() -> argparse.Namespace:
         parser.error("--chars-per-sec must be > 0")
     if args.gap_margin_sec < 0:
         parser.error("--gap-margin-sec must be >= 0")
+    if args.pad_lead_in_sec < 0:
+        parser.error("--pad-lead-in-sec must be >= 0")
     return args
+
+
+def shift_alignments(entries: list[list[Any]], offset_sec: float) -> list[list[Any]]:
+    """全エントリの [start, end] を offset_sec だけ後ろへずらす。"""
+    return [
+        [text, [round(start + offset_sec, 4), round(end + offset_sec, 4)], speaker]
+        for text, (start, end), speaker in entries
+    ]
+
+
+def pad_lead_in_wav(src_wav: Path, dst_wav: Path, pad_sec: float) -> None:
+    """WAV の先頭に pad_sec 秒の無音を足して dst_wav に書き出す。"""
+    import numpy as np
+    import soundfile as sf
+
+    data, sample_rate = sf.read(str(src_wav), always_2d=True)
+    pad_samples = int(round(pad_sec * sample_rate))
+    silence = np.zeros((pad_samples, data.shape[1]), dtype=data.dtype)
+    sf.write(str(dst_wav), np.concatenate([silence, data], axis=0), sample_rate)
 
 
 def load_thoughts(path: Path) -> dict[str, list[dict[str, Any]]]:
@@ -277,6 +323,18 @@ def main() -> int:
             stats["skip_no_utterance_alignments"] += 1
             continue
 
+        if args.pad_lead_in_sec > 0:
+            src_wav = json_path.with_suffix(".wav")
+            if not src_wav.is_file():
+                stats["skip_no_wav_to_pad"] += 1
+                continue
+            entries = shift_alignments(entries, args.pad_lead_in_sec)
+            meta_in = payload.get("metadata")
+            if isinstance(meta_in, dict) and "duration_sec" in meta_in:
+                meta_in["duration_sec"] = round(
+                    float(meta_in["duration_sec"]) + args.pad_lead_in_sec, 4
+                )
+
         if args.from_emotional_state:
             items = bootstrap_items(payload, entries)
         elif args.from_aizuchi_density:
@@ -314,6 +372,7 @@ def main() -> int:
             "chars_per_sec": args.chars_per_sec,
             "gap_margin_sec": args.gap_margin_sec,
             "source": source,
+            "pad_lead_in_sec": args.pad_lead_in_sec,
         }
         meta["alignments_word_split"] = dict(
             meta.get("alignments_word_split") or {}, words=split_stats["words"]
@@ -325,14 +384,19 @@ def main() -> int:
 
         out_json = args.out_dir / json_path.name
         out_json.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        if not in_place and args.wav != "none":
-            src_wav = json_path.with_suffix(".wav")
-            dst_wav = args.out_dir / src_wav.name
-            if src_wav.is_file() and not dst_wav.exists():
-                if args.wav == "symlink":
-                    dst_wav.symlink_to(src_wav.resolve())
-                else:
-                    shutil.copy2(src_wav, dst_wav)
+        src_wav = json_path.with_suffix(".wav")
+        dst_wav = args.out_dir / src_wav.name
+        if args.pad_lead_in_sec > 0:
+            # --wav symlink/copy はどちらも元の音声をそのまま持ってくるだけ
+            # なので、無音を足した新しい音声を書くこの経路には使えない。
+            # soundfile は書き込み前に全体を読み切るので、in-place（src と
+            # dst が同じパス）で上書きしても安全。
+            pad_lead_in_wav(src_wav, dst_wav, args.pad_lead_in_sec)
+        elif not in_place and args.wav != "none" and src_wav.is_file() and not dst_wav.exists():
+            if args.wav == "symlink":
+                dst_wav.symlink_to(src_wav.resolve())
+            else:
+                shutil.copy2(src_wav, dst_wav)
 
     print("=== inject_inner_thoughts ===")
     for key in sorted(stats):

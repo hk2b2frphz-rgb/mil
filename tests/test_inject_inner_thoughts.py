@@ -11,6 +11,12 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import inject_inner_thoughts as inj  # noqa: E402
 
+try:
+    import soundfile as _sf  # noqa: F401
+    HAS_SOUNDFILE = True
+except ImportError:
+    HAS_SOUNDFILE = False
+
 
 def make_payload(
     *,
@@ -131,6 +137,79 @@ class DensityInjectionEndToEndTest(unittest.TestCase):
             )
             output = self.run_injector(data_dir, out_dir)
             self.assertNotIn("WARNING", output)
+
+
+class ShiftAlignmentsTest(unittest.TestCase):
+    def test_every_entry_start_and_end_move_by_the_same_offset(self) -> None:
+        entries = [["a", [0.0, 1.0], "SPEAKER_MAIN"], ["b", [1.5, 3.0], "SPEAKER_USER"]]
+        shifted = inj.shift_alignments(entries, 2.0)
+        self.assertEqual(shifted, [
+            ["a", [2.0, 3.0], "SPEAKER_MAIN"],
+            ["b", [3.5, 5.0], "SPEAKER_USER"],
+        ])
+
+    def test_zero_offset_is_a_no_op(self) -> None:
+        entries = [["a", [0.3, 1.1], "SPEAKER_MAIN"]]
+        self.assertEqual(inj.shift_alignments(entries, 0.0), entries)
+
+
+@unittest.skipUnless(HAS_SOUNDFILE, "soundfile not installed in this environment")
+class PadLeadInEndToEndTest(unittest.TestCase):
+    """--pad-lead-in-sec: the fix for the case ShiftAlignmentsTest and
+    DensityInjectionEndToEndTest.test_no_lead_in_silence_drops_the_tag_and_warns
+    document -- a dialogue whose greeting starts at t=0 has nowhere to put the
+    density tag, so instead of hoping for pre-existing silence, this pads the
+    audio itself and shifts every timestamp, guaranteeing room."""
+
+    def make_wav(self, path: Path, duration_sec: float, sample_rate: int = 24000) -> None:
+        import numpy as np
+        import soundfile as sf
+
+        samples = np.zeros((int(duration_sec * sample_rate), 2), dtype="float32")
+        sf.write(str(path), samples, sample_rate)
+
+    def test_a_tag_that_would_otherwise_be_dropped_now_fits(self) -> None:
+        import soundfile as sf
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "in"
+            out_dir = Path(tmp) / "out"
+            data_dir.mkdir()
+            # Greeting at t=0.0 -- no natural silence at all, the case that
+            # dropped the tag in DensityInjectionEndToEndTest above.
+            payload = make_payload(greeting_start=0.0, aizuchi_frequency_label="density=0.75")
+            (data_dir / "sample_001.json").write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+            self.make_wav(data_dir / "sample_001.wav", duration_sec=6.0)
+
+            argv = [
+                "inject_inner_thoughts.py",
+                "--data-dir", str(data_dir),
+                "--out-dir", str(out_dir),
+                "--from-aizuchi-density",
+                "--pad-lead-in-sec", "3.0",
+            ]
+            import contextlib
+            import io
+            import unittest.mock as mock
+
+            buf = io.StringIO()
+            with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(buf):
+                rc = inj.main()
+            self.assertEqual(rc, 0)
+            self.assertNotIn("WARNING", buf.getvalue())
+
+            written = json.loads((out_dir / "sample_001.json").read_text(encoding="utf-8"))
+            entries = written["alignments_utterance"]
+            tags = [e for e in entries if e[0] == "<相槌:density=0.75>"]
+            self.assertEqual(len(tags), 1)
+            greeting = next(e for e in entries if e[2] == inj.MOSHI_LABEL and "もしもし" in e[0])
+            # The greeting itself must have shifted by the pad amount.
+            self.assertAlmostEqual(greeting[1][0], 3.0, places=2)
+
+            data, sample_rate = sf.read(str(out_dir / "sample_001.wav"))
+            self.assertAlmostEqual(len(data) / sample_rate, 9.0, places=1)
 
 
 if __name__ == "__main__":
