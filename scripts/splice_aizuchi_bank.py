@@ -78,7 +78,13 @@ MAIN_LABEL = "SPEAKER_MAIN"
 STRIP_CHARS = "。、．，!?！？…・ 　"
 LEFT_CHANNEL = 0
 # 継ぎ目のプチッを消すだけの長さ。相槌の立ち上がりを鈍らせない範囲で。
-FADE_SEC = 0.005
+# 頭は不連続を消すだけでよいので最小限。尻は「切った」と聞こえない程度に
+# 伸ばす。5ms はクリック除去には足りるが、相槌が言い終わる前にぶつ切りに
+# なったときは切断そのものが聞こえる（特に聞き手チャンネル。無音の中に
+# 相槌だけが立つので、途切れが目立つ）。30ms は「フェードした」とは知覚
+# されない範囲で、切断の耳障りな成分だけを落とせる長さ。
+FADE_IN_SEC = 0.005
+FADE_OUT_SEC = 0.030
 # 相槌とみなす文字数の上限。--aizuchi-vocab-file を渡さなかったときだけ使う
 # 目安で、本来は語で決めるべきもの。「なるほど」は 4 文字だが うん では
 # 代用できない（評価であって継続の相槌ではない）ので、長さで切ると必ず
@@ -350,7 +356,7 @@ def insert_backchannels(
             clips, float(anchor.get("dur_sec", 0.0)), args.match_top_k, rng, want
         )
         signal = resample_to(clip, sample_rate)
-        placed = fade(signal.astype(np.float64), sample_rate)
+        placed = fade_in(signal.astype(np.float64), sample_rate)
         if args.gain == "match":
             # 消す相槌が無いので、相手のチャンネルの音量に合わせる。
             reference = float(np.sqrt(np.mean(np.square(out[1 - LEFT_CHANNEL]))))
@@ -366,7 +372,9 @@ def insert_backchannels(
         written = max(0, stop - begin)
         if written <= 0:
             continue
-        out[LEFT_CHANNEL, begin:stop] += placed[:written]
+        # 切り詰めてから尻を落とす。順序が逆だと、末尾に当たって切られた
+        # ぶんだけフェードも一緒に落ちて不連続が残る。
+        out[LEFT_CHANNEL, begin:stop] += fade_out(placed[:written], sample_rate)
         placed_end = round(target + written / sample_rate, 4)
         new_rows.append([clip["text"], [round(target, 4), placed_end], MAIN_LABEL])
         swaps.append(
@@ -432,14 +440,28 @@ def pick_clip(
     return rng.choice(ordered[: max(1, top_k)]), fell_back
 
 
-def fade(signal: np.ndarray, sample_rate: int) -> np.ndarray:
-    n = min(int(round(FADE_SEC * sample_rate)), signal.size // 2)
+def fade_in(signal: np.ndarray, sample_rate: int) -> np.ndarray:
+    """頭の不連続だけ消す。"""
+    n = min(int(round(FADE_IN_SEC * sample_rate)), signal.size)
     if n <= 0:
         return signal
-    ramp = np.linspace(0.0, 1.0, n)
     out = signal.copy()
-    out[:n] *= ramp
-    out[-n:] *= ramp[::-1]
+    out[:n] *= np.linspace(0.0, 1.0, n)
+    return out
+
+
+def fade_out(signal: np.ndarray, sample_rate: int) -> np.ndarray:
+    """尻を落とす。実際に置く長さが決まってから掛けること。
+
+    切り詰める前に掛けても、切り落とされた側にフェードが残るだけで、
+    実際に鳴る末尾は不連続のままになる（対話の末尾に当たったときの
+    ぶつ切りがこれだった）。
+    """
+    n = min(int(round(FADE_OUT_SEC * sample_rate)), signal.size)
+    if n <= 0:
+        return signal
+    out = signal.copy()
+    out[-n:] *= np.linspace(1.0, 0.0, n)
     return out
 
 
@@ -471,7 +493,22 @@ def splice_dialogue(
         ):
             erase_from = min(out.shape[-1], int(round(float(start) * sample_rate)))
             erase_to = min(out.shape[-1], int(round(float(end) * sample_rate)))
+            # 区間の端が無音とは限らない（相槌の立ち上がり・余韻が区間の外へ
+            # はみ出していることがある）。0 を代入するだけだと、その境目が
+            # 段差として残って「ぶつ」と鳴る。両端を短く落としてから消す。
             out[LEFT_CHANNEL, erase_from:erase_to] = 0.0
+            taper = min(int(round(FADE_OUT_SEC * sample_rate)), erase_from)
+            if taper > 0:
+                out[LEFT_CHANNEL, erase_from - taper : erase_from] *= np.linspace(
+                    1.0, 0.0, taper
+                )
+            taper = min(
+                int(round(FADE_IN_SEC * sample_rate)), out.shape[-1] - erase_to
+            )
+            if taper > 0:
+                out[LEFT_CHANNEL, erase_to : erase_to + taper] *= np.linspace(
+                    0.0, 1.0, taper
+                )
 
     for row_index, (text, (start, end), label) in enumerate(rows):
         if label != MAIN_LABEL or not is_backchannel(
@@ -501,7 +538,7 @@ def splice_dialogue(
             ),
         ]
 
-        placed = fade(signal.astype(np.float64), sample_rate)
+        placed = fade_in(signal.astype(np.float64), sample_rate)
         if args.gain == "match" and original.size:
             original_rms = float(np.sqrt(np.mean(np.square(original))))
             placed_rms = float(np.sqrt(np.mean(np.square(placed))))
@@ -516,7 +553,8 @@ def splice_dialogue(
         written = stop - slot_begin
         # 相手の発話に食い込むのは相槌として自然なので、区間をはみ出しても
         # 切らずにそのまま置く。切るのは対話の末尾に当たったときだけ。
-        out[LEFT_CHANNEL, slot_begin:stop] += placed[:written]
+        # 尻のフェードは切り詰めた後に掛ける（insert_backchannels と同じ理由）。
+        out[LEFT_CHANNEL, slot_begin:stop] += fade_out(placed[:written], sample_rate)
 
         placed_start = slot_begin / sample_rate
         placed_end = round(placed_start + written / sample_rate, 4)

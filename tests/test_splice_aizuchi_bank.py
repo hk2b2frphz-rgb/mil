@@ -570,5 +570,58 @@ class BankLoadTest(unittest.TestCase):
                 splice.load_bank(path, "ありえない語", None, False)
 
 
+class FadeTest(unittest.TestCase):
+    """A backchannel sits alone in an otherwise silent listener channel, so a
+    discontinuity at its edge is audible as a click rather than being masked.
+    The tail matters most: a clip cut off at the end of the dialogue used to
+    stop mid-waveform, because the fade was applied before the truncation and
+    went out with the part that got cut."""
+
+    def steady(self, seconds: float) -> np.ndarray:
+        # Never near zero, so any cut leaves a step.
+        return 0.5 * np.sin(2 * np.pi * 200 * np.arange(int(SAMPLE_RATE * seconds)) / SAMPLE_RATE)
+
+    def test_the_tail_is_taken_to_zero(self) -> None:
+        faded = splice.fade_out(self.steady(0.5), SAMPLE_RATE)
+        self.assertAlmostEqual(float(faded[-1]), 0.0, places=6)
+
+    def test_the_head_is_taken_from_zero(self) -> None:
+        faded = splice.fade_in(self.steady(0.5), SAMPLE_RATE)
+        self.assertAlmostEqual(float(faded[0]), 0.0, places=6)
+
+    def test_fading_out_after_truncation_still_lands_on_zero(self) -> None:
+        # The ordering the bug was about: cut first, then fade what remains.
+        cut = splice.fade_in(self.steady(0.5), SAMPLE_RATE)[: int(SAMPLE_RATE * 0.3)]
+        self.assertGreater(abs(float(cut[-1])), 0.01)
+        self.assertAlmostEqual(float(splice.fade_out(cut, SAMPLE_RATE)[-1]), 0.0, places=6)
+
+    def test_the_fade_out_is_longer_than_the_click_guard_at_the_head(self) -> None:
+        self.assertGreater(splice.FADE_OUT_SEC, splice.FADE_IN_SEC)
+
+    def test_the_body_of_the_clip_is_left_alone(self) -> None:
+        signal = self.steady(0.5)
+        faded = splice.fade_out(splice.fade_in(signal, SAMPLE_RATE), SAMPLE_RATE)
+        head = int(SAMPLE_RATE * splice.FADE_IN_SEC)
+        tail = int(SAMPLE_RATE * splice.FADE_OUT_SEC)
+        np.testing.assert_allclose(faded[head:-tail], signal[head:-tail])
+
+    def test_a_clip_shorter_than_the_fade_still_works(self) -> None:
+        tiny = self.steady(0.01)
+        faded = splice.fade_out(tiny, SAMPLE_RATE)
+        self.assertEqual(faded.size, tiny.size)
+        self.assertAlmostEqual(float(faded[-1]), 0.0, places=6)
+
+    def test_a_truncated_splice_ends_quietly(self) -> None:
+        # End to end: a clip that runs past the end of the dialogue.
+        stereo = np.zeros((2, SAMPLE_RATE * 4))
+        rows = [["ええ", [3.8, 3.9], "SPEAKER_MAIN"]]
+        out, _rows, swaps = splice.splice_dialogue(
+            stereo, SAMPLE_RATE, rows, [clip(0.9)], default_args(),
+            random.Random(0), None,
+        )
+        self.assertTrue(swaps[0]["truncated"])
+        self.assertLess(abs(float(out[0, -1])), 1e-6)
+
+
 if __name__ == "__main__":
     unittest.main()
