@@ -102,7 +102,7 @@ class ListeningParseTest(unittest.TestCase):
             {"id": "x"}, [], self.TEXT, ["うん", "そっか"]
         )
         self.assertNotIn("並べないでください", prompt.user)
-        self.assertIn("普通に使ってください", prompt.user)
+        self.assertIn("語彙にある形をそのまま使います", prompt.user)
 
     def test_the_example_is_omitted_by_default(self) -> None:
         prompt = gen.build_aizuchi_listening_prompt(
@@ -130,10 +130,10 @@ class ListeningParseTest(unittest.TestCase):
         prompt = gen.build_aizuchi_listening_prompt(
             {"id": "x"}, [], self.TEXT, ["うん", "そっか"]
         )
-        self.assertIn("1 から 3 まで", prompt.user)
+        self.assertIn("（1〜3）", prompt.user)
         self.assertIn("うん / そっか", prompt.user)
         # The end of the utterance must be asked for explicitly.
-        self.assertIn("言い切った所には受け止めを置いてください", prompt.user)
+        self.assertIn("言い切った所）には必ず置いてください", prompt.user)
         self.assertIn("上限はありません", prompt.user)
 
 
