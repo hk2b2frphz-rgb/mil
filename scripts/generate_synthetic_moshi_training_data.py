@@ -557,7 +557,7 @@ def parse_args() -> argparse.Namespace:
             "相づちを打つ位置の決め方。rule=句の切れ目ごとの確率で抽選、語は"
             "モデルが選ぶ（既定）/ llm=どこで打つかもモデルが決める（上限なし・"
             "末尾も候補）/ density=文末は必ず、それ以外は --aizuchi-density の"
-            "確率で抽選。語彙からランダムに選ぶだけで LLM は呼ばない"
+            "確率で抽選。語は rule と同じくモデルが選ぶ"
         ),
     )
     parser.add_argument(
@@ -566,7 +566,8 @@ def parse_args() -> argparse.Namespace:
         default=float(os.environ.get("AIZUCHI_DENSITY") or 0.5),
         help=(
             "--aizuchi-only-placement density のときの相槌の密度。0=相槌 0 件、"
-            "1=flood 相当（打ちすぎ側の上限。使う想定では無い）。0.25 あたりが"
+            "1=flood 相当（打ちすぎ側の上限。推論時の既定にはしないが、学習"
+            "データとして生成する分には問題ない）。0.25 あたりが"
             "reserved、0.5 が normal、0.75 が eager 相当で、その間は連続的に"
             "補間する。文末は密度に関わらず（0 を除き）必ず打つ"
         ),
@@ -1804,6 +1805,7 @@ class LLMDialogueGenerator:
             )
         if placement == "density":
             return self._react_by_density(
+                use_case=use_case,
                 visible_turns=visible_turns,
                 user_turn=user_turn,
                 clauses=clauses,
@@ -1848,6 +1850,7 @@ class LLMDialogueGenerator:
     def _react_by_density(
         self,
         *,
+        use_case: dict[str, Any],
         visible_turns: list[DialogueTurn],
         user_turn: DialogueTurn,
         clauses: list[str],
@@ -1855,12 +1858,13 @@ class LLMDialogueGenerator:
         block_index: int,
         rng: random.Random,
     ) -> list[DialogueTurn]:
-        """位置は確率（文末は必ず）、語はランダム。LLM を呼ばない。
+        """位置は確率（文末は必ず）で決め、語は rule と同じく LLM に選ばせる。
 
         --aizuchi-density（0〜1）が reserved/normal/eager/flood の間を連続的に
-        補間する。0 は相槌 0 件、1 は flood 相当（打ちすぎ側の上限。使う想定
-        では無い）。語彙の選び方に文脈判断は要らないという判断から、位置も
-        語も LLM を呼ばずに決める。
+        補間する。0 は相槌 0 件、1 は flood 相当（打ちすぎ側の上限。推論時の
+        既定にはしないが、学習データとして生成する分には問題ない）。位置は
+        文脈判断が要らないので確率で決めるが、どの語を選ぶかは rule モード
+        と同様に LLM に判断させる。
         """
         density = float(getattr(self.args, "aizuchi_density", 0.5))
         frequency = resolve_aizuchi_density(density)
@@ -1869,12 +1873,22 @@ class LLMDialogueGenerator:
         points = pick_density_points(clauses, frequency, rng)
         if not points:
             return [user_turn]
-        recent = (
-            recent_aizuchi_texts(visible_turns, AIZUCHI_NO_REPEAT_WINDOW)
-            if AIZUCHI_NO_REPEAT_WINDOW
-            else []
+        prompt = build_aizuchi_only_agent_prompt(
+            use_case,
+            visible_turns,
+            user_turn.text,
+            points,
+            frequency=frequency,
+            with_example=bool(self.args.aizuchi_only_example),
         )
-        reactions = pick_aizuchi_words(points, recent, rng)
+        raw = self.call_agent(
+            prompt,
+            temperature=self.args.multi_agent_aizuchi_temperature,
+            max_tokens=200,
+            role_name="aizuchiAI",
+        )
+        reactions = parse_aizuchi_reactions(raw, clauses, points)
+        reactions = complete_aizuchi_reactions(reactions, points, visible_turns)
         self.trace_event(
             {
                 "event": "aizuchi_decision",
@@ -1883,6 +1897,9 @@ class LLMDialogueGenerator:
                 "placement": "density",
                 "density": density,
                 "points": points,
+                "prompt_system": prompt.system,
+                "prompt_user": prompt.user,
+                "raw_text": raw[:1000],
                 "reactions": reactions,
             }
         )
@@ -3354,27 +3371,34 @@ def build_aizuchi_only_agent_prompt(
     frequency: dict[str, Any] | None = None,
     with_example: bool = False,
 ) -> AgentPrompt:
-    """反応する位置は決まっている。何と言うかだけを訊く。"""
+    """反応する位置は決まっている。何と言うかだけを訊く。
+
+    語彙は AIZUCHI_ACTIVE_VOCAB から動的に組む。以前はここに書き起こし語彙を
+    直接文字列で書いていて、語彙を差し替えても文面に残ってしまっていた
+    （build_aizuchi_listening_prompt で見つかったのと同じ形のバグ）。
+    """
     transcript = dialogue_turns_to_transcript(turns) or "(まだ会話は始まっていません)"
     clauses = split_text_into_clauses(user_text)
     numbered = "\n".join(f"{i + 1}: {clause}" for i, clause in enumerate(clauses))
     recent = recent_aizuchi_texts(turns)
+    vocab = sorted(AIZUCHI_ACTIVE_VOCAB)
+    words = "\n  ".join(" / ".join(vocab[i : i + 6]) for i in range(0, len(vocab), 6))
+    # 受け止めの語だけを優先させたいが、語彙に無ければ勧められない。
     acknowledgement_words = {
         "そうですか。",
         "そうですか…。",
         "そうでしたか。",
         "そうだったんですね。",
         "そうなんですね。",
-    }
+    } & AIZUCHI_ACTIVE_VOCAB
     has_acknowledgement = any(
         turn.speaker == "moshi" and turn.text.strip() in acknowledgement_words
         for turn in turns
     )
     acknowledgement_hint = (
         "\n- この対話ではまだ事情を受け止める言葉を使っていません。今回が事実や感情の"
-        "区切りなら「そうなんですね。」「そうだったんですね。」「そうですか…。」を"
-        "優先します。"
-        if not has_acknowledgement
+        "区切りなら、受け止めの語を優先します: " + " / ".join(sorted(acknowledgement_words))
+        if acknowledgement_words and not has_acknowledgement
         else ""
     )
     forbidden = (
@@ -3395,6 +3419,7 @@ def build_aizuchi_only_agent_prompt(
         lines.append(f"  位置{index}（{clause}）… {hint}")
     slots = "\n".join(lines)
     example = f"\n{AIZUCHI_ONLY_EXAMPLE}\n" if with_example else ""
+    default_word = vocab[0] if vocab else "はい。"
     prompt = f"""
 相談ケース:
 {case_brief(use_case)}
@@ -3410,17 +3435,13 @@ def build_aizuchi_only_agent_prompt(
 
 それぞれの位置で何と言うかだけを決めてください。位置を増やしたり減らしたりしません。
 - 使えるのは次の語だけです:
-  はい。/ はい、はい。/ ええ。/ えぇ。/ ええ、ええ。/ うん。/ うん、うん。/
-  あぁ…。/ あー…。/ はぁ…。/ そうですか。/ そうですか…。/ そうでしたか。/
-  そうだったんですね。/ そうなんですね。/ 大丈夫ですよ。/ はい、大丈夫ですよ。
-- 短い相づちを中心にしつつ、事実を初めて知った区切りでは「そうなんですね。」、
-  過去のつらい出来事には「そうだったんですね。」も使います。同じ長い語は繰り返しません。
-- つらさがにじんだ所は「あぁ…。」、事実の区切りは「はい。」、静かな同意は「ええ。」、
-  ためらいや詫びには「大丈夫ですよ。」。{acknowledgement_hint}{forbidden}
-- 「なるほど。」は使いません。相手の言葉を言い換えたり、返したりもしません。
+  {words}
+- 場面に合わせて選びます（つらさがにじんだ所、事実を初めて知った区切り、
+  静かな同意、ためらいや詫びなど）。同じ長い語は繰り返しません。{acknowledgement_hint}{forbidden}
+- 相手の言葉を言い換えたり、返したりもしません。
 {example}
 JSONだけを返してください:
-{{"reactions":[{{"after_clause": {points[0]["after_clause"] if points else 1}, "text": "はい。"}}]}}
+{{"reactions":[{{"after_clause": {points[0]["after_clause"] if points else 1}, "text": "{default_word}"}}]}}
 """.strip()
     return AgentPrompt(system=AIZUCHI_ONLY_AGENT_SYSTEM_PROMPT, user=prompt)
 
@@ -3799,35 +3820,6 @@ def pick_density_points(
         chunk_start = index
     points.append({"after_clause": last, "kind": "end"})
     return points
-
-
-def pick_aizuchi_words(
-    points: list[dict[str, Any]], recent: list[str], rng: random.Random
-) -> list[dict[str, Any]]:
-    """位置ごとに語彙からランダムに語を選ぶ。LLM は呼ばない。
-
-    「どこで打つか」は決まっているので、あとは語彙の中からどれかを選ぶだけの
-    問題になる。文脈を見て選ばせても、結局は語彙の中の一つを返すだけなら、
-    ランダム抽選と実質差が無く、LLM 呼び出しの分だけ遅く・不安定になる
-    （そっか系への偏り、thinking の予算切れなど、今日の問題の大半はこの
-    呼び出しから来ていた）。直近 AIZUCHI_NO_REPEAT_WINDOW 回に使った語は
-    避け、候補が尽きたら（語彙がそれより少なければ）諦めて許す。
-    """
-    vocab = list(AIZUCHI_ACTIVE_VOCAB)
-    if not vocab:
-        return []
-    reactions: list[dict[str, Any]] = []
-    window = list(recent)
-    for point in points:
-        candidates = [w for w in vocab if w not in window] or vocab
-        word = rng.choice(candidates)
-        reactions.append({"after_clause": point["after_clause"], "text": word})
-        window.append(word)
-        if AIZUCHI_NO_REPEAT_WINDOW:
-            del window[: -AIZUCHI_NO_REPEAT_WINDOW]
-        else:
-            window.clear()
-    return reactions
 
 
 def pick_reaction_points(

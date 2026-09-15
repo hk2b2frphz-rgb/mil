@@ -376,45 +376,12 @@ class DensityPlacementTest(unittest.TestCase):
         self.assertEqual(points[-1]["after_clause"], len(clauses))
 
 
-class DensityWordPickTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.saved = set(gen.AIZUCHI_ACTIVE_VOCAB)
-        self.window = gen.AIZUCHI_NO_REPEAT_WINDOW
-
-    def tearDown(self) -> None:
-        gen.AIZUCHI_ACTIVE_VOCAB = self.saved
-        gen.AIZUCHI_NO_REPEAT_WINDOW = self.window
-
-    def test_no_llm_call_is_needed_a_word_is_chosen_per_point(self) -> None:
-        gen.set_aizuchi_vocab(["うん", "そっか", "はい"], 0)
-        points = [{"after_clause": 1, "kind": "cont"}, {"after_clause": 3, "kind": "end"}]
-        reactions = gen.pick_aizuchi_words(points, [], random.Random(0))
-        self.assertEqual(len(reactions), 2)
-        for reaction in reactions:
-            self.assertIn(reaction["text"], {"うん", "そっか", "はい"})
-
-    def test_recently_used_words_are_avoided_when_alternatives_exist(self) -> None:
-        gen.set_aizuchi_vocab(["うん", "そっか", "はい"], 3)
-        points = [{"after_clause": i, "kind": "cont"} for i in range(1, 4)]
-        reactions = gen.pick_aizuchi_words(points, ["うん"], random.Random(0))
-        self.assertNotIn("うん", [r["text"] for r in reactions[:2]])
-
-    def test_a_vocabulary_smaller_than_the_window_still_produces_output(self) -> None:
-        # Only one word available; avoiding "recently used" would leave no
-        # candidates, so the restriction must be dropped rather than crash.
-        gen.set_aizuchi_vocab(["うん"], 3)
-        points = [{"after_clause": 1, "kind": "end"}]
-        reactions = gen.pick_aizuchi_words(points, ["うん", "うん", "うん"], random.Random(0))
-        self.assertEqual(reactions, [{"after_clause": 1, "text": "うん"}])
-
-    def test_an_empty_vocabulary_yields_no_reactions(self) -> None:
-        gen.AIZUCHI_ACTIVE_VOCAB = set()
-        points = [{"after_clause": 1, "kind": "end"}]
-        self.assertEqual(gen.pick_aizuchi_words(points, [], random.Random(0)), [])
-
-
 class DensityDispatchTest(unittest.TestCase):
-    """react_to_user_turn end to end in density mode: no LLM call needed."""
+    """react_to_user_turn end to end in density mode: position is picked by
+    probability (end guaranteed), but word choice still goes through the
+    same LLM call as rule mode -- pick_aizuchi_words (pure random) was
+    removed after the user pointed out word choice was never meant to be
+    random, only WHERE to place a backchannel was."""
 
     def make_generator(self, density: float) -> gen.LLMDialogueGenerator:
         args = argparse.Namespace(
@@ -423,6 +390,8 @@ class DensityDispatchTest(unittest.TestCase):
             out_dir=Path("/tmp"),
             aizuchi_only_placement="density",
             aizuchi_density=density,
+            aizuchi_only_example=0,
+            multi_agent_aizuchi_temperature=0.3,
             llm_task="dialogue",
         )
         return gen.LLMDialogueGenerator(args)
@@ -441,29 +410,35 @@ class DensityDispatchTest(unittest.TestCase):
         user_turn = gen.DialogueTurn(
             "user", "今日は疲れて、何もできなくて、ずっと横になっていました。"
         )
-        turns = generator.react_to_user_turn(
-            use_case={"id": "x"},
-            visible_turns=[],
-            user_turn=user_turn,
-            case_id="c1",
-            block_index=0,
-            frequency={},
-            rng=random.Random(0),
-        )
+        with unittest.mock.patch.object(
+            generator, "call_agent", return_value='{"reactions":[{"after_clause": 3, "text": "はい"}]}'
+        ) as mock_call:
+            turns = generator.react_to_user_turn(
+                use_case={"id": "x"},
+                visible_turns=[],
+                user_turn=user_turn,
+                case_id="c1",
+                block_index=0,
+                frequency={},
+                rng=random.Random(0),
+            )
+        mock_call.assert_called_once()
         self.assertEqual(turns[-1].speaker, "moshi")
 
     def test_density_zero_returns_the_utterance_untouched(self) -> None:
         generator = self.make_generator(0.0)
         user_turn = gen.DialogueTurn("user", "今日は疲れて、何もできなくて。")
-        turns = generator.react_to_user_turn(
-            use_case={"id": "x"},
-            visible_turns=[],
-            user_turn=user_turn,
-            case_id="c1",
-            block_index=0,
-            frequency={},
-            rng=random.Random(0),
-        )
+        with unittest.mock.patch.object(generator, "call_agent") as mock_call:
+            turns = generator.react_to_user_turn(
+                use_case={"id": "x"},
+                visible_turns=[],
+                user_turn=user_turn,
+                case_id="c1",
+                block_index=0,
+                frequency={},
+                rng=random.Random(0),
+            )
+        mock_call.assert_not_called()
         self.assertEqual(turns, [user_turn])
 
 

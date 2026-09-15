@@ -57,14 +57,15 @@ export DIALOGUE_GENERATION_MODE="aizuchi-only"
 # route, with one change -- the end of the utterance is now guaranteed
 # (previously it was drawn from the same rates as mid-utterance positions, so
 # a listener could still go quiet after the speaker finished). Word: chosen
-# at random from the vocabulary, not by an LLM call. Deciding among a handful
-# of short acknowledgement words does not need contextual judgement, and
-# every failure mode hit today (favoring "sokka", the hardcoded example
-# words, the thinking-timeout bug) traced back to that call.
+# by the same LLM call the rule-based route used, not at random -- deciding
+# among a handful of short acknowledgement words still benefits from seeing
+# what was just said (e.g. preferring an acknowledgement word right after a
+# fact/feeling lands), which a uniform random pick can't do.
 export AIZUCHI_ONLY_PLACEMENT="density"
 # 0 = no backchannels at all, 0.25/0.5/0.75 = reserved/normal/eager, 1 = flood
-# (the "too much" upper bound; not meant to be used). Values between anchors
-# interpolate continuously, replacing the discrete preset choice.
+# (the "too much" upper bound; not the inference/production default, but fine
+# to use when generating training data). Values between anchors interpolate
+# continuously, replacing the discrete preset choice.
 export AIZUCHI_DENSITY="${AIZUCHI_DENSITY:-0.5}"
 # Vocabulary is the written default (AIZUCHI_ONLY_VOCAB: hai/ee/sou-nan-desu-ne/
 # aa... etc) minus one entry. The real-recording-derived listening_vocab.tsv
@@ -76,9 +77,10 @@ export AIZUCHI_DENSITY="${AIZUCHI_DENSITY:-0.5}"
 # removed. scripts/2026-09-15/listening_vocab.tsv and real_aizuchi_examples.md
 # are kept on disk if the real-vocabulary direction is worth revisiting.
 export AIZUCHI_VOCAB_FILE="$PWD/scripts/2026-09-15/aizuchi_vocab_no_bare_un.tsv"
-# Examples and thinking are unused in density mode (no LLM call happens for
-# backchannel decisions at all), left here only so they take effect again if
-# --aizuchi-only-placement is switched back to llm.
+# Examples apply here too -- density mode calls the same word-choice prompt
+# builder (build_aizuchi_only_agent_prompt) as rule mode, only the position
+# logic differs. Thinking (below) is still llm-mode-only: density's LLM call
+# is a short word pick from a handful of options, not open-ended placement.
 export AIZUCHI_ONLY_EXAMPLE="${AIZUCHI_ONLY_EXAMPLE:-0}"
 
 # Thinking, off by default. This pipeline otherwise steers models AWAY from
