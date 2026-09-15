@@ -139,6 +139,76 @@ class DensityInjectionEndToEndTest(unittest.TestCase):
             self.assertNotIn("WARNING", output)
 
 
+class LabelSurvivesTheTtsLoaderTest(unittest.TestCase):
+    """The tag is only reachable if aizuchi_frequency_label survives from
+    dialogues.jsonl into the sidecar the injector reads. generate_qwen3_tts_data
+    (the TTS step this corpus's pipeline actually runs, via
+    run_bank_stereo_test.sh) rebuilds each dialogue through an explicit
+    whitelist, so an unlisted field is dropped silently -- which is exactly
+    what happened until this was wired up."""
+
+    def test_the_jsonl_loader_keeps_the_label(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import generate_qwen3_tts_data as q
+
+        row = {
+            "id": "case_a",
+            "category": "c",
+            "risk_level": "low",
+            "title": "t",
+            "aizuchi_frequency_label": "density=0.75",
+            "turns": [
+                {"speaker": "moshi", "text": "もしもし。"},
+                {"speaker": "user", "text": "はなします。"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dialogues.jsonl"
+            path.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+            loaded = q.load_dialogues_from_jsonl(path)
+        self.assertEqual(loaded[0]["aizuchi_frequency_label"], "density=0.75")
+
+    def test_a_dialogue_without_the_label_loads_as_none(self) -> None:
+        import generate_qwen3_tts_data as q
+
+        row = {
+            "id": "case_a", "category": "c", "risk_level": "low", "title": "t",
+            "turns": [{"speaker": "user", "text": "はなします。"}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dialogues.jsonl"
+            path.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+            loaded = q.load_dialogues_from_jsonl(path)
+        self.assertIsNone(loaded[0]["aizuchi_frequency_label"])
+
+
+@unittest.skipUnless(HAS_SOUNDFILE, "soundfile not installed in this environment")
+class PadPreservesAudioFormatTest(unittest.TestCase):
+    """soundfile writes WAV as PCM_16 unless told otherwise, so padding a
+    32-bit float or 24-bit corpus would silently requantize every sample."""
+
+    def test_the_subtype_and_samples_survive_the_pad(self) -> None:
+        import numpy as np
+        import soundfile as sf
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for subtype in ("PCM_16", "FLOAT", "PCM_24"):
+                src = Path(tmp) / f"src_{subtype}.wav"
+                dst = Path(tmp) / f"dst_{subtype}.wav"
+                original = np.random.RandomState(0).uniform(-0.5, 0.5, (2400, 2))
+                sf.write(str(src), original, 24000, subtype=subtype)
+
+                inj.pad_lead_in_wav(src, dst, 1.0)
+
+                self.assertEqual(sf.info(str(dst)).subtype, subtype, subtype)
+                self.assertEqual(sf.info(str(dst)).samplerate, 24000, subtype)
+                written, _ = sf.read(str(dst), always_2d=True)
+                source, _ = sf.read(str(src), always_2d=True)
+                self.assertEqual(len(written), len(source) + 24000, subtype)
+                self.assertEqual(np.abs(written[:24000]).max(), 0.0, subtype)
+                np.testing.assert_allclose(written[24000:], source, atol=1e-9)
+
+
 class ShiftAlignmentsTest(unittest.TestCase):
     def test_every_entry_start_and_end_move_by_the_same_offset(self) -> None:
         entries = [["a", [0.0, 1.0], "SPEAKER_MAIN"], ["b", [1.5, 3.0], "SPEAKER_USER"]]

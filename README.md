@@ -372,8 +372,11 @@ qsub -V scripts/2026-09-15/real_aizuchi_fullft_500.pbs     # 4. full-FT       A1
 - `Dialogue.aizuchi_frequency_label` フィールド。placement=density なら実際に
   使った値（例: `"density=0.75"`）、rule ならプリセット名（`"eager"` 等）、
   llm なら頻度を制御していないことを表す `"llm"`。`dialogues.jsonl` に
-  シリアライズされ、`generate_kaburi_tts_data.py` が sidecar JSON の
-  `metadata.dialogue.aizuchi_frequency_label` にも引き継ぐ
+  シリアライズされ、TTS 側（`generate_qwen3_tts_data.py` /
+  `generate_kaburi_tts_data.py` のどちらも）が sidecar JSON の
+  `metadata.dialogue.aizuchi_frequency_label` に引き継ぐ。間に挟まる
+  `rewrite_aizuchi_vocab.py` と `splice_aizuchi_bank.py` は元の dict /
+  metadata をそのまま残すので、対話生成から学習データまで欠けずに届く
 - `--aizuchi-density-mixed`（`AIZUCHI_DENSITY_MIXED=1`）。`--aizuchi-density` の
   固定値を無視し、対話ごとに 0〜1 の一様乱数を引く
   （`--aizuchi-only-frequency mixed` の density 版）。1 ジョブの中で 0〜1

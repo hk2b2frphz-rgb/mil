@@ -2030,8 +2030,8 @@ class LLMDialogueGenerator:
         placement = getattr(self.args, "aizuchi_only_placement", "rule")
         density = resolve_aizuchi_only_density(
             placement,
-            self.args.aizuchi_density,
-            bool(self.args.aizuchi_density_mixed),
+            getattr(self.args, "aizuchi_density", 0.5),
+            bool(getattr(self.args, "aizuchi_density_mixed", False)),
             rng,
         )
         aizuchi_frequency_label = aizuchi_only_frequency_label(

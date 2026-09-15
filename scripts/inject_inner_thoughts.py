@@ -145,14 +145,24 @@ def shift_alignments(entries: list[list[Any]], offset_sec: float) -> list[list[A
 
 
 def pad_lead_in_wav(src_wav: Path, dst_wav: Path, pad_sec: float) -> None:
-    """WAV の先頭に pad_sec 秒の無音を足して dst_wav に書き出す。"""
+    """WAV の先頭に pad_sec 秒の無音を足して dst_wav に書き出す。
+
+    subtype を明示的に引き継ぐ。soundfile の既定は WAV なら PCM_16 なので、
+    渡さないと 32bit float や 24bit PCM の音声が黙って 16bit に落ちる。
+    """
     import numpy as np
     import soundfile as sf
 
+    info = sf.info(str(src_wav))
     data, sample_rate = sf.read(str(src_wav), always_2d=True)
     pad_samples = int(round(pad_sec * sample_rate))
     silence = np.zeros((pad_samples, data.shape[1]), dtype=data.dtype)
-    sf.write(str(dst_wav), np.concatenate([silence, data], axis=0), sample_rate)
+    sf.write(
+        str(dst_wav),
+        np.concatenate([silence, data], axis=0),
+        sample_rate,
+        subtype=info.subtype,
+    )
 
 
 def load_thoughts(path: Path) -> dict[str, list[dict[str, Any]]]:
@@ -408,13 +418,21 @@ def main() -> int:
         dropped = stats["density_tag_dropped"]
         labeled = stats["density_labeled"]
         if dropped:
+            fate = (
+                "タグ無しの元ファイルがそのまま残ります（--out-dir が "
+                "--data-dir と同じなので）。頻度がモデルに伝わらない対話が"
+                "コーパスに混ざるということです"
+                if in_place
+                else "--out-dir に書き出されません。つまりこの分だけ"
+                "コーパスが小さくなります（誤ったタグが付くよりは安全側ですが、"
+                "黙って件数が減るので気付けるようにここで出しています）"
+            )
             print(
-                f"\nWARNING: density タグが挟めず無条件のまま残った対話が "
-                f"{dropped}/{labeled} 件あります（冒頭挨拶の前に十分な無音が"
-                f"無かった）。この分は生成時に付けたはずの相槌頻度がモデルに"
-                f"伝わらないまま学習データに混ざるので、条件付けの精度に効きます。"
-                f"--chars-per-sec を上げる（タグを短時間に詰める）か、生成側で"
-                f"挨拶の前に無音を作ってから再実行してください。"
+                f"\nWARNING: density タグを置けなかった対話が {dropped}/{labeled} "
+                f"件あります（冒頭挨拶の前に十分な無音が無かった）。この分は"
+                f"{fate}。--pad-lead-in-sec を（十分な秒数で）指定すれば確実に"
+                f"置けます。指定済みで出ている場合はタグの長さに対して値が"
+                f"短すぎるので、増やすか --chars-per-sec を上げてください。"
             )
     return 0
 

@@ -289,6 +289,12 @@ class Dialogue:
     title: str
     turns: list[DialogueTurn]
     duplex_task: str | None = None
+    # aizuchi-only 生成時の相槌頻度。inject_inner_thoughts.py
+    # --from-aizuchi-density が sidecar JSON の
+    # metadata.dialogue.aizuchi_frequency_label から読み、モデルへの条件付け
+    # タグとして対話の先頭に埋め込む。ここで落とすと生成時に決めた頻度が
+    # 学習側に一切伝わらなくなる。
+    aizuchi_frequency_label: str | None = None
 
 
 @dataclass
@@ -2088,6 +2094,10 @@ def load_dialogues_from_jsonl(path: Path) -> list[dict[str, Any]]:
                 "duplex_task": str(row.get("duplex_task") or "") or None,
                 # --style-preset auto 用（新形式 dialogues.jsonl のみ持つ）
                 "emotional_state": str(row.get("emotional_state") or "") or None,
+                # 相槌頻度の条件付けタグ用（aizuchi-only 生成のみ持つ）
+                "aizuchi_frequency_label": (
+                    str(row.get("aizuchi_frequency_label") or "") or None
+                ),
                 "turns": turns,
             })
     return out
@@ -2903,6 +2913,9 @@ def prepare_dialogue_render_job(
         title=template["title"],
         turns=turns,
         duplex_task=str(template.get("duplex_task") or "") or None,
+        aizuchi_frequency_label=(
+            str(template.get("aizuchi_frequency_label") or "") or None
+        ),
     )
     user_voice = args.user_speaker_pool_list[
         (index - 1) % len(args.user_speaker_pool_list)
@@ -4061,6 +4074,7 @@ def main() -> None:
                         "risk_level": dialogue.risk_level,
                         "title": dialogue.title,
                         "duplex_task": dialogue.duplex_task,
+                        "aizuchi_frequency_label": dialogue.aizuchi_frequency_label,
                         "turns": [asdict(t) for t in dialogue.turns],
                     },
                 },
@@ -4072,6 +4086,7 @@ def main() -> None:
                 "risk_level": dialogue.risk_level,
                 "title": dialogue.title,
                 "duplex_task": dialogue.duplex_task,
+                "aizuchi_frequency_label": dialogue.aizuchi_frequency_label,
                 "turns": [asdict(t) for t in dialogue.turns],
             })
             append_jsonl(manifest_path, {
