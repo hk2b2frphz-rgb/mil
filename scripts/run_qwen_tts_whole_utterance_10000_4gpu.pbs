@@ -312,6 +312,9 @@ if command -v nvidia-smi >/dev/null 2>&1; then
 fi
 
 echo "===== step 0/3: uv environment preflight ====="
+if [[ "$TTS_BACKEND" == "qwen3" ]]; then
+    bash scripts/check_tts_network.sh
+fi
 # Kokoro is not part of the main project env (its misaki[ja]/unidic deps are
 # heavy and conflict-prone), so it runs in an isolated uv env pinned to the
 # main env's torch/torchaudio -- the same pattern as run_tts_comparison.pbs.

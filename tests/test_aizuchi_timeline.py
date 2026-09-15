@@ -9,7 +9,9 @@ import numpy as np
 from scripts.generate_qwen3_tts_data import (
     Dialogue,
     DialogueTurn,
+    apply_aizuchi_overlap,
     build_segments_whole_utterance,
+    dialogue_aizuchi_texts,
 )
 from scripts.generate_synthetic_moshi_training_data import (
     AIZUCHI_FREQUENCY_PRESETS,
@@ -22,6 +24,7 @@ from scripts.generate_synthetic_moshi_training_data import (
     pick_reaction_points,
     sanitize_aizuchi_only_turns,
     split_user_text_on_pauses,
+    user_turns_with_aizuchi,
 )
 
 
@@ -59,6 +62,29 @@ class _FakeAligner:
 
 
 class AizuchiTimelineTest(unittest.TestCase):
+    def test_generated_backchannel_keeps_event_and_is_not_limited_by_text_bank(self) -> None:
+        turns = user_turns_with_aizuchi(
+            "これは生成側で出た新しい相槌の確認です。続きも話します。",
+            [{"after_clause": 1, "text": "新しい相槌です。"}],
+        )
+
+        self.assertEqual(turns[1].event, "model_backchannel")
+        rendered = apply_aizuchi_overlap(
+            [{"speaker": turn.speaker, "text": turn.text, "event": turn.event}
+             for turn in turns]
+        )
+        self.assertEqual(rendered[1]["timing"], "overlap_previous")
+
+    def test_bank_is_built_from_dialogue_training_data(self) -> None:
+        bank = dialogue_aizuchi_texts([
+            {"turns": [
+                {"speaker": "user", "text": "話します。"},
+                {"speaker": "moshi", "text": "独自の相槌。", "event": "model_backchannel"},
+            ]}
+        ])
+
+        self.assertIn("独自の相槌。", bank)
+
     def test_multiple_aizuchi_stay_anchored_to_the_merged_user(self) -> None:
         dialogue = Dialogue(
             id="multiple-aizuchi",

@@ -230,6 +230,14 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="Number of test dialogues to generate. Default: 3.",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "In dialogues-only mode, keep existing dialogues.jsonl rows and "
+            "generate only use cases that are still missing."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--mode",
@@ -3023,7 +3031,16 @@ def user_turns_with_aizuchi(
         chunk = "".join(clauses[start:after_clause]).strip()
         if chunk:
             turns.append(DialogueTurn("user", chunk))
-        turns.append(DialogueTurn("moshi", str(insertion["text"])))
+        # Keep the semantic label all the way through serialization.  The TTS
+        # stage must be able to recognize a generated backchannel even when a
+        # newly added phrase is not yet present in its legacy text bank.
+        turns.append(
+            DialogueTurn(
+                "moshi",
+                str(insertion["text"]),
+                event="model_backchannel",
+            )
+        )
         start = after_clause
     rest = "".join(clauses[start:]).strip()
     if rest:
@@ -5055,6 +5072,7 @@ def load_dialogues_from_jsonl(path: Path) -> list[Dialogue]:
 def generate_dialogues(
     args: argparse.Namespace,
     on_generated: Optional[Callable[[Dialogue], None]] = None,
+    skip_source_ids: Optional[set[str]] = None,
 ) -> list[Dialogue]:
     """Generate dialogues. If on_generated is given it is called for each dialogue
     as soon as it is produced, so callers can persist incrementally instead of
@@ -5073,13 +5091,26 @@ def generate_dialogues(
     if args.dialogues_jsonl is not None:
         logger.info("Loading dialogues from %s", args.dialogues_jsonl)
         loaded = load_dialogues_from_jsonl(args.dialogues_jsonl)[: args.num_dialogues]
+        if skip_source_ids:
+            loaded = [
+                dialogue
+                for dialogue in loaded
+                if dialogue.source_use_case not in skip_source_ids
+            ]
         if on_generated is not None:
             for dialogue in loaded:
                 on_generated(dialogue)
         return loaded
 
     rng = random.Random(args.seed)
-    use_cases = load_use_cases(args)[: args.num_dialogues]
+    indexed_use_cases = list(enumerate(load_use_cases(args)[: args.num_dialogues]))
+    if skip_source_ids:
+        indexed_use_cases = [
+            (index, use_case)
+            for index, use_case in indexed_use_cases
+            if str(use_case.get("id", "")) not in skip_source_ids
+        ]
+    use_cases = [use_case for _, use_case in indexed_use_cases]
     generator = LLMDialogueGenerator(args)
     dialogues: list[Dialogue] = []
     if args.dialogue_generation_mode in AGENT_DIALOGUE_MODES:
@@ -5124,7 +5155,7 @@ def generate_dialogues(
 
         concurrency = max(1, int(getattr(args, "multi_agent_concurrency", 1)))
         if concurrency <= 1:
-            for index, use_case in enumerate(use_cases):
+            for index, use_case in indexed_use_cases:
                 _emit(_one_dialogue(index, use_case), dialogues)
         else:
             logger.info(
@@ -5136,7 +5167,7 @@ def generate_dialogues(
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
                 futures = [
                     pool.submit(_one_dialogue, index, use_case)
-                    for index, use_case in enumerate(use_cases)
+                    for index, use_case in indexed_use_cases
                 ]
                 for future in futures:
                     _emit(future.result(), dialogues)
@@ -5338,10 +5369,26 @@ def write_dialogues_only(args: argparse.Namespace) -> None:
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     dialogues_path = out_dir / "dialogues.jsonl"
-    if dialogues_path.exists():
+    completed_source_ids: set[str] = set()
+    existing_count = 0
+    if args.resume and dialogues_path.exists():
+        existing_rows = load_jsonl(dialogues_path)
+        existing_count = len(existing_rows)
+        completed_source_ids = {
+            str(row.get("source_use_case"))
+            for row in existing_rows
+            if row.get("source_use_case") is not None
+        }
+        logger.info(
+            "resume enabled: keeping %d dialogues (%d source use cases) in %s",
+            existing_count,
+            len(completed_source_ids),
+            dialogues_path,
+        )
+    elif dialogues_path.exists():
         dialogues_path.unlink()
 
-    count = 0
+    count = existing_count
 
     def sink(dialogue: Dialogue) -> None:
         nonlocal count
@@ -5349,8 +5396,12 @@ def write_dialogues_only(args: argparse.Namespace) -> None:
         count += 1
         logger.info("saved dialogue %d -> %s (%s)", count, dialogue.id, dialogues_path)
 
-    generate_dialogues(args, on_generated=sink)
-    logger.info("dialogues-only mode: wrote %d dialogues to %s", count, dialogues_path)
+    generate_dialogues(
+        args,
+        on_generated=sink,
+        skip_source_ids=completed_source_ids,
+    )
+    logger.info("dialogues-only mode: %d total dialogues in %s", count, dialogues_path)
 
 
 def main() -> None:

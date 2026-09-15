@@ -464,14 +464,44 @@ def aizuchi_overlap_lead(turn_index: int) -> float:
     return max(0.0, AIZUCHI_OVERLAP_LEAD_SEC + jitter)
 
 
-def apply_aizuchi_overlap(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def dialogue_aizuchi_texts(
+    templates: list[dict[str, Any]],
+) -> frozenset[str]:
+    """Build the overlap bank from the dialogue-generation output itself.
+
+    ``event=model_backchannel`` is written by the dialogue generator, so this
+    keeps the TTS bank synchronized with newly introduced generated phrases.
+    The legacy fixed bank is included for old/template JSONL rows.
+    """
+    generated = {
+        str(turn.get("text") or "").strip()
+        for template in templates
+        for turn in (template.get("turns") or [])
+        if isinstance(turn, dict)
+        and turn.get("speaker") == "moshi"
+        and turn.get("event") == "model_backchannel"
+        and str(turn.get("text") or "").strip()
+    }
+    return frozenset(AIZUCHI_OVERLAP_TEXTS | generated)
+
+
+def apply_aizuchi_overlap(
+    turns: list[dict[str, Any]],
+    aizuchi_texts: frozenset[str] | None = None,
+) -> list[dict[str, Any]]:
+    aizuchi_texts = aizuchi_texts or AIZUCHI_OVERLAP_TEXTS
     updated_turns: list[dict[str, Any]] = []
     previous_turn: dict[str, Any] | None = None
     for turn in turns:
         updated_turn = dict(turn)
         if (
             turn.get("speaker") == "moshi"
-            and turn.get("text") in AIZUCHI_OVERLAP_TEXTS
+            # Generated dialogues carry the semantic event.  Keep the text
+            # bank as a compatibility fallback for older/manual JSONL files.
+            and (
+                turn.get("event") == "model_backchannel"
+                or turn.get("text") in aizuchi_texts
+            )
             and previous_turn is not None
             and previous_turn.get("speaker") == "user"
         ):
@@ -3243,6 +3273,11 @@ def cache_mixed_role_stage(
                     missing.append((job, request_index, request))
         if not missing:
             continue
+        # Loading a model is infrastructure setup, not a bad audio request.
+        # Keep it outside request isolation: a Hub/proxy failure otherwise
+        # retries the same model download for every dialogue until walltime.
+        # Both Qwen backends load idempotently; fully cached batches skip this.
+        tts.load()
         try:
             outputs = _synthesize_many_compatible(
                 tts, [request for _, _, request in missing]
@@ -3588,10 +3623,12 @@ def main() -> None:
     if args.dialogues_jsonl is not None:
         all_templates = load_dialogues_from_jsonl(args.dialogues_jsonl)
         if args.auto_overlap_aizuchi:
+            aizuchi_texts = dialogue_aizuchi_texts(all_templates)
             all_templates = [
-                {**template, "turns": apply_aizuchi_overlap(template["turns"])}
+                {**template, "turns": apply_aizuchi_overlap(template["turns"], aizuchi_texts)}
                 for template in all_templates
             ]
+            logger.info("dialogue学習データ由来の相槌を %d 種類 bank に登録しました", len(aizuchi_texts))
         logger.info("対話 %d 件を %s から読み込みました", len(all_templates), args.dialogues_jsonl)
     else:
         all_templates = TEMPLATE_DIALOGUES
