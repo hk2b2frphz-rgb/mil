@@ -143,7 +143,12 @@ fi
     export DIALOGUES_JSONL="$TTS_DIALOGUES"
     export BATCH_ID="${BATCH_ID}_qwen"
     export OUT_ROOT="$QWEN_ROOT"
-    export NUM_DIALOGUES NUM_SHARDS=1 SPARE_RATIO=0 RESUME=0 LOG_EVERY=1
+    # 3 本の動作確認では 1 GPU・再開なしでよいが、本番の規模ではどちらも
+    # 要る。10000 本を 1 GPU で回すと walltime に収まらず、RESUME=0 だと
+    # 途中で切れたぶんが全部消える。既定は従来どおりなので smoke は不変。
+    export NUM_DIALOGUES SPARE_RATIO=0 LOG_EVERY=1
+    export NUM_SHARDS="${NUM_SHARDS:-1}"
+    export RESUME="${RESUME:-0}"
     bash scripts/run_qwen_tts_vllm_3000_4gpu.pbs
 )
 
