@@ -78,9 +78,13 @@ MAIN_LABEL = "SPEAKER_MAIN"
 LEFT_CHANNEL = 0
 # 継ぎ目のプチッを消すだけの長さ。相槌の立ち上がりを鈍らせない範囲で。
 FADE_SEC = 0.005
-# 相槌とみなす文字数の上限。「そうなんですね」で 7 文字なので、既定はそれより
-# 短いものだけ。--aizuchi-max-chars で動かせる。
+# 相槌とみなす文字数の上限。--aizuchi-vocab-file を渡さなかったときだけ使う
+# 目安で、本来は語で決めるべきもの。「なるほど」は 4 文字だが うん では
+# 代用できない（評価であって継続の相槌ではない）ので、長さで切ると必ず
+# 取りこぼすか取りすぎる。
 DEFAULT_MAX_CHARS = 6
+# 「置き換えなかった短い発話」として報告する上限。語彙を広げる判断材料。
+SHORT_UTTERANCE_CHARS = 12
 
 
 def stereo_dir(training_dir: Path) -> Path:
@@ -468,6 +472,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     retimed_total = 0
     processed = 0
     missing = 0
+    replaced_texts: dict[str, int] = {}
+    left_alone: dict[str, int] = {}
     errors: list[float] = []
     moves: list[float] = []
     for json_path in json_paths:
@@ -562,6 +568,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                     json.dumps({"stem": json_path.stem, **swap}, ensure_ascii=False) + "\n"
                 )
         processed += 1
+        for swap in swaps:
+            key = str(swap["original_text"]).strip()
+            replaced_texts[key] = replaced_texts.get(key, 0) + 1
+        # 置き換えなかった聞き手側の短い発話。語彙を広げるかどうかの判断材料に
+        # なるので、黙って落とさず数えておく。
+        for text, _span, label in rows:
+            stripped = str(text).strip()
+            if (
+                label == MAIN_LABEL
+                and len(stripped.strip("。、．，!?！？ 　")) <= SHORT_UTTERANCE_CHARS
+                and not is_backchannel(stripped, args.aizuchi_max_chars, vocab)
+            ):
+                left_alone[stripped] = left_alone.get(stripped, 0) + 1
         total_swaps += len(swaps)
         errors.extend(swap["length_error_sec"] for swap in swaps)
         moves.extend(swap["moved_sec"] for swap in swaps if swap["moved_sec"])
@@ -571,6 +590,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print()
     print(f"対話 {processed} 本 / 差し替え {total_swaps} 箇所")
+    if replaced_texts:
+        print("差し替えた語:")
+        for text, count in sorted(replaced_texts.items(), key=lambda kv: -kv[1]):
+            print(f"  {text} x{count}")
+    if left_alone:
+        print(f"置き換えなかった短い発話（語彙外。{args.bank_text or 'バンク'} で")
+        print("代用できるものがあれば --aizuchi-vocab-file に足す）:")
+        for text, count in sorted(left_alone.items(), key=lambda kv: -kv[1])[:15]:
+            print(f"  {text} x{count}")
     if missing:
         print(f"  配置が無くて飛ばしたもの: {missing} 本")
     if errors:

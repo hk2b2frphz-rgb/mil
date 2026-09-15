@@ -61,6 +61,11 @@ CLONE_OUT_DIR_MOSHI="${CLONE_OUT_DIR_MOSHI:-$REPO_ROOT/data/clone_examples/99999
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 RASTER_MODE="${RASTER_MODE:-pred}"
 MATCH_TOP_K="${MATCH_TOP_K:-5}"
+# Which backchannels a banked "un" may stand in for. Without this the rule is a
+# character count, and a count cannot tell a continuer from an assessment:
+# replacing "sou-nan-desu-ne" with "un" deletes the listener's reaction to what
+# was said and the dialogue stops making sense.
+AIZUCHI_VOCAB_FILE="${AIZUCHI_VOCAB_FILE:-$REPO_ROOT/scripts/2026-09-15/continuer_vocab.txt}"
 SEED="${SEED:-0}"
 STAMP="$(run_id_stamp)"
 
@@ -115,6 +120,7 @@ SPLICE_ARGS=(
     --match-top-k "$MATCH_TOP_K"
     --seed "$SEED"
 )
+[[ -n "$AIZUCHI_VOCAB_FILE" ]] && SPLICE_ARGS+=(--aizuchi-vocab-file "$AIZUCHI_VOCAB_FILE")
 [[ -n "${BANK_TEXT:-}" ]] && SPLICE_ARGS+=(--bank-text "$BANK_TEXT")
 [[ -n "${BANK_TEMPERATURE:-}" ]] && SPLICE_ARGS+=(--bank-temperature "$BANK_TEMPERATURE")
 uv run python scripts/splice_aizuchi_bank.py "${SPLICE_ARGS[@]}"

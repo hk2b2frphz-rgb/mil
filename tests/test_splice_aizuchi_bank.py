@@ -68,6 +68,43 @@ class BackchannelTest(unittest.TestCase):
         self.assertFalse(splice.is_backchannel("はい", 99, vocab))
 
 
+class ContinuerVocabTest(unittest.TestCase):
+    VOCAB = REPO_ROOT / "scripts/2026-09-15/continuer_vocab.txt"
+
+    def vocab(self) -> set[str]:
+        return {
+            line.strip()
+            for line in self.VOCAB.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+
+    def test_continuers_are_replaceable(self) -> None:
+        vocab = self.vocab()
+        for text in ("はい。", "ええ。", "うん。", "うん、うん。", "はい、はい。"):
+            with self.subTest(text=text):
+                self.assertTrue(splice.is_backchannel(text, 6, vocab))
+
+    def test_assessments_are_not(self) -> None:
+        # The complaint this file exists for: "sou-nan-desu-ne" is a reaction
+        # to what was said, and replacing it with "un" deletes that reaction.
+        vocab = self.vocab()
+        for text in (
+            "そうなんですね。",
+            "そうでしたか。",
+            "そうですか。",
+            "なるほど。",
+            "大丈夫ですよ。",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(splice.is_backchannel(text, 6, vocab))
+
+    def test_a_character_count_cannot_make_this_distinction(self) -> None:
+        # Four characters, and not replaceable -- which is why the vocabulary
+        # exists rather than a longer or shorter limit.
+        self.assertTrue(splice.is_backchannel("なるほど。", 6, None))
+        self.assertFalse(splice.is_backchannel("なるほど。", 6, self.vocab()))
+
+
 class PickTest(unittest.TestCase):
     def test_the_nearest_length_is_taken_when_k_is_one(self) -> None:
         clips = [clip(0.2), clip(0.5), clip(0.9)]
