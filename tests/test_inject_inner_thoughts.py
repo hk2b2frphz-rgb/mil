@@ -47,7 +47,7 @@ class DensityItemsTest(unittest.TestCase):
     def test_a_label_produces_exactly_one_tag_at_turn_index_zero(self) -> None:
         payload = make_payload(greeting_start=1.0, aizuchi_frequency_label="density=0.75")
         items = inj.density_items(payload)
-        self.assertEqual(items, [{"turn_index": 0, "text": "<相槌:density=0.75>"}])
+        self.assertEqual(items, [{"turn_index": 0, "text": "<相槌75>"}])
 
     def test_no_label_yields_no_items(self) -> None:
         payload = make_payload(greeting_start=1.0, aizuchi_frequency_label=None)
@@ -60,7 +60,7 @@ class DensityItemsTest(unittest.TestCase):
     def test_rule_and_llm_labels_are_carried_through_unchanged(self) -> None:
         for label in ("eager", "llm", "reserved"):
             payload = make_payload(greeting_start=1.0, aizuchi_frequency_label=label)
-            self.assertEqual(inj.density_items(payload), [{"turn_index": 0, "text": f"<相槌:{label}>"}])
+            self.assertEqual(inj.density_items(payload), [{"turn_index": 0, "text": f"<相槌{label}>"}])
 
 
 class DensityInjectionEndToEndTest(unittest.TestCase):
@@ -100,7 +100,7 @@ class DensityInjectionEndToEndTest(unittest.TestCase):
 
             written = json.loads((out_dir / "sample_001.json").read_text(encoding="utf-8"))
             entries = written["alignments_utterance"]
-            tags = [e for e in entries if e[0] == "<相槌:density=0.75>"]
+            tags = [e for e in entries if e[0] == "<相槌75>"]
             self.assertEqual(len(tags), 1)
             # Placed before the greeting, not overlapping it.
             self.assertLessEqual(tags[0][1][1], 4.0)
@@ -137,6 +137,65 @@ class DensityInjectionEndToEndTest(unittest.TestCase):
             )
             output = self.run_injector(data_dir, out_dir)
             self.assertNotIn("WARNING", output)
+
+
+class TagSurvivesTextNormalizationTest(unittest.TestCase):
+    """The last mile. prepare_nu_fullft_dataset.py normalizes every transcript
+    line before handing it to nu (NFKC, ASCII punctuation to its Japanese
+    forms, whitespace stripped), and alignment_words has already cut the tag
+    into word-sized chunks that get normalized one by one. A tag that does not
+    pass through unchanged is trained in one spelling and prompted in another,
+    and nothing anywhere fails -- the conditioning just quietly does not work.
+    "<相槌:density=0.75>" was exactly that: its ASCII colon came out full-width."""
+
+    def all_labels(self) -> list[str]:
+        from generate_synthetic_moshi_training_data import (
+            AIZUCHI_FREQUENCY_PRESETS,
+            aizuchi_only_frequency_label,
+        )
+
+        labels = [
+            aizuchi_only_frequency_label("density", "normal", value / 100)
+            for value in range(0, 101, 5)
+        ]
+        labels += [
+            aizuchi_only_frequency_label("rule", name, None)
+            for name in AIZUCHI_FREQUENCY_PRESETS
+        ]
+        labels.append(aizuchi_only_frequency_label("llm", "normal", None))
+        return labels
+
+    def test_every_tag_the_pipeline_can_produce_passes_through_unchanged(self) -> None:
+        from alignment_words import split_utterance_alignments
+        from prepare_nu_fullft_dataset import normalize_transcript_text
+
+        for label in self.all_labels():
+            tag = inj.aizuchi_tag_text(label)
+            with self.subTest(label=label, tag=tag):
+                self.assertEqual(normalize_transcript_text(tag)[0], tag)
+                # And again after the word split, since each chunk is
+                # normalized on its own and a boundary can change what a
+                # rule sees on either side of it.
+                chunks, _stats = split_utterance_alignments(
+                    [[tag, [0.0, 2.0], inj.MOSHI_LABEL]]
+                )
+                rebuilt = "".join(
+                    normalize_transcript_text(chunk[0])[0] for chunk in chunks
+                )
+                self.assertEqual(rebuilt, tag)
+
+    def test_a_density_becomes_an_integer_percent(self) -> None:
+        self.assertEqual(inj.aizuchi_tag_text("density=0.75"), "<相槌75>")
+        self.assertEqual(inj.aizuchi_tag_text("density=1.00"), "<相槌100>")
+        self.assertEqual(inj.aizuchi_tag_text("density=0.00"), "<相槌0>")
+
+    def test_no_tag_contains_a_character_the_normalizer_rewrites(self) -> None:
+        for label in self.all_labels():
+            tag = inj.aizuchi_tag_text(label)
+            with self.subTest(tag=tag):
+                self.assertNotIn(":", tag)  # becomes a full-width colon
+                self.assertNotIn(".", tag)  # can become "。" at a chunk edge
+                self.assertNotIn(" ", tag)  # stripped
 
 
 class LabelSurvivesTheTtsLoaderTest(unittest.TestCase):
@@ -341,7 +400,7 @@ class PadLeadInEndToEndTest(unittest.TestCase):
 
             written = json.loads((out_dir / "sample_001.json").read_text(encoding="utf-8"))
             entries = written["alignments_utterance"]
-            tags = [e for e in entries if e[0] == "<相槌:density=0.75>"]
+            tags = [e for e in entries if e[0] == "<相槌75>"]
             self.assertEqual(len(tags), 1)
             greeting = next(e for e in entries if e[2] == inj.MOSHI_LABEL and "もしもし" in e[0])
             # The greeting itself must have shifted by the pad amount.

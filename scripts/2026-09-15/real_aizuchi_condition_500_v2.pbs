@@ -50,7 +50,9 @@
 #
 # CHECK BEFORE MOVING ON: the tool must not print a density_tag_dropped
 # WARNING. If it does, raise PAD_LEAD_IN_SEC -- the tag needs about
-# len(tag)/CHARS_PER_SEC seconds, roughly 2.5s at the default 8 chars/sec.
+# len(tag)/CHARS_PER_SEC seconds. The longest tag is 9 characters (the
+# bracketed word for backchannel followed by "eager"), so ~1.2s at the
+# default 8 chars/sec; 1.5 leaves room.
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
@@ -58,7 +60,7 @@ cd "${PBS_O_WORKDIR:-$(pwd)}"
 export CORPUS_VERSION="${CORPUS_VERSION:-v2}"
 SRC_SHARD="${SRC_SHARD:-$PWD/data/runs/real_aizuchi_500_${CORPUS_VERSION}/tts/placement_bank/shard_000}"
 DST_SHARD="${DST_SHARD:-${SRC_SHARD}_conditioned}"
-PAD_LEAD_IN_SEC="${PAD_LEAD_IN_SEC:-3.0}"
+PAD_LEAD_IN_SEC="${PAD_LEAD_IN_SEC:-1.5}"
 
 SRC_DIR="$SRC_SHARD/training_set/data_stereo"
 DST_DIR="$DST_SHARD/training_set/data_stereo"

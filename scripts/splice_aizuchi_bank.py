@@ -229,6 +229,9 @@ def backchannel_anchors(
             "text": str(row["text"]).strip().strip(STRIP_CHARS),
             "dur_sec": round(float(row["end_sec"]) - start, 4),
         }
+        # 「相手の何文字目まで話したところか」。これが両側で唯一そろう量。
+        # 行番号や秒はそろわない（下の char_offset の説明を参照）。
+        chars_before = sum(len(str(u["text"])) for _i, u in prior[:-1]) if prior else 0
         if not prior:
             # 相手が話し始める前。位置をそのまま持つしかない。
             anchors.append(
@@ -239,13 +242,17 @@ def backchannel_anchors(
         anchor_start = float(anchor["start_sec"])
         anchor_end = float(anchor["end_sec"])
         span = anchor_end - anchor_start
+        anchor_chars = len(str(anchor["text"]))
         if start < anchor_end and span > 0:
+            ratio = (start - anchor_start) / span
             anchors.append(
                 {
                     **common,
                     "anchor": index,
                     "mode": "inside",
-                    "value": round((start - anchor_start) / span, 4),
+                    "value": round(ratio, 4),
+                    "char_offset": round(chars_before + ratio * anchor_chars, 2),
+                    "after_sec": 0.0,
                 }
             )
         else:
@@ -255,6 +262,8 @@ def backchannel_anchors(
                     "anchor": index,
                     "mode": "after",
                     "value": round(start - anchor_end, 4),
+                    "char_offset": float(chars_before + anchor_chars),
+                    "after_sec": round(start - anchor_end, 4),
                 }
             )
     return anchors
@@ -312,15 +321,50 @@ def load_placements(placement_dir: Path) -> dict[str, dict[str, Any]]:
 def anchor_time(
     anchor: dict[str, Any], user_rows: Sequence[Sequence[Any]], fallback: float
 ) -> float:
-    """anchor を既存側の時間軸の秒に直す。"""
-    index = int(anchor.get("anchor", -1))
-    if index < 0 or index >= len(user_rows):
-        return float(anchor.get("value", fallback))
-    row = user_rows[index]
-    start, end = float(row[1][0]), float(row[1][1])
-    if anchor.get("mode") == "inside":
-        return start + float(anchor["value"]) * max(0.0, end - start)
-    return end + float(anchor["value"])
+    """anchor を既存側の時間軸の秒に直す。
+
+    突き合わせるのは「相手の何文字目まで話したところか」。行番号では合わない:
+    KABURI 側は句ごとに 1 行だが、レンダリング側 (build_segments_whole_utterance)
+    は連続する user ターンを 1 発話に結合するので、同じ対話でも行数がまるで違う
+    （句 20 行 対 発話 5 行など）。しかも KABURI は silence ターンを落とすので、
+    秒でも合わない。テキストだけが両側で同じ。
+
+    行番号で引いていた頃は、範囲外の anchor が value をそのまま絶対秒として
+    返していた。ratio (0-1) や「終わりから N 秒」が秒として解釈されるので、
+    ほとんどの相槌が対話の先頭数秒に積み重なっていた。
+    """
+    offset = anchor.get("char_offset")
+    if offset is None:
+        # 旧形式（char_offset を持たない anchor）。行番号で引く。
+        index = int(anchor.get("anchor", -1))
+        if index < 0 or index >= len(user_rows):
+            return float(anchor.get("value", fallback))
+        row = user_rows[index]
+        start, end = float(row[1][0]), float(row[1][1])
+        if anchor.get("mode") == "inside":
+            return start + float(anchor["value"]) * max(0.0, end - start)
+        return end + float(anchor["value"])
+
+    if not user_rows:
+        return fallback
+    target = max(0.0, float(offset))
+    # 言い終わってから打った相槌は、その間合いも持っている。文字位置は
+    # 「どの句の切れ目か」しか表せないので、秒の分はここで足し戻す。
+    # 結合された発話では切れ目に無音が無いため、次の句へ少し食い込む形になる
+    # ――相槌としてはそれが自然。
+    gap = float(anchor.get("after_sec", 0.0))
+    consumed = 0.0
+    for row in user_rows:
+        text_len = float(len(str(row[0])))
+        start, end = float(row[1][0]), float(row[1][1])
+        if text_len <= 0:
+            continue
+        if target <= consumed + text_len:
+            within = (target - consumed) / text_len
+            return start + within * max(0.0, end - start) + gap
+        consumed += text_len
+    # 相手が話し終わったあと。最後の発話の終わりから測る。
+    return float(user_rows[-1][1][1]) + gap
 
 
 def insert_backchannels(

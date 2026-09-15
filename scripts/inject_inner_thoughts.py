@@ -285,6 +285,35 @@ def bootstrap_items(payload: dict[str, Any], entries: list[list[Any]]) -> list[d
             for i in range(1, len(moshi_turn_starts(entries)))]
 
 
+def aizuchi_tag_text(label: str) -> str:
+    """頻度ラベルを、学習データまで字面が変わらないタグにする。
+
+    prepare_nu_fullft_dataset.py は nu に渡す前にテキストを正規化する
+    （NFKC、ASCII 記号の全角化、連続する句読点の圧縮、空白の除去）。ここを
+    素通りしない字面を使うと、学習データに入る形と、推論時にこちらが与える形が
+    食い違う。実際 "<相槌:density=0.75>" は ASCII コロンが全角に化けていた。
+    デバッグが難しい壊れ方（タグは効かないが、どこも失敗しない）なので、
+    正規化を通しても同じになる字面だけを使う:
+
+    - ASCII コロン・空白を使わない（前者は全角化、後者は削除される）
+    - 小数点を使わない。単語分割の切れ目が "." の直前に来ると、前後が数字で
+      なくなって "。" に化ける。密度は 0-100 の整数にする
+    - 短くする。単語分割で細切れになる数が減るうえ、置くのに要る無音も
+      短くて済む（--pad-lead-in-sec がその分小さくできる）
+
+    テストが実際の正規化関数に通して字面が変わらないことを確かめている。
+    """
+    if label.startswith("density="):
+        try:
+            percent = round(float(label.split("=", 1)[1]) * 100)
+        except ValueError:
+            percent = 0
+        return f"<相槌{percent}>"
+    # rule の preset 名（eager 等）と llm。どちらも ASCII 英字だけなので
+    # 正規化を素通りする。
+    return f"<相槌{label}>"
+
+
 def density_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """相槌頻度の条件付けタグを聞き手の最初の発話の直前に1つだけ置く。
 
@@ -305,7 +334,7 @@ def density_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     label = str(dialogue.get("aizuchi_frequency_label") or "").strip()
     if not label:
         return []
-    return [{"turn_index": 0, "text": f"<相槌:{label}>"}]
+    return [{"turn_index": 0, "text": aizuchi_tag_text(label)}]
 
 
 def main() -> int:

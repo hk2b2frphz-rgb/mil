@@ -239,12 +239,26 @@ qsub -V scripts/2026-09-15/aizuchi_normal_placement_bank.pbs
 `sample_00001` が振り直されるので、名前で合わせると別の対話が対になる。
 
 移すのは**位置**。相槌ごとに「どの user 発話の、どこで」打たれたかを KABURI の
-時間軸で読み、既存側の同じ順番の発話に当てはめる。2 通りに分けて持つ。
+時間軸で読み、既存側に当てはめる。2 通りに分けて持つ。
 
 | | 意味 | 持ち方 |
 | --- | --- | --- |
 | `inside` | 相手の発話の最中に入った（＝かぶり） | 発話長に対する**割合** |
 | `after` | 言い終わってから入った | 終わりからの**秒数** |
+
+
+**当てはめ先は「相手の何文字目まで話したところか」で引く**（行番号ではなく）。
+両側で user 発話の数え方が構造的に違うため:
+
+- KABURI 側は句ごとに 1 行のまま。しかも `silence` ターンを落とす
+- レンダリング側（`build_segments_whole_utterance`）は連続する user ターンを
+  1 発話に結合し、`silence` はそこで結合を切る
+
+同じ対話でも行数がまるで違う（句 20 行 対 発話 5 行など）ので、行番号で引くと
+ほとんどの anchor が範囲外に落ちる。範囲外のフォールバックは保持している値を
+そのまま絶対秒として返していたため、割合 0.8 や間合い 0.4 が「0.8 秒」「0.4 秒」と
+解釈され、**相槌が対話の先頭数秒に積み重なっていた**（5 本中 4 本が同一時刻）。
+テキストは両側で同じなので、文字位置で引けば結合のされ方にも沈黙にも依らない。
 
 終わりからの差だけで測るとかぶりを表せない。相槌は言い終わるのを待つものでは
 なく、実録音でも「うん」の 71% は相手の発話に重なっていて、終わりから測った差は
@@ -407,8 +421,13 @@ qsub -V scripts/2026-09-15/real_aizuchi_fullft_500.pbs     # 4. full-FT       A1
   条件付けの学習に向く
 - `scripts/inject_inner_thoughts.py --from-aizuchi-density`。既存の「読み上げ
   ない内心をテキストストリームにだけ差し込む」仕組み（音声は一切変更しない）
-  を流用し、`aizuchi_frequency_label` から `<相槌:density=0.75>` のようなタグを
-  対話の冒頭挨拶の直前に 1 つだけ埋め込む。emotional_state 版
+  を流用し、`aizuchi_frequency_label` から `<相槌75>` のようなタグを
+  聞き手が最初に音を出す前に 1 つだけ埋め込む。**タグの字面は
+  `prepare_nu_fullft_dataset.py` のテキスト正規化を素通りする形だけを使う**
+  （ASCII コロンは全角化され、小数点は単語分割の切れ目次第で「。」に化ける。
+  実際 `<相槌:density=0.75>` は学習データでは全角コロンになっていて、推論時に
+  与える字面と食い違っていた）。密度は 0-100 の整数にしてある。
+  emotional_state 版
   （`--from-emotional-state`）と違い対話全体で値が変わらないのはむしろ狙い
   通りで、学習用途に使ってよい
 
@@ -428,7 +447,7 @@ qsub -V scripts/2026-09-15/real_aizuchi_fullft_500.pbs     # 4. full-FT       A1
 
 - 使い方は `scripts/2026-09-15/real_aizuchi_fullft_500.pbs` のコメント参照。
   step 1（対話生成）を `AIZUCHI_DENSITY_MIXED=1` で回してから
-  `inject_inner_thoughts.py --from-aizuchi-density --pad-lead-in-sec 3.0` を
+  `inject_inner_thoughts.py --from-aizuchi-density --pad-lead-in-sec 1.5` を
   step 3 の出力に対して実行し、その `--out-dir` を fullft の `SRC_RUN_DIR`
   に渡す（`aizuchi_normal_fullft_10000.pbs` の inner-thought 版と同じ
   パターン）

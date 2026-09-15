@@ -570,6 +570,81 @@ class BankLoadTest(unittest.TestCase):
                 splice.load_bank(path, "ありえない語", None, False)
 
 
+class AnchorAcrossDifferentRowSplitsTest(unittest.TestCase):
+    """The two sides do not agree on what a "user row" is. KABURI keeps one
+    row per clause and drops silence turns; the render merges consecutive user
+    turns into one utterance and honours silences. Anchoring by row index made
+    most backchannels fall out of range, and the fallback handed the stored
+    value back as an absolute time -- a ratio like 0.8 or a gap like 0.4 read
+    as seconds -- so they stacked up in the first moments of the call.
+    The character offset into the speaker's text is what both sides share."""
+
+    def placements(self, clauses: int) -> list[dict]:
+        rows, t = [], 0.0
+        for i in range(1, clauses + 1):
+            rows.append({"label": "SPEAKER_USER", "text": f"第{i}句ですけれども、",
+                         "start_sec": t, "end_sec": t + 2.0})
+            rows.append({"label": "SPEAKER_MAIN", "text": "うん",
+                         "start_sec": t + 1.6, "end_sec": t + 2.0})
+            t += 2.2
+        return rows
+
+    def merged_row(self, clauses: int, span: tuple[float, float]) -> list:
+        text = "".join(f"第{i}句ですけれども、" for i in range(1, clauses + 1))
+        return [text, [span[0], span[1]], "SPEAKER_USER"]
+
+    def placed_times(self, clauses: int = 5) -> list[float]:
+        anchors = splice.backchannel_anchors(self.placements(clauses), 6, None)
+        rows = [self.merged_row(clauses, (0.3, 11.3))]
+        stereo = np.zeros((2, SAMPLE_RATE * 12))
+        _out, _rows, swaps = splice.insert_backchannels(
+            stereo, SAMPLE_RATE, rows, anchors, [clip(0.4)],
+            default_args(), random.Random(0),
+        )
+        return [swap["start_sec"] for swap in swaps]
+
+    def test_they_do_not_pile_up_at_the_start(self) -> None:
+        times = self.placed_times()
+        self.assertEqual(len(times), 5)
+        self.assertEqual(len({round(t, 2) for t in times}), len(times))
+
+    def test_they_keep_their_order_and_spread(self) -> None:
+        times = self.placed_times()
+        self.assertEqual(times, sorted(times))
+        self.assertGreater(max(times) - min(times), 5.0)
+
+    def test_they_stay_inside_the_utterance_they_belong_to(self) -> None:
+        for moment in self.placed_times():
+            self.assertGreaterEqual(moment, 0.3)
+            self.assertLessEqual(moment, 11.3)
+
+    def test_the_offset_is_proportional_to_the_text_not_the_row_count(self) -> None:
+        # Same dialogue, target rows split two different ways: the same
+        # backchannel has to land at the same moment either way.
+        anchors = splice.backchannel_anchors(self.placements(4), 6, None)
+        whole = [self.merged_row(4, (0.0, 8.0))]
+        halves = [
+            ["".join(f"第{i}句ですけれども、" for i in (1, 2)), [0.0, 4.0], "SPEAKER_USER"],
+            ["".join(f"第{i}句ですけれども、" for i in (3, 4)), [4.0, 8.0], "SPEAKER_USER"],
+        ]
+        for anchor in anchors:
+            self.assertAlmostEqual(
+                splice.anchor_time(anchor, whole, 0.0),
+                splice.anchor_time(anchor, halves, 0.0),
+                places=6,
+            )
+
+    def test_an_anchor_past_all_of_the_speech_lands_after_it(self) -> None:
+        anchor = {"char_offset": 999.0, "after_sec": 0.4, "mode": "after"}
+        rows = [["みじかい", [1.0, 3.0], "SPEAKER_USER"]]
+        self.assertAlmostEqual(splice.anchor_time(anchor, rows, 0.0), 3.4, places=6)
+
+    def test_an_old_anchor_without_the_offset_still_works(self) -> None:
+        anchor = {"anchor": 0, "mode": "inside", "value": 0.25}
+        rows = [["今日は本当に疲れてしまって", [10.0, 14.0], "SPEAKER_USER"]]
+        self.assertAlmostEqual(splice.anchor_time(anchor, rows, 0.0), 11.0, places=6)
+
+
 class LevelTest(unittest.TestCase):
     """This module promises it moves the other speaker's audio by not one
     sample. Two ways it used to break that promise, both through the level."""
