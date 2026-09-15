@@ -35,10 +35,6 @@ def clip(seconds: float, amplitude: float = 0.3) -> dict:
     }
 
 
-def backchannel_gaps_of(placements) -> list[float]:
-    return splice.backchannel_gaps(placements, 6, None)
-
-
 def default_args(**overrides) -> argparse.Namespace:
     values = {
         "aizuchi_max_chars": 6,
@@ -247,65 +243,94 @@ class SpliceTest(unittest.TestCase):
         self.assertLessEqual(float(np.max(np.abs(out))), 1.0)
 
 
-class GapTransferTest(unittest.TestCase):
-    def placements(self) -> list[dict]:
-        # The listener cuts in 0.2s BEFORE the user finishes -- the overlap the
-        # Qwen path never produces and the whole reason to borrow KABURI's
-        # timing rather than its audio.
-        return [
-            {
-                "label": "SPEAKER_USER",
-                "text": "今日は本当に疲れてしまって",
-                "start_sec": 0.0,
-                "end_sec": 2.0,
-            },
-            {"label": "SPEAKER_MAIN", "text": "うん", "start_sec": 1.8, "end_sec": 2.1},
+class AnchorTransferTest(unittest.TestCase):
+    def anchors_of(self, placements) -> list[dict]:
+        return splice.backchannel_anchors(placements, 6, None)
+
+    def test_a_backchannel_inside_an_utterance_is_kept_inside(self) -> None:
+        # The case the old gap-from-the-end framing could not express: the
+        # listener comes in a quarter of the way through, not near the end.
+        placements = [
+            {"label": "SPEAKER_USER", "text": "今日は本当に疲れてしまって",
+             "start_sec": 0.0, "end_sec": 8.0},
+            {"label": "SPEAKER_MAIN", "text": "うん", "start_sec": 2.0, "end_sec": 2.3},
         ]
+        anchor = self.anchors_of(placements)[0]
+        self.assertEqual(anchor["mode"], "inside")
+        self.assertAlmostEqual(anchor["value"], 0.25, places=3)
 
-    def test_an_overlapping_backchannel_yields_a_negative_gap(self) -> None:
-        self.assertEqual(backchannel_gaps_of(self.placements()), [-0.2])
+    def test_the_position_survives_a_differently_long_utterance(self) -> None:
+        # KABURI ran the utterance for 8s; the real one runs for 4s. A quarter
+        # of the way in has to stay a quarter of the way in, not land at 2.0s
+        # of a 4s turn, and certainly not after it ends.
+        rows = [["今日は本当に疲れてしまって", [10.0, 14.0], "SPEAKER_USER"],
+                ["ええ", [14.5, 14.9], "SPEAKER_MAIN"]]
+        moved = splice.retime_backchannels(
+            rows, [{"anchor": 0, "mode": "inside", "value": 0.25}], 6, None, 20.0
+        )
+        self.assertAlmostEqual(moved[1], 11.0, places=3)
 
-    def test_a_backchannel_before_any_user_turn_is_measured_from_zero(self) -> None:
-        rows = [{"label": "SPEAKER_MAIN", "text": "うん", "start_sec": 0.5, "end_sec": 0.8}]
-        self.assertEqual(backchannel_gaps_of(rows), [0.5])
-
-    def test_long_listener_turns_are_not_counted(self) -> None:
-        rows = self.placements() + [
-            {
-                "label": "SPEAKER_MAIN",
-                "text": "それは大変でしたね、よく話してくれました",
-                "start_sec": 3.0,
-                "end_sec": 5.0,
-            }
+    def test_a_backchannel_after_the_utterance_keeps_its_gap(self) -> None:
+        placements = [
+            {"label": "SPEAKER_USER", "text": "今日は疲れました",
+             "start_sec": 0.0, "end_sec": 3.0},
+            {"label": "SPEAKER_MAIN", "text": "うん", "start_sec": 3.4, "end_sec": 3.7},
         ]
-        self.assertEqual(len(backchannel_gaps_of(rows)), 1)
+        anchor = self.anchors_of(placements)[0]
+        self.assertEqual(anchor["mode"], "after")
+        self.assertAlmostEqual(anchor["value"], 0.4, places=3)
+        rows = [["今日は疲れました", [0.0, 5.0], "SPEAKER_USER"],
+                ["ええ", [5.5, 5.9], "SPEAKER_MAIN"]]
+        moved = splice.retime_backchannels(rows, [anchor], 6, None, 20.0)
+        self.assertAlmostEqual(moved[1], 5.4, places=3)
 
-    def test_the_gap_moves_the_backchannel_on_the_real_timeline(self) -> None:
-        # Existing render: the listener waits 0.5s after the user finishes.
-        rows = [
-            ["今日は本当に疲れてしまって", [0.0, 3.0], "SPEAKER_USER"],
-            ["ええ", [3.5, 3.9], "SPEAKER_MAIN"],
+    def test_the_anchor_is_the_utterance_in_progress_not_the_first_one(self) -> None:
+        placements = [
+            {"label": "SPEAKER_USER", "text": "あのう", "start_sec": 0.0, "end_sec": 1.0},
+            {"label": "SPEAKER_USER", "text": "今日は本当に疲れてしまって",
+             "start_sec": 2.0, "end_sec": 6.0},
+            {"label": "SPEAKER_MAIN", "text": "うん", "start_sec": 4.0, "end_sec": 4.3},
         ]
-        moved = splice.retime_backchannels(rows, [-0.2], 6, None, 10.0)
-        # KABURI's -0.2s applied to the real user end of 3.0.
-        self.assertAlmostEqual(moved[1], 2.8, places=3)
+        anchor = self.anchors_of(placements)[0]
+        self.assertEqual(anchor["anchor"], 1)
+        self.assertEqual(anchor["mode"], "inside")
+        self.assertAlmostEqual(anchor["value"], 0.5, places=3)
+
+    def test_a_backchannel_before_anyone_speaks_keeps_its_absolute_time(self) -> None:
+        placements = [
+            {"label": "SPEAKER_MAIN", "text": "うん", "start_sec": 0.5, "end_sec": 0.8},
+            {"label": "SPEAKER_USER", "text": "あのう", "start_sec": 1.0, "end_sec": 2.0},
+        ]
+        anchor = self.anchors_of(placements)[0]
+        self.assertEqual(anchor["mode"], "absolute")
+        self.assertAlmostEqual(anchor["value"], 0.5, places=3)
+
+    def test_long_listener_turns_are_not_anchored(self) -> None:
+        placements = [
+            {"label": "SPEAKER_USER", "text": "つかれた", "start_sec": 0.0, "end_sec": 3.0},
+            {"label": "SPEAKER_MAIN",
+             "text": "それは大変でしたね、よく話してくれました",
+             "start_sec": 3.0, "end_sec": 5.0},
+        ]
+        self.assertEqual(self.anchors_of(placements), [])
 
     def test_a_mismatched_count_refuses_rather_than_guessing(self) -> None:
-        rows = [
-            ["今日は本当に疲れてしまって", [0.0, 3.0], "SPEAKER_USER"],
-            ["ええ", [3.5, 3.9], "SPEAKER_MAIN"],
-        ]
-        self.assertEqual(splice.retime_backchannels(rows, [-0.2, 0.3], 6, None, 10.0), {})
+        rows = [["今日は疲れました", [0.0, 3.0], "SPEAKER_USER"],
+                ["ええ", [3.5, 3.9], "SPEAKER_MAIN"]]
+        anchors = [{"anchor": 0, "mode": "after", "value": 0.1}] * 2
+        self.assertEqual(splice.retime_backchannels(rows, anchors, 6, None, 10.0), {})
 
     def test_a_move_never_lands_outside_the_file(self) -> None:
-        rows = [
-            ["今日は本当に疲れてしまって", [0.0, 3.0], "SPEAKER_USER"],
-            ["ええ", [3.5, 3.9], "SPEAKER_MAIN"],
-        ]
-        self.assertEqual(splice.retime_backchannels(rows, [-99.0], 6, None, 10.0)[1], 0.0)
-        self.assertLessEqual(
-            splice.retime_backchannels(rows, [99.0], 6, None, 10.0)[1], 10.0
+        rows = [["今日は疲れました", [0.0, 3.0], "SPEAKER_USER"],
+                ["ええ", [3.5, 3.9], "SPEAKER_MAIN"]]
+        low = splice.retime_backchannels(
+            rows, [{"anchor": 0, "mode": "after", "value": -99.0}], 6, None, 10.0
         )
+        high = splice.retime_backchannels(
+            rows, [{"anchor": 0, "mode": "after", "value": 99.0}], 6, None, 10.0
+        )
+        self.assertEqual(low[1], 0.0)
+        self.assertLessEqual(high[1], 10.0)
 
 
 class RetimedSpliceTest(unittest.TestCase):

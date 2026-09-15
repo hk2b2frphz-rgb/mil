@@ -147,9 +147,12 @@ def load_bank(
     for entry in entries:
         signal, sample_rate = read_wav(bank_dir / entry["wav"])
         stats = measure(signal, sample_rate)
+        # 頭の無音だけ落とす。尻は落とさない -- 無音判定はピークの 5% を
+        # 下回ったところで切るので、「うん」の終わりの鼻音のように緩やかに
+        # 減衰する音は最後が削れる。「うんが最後まで言っていない」はこれ。
+        # 尻に残る無音は聞き手チャンネルの無音なので、残っても害が無い。
         start = int(round(stats["lead_silence_sec"] * sample_rate))
-        end = signal.size - int(round(stats["trail_silence_sec"] * sample_rate))
-        trimmed = signal[start:max(start + 1, end)]
+        trimmed = signal[start:] if start < signal.size else signal
         if trimmed.size == 0:
             continue
         clips.append(
@@ -159,7 +162,10 @@ def load_bank(
                 "temperature": entry.get("temperature"),
                 "signal": trimmed,
                 "sample_rate": sample_rate,
-                "speech_sec": trimmed.size / sample_rate,
+                # 尺の突き合わせに使うのは実際に鳴っている長さ。尻の無音を
+                # 含めると、短い音を長い区間に当ててしまう。
+                "speech_sec": float(stats["speech_sec"]),
+                "clip_sec": trimmed.size / sample_rate,
             }
         )
     if not clips:
@@ -180,20 +186,27 @@ def is_backchannel(text: str, max_chars: int, vocab: set[str] | None) -> bool:
     return len(stripped) <= max_chars
 
 
-def backchannel_gaps(
+def backchannel_anchors(
     placements: Sequence[dict[str, Any]], max_chars: int, vocab: set[str] | None
-) -> list[float]:
-    """KABURI の配置から、相槌ごとの「相手の発話の終わりからの差」を取り出す。
+) -> list[dict[str, Any]]:
+    """各相槌が「どの user 発話の、どこで」打たれたかを取り出す。
 
-    上流の配置式は start_i = max(0, prev_any_end + gap_i)。相槌について意味が
-    あるのは「相手が言い終えてから何秒後に(あるいは何秒前に)反応したか」なので、
-    直前に始まっている相手の発話の終わりを基準に測る。負なら食い込み。
+    相手の発話の終わりからの差だけで測ると、かぶりを表せない。相槌は言い終わる
+    のを待って打つものではなく、発話の途中に入る -- 実録音でも「うん」の 71% は
+    相手の発話に重なっていて、終わりから測った差は p10 で -17 秒だった。つまり
+    「終わりの何秒前」ではなく「発話のどのあたり」が本体。
 
-    この差だけを既存の音声へ移せば、KABURI の音は 1 サンプルも要らない --
-    使うのはタイミングだけ、という元の狙いそのもの。
+    そこで 2 通りに分けて持つ:
+
+      inside  発話の最中に入った。発話長に対する割合で持つ。既存側の発話が
+              長くても短くても、同じ「あたり」に入る
+      after   言い終わってから入った。終わりからの秒数で持つ
+
+    anchor は user 発話の何番目か。既存側の同じ順番の発話に当てはめる。
     """
     rows = sorted(placements, key=lambda row: row["start_sec"])
-    gaps: list[float] = []
+    users = [row for row in rows if row["label"] != MAIN_LABEL]
+    anchors: list[dict[str, Any]] = []
     for row in rows:
         if row["label"] != MAIN_LABEL or not is_backchannel(
             str(row["text"]), max_chars, vocab
@@ -201,46 +214,71 @@ def backchannel_gaps(
             continue
         start = float(row["start_sec"])
         prior = [
-            float(other["end_sec"])
-            for other in rows
-            if other["label"] != MAIN_LABEL and float(other["start_sec"]) < start
+            (index, user)
+            for index, user in enumerate(users)
+            if float(user["start_sec"]) <= start
         ]
-        gaps.append(round(start - (max(prior) if prior else 0.0), 4))
-    return gaps
+        if not prior:
+            # 相手が話し始める前。位置をそのまま持つしかない。
+            anchors.append({"anchor": -1, "mode": "absolute", "value": round(start, 4)})
+            continue
+        index, anchor = prior[-1]
+        anchor_start = float(anchor["start_sec"])
+        anchor_end = float(anchor["end_sec"])
+        span = anchor_end - anchor_start
+        if start < anchor_end and span > 0:
+            anchors.append(
+                {
+                    "anchor": index,
+                    "mode": "inside",
+                    "value": round((start - anchor_start) / span, 4),
+                }
+            )
+        else:
+            anchors.append(
+                {"anchor": index, "mode": "after", "value": round(start - anchor_end, 4)}
+            )
+    return anchors
 
 
 def retime_backchannels(
     rows: Sequence[Sequence[Any]],
-    gaps: Sequence[float],
+    anchors: Sequence[dict[str, Any]],
     max_chars: int,
     vocab: set[str] | None,
     duration_sec: float,
 ) -> dict[int, float]:
-    """既存の音声の相槌に KABURI の差を当てはめ、{行番号: 新しい開始秒} を返す。
+    """既存の音声の相槌に KABURI の位置を当てはめ、{行番号: 新しい開始秒} を返す。
 
-    対応は「相槌の出てくる順番」で取る。時刻順に並べた k 番目の相槌に k 番目の
-    差を当てる。本数が合わないときは何も返さない -- 途中でずれた対応を黙って
-    通すより、その対話を飛ばした方がよい。
+    相槌どうしの対応は出てくる順で、anchor の user 発話も出てくる順で取る。
+    本数が合わないときは何も返さない -- 途中でずれた対応を黙って通すより、
+    その対話を飛ばした方がよい。
     """
     indexed = sorted(range(len(rows)), key=lambda i: rows[i][1][0])
+    users = [i for i in indexed if rows[i][2] != MAIN_LABEL]
     targets = [
         i
         for i in indexed
         if rows[i][2] == MAIN_LABEL and is_backchannel(str(rows[i][0]), max_chars, vocab)
     ]
-    if len(targets) != len(gaps):
+    if len(targets) != len(anchors):
         return {}
 
     new_starts: dict[int, float] = {}
     for position, row_index in enumerate(targets):
-        start = float(rows[row_index][1][0])
-        prior = [
-            float(rows[i][1][1])
-            for i in indexed
-            if rows[i][2] != MAIN_LABEL and float(rows[i][1][0]) < start
-        ]
-        base = max(prior) if prior else 0.0
-        moved = base + float(gaps[position])
+        anchor = anchors[position]
+        index = int(anchor.get("anchor", -1))
+        if index < 0 or index >= len(users):
+            moved = float(anchor.get("value", rows[row_index][1][0]))
+        else:
+            user_row = rows[users[index]]
+            user_start = float(user_row[1][0])
+            user_end = float(user_row[1][1])
+            if anchor.get("mode") == "inside":
+                span = max(0.0, user_end - user_start)
+                moved = user_start + float(anchor["value"]) * span
+            else:
+                moved = user_end + float(anchor["value"])
         new_starts[row_index] = min(max(0.0, moved), max(0.0, duration_sec - 0.01))
     return new_starts
 
@@ -502,6 +540,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     left_alone: dict[str, int] = {}
     text_fallbacks = 0
     missing_texts: dict[str, int] = {}
+    anchor_modes: dict[str, int] = {}
     errors: list[float] = []
     moves: list[float] = []
     for json_path in json_paths:
@@ -532,18 +571,22 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         new_starts: dict[int, float] = {}
         if placement is not None:
-            gaps = backchannel_gaps(
+            anchors = backchannel_anchors(
                 placement.get("placements", []), args.aizuchi_max_chars, vocab
             )
+            for anchor in anchors:
+                anchor_modes[str(anchor.get("mode"))] = (
+                    anchor_modes.get(str(anchor.get("mode")), 0) + 1
+                )
             duration = stereo.shape[-1] / sample_rate
             new_starts = retime_backchannels(
-                rows, gaps, args.aizuchi_max_chars, vocab, duration
+                rows, anchors, args.aizuchi_max_chars, vocab, duration
             )
-            if not new_starts and gaps:
+            if not new_starts and anchors:
                 # 本数が合わない = 対応が取れない。黙ってずらすより飛ばす。
                 print(
                     f"[skip] 相槌の本数が配置と合いません: {json_path.name} "
-                    f"(KABURI {len(gaps)} 箇所)"
+                    f"(KABURI {len(anchors)} 箇所)"
                 )
                 continue
             retimed_total += len(new_starts)
@@ -644,6 +687,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"バンクに同じ語が無くて別の語を差したもの: {text_fallbacks} 箇所")
         for word, count in sorted(missing_texts.items(), key=lambda kv: -kv[1])[:10]:
             print(f"  {word} x{count}")
+    if anchor_modes:
+        inside = anchor_modes.get("inside", 0)
+        after = anchor_modes.get("after", 0)
+        total = sum(anchor_modes.values())
+        print(
+            f"KABURI が置いた位置: 相手の発話中 {inside} / 言い終えた後 {after}"
+            + (f" / 発話前 {anchor_modes['absolute']}" if anchor_modes.get("absolute") else "")
+        )
+        if total and inside == 0:
+            print("  <- ひとつも重なっていない。KABURI 側がターン制で置いている。")
+            print("     placement JSON を見て gap の分布を確かめること。")
     if moves:
         absolute = [abs(value) for value in moves]
         earlier = sum(1 for value in moves if value < 0)
