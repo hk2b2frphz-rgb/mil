@@ -36,10 +36,10 @@
 # 2. --from-aizuchi-density reads metadata.dialogue.aizuchi_frequency_label,
 #    which step 1 recorded and steps 2-3 carried through, and writes one tag
 #    per dialogue just before the listener's first sound. Note that in this
-#    route that is the first backchannel, not the greeting: step 3 synthesizes
-#    the speaker side only, so the greeting never reaches the audio at all.
-#    Either way the tag lands before the listener has made any sound, which
-#    is what matters.
+#    route that is the first backchannel: step 3 synthesizes the speaker side
+#    only and drops the fixed opening (DROP_GREETING=1), so this corpus has no
+#    greeting at all. Either way the tag lands before the listener has made
+#    any sound, which is what matters.
 # 3. The manifest is rebuilt from what actually came out: a dialogue whose tag
 #    could not be placed is not in the output, and padding (when used) changes
 #    every duration.
@@ -50,8 +50,9 @@
 #
 # PAD_LEAD_IN_SEC DEFAULTS TO 0, i.e. the audio is not rewritten at all and
 # the wavs are symlinked into the output. In THIS route the tag does not need
-# reserved silence: step 3 synthesizes the speaker only, so the listener
-# channel is empty until its first backchannel -- several seconds of room,
+# reserved silence: step 3 synthesizes the speaker only and drops the opening,
+# so the listener channel is empty until its first backchannel -- seconds of
+# room,
 # and the tag is under a second. (Overlapping the SPEAKER is fine and is what
 # inject_inner_thoughts.py has always allowed; only a collision with the
 # listener's own audio is avoided.) Padding matters for the full-render route,

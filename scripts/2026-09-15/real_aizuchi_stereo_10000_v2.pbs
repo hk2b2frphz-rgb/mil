@@ -56,12 +56,17 @@
 # and never synthesized, and the reply is looked up in a bank that does not
 # hold it, so a clip of some other word is used instead.
 #
-# LEAD_IN_SEC=1.5 instead of the usual 0.3 so the density tag step 4 writes
-# has somewhere to sit. The tag goes before the listener's first sound, which
-# with the greeting restored is the greeting itself at LEAD_IN_SEC. The tag
-# needs about 0.75s and 0.3 leaves 0.2. Widening the lead-in costs 1.2s of
-# silence per dialogue at render time; the alternative (padding the audio in
-# step 4) rewrites every wav and doubles the corpus on disk.
+# DROP_GREETING=1 keeps the corpus to backchannels only: the fixed opening
+# ("moshi-moshi, this is the ...") is left out of the speaker-only copy, so it
+# is never synthesized and appears in neither the audio nor the transcript.
+# The reply to "are you still there?" is NOT dropped -- it is a real response
+# the listener has to make, and the bank has no clip for it, so it has to be
+# synthesized like any other non-backchannel listener turn.
+#
+# With no greeting the listener's first sound is its first backchannel, several
+# seconds in, which leaves the density tag step 4 writes more room than it
+# needs. LEAD_IN_SEC therefore stays at its default; widening it is only
+# necessary when the greeting is kept.
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
@@ -75,7 +80,7 @@ export NUM_DIALOGUES="${NUM_DIALOGUES:-10000}"
 export KEEP_TEXT=1
 # See the notes above -- both matter for the greeting and the tag.
 export AIZUCHI_VOCAB_FILE="${AIZUCHI_VOCAB_FILE:-$PWD/scripts/2026-09-15/aizuchi_vocab_no_bare_un.tsv}"
-export LEAD_IN_SEC="${LEAD_IN_SEC:-1.5}"
+export DROP_GREETING="${DROP_GREETING:-1}"
 export MATCH_TOP_K="${MATCH_TOP_K:-5}"
 # See the note above: both differ from the smoke defaults on purpose.
 export NUM_SHARDS="${NUM_SHARDS:-4}"

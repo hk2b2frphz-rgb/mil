@@ -125,6 +125,11 @@ REWRITE_ARGS=(
 if [[ -n "${AIZUCHI_VOCAB_FILE:-}" ]]; then
     REWRITE_ARGS+=(--aizuchi-vocab-file "$AIZUCHI_VOCAB_FILE")
 fi
+# 相槌だけに集中したコーパスでは名乗りは要らない。落とすと合成されないので
+# 音声にも書き起こしにも残らない。
+if [[ "${DROP_GREETING:-0}" == "1" ]]; then
+    REWRITE_ARGS+=(--drop-greeting)
+fi
 if [[ "$KEEP_TEXT" == "1" ]]; then
     REWRITE_ARGS+=(--keep-text)
 elif [[ -n "${BACKCHANNEL_TEXT:-}" ]]; then

@@ -50,6 +50,12 @@ def load_distribution(path: Path) -> tuple[list[str], list[float]]:
     return words, weights
 
 
+# generate_synthetic_moshi_training_data.AIZUCHI_ONLY_GREETING と同じ文字列。
+# import すると対話生成側を丸ごと読むことになるので写している。ずれたら
+# tests/test_rewrite_aizuchi_vocab.py が落ちる。
+AIZUCHI_ONLY_GREETING = "もしもし、こちら孤独孤立相談窓口になります。"
+
+
 def is_backchannel(
     text: str, max_chars: int, vocab: set[str] | None = None
 ) -> bool:
@@ -107,6 +113,26 @@ def rewrite(
     return out, replaced, kept
 
 
+def keep_listener_turn(
+    turn: dict[str, Any],
+    max_chars: int,
+    vocab: set[str] | None,
+    drop_greeting: bool,
+) -> bool:
+    """user のみの写しに聞き手のターンを残すか（＝合成させるか）。
+
+    相槌はバンクから来るので残さない。それ以外の聞き手発話（名乗り、
+    「聞いていますか?」への応答）はバンクに無いので、落とすと音声に一切
+    残らない。--drop-greeting のときだけ名乗りも落とす。
+    """
+    text = str(turn.get("text", "")).strip()
+    if is_backchannel(text, max_chars, vocab):
+        return False
+    if drop_greeting and text.strip(STRIP_CHARS) == AIZUCHI_ONLY_GREETING.strip(STRIP_CHARS):
+        return False
+    return True
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -116,6 +142,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--dist", type=Path, default=DEFAULT_DIST)
     parser.add_argument("--text", default="", help="この 1 語だけにする（--dist より優先）")
     parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
+    parser.add_argument(
+        "--drop-greeting",
+        action="store_true",
+        help=(
+            "冒頭の名乗りを user のみの写しからも落とす。相槌だけに集中した"
+            "コーパスを作るとき用。落とすと合成されないので音声に残らない"
+        ),
+    )
     parser.add_argument(
         "--aizuchi-vocab-file",
         type=Path,
@@ -225,9 +259,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     turn
                     for turn in dialogue["turns"]
                     if str(turn.get("speaker", "")).strip().lower() != LISTENER
-                    or not is_backchannel(
-                        str(turn.get("text", "")).strip(), args.max_chars, vocab
-                    )
+                    or keep_listener_turn(turn, args.max_chars, vocab,
+                                          args.drop_greeting)
                 ]
                 kept_turns += len(turns)
                 handle.write(

@@ -169,6 +169,22 @@ class SpeakerOnlyCopyTest(unittest.TestCase):
         self.assertIn("はい", vocab)
         self.assertNotIn("聞いていますよ", vocab)
 
+    def test_drop_greeting_leaves_the_probe_reply_alone(self) -> None:
+        # The backchannel-only corpus wants no opening, but the reply to
+        # "are you still there?" is a real response the listener has to make
+        # and the bank has no clip for it.
+        synthesized, _vocab = self.run_rewrite(
+            "--aizuchi-vocab-file", str(self.VOCAB), "--drop-greeting"
+        )
+        self.assertEqual(synthesized, ["はい、聞いていますよ。"])
+
+    def test_the_copied_greeting_matches_the_generator(self) -> None:
+        import generate_synthetic_moshi_training_data as generator
+
+        self.assertEqual(
+            rewriter.AIZUCHI_ONLY_GREETING, generator.AIZUCHI_ONLY_GREETING
+        )
+
     def test_without_it_the_greeting_and_the_reply_are_lost(self) -> None:
         # The behaviour this option exists to prevent.
         synthesized, vocab = self.run_rewrite()
