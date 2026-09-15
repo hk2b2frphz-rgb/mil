@@ -183,6 +183,13 @@ class Dialogue:
     # --style-preset auto）が対話ごとの声のトーン・テンポをミラーリング
     # するために dialogues.jsonl 経由で読む。
     emotional_state: str = ""
+    # aizuchi-only モードでこの対話を生成した相槌頻度。placement=density なら
+    # "density=0.75" のように実際に使った値、rule なら preset 名（eager 等）、
+    # llm なら "llm"（頻度を制御していない）。generator_notes は自由記述で
+    # 機械可読ではないため別フィールドにした。inject_inner_thoughts.py
+    # --from-aizuchi-density がこれを読み上げないテキストとして対話の先頭に
+    # 埋め込み、モデルへの頻度の条件付けに使う。
+    aizuchi_frequency_label: str = ""
 
 
 @dataclass
@@ -570,6 +577,19 @@ def parse_args() -> argparse.Namespace:
             "データとして生成する分には問題ない）。0.25 あたりが"
             "reserved、0.5 が normal、0.75 が eager 相当で、その間は連続的に"
             "補間する。文末は密度に関わらず（0 を除き）必ず打つ"
+        ),
+    )
+    parser.add_argument(
+        "--aizuchi-density-mixed",
+        action="store_true",
+        default=bool(os.environ.get("AIZUCHI_DENSITY_MIXED") == "1"),
+        help=(
+            "指定すると --aizuchi-density を無視し、対話ごとに 0〜1 の一様乱数で"
+            "密度を引く（--aizuchi-only-frequency mixed の density 版）。モデルに"
+            "相槌頻度を条件付けさせたいとき、単一ジョブで 0〜1 全域をカバーする"
+            "対話を作るために使う。各対話の実際の密度は Dialogue.aizuchi_frequency_label"
+            "に記録され、inject_inner_thoughts.py --from-aizuchi-density で"
+            "読み上げないタグとして先頭に埋め込める"
         ),
     )
     parser.add_argument(
@@ -1788,8 +1808,15 @@ class LLMDialogueGenerator:
         block_index: int,
         frequency: dict[str, Any],
         rng: random.Random,
+        density: float | None = None,
     ) -> list[DialogueTurn]:
-        """聞き手の反応を入れる。位置の決め方は 3 通り（--aizuchi-only-placement）。"""
+        """聞き手の反応を入れる。位置の決め方は 3 通り（--aizuchi-only-placement）。
+
+        density は placement=="density" のときの相槌密度。呼び出し側が対話ごとに
+        一度だけ解決した値を渡す（--aizuchi-density-mixed で対話ごとに乱数を
+        引く場合、ターンをまたいで値がぶれないようにするため）。省略時は
+        --aizuchi-density をそのまま使う。
+        """
         clauses = split_text_into_clauses(user_turn.text)
         if len(clauses) < 1:
             return [user_turn]
@@ -1804,6 +1831,11 @@ class LLMDialogueGenerator:
                 block_index=block_index,
             )
         if placement == "density":
+            resolved_density = (
+                float(density)
+                if density is not None
+                else float(getattr(self.args, "aizuchi_density", 0.5))
+            )
             return self._react_by_density(
                 use_case=use_case,
                 visible_turns=visible_turns,
@@ -1812,6 +1844,7 @@ class LLMDialogueGenerator:
                 case_id=case_id,
                 block_index=block_index,
                 rng=rng,
+                density=resolved_density,
             )
         points = pick_reaction_points(clauses, frequency, rng)
         if not points:
@@ -1857,16 +1890,16 @@ class LLMDialogueGenerator:
         case_id: str,
         block_index: int,
         rng: random.Random,
+        density: float,
     ) -> list[DialogueTurn]:
         """位置は確率（文末は必ず）で決め、語は rule と同じく LLM に選ばせる。
 
-        --aizuchi-density（0〜1）が reserved/normal/eager/flood の間を連続的に
-        補間する。0 は相槌 0 件、1 は flood 相当（打ちすぎ側の上限。推論時の
-        既定にはしないが、学習データとして生成する分には問題ない）。位置は
-        文脈判断が要らないので確率で決めるが、どの語を選ぶかは rule モード
-        と同様に LLM に判断させる。
+        density（0〜1、呼び出し側が対話ごとに一度だけ解決して渡す）が
+        reserved/normal/eager/flood の間を連続的に補間する。0 は相槌 0 件、
+        1 は flood 相当（打ちすぎ側の上限。推論時の既定にはしないが、学習
+        データとして生成する分には問題ない）。位置は文脈判断が要らないので
+        確率で決めるが、どの語を選ぶかは rule モードと同様に LLM に判断させる。
         """
-        density = float(getattr(self.args, "aizuchi_density", 0.5))
         frequency = resolve_aizuchi_density(density)
         if frequency is None:
             return [user_turn]
@@ -1994,6 +2027,16 @@ class LLMDialogueGenerator:
         frequency_name, frequency = resolve_aizuchi_frequency(
             self.args.aizuchi_only_frequency, rng
         )
+        placement = getattr(self.args, "aizuchi_only_placement", "rule")
+        density = resolve_aizuchi_only_density(
+            placement,
+            self.args.aizuchi_density,
+            bool(self.args.aizuchi_density_mixed),
+            rng,
+        )
+        aizuchi_frequency_label = aizuchi_only_frequency_label(
+            placement, frequency_name, density
+        )
         max_blocks = max(1, int(self.args.aizuchi_only_max_blocks))
         min_blocks = max(1, min(int(self.args.aizuchi_only_min_blocks), max_blocks))
         # 判定器で切り上げるのをやめ、長さは最初に引く。相づちしか返らない対話に
@@ -2019,6 +2062,9 @@ class LLMDialogueGenerator:
                 "block_plans": plans,
                 "frequency": frequency_name,
                 "frequency_label": frequency["label"],
+                "placement": placement,
+                "density": density,
+                "aizuchi_frequency_label": aizuchi_frequency_label,
                 "empty_policy": self.args.multi_agent_empty_policy,
             }
         )
@@ -2083,6 +2129,7 @@ class LLMDialogueGenerator:
                             block_index=block_index + 1,
                             frequency=frequency,
                             rng=rng,
+                            density=density,
                         )
                     )
 
@@ -2115,6 +2162,7 @@ class LLMDialogueGenerator:
                 "mode": "aizuchi-only",
                 "case_id": case_id,
                 "frequency": frequency_name,
+                "aizuchi_frequency_label": aizuchi_frequency_label,
                 "turn_count": len(clean_turns),
                 "dropped_turns": len(turns) - len(clean_turns),
                 "transcript": dialogue_turns_to_transcript(clean_turns),
@@ -2135,6 +2183,7 @@ class LLMDialogueGenerator:
             ),
             duplex_task=str(use_case.get("duplex_task") or "") or None,
             emotional_state=str(use_case.get("emotional_state") or ""),
+            aizuchi_frequency_label=aizuchi_frequency_label,
         )
 
     def generate_transformers_subprocess(self, prompt: str) -> str:
@@ -3781,6 +3830,42 @@ def resolve_aizuchi_density(density: float) -> dict[str, Any] | None:
         "min_gap": max(0, round(num("min_gap", 0))),
         "min_chunk_chars": max(0, round(num("min_chunk_chars", 0))),
     }
+
+
+def resolve_aizuchi_only_density(
+    placement: str,
+    fixed_density: float,
+    density_mixed: bool,
+    rng: random.Random,
+) -> float | None:
+    """aizuchi-only の対話 1 本を通して使う相槌密度を一度だけ決める。
+
+    placement != "density" なら None（この対話には密度という概念が無い）。
+    density_mixed なら 0〜1 の一様乱数を対話ごとに引く（--aizuchi-only-frequency
+    mixed の density 版）。そうでなければ --aizuchi-density の固定値。ターンを
+    またいでこの値がぶれると、対話の先頭に埋め込む条件付けタグと実際の頻度が
+    食い違うので、対話生成の入口で一度だけ呼ぶこと。
+    """
+    if placement != "density":
+        return None
+    return rng.random() if density_mixed else float(fixed_density)
+
+
+def aizuchi_only_frequency_label(
+    placement: str,
+    frequency_name: str,
+    density: float | None,
+) -> str:
+    """モデルへの頻度条件付けタグに使う、対話 1 本ぶんの頻度ラベル。
+
+    density のときだけ実測値（0.00-1.00）を刻む。rule はプリセット名
+    （eager 等）、llm は頻度を制御していないことを表す固定文字列にする。
+    """
+    if placement == "density":
+        return f"density={float(density if density is not None else 0.0):.2f}"
+    if placement == "llm":
+        return "llm"
+    return frequency_name
 
 
 def pick_density_points(

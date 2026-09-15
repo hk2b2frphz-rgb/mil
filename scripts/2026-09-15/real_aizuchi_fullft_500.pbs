@@ -23,6 +23,17 @@
 # treat the first run as a check that the data trains at all rather than as a
 # result: whether the listener learns to come in where the bank clips were
 # placed, and whether the retrieved audio is consistent enough to learn from.
+#
+# To train the frequency-conditioned variant instead (step 1 run with
+# AIZUCHI_DENSITY_MIXED=1, so each dialogue's metadata carries a distinct
+# aizuchi_frequency_label), run scripts/inject_inner_thoughts.py
+# --from-aizuchi-density over the step-3 stereo output first and point
+# SRC_RUN_DIR at its --out-dir, same pattern as
+# scripts/2026-09-04/aizuchi_normal_fullft_10000.pbs's inner-thought variant.
+# Check the printed WARNING for density_tag_dropped before training on it --
+# a dialogue whose greeting has no lead-in silence loses its tag silently
+# otherwise, and trains as unconditioned data mislabeled with a frequency
+# nothing in the audio actually reflects.
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"

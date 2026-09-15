@@ -442,5 +442,47 @@ class DensityDispatchTest(unittest.TestCase):
         self.assertEqual(turns, [user_turn])
 
 
+class AizuchiFrequencyConditioningLabelTest(unittest.TestCase):
+    """Dialogue.aizuchi_frequency_label -- the value inject_inner_thoughts.py
+    --from-aizuchi-density later embeds as an unspoken tag so the model can be
+    conditioned on how talkative the listener is, instead of the frequency
+    only ever showing up baked into the generated text itself."""
+
+    def test_non_density_placements_have_no_density_concept(self) -> None:
+        self.assertIsNone(
+            gen.resolve_aizuchi_only_density("rule", 0.5, False, random.Random(0))
+        )
+        self.assertIsNone(
+            gen.resolve_aizuchi_only_density("llm", 0.5, True, random.Random(0))
+        )
+
+    def test_fixed_density_is_used_as_is(self) -> None:
+        density = gen.resolve_aizuchi_only_density("density", 0.75, False, random.Random(0))
+        self.assertEqual(density, 0.75)
+
+    def test_mixed_density_draws_a_fresh_value_per_call(self) -> None:
+        rng = random.Random(0)
+        seen = {
+            gen.resolve_aizuchi_only_density("density", 0.5, True, rng) for _ in range(20)
+        }
+        self.assertTrue(all(0.0 <= d < 1.0 for d in seen))
+        self.assertGreater(len(seen), 1)
+
+    def test_density_label_reports_the_actual_resolved_value(self) -> None:
+        self.assertEqual(
+            gen.aizuchi_only_frequency_label("density", "normal", 0.75), "density=0.75"
+        )
+
+    def test_rule_label_is_the_preset_name(self) -> None:
+        self.assertEqual(
+            gen.aizuchi_only_frequency_label("rule", "eager", None), "eager"
+        )
+
+    def test_llm_label_marks_frequency_as_uncontrolled(self) -> None:
+        self.assertEqual(
+            gen.aizuchi_only_frequency_label("llm", "normal", None), "llm"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

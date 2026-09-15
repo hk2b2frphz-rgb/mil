@@ -1293,6 +1293,7 @@ def main() -> int:
                     "risk_level": dialogue.get("risk_level"),
                     "title": dialogue.get("title"),
                     "duplex_task": dialogue.get("duplex_task"),
+                    "aizuchi_frequency_label": dialogue.get("aizuchi_frequency_label"),
                     "turns": [
                         {k: v for k, v in turn.items() if not k.startswith("_")}
                         for turn in dialogue["turns"]
@@ -1311,6 +1312,7 @@ def main() -> int:
                 "risk_level": dialogue.get("risk_level"),
                 "title": dialogue.get("title"),
                 "duplex_task": dialogue.get("duplex_task"),
+                "aizuchi_frequency_label": dialogue.get("aizuchi_frequency_label"),
                 "turns": [
                     {k: v for k, v in turn.items() if not k.startswith("_")}
                     for turn in dialogue["turns"]

@@ -67,6 +67,14 @@ export AIZUCHI_ONLY_PLACEMENT="density"
 # to use when generating training data). Values between anchors interpolate
 # continuously, replacing the discrete preset choice.
 export AIZUCHI_DENSITY="${AIZUCHI_DENSITY:-0.5}"
+# AIZUCHI_DENSITY_MIXED=1 ignores AIZUCHI_DENSITY and draws a fresh 0-1 value
+# per dialogue instead, so one job's output spans the whole range rather than
+# sitting at one fixed value. Needed if you want the model conditioned on
+# frequency -- see the "density conditioning" section in README.md -- since a
+# fixed-density job gives every dialogue the same unspoken tag, which is
+# nothing for the model to learn to distinguish. Off by default: it does not
+# change what a fixed-value run produces.
+export AIZUCHI_DENSITY_MIXED="${AIZUCHI_DENSITY_MIXED:-0}"
 # Vocabulary is the written default (AIZUCHI_ONLY_VOCAB: hai/ee/sou-nan-desu-ne/
 # aa... etc) minus one entry. The real-recording-derived listening_vocab.tsv
 # put "sokka" in reach for almost every position and it stood out; reverting

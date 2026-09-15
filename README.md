@@ -364,6 +364,46 @@ qsub -V scripts/2026-09-15/real_aizuchi_fullft_500.pbs     # 4. full-FT       A1
 `AIZUCHI_NO_REPEAT_WINDOW=0`。既定の 3（直近 3 回に使った語は禁止）だと
 最頻形が打てなくなる。実録音では「うん」だけで 4 回に 1 回だった。
 
+**相槌頻度をモデルに条件付けする。** 密度は元々データ生成時だけのパラメータで、
+学習時にはモデルへ一切伝わらず、生成された対話に埋め込まれた結果（相槌の
+間隔・頻度）からしか学習できなかった。頻度をモデルへの制御可能な入力にする
+ために、以下を追加した:
+
+- `Dialogue.aizuchi_frequency_label` フィールド。placement=density なら実際に
+  使った値（例: `"density=0.75"`）、rule ならプリセット名（`"eager"` 等）、
+  llm なら頻度を制御していないことを表す `"llm"`。`dialogues.jsonl` に
+  シリアライズされ、`generate_kaburi_tts_data.py` が sidecar JSON の
+  `metadata.dialogue.aizuchi_frequency_label` にも引き継ぐ
+- `--aizuchi-density-mixed`（`AIZUCHI_DENSITY_MIXED=1`）。`--aizuchi-density` の
+  固定値を無視し、対話ごとに 0〜1 の一様乱数を引く
+  （`--aizuchi-only-frequency mixed` の density 版）。1 ジョブの中で 0〜1
+  全域をカバーする対話が作れるので、単一の値しか無い固定密度ジョブより
+  条件付けの学習に向く
+- `scripts/inject_inner_thoughts.py --from-aizuchi-density`。既存の「読み上げ
+  ない内心をテキストストリームにだけ差し込む」仕組み（音声は一切変更しない）
+  を流用し、`aizuchi_frequency_label` から `<相槌:density=0.75>` のようなタグを
+  対話の冒頭挨拶の直前に 1 つだけ埋め込む。emotional_state 版
+  （`--from-emotional-state`）と違い対話全体で値が変わらないのはむしろ狙い
+  通りで、学習用途に使ってよい
+
+  **注意:** タグは挨拶の直前の無音に収める必要があり、無音が無い対話では
+  置けずに skip される。密度タグが置けない対話は、生成時に付けたはずの頻度が
+  モデルに伝わらないまま学習データに混ざる（条件付け精度に直接効く）ので、
+  実行後の `WARNING: ... density_tag_dropped` を必ず確認すること
+  （`--chars-per-sec` を上げてタグを短時間に詰めるか収まらなければ根本的に
+  生成側で挨拶前の無音を確保する必要がある）
+
+- 使い方は `scripts/2026-09-15/real_aizuchi_fullft_500.pbs` のコメント参照。
+  step 1（対話生成）を `AIZUCHI_DENSITY_MIXED=1` で回してから
+  `inject_inner_thoughts.py --from-aizuchi-density` を step 3 の出力に対して
+  実行し、その `--out-dir` を fullft の `SRC_RUN_DIR` に渡す
+  （`aizuchi_normal_fullft_10000.pbs` の inner-thought 版と同じパターン）
+
+推論側で同じタグをモデルのテキストストリームの先頭に与えて頻度を選ばせる
+実装は、学習コード自体（`../moshi-finetune-nu-dialogue`）が別リポジトリに
+あり本リポジトリの管轄外。ここではタグの形式と生成側の契約を揃えるところ
+まで。
+
 **one-shot 例は実データから**（`AIZUCHI_ONLY_EXAMPLE=1`、既定で有効）。実際の
 タイムスタンプ付き書き起こしを見ると、裸の一語（「うん」「うん」と2回連続）は
 ごく普通に出てくる。一方「そっかー。何年生かな?」のように相槌と質問が同じ

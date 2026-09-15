@@ -83,6 +83,16 @@ def parse_args() -> argparse.Namespace:
     src.add_argument("--from-emotional-state", action="store_true",
                      help="配管確認用。metadata の emotional_state から一定の"
                           "内心を作る。対話内で不変なので学習用途には使わない")
+    src.add_argument("--from-aizuchi-density", action="store_true",
+                     help="metadata.dialogue.aizuchi_frequency_label "
+                          "（generate_synthetic_moshi_training_data.py が "
+                          "aizuchi-only モードで記録する相槌頻度）から、対話の"
+                          "冒頭挨拶の直前に読み上げないタグを1つだけ置く。"
+                          "モデルに相槌頻度を条件付けさせるためのもの。挨拶の"
+                          "前に無音が無い対話では置き場所が無く skip される点に"
+                          "注意（統計の skip_gap_too_short / skip_no_anchor を"
+                          "確認すること）。emotional_state と違い対話内で"
+                          "不変であることが狙いなので学習用途に使ってよい")
     parser.add_argument("--chars-per-sec", type=float, default=DEFAULT_CHARS_PER_SEC)
     parser.add_argument("--gap-margin-sec", type=float, default=DEFAULT_GAP_MARGIN_SEC)
     parser.add_argument("--wav", choices=["symlink", "copy", "none"], default="symlink",
@@ -219,6 +229,23 @@ def bootstrap_items(payload: dict[str, Any], entries: list[list[Any]]) -> list[d
             for i in range(1, len(moshi_turn_starts(entries)))]
 
 
+def density_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """相槌頻度の条件付けタグを冒頭挨拶の直前に1つだけ置く。
+
+    emotional_state と違い、対話全体を通して値が変わらないことが目的そのもの
+    （density_mixed で対話ごとに引いた頻度をモデルに教えるタグなので、対話の
+    途中でぶれてはむしろ困る）。turn_index=0 は冒頭挨拶自身を指すので、
+    bootstrap_items が「まだ何も聴いていない」ことを理由に避けている場所に、
+    ここでは意図して置く。
+    """
+    meta = payload.get("metadata") or {}
+    dialogue = meta.get("dialogue") or {}
+    label = str(dialogue.get("aizuchi_frequency_label") or "").strip()
+    if not label:
+        return []
+    return [{"turn_index": 0, "text": f"<相槌:{label}>"}]
+
+
 def main() -> int:
     args = parse_args()
     if not args.data_dir.is_dir():
@@ -250,8 +277,14 @@ def main() -> int:
             stats["skip_no_utterance_alignments"] += 1
             continue
 
-        items = (bootstrap_items(payload, entries) if args.from_emotional_state
-                 else thoughts.get(stem, []))
+        if args.from_emotional_state:
+            items = bootstrap_items(payload, entries)
+        elif args.from_aizuchi_density:
+            items = density_items(payload)
+            if items:
+                stats["density_labeled"] += 1
+        else:
+            items = thoughts.get(stem, [])
         if not items:
             stats["skip_no_thoughts"] += 1
             continue
@@ -260,6 +293,8 @@ def main() -> int:
                                       args.gap_margin_sec, stats)
         if injected == 0:
             stats["samples_unchanged"] += 1
+            if args.from_aizuchi_density:
+                stats["density_tag_dropped"] += 1
             continue
 
         word_level, split_stats = split_utterance_alignments(merged)
@@ -267,12 +302,18 @@ def main() -> int:
         payload["alignments"] = word_level
         payload["alignments_utterance"] = merged
         meta = payload.setdefault("metadata", {})
+        if args.from_emotional_state:
+            source = "emotional_state"
+        elif args.from_aizuchi_density:
+            source = "aizuchi_density"
+        else:
+            source = str(args.thoughts)
         meta["inner_thoughts"] = {
             "version": 1,
             "injected": injected,
             "chars_per_sec": args.chars_per_sec,
             "gap_margin_sec": args.gap_margin_sec,
-            "source": "emotional_state" if args.from_emotional_state else str(args.thoughts),
+            "source": source,
         }
         meta["alignments_word_split"] = dict(
             meta.get("alignments_word_split") or {}, words=split_stats["words"]
@@ -299,6 +340,18 @@ def main() -> int:
     if stats["skip_gap_too_short"]:
         print("\nNOTE: skip_gap_too_short は内心が無音に収まらなかった件数。"
               "\n      内心を短くするか --chars-per-sec を見直すこと。")
+    if args.from_aizuchi_density:
+        dropped = stats["density_tag_dropped"]
+        labeled = stats["density_labeled"]
+        if dropped:
+            print(
+                f"\nWARNING: density タグが挟めず無条件のまま残った対話が "
+                f"{dropped}/{labeled} 件あります（冒頭挨拶の前に十分な無音が"
+                f"無かった）。この分は生成時に付けたはずの相槌頻度がモデルに"
+                f"伝わらないまま学習データに混ざるので、条件付けの精度に効きます。"
+                f"--chars-per-sec を上げる（タグを短時間に詰める）か、生成側で"
+                f"挨拶の前に無音を作ってから再実行してください。"
+            )
     return 0
 
 
