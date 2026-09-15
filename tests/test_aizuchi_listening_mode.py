@@ -191,5 +191,37 @@ class ThinkingPromptTest(unittest.TestCase):
         self.assertEqual(gen.parse_aizuchi_listening_reactions(raw, ["a"]), [])
 
 
+class ThinkingTruncationTest(unittest.TestCase):
+    def test_an_unclosed_think_block_is_truncated(self) -> None:
+        self.assertTrue(
+            gen.aizuchi_thinking_truncated("<think>まだ考えている途中で token が切れて")
+        )
+
+    def test_a_deliberately_empty_reactions_list_is_not_truncated(self) -> None:
+        # The model finished reasoning and correctly decided nothing was
+        # worth responding to; this must not be treated as a failure that
+        # deserves a retry.
+        self.assertFalse(
+            gen.aizuchi_thinking_truncated(
+                "<think>短いので反応不要。</think>\n" '{"reactions":[]}'
+            )
+        )
+
+    def test_a_normal_closed_response_is_not_truncated(self) -> None:
+        self.assertFalse(
+            gen.aizuchi_thinking_truncated(
+                "<think>ここで反応。</think>\n"
+                '{"reactions":[{"after_clause":1,"text":"うん"}]}'
+            )
+        )
+
+    def test_plain_json_with_no_thinking_at_all_is_not_truncated(self) -> None:
+        # enable_thinking=False still runs through this check on the retry
+        # path; ordinary output must not be flagged.
+        self.assertFalse(
+            gen.aizuchi_thinking_truncated('{"reactions":[{"after_clause":1,"text":"うん"}]}')
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

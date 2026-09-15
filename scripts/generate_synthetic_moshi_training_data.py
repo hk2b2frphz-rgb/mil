@@ -1841,6 +1841,25 @@ class LLMDialogueGenerator:
             role_name="aizuchiAI",
             enable_thinking=thinking or None,
         )
+        retried = False
+        if thinking and aizuchi_thinking_truncated(raw):
+            # 予算内に考え終わらず </think> が閉じないまま切れた。予算を
+            # 増やしても「今度は足りる」保証は無い(発話ごとに考える長さが
+            # 違う)ので、その場で thinking を切って再試行する方が確実。
+            retried = True
+            logger.warning(
+                "aizuchiAI: thinking がトークン予算内に終わらず JSON が届き"
+                "ませんでした。thinking を切って再試行します"
+                " (case=%s block=%s)",
+                case_id, block_index,
+            )
+            raw = self.call_agent(
+                prompt,
+                temperature=self.args.multi_agent_aizuchi_temperature,
+                max_tokens=400,
+                role_name="aizuchiAI-retry",
+                enable_thinking=False,
+            )
         reactions = parse_aizuchi_listening_reactions(raw, clauses)
         self.trace_event(
             {
@@ -1848,6 +1867,8 @@ class LLMDialogueGenerator:
                 "case_id": case_id,
                 "block_index": block_index,
                 "placement": "llm",
+                "thinking": thinking,
+                "thinking_retried": retried,
                 "n_clauses": len(clauses),
                 "prompt_system": prompt.system,
                 "prompt_user": prompt.user,
@@ -3455,6 +3476,20 @@ JSONだけを返してください:
 {{"reactions":[{example_json}]}}
 """.strip()
     return AgentPrompt(system=AIZUCHI_LISTENING_SYSTEM_PROMPT, user=prompt)
+
+
+def aizuchi_thinking_truncated(raw: str) -> bool:
+    """thinking の予算切れで JSON まで届かなかったかを判定する。
+
+    reasoning が終わらないと </think> が閉じないので strip_thinking は全文を
+    そのまま返し、そこに波括弧の対が無い。「モデルが reactions=[] と正しく
+    判断した」（JSON は届いている）場合と区別するためにここだけ見る。
+    """
+    try:
+        extract_json_object(raw)
+    except (ValueError, json.JSONDecodeError):
+        return True
+    return False
 
 
 def parse_aizuchi_listening_reactions(
