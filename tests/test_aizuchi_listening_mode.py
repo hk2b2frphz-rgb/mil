@@ -109,14 +109,19 @@ class ListeningParseTest(unittest.TestCase):
         self.assertNotIn("娘が一人いるんですけど", prompt.user)
 
     def test_the_real_example_appears_when_requested(self) -> None:
-        # Drawn from an actual transcript rather than invented, with the
-        # non-backchannel half of a fused turn ("sokka-. nan'nensei kana?")
-        # stripped out -- this mode only reproduces the backchannel.
+        # Drawn from actual transcript excerpts rather than invented, with the
+        # non-backchannel half of each fused turn ("sokka-. nan'nensei kana?")
+        # stripped out -- this mode only reproduces the backchannel. Multiple
+        # examples, not one, since a single excerpt only ever shows bare
+        # words and one elongation, not the other real patterns (a repeated
+        # run, two backchannels fused into one word).
         prompt = gen.build_aizuchi_listening_prompt(
             {"id": "x"}, [], self.TEXT, ["うん", "そっか"], with_example=True
         )
         self.assertIn("娘が一人いるんですけど", prompt.user)
-        self.assertIn("実際の相談ダイヤルの書き起こしから", prompt.user)
+        self.assertIn("例1（", prompt.user)
+        self.assertIn("例2（", prompt.user)
+        self.assertIn("例3（", prompt.user)
         self.assertNotIn("何年生かな", prompt.user)
 
     def test_the_prompt_names_the_last_clause_and_the_vocabulary(self) -> None:
