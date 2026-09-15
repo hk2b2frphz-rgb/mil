@@ -25,14 +25,20 @@ export NUM_CASES="${NUM_CASES:-500}"
 
 export DIALOGUE_GENERATION_MODE="aizuchi-only"
 export AIZUCHI_ONLY_PLACEMENT="llm"
-export AIZUCHI_VOCAB_FILE="$PWD/scripts/2026-09-15/listening_vocab.tsv"
-export AIZUCHI_PROBE_REPLIES_FILE="$PWD/scripts/2026-09-15/listening_probe_replies.txt"
-export AIZUCHI_NO_REPEAT_WINDOW="0"
-# Shows aizuchiAI one real example (non-backchannel content stripped from an
-# actual transcript excerpt) instead of zero-shot. On by default here: the
-# real recording showed the model's job is closer to "match this rhythm" than
-# "follow this rule", which a worked example teaches better than more prose.
-export AIZUCHI_ONLY_EXAMPLE="${AIZUCHI_ONLY_EXAMPLE:-1}"
+# Vocabulary is the written default (AIZUCHI_ONLY_VOCAB: hai/ee/sou-nan-desu-ne/
+# aa... etc) minus one entry, not the real-recording-derived listening_vocab.tsv
+# this run used earlier. That vocabulary put "sokka" in reach for almost every
+# position, and with only a few examples all built around "sokka" family
+# forms, the model leaned on it far past what felt natural. Reverting to the
+# plain written list traded that problem for a smaller one: bare "un." alone
+# then stood out the same way, while "un, un." and "hai, hai." (also in the
+# written list) did not. aizuchi_vocab_no_bare_un.tsv is the written list with
+# only that one entry removed.
+# scripts/2026-09-15/listening_vocab.tsv and real_aizuchi_examples.md are kept
+# on disk if the real-vocabulary direction is worth revisiting, just not
+# wired in by default here.
+export AIZUCHI_VOCAB_FILE="$PWD/scripts/2026-09-15/aizuchi_vocab_no_bare_un.tsv"
+export AIZUCHI_ONLY_EXAMPLE="${AIZUCHI_ONLY_EXAMPLE:-0}"
 
 export AIZUCHI_ENABLE_THINKING="${AIZUCHI_ENABLE_THINKING:-0}"
 export AIZUCHI_THINKING_MAX_TOKENS="${AIZUCHI_THINKING_MAX_TOKENS:-1600}"

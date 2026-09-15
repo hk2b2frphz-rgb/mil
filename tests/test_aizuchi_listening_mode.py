@@ -95,12 +95,14 @@ class ListeningParseTest(unittest.TestCase):
 
     def test_bare_single_words_are_no_longer_forbidden(self) -> None:
         # The real recording showed "un" repeated bare, back to back. The
-        # earlier prompt told the model never to do that; it was wrong.
+        # earlier prompt told the model never to do that; it was wrong. The
+        # instruction is worded generically (no hardcoded word) so it stays
+        # correct across a vocabulary swap.
         prompt = gen.build_aizuchi_listening_prompt(
             {"id": "x"}, [], self.TEXT, ["うん", "そっか"]
         )
         self.assertNotIn("並べないでください", prompt.user)
-        self.assertIn("裸の一語（「うん」「そっか」）は普通に使ってください", prompt.user)
+        self.assertIn("普通に使ってください", prompt.user)
 
     def test_the_example_is_omitted_by_default(self) -> None:
         prompt = gen.build_aizuchi_listening_prompt(
