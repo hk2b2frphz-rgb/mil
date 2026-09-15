@@ -792,8 +792,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         if limit and processed >= limit:
             break
 
+    # 学習側（moshi-finetune）が読むのはこの manifest。data_stereo だけ書いても
+    # 学習には渡せないので、差し込んだ結果に対して作り直す。
+    manifest_path = args.out_dir / "synthetic_moshi_train.jsonl"
+    with manifest_path.open("w", encoding="utf-8") as handle:
+        for path in sorted(out_stereo.glob("*.wav")):
+            sidecar = path.with_suffix(".json")
+            if not sidecar.is_file():
+                continue
+            meta = json.loads(sidecar.read_text(encoding="utf-8")).get("metadata", {})
+            handle.write(
+                json.dumps(
+                    {
+                        "path": str(path.relative_to(args.out_dir)).replace("\\", "/"),
+                        "duration": float(meta.get("duration_sec") or 0.0),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
     print()
     print(f"対話 {processed} 本 / 差し替え {total_swaps} 箇所")
+    print(f"manifest: {manifest_path}")
     if replaced_texts:
         print("差し替えた語:")
         for text, count in sorted(replaced_texts.items(), key=lambda kv: -kv[1]):

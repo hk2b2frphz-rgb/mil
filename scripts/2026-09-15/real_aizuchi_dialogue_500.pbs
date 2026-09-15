@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N ra_dlg500
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# STEP 1 of 4. 500 listener-only dialogues, real backchannel vocabulary,
+# placement decided by the model.
+#
+#   qsub -V scripts/2026-09-15/real_aizuchi_dialogue_500.pbs
+#
+# Two things differ from the aizuchi_normal corpora.
+#
+# The vocabulary is the one measured in the real recording rather than the
+# written one. Its top four words -- 76% of the 116 backchannels counted --
+# appear nowhere in the vocabulary the earlier corpora were generated from, so
+# a corpus built on the written list cannot be used to study them.
+#
+# The placement is the model's. The earlier route scored each clause boundary,
+# rolled dice against a per-boundary probability, and capped the count per
+# utterance; the model was then asked only which word to say at positions
+# already chosen. Nothing in that asks whether this is a place a listener
+# should respond. Here the model is given the utterance split into clauses and
+# chooses the positions itself, with no cap, and is told explicitly to respond
+# where the speaker finishes -- a listener that goes quiet at the end of a
+# sentence sounds like one who stopped listening.
+#
+# no-repeat-window is 0 because the vocabulary is now seven words rather than
+# seventeen. The default of 3 would forbid a word for three turns after use,
+# and the real recording says "un" alone was one backchannel in four.
+#
+# A100 for the dialogue LLM (vLLM, Qwen3.6-27B).
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export CORPUS_VERSION="${CORPUS_VERSION:-v1}"
+export BATCH_ID="real_aizuchi_500_${CORPUS_VERSION}"
+export OUT_ROOT="$PWD/data/runs/real_aizuchi_500_${CORPUS_VERSION}/dialogue"
+export NUM_CASES="${NUM_CASES:-500}"
+
+export DIALOGUE_GENERATION_MODE="aizuchi-only"
+export AIZUCHI_ONLY_PLACEMENT="llm"
+export AIZUCHI_VOCAB_FILE="$PWD/scripts/2026-09-15/real_backchannel_dist.tsv"
+export AIZUCHI_NO_REPEAT_WINDOW="0"
+
+# The frequency preset only feeds the rule-based placement, which is off here.
+# It is still set so the run records which one it would have been.
+export AIZUCHI_ONLY_FREQUENCY="normal"
+export AIZUCHI_ONLY_MIN_BLOCKS="${AIZUCHI_ONLY_MIN_BLOCKS:-4}"
+export AIZUCHI_ONLY_MAX_BLOCKS="${AIZUCHI_ONLY_MAX_BLOCKS:-6}"
+
+# No silences and no "are you still listening?" checks, as in normal v6.
+export AIZUCHI_ONLY_MAX_SILENCES="0"
+export AIZUCHI_ONLY_SILENCE_RATE="0"
+export AIZUCHI_ONLY_PROBE_RATE="0"
+
+exec bash scripts/run_dialogues_qwen_3000.pbs

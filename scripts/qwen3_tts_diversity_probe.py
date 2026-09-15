@@ -900,8 +900,11 @@ def write_wav(path: Path, signal: np.ndarray, sample_rate: int) -> str:
 def load_texts(path: Path | None) -> list[str]:
     if path is None:
         return list(DEFAULT_TEXTS)
+    # <語>\t<重み> の形（real_backchannel_dist.tsv）もそのまま渡せるように、
+    # 1 列目だけ取る。重みはここでは使わない -- 何本ずつ作るかは --repeats で
+    # 決めており、バンクは語ごとに同じ深さで持っておく方が引きやすい。
     texts = [
-        line.strip()
+        line.strip().split("\t")[0].split()[0]
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]

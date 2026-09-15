@@ -40,7 +40,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 import numpy as np
 
@@ -548,6 +548,31 @@ def parse_args() -> argparse.Namespace:
             "instruction given to aizuchiAI. In aizuchi-only mode it replaces "
             "--multi-agent-max-aizuchi-per-user / --multi-agent-aizuchi-min-chars."
         ),
+    )
+    parser.add_argument(
+        "--aizuchi-only-placement",
+        choices=("rule", "llm"),
+        default=os.environ.get("AIZUCHI_ONLY_PLACEMENT") or "rule",
+        help=(
+            "相づちを打つ位置の決め方。rule=句の切れ目ごとの確率で抽選（既定）/ "
+            "llm=どこで打つかもモデルが決める（上限なし・末尾も候補）"
+        ),
+    )
+    parser.add_argument(
+        "--aizuchi-vocab-file",
+        type=Path,
+        default=(
+            Path(os.environ["AIZUCHI_VOCAB_FILE"])
+            if os.environ.get("AIZUCHI_VOCAB_FILE")
+            else None
+        ),
+        help="相づち語彙を差し替える。1 行 1 語（<語>\\t<重み> も可）",
+    )
+    parser.add_argument(
+        "--aizuchi-no-repeat-window",
+        type=int,
+        default=int(os.environ.get("AIZUCHI_NO_REPEAT_WINDOW") or 3),
+        help="直近この回数に使った語は使わない。0 で無効（語彙を絞ったとき用）",
     )
     parser.add_argument(
         "--aizuchi-only-example",
@@ -1690,10 +1715,19 @@ class LLMDialogueGenerator:
         frequency: dict[str, Any],
         rng: random.Random,
     ) -> list[DialogueTurn]:
-        """聞き手の反応を入れる。位置はこちらが決め、語だけモデルに訊く。"""
+        """聞き手の反応を入れる。位置の決め方は 2 通り（--aizuchi-only-placement）。"""
         clauses = split_text_into_clauses(user_turn.text)
         if len(clauses) < 1:
             return [user_turn]
+        if getattr(self.args, "aizuchi_only_placement", "rule") == "llm":
+            return self._react_by_listening(
+                use_case=use_case,
+                visible_turns=visible_turns,
+                user_turn=user_turn,
+                clauses=clauses,
+                case_id=case_id,
+                block_index=block_index,
+            )
         points = pick_reaction_points(clauses, frequency, rng)
         if not points:
             return [user_turn]
@@ -1720,6 +1754,43 @@ class LLMDialogueGenerator:
                 "block_index": block_index,
                 "frequency": frequency.get("label"),
                 "points": points,
+                "prompt_system": prompt.system,
+                "prompt_user": prompt.user,
+                "raw_text": raw[:1000],
+                "reactions": reactions,
+            }
+        )
+        return user_turns_with_aizuchi(user_turn.text, reactions)
+
+    def _react_by_listening(
+        self,
+        *,
+        use_case: dict[str, Any],
+        visible_turns: list[DialogueTurn],
+        user_turn: DialogueTurn,
+        clauses: list[str],
+        case_id: str,
+        block_index: int,
+    ) -> list[DialogueTurn]:
+        """どこで打つかもモデルに決めさせる。上限は置かない。"""
+        vocab = sorted(AIZUCHI_ACTIVE_VOCAB)
+        prompt = build_aizuchi_listening_prompt(
+            use_case, visible_turns, user_turn.text, vocab
+        )
+        raw = self.call_agent(
+            prompt,
+            temperature=self.args.multi_agent_aizuchi_temperature,
+            max_tokens=400,
+            role_name="aizuchiAI",
+        )
+        reactions = parse_aizuchi_listening_reactions(raw, clauses)
+        self.trace_event(
+            {
+                "event": "aizuchi_decision",
+                "case_id": case_id,
+                "block_index": block_index,
+                "placement": "llm",
+                "n_clauses": len(clauses),
                 "prompt_system": prompt.system,
                 "prompt_user": prompt.user,
                 "raw_text": raw[:1000],
@@ -2760,6 +2831,41 @@ AIZUCHI_ONLY_VOCAB = (
     # ためらいや詫びへの応え。
     "大丈夫ですよ。", "はい、大丈夫ですよ。",
 )
+# 実行時に差し替わる相づち語彙。--aizuchi-vocab-file を渡すと、実録音で数えた
+# 語（うん / うーん / そっか / うんうん ...）に入れ替わる。合成側の語彙は実録音の
+# 上位 4 語をひとつも含んでいないので、その 4 語で学習データを作りたければ
+# 差し替えるしかない。parse と sanitize はこの集合を見る。
+AIZUCHI_ACTIVE_VOCAB: set[str] = set(AIZUCHI_ONLY_VOCAB)
+# 直近この回数に使った語は使わない。語彙が 17 語あるうちは 3 で足りるが、実録音の
+# 7 語に絞ると「うん」が 3 回に 1 回しか打てなくなる（実録音では 116 件中 28 件が
+# 「うん」= 4 回に 1 回は同じ語）。語彙の広さに合わせて動かす。
+AIZUCHI_NO_REPEAT_WINDOW = 3
+
+
+def set_aizuchi_vocab(words: Sequence[str], no_repeat_window: int | None = None) -> None:
+    """相づち語彙を差し替える。空なら既定のまま。"""
+    global AIZUCHI_ACTIVE_VOCAB, AIZUCHI_NO_REPEAT_WINDOW
+
+    cleaned = [str(word).strip() for word in words if str(word).strip()]
+    if cleaned:
+        AIZUCHI_ACTIVE_VOCAB = set(cleaned)
+    if no_repeat_window is not None:
+        AIZUCHI_NO_REPEAT_WINDOW = max(0, int(no_repeat_window))
+
+
+def load_aizuchi_vocab_file(path: Path) -> list[str]:
+    """1 行 1 語。<語>\t<重み> の形（real_backchannel_dist.tsv）も受ける。"""
+    words: list[str] = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        words.append(line.split("\t")[0].split()[0])
+    if not words:
+        raise SystemExit(f"相づち語彙が空です: {path}")
+    return words
+
+
 # 「聞いていますか?」への応答だけは相づち語彙の外に出る。相づちと違って user の
 # 発話に重ねず、質問の後に順番に置く（TTS の overlap 対象にもならない）。
 AIZUCHI_ONLY_PROBE_REPLIES = (
@@ -3170,6 +3276,103 @@ JSONだけを返してください。
     return AgentPrompt(system=AIZUCHI_ONLY_JUDGE_SYSTEM_PROMPT, user=prompt)
 
 
+AIZUCHI_LISTENING_SYSTEM_PROMPT = """
+あなたは傾聴の相談員の「聞き手としての耳」です。相手の話を聞きながら、
+相づちを打つべき所で打ちます。どこで打つか、いくつ打つかは、あなたが決めます。
+相づち以外は一切話しません。JSONだけを出力してください。
+""".strip()
+
+
+def build_aizuchi_listening_prompt(
+    use_case: dict[str, Any],
+    turns: list[DialogueTurn],
+    user_text: str,
+    vocab: Sequence[str],
+) -> AgentPrompt:
+    """どこで打つかも、何と言うかも、モデルに決めさせる。
+
+    位置をこちらが確率で決める方式（pick_reaction_points）との違いはそこだけ
+    ではない。あちらは句の切れ目の種類ごとに決めた確率でサイコロを振るので、
+    「傾聴としてここで受け止めるべき」という判断が入らない。数も max_per_turn
+    で機械的に抑えていた。ここでは上限を置かず、話の内容を見て決めさせる。
+
+    末尾（最後の句のうしろ）も候補に入れる。言い終えたところで何も返さない
+    聞き手は不自然で、実際の傾聴では言い切りにこそ受け止めが入る。
+    """
+    transcript = dialogue_turns_to_transcript(turns) or "(まだ会話は始まっていません)"
+    clauses = split_text_into_clauses(user_text)
+    numbered = "\n".join(f"{i + 1}: {clause}" for i, clause in enumerate(clauses))
+    words = " / ".join(vocab)
+    last = len(clauses)
+    sample_word = vocab[0] if vocab else "うん"
+    # 句が 1 つしかない発話で同じ位置を 2 回並べると、重複を返してよいと
+    # 読まれかねない。
+    example_indices = [1] if last <= 1 else [1, last]
+    example_json = ", ".join(
+        f'{{"after_clause": {index}, "text": "{sample_word}"}}'
+        for index in example_indices
+    )
+    prompt = f"""
+相談ケース:
+{case_brief(use_case)}
+
+直前までの会話:
+{transcript}
+
+今回の相手の発話を句ごとに分けたもの:
+{numbered}
+
+この話を聞きながら、相づちを打つ所を自分で選んでください。
+
+- 位置は「何番の句を言い終えた直後」で指定します。1 から {last} まで。
+- {last} は発話全体を言い終えた所です。**言い切った所には受け止めを置いてください。**
+  黙って次を待つ聞き手は、聞いていないのと同じに聞こえます。
+- 数に上限はありません。打つべき所には打ち、打つ必要のない所では黙ってください。
+  相手が言い淀んでいる途中、単語の途中のような所では打ちません。
+- つらさがこぼれた所、事実の区切り、言い切った所には打ちます。
+- 使える語はこれだけです: {words}
+- 相手の言葉を言い換えたり、質問したり、助言したりしません。
+
+JSONだけを返してください:
+{{"reactions":[{example_json}]}}
+""".strip()
+    return AgentPrompt(system=AIZUCHI_LISTENING_SYSTEM_PROMPT, user=prompt)
+
+
+def parse_aizuchi_listening_reactions(
+    text: str,
+    clauses: list[str],
+) -> list[dict[str, Any]]:
+    """位置もモデルが決めた返答を受ける。句の範囲内で語彙内なら通す。"""
+    try:
+        data = extract_json_object(text)
+    except (ValueError, json.JSONDecodeError):
+        return []
+    raw = data.get("reactions")
+    if not isinstance(raw, list):
+        raw = data.get("insertions")
+    if not isinstance(raw, list):
+        return []
+    allowed = set(AIZUCHI_ACTIVE_VOCAB)
+    out: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            after_clause = int(item.get("after_clause"))
+        except (TypeError, ValueError):
+            continue
+        if not 1 <= after_clause <= len(clauses) or after_clause in seen:
+            continue
+        value = str(item.get("text") or "").strip()
+        if value not in allowed:
+            continue
+        seen.add(after_clause)
+        out.append({"after_clause": after_clause, "text": value})
+    return sorted(out, key=lambda entry: entry["after_clause"])
+
+
 def parse_aizuchi_reactions(
     text: str,
     clauses: list[str],
@@ -3185,7 +3388,7 @@ def parse_aizuchi_reactions(
         raw = data.get("insertions")  # 旧スキーマでの返答も受ける
     if not isinstance(raw, list):
         return []
-    allowed = set(AIZUCHI_ONLY_VOCAB)
+    allowed = set(AIZUCHI_ACTIVE_VOCAB)
     by_index = {int(p["after_clause"]): p for p in points}
     out: list[dict[str, Any]] = []
     seen: set[int] = set()
@@ -3325,7 +3528,7 @@ def sanitize_aizuchi_only_turns(
     すぐ後の繰り返し」。確認への応答だけは沈黙の直後でも通す。
     """
     allowed = (
-        set(AIZUCHI_ONLY_VOCAB)
+        set(AIZUCHI_ACTIVE_VOCAB)
         | set(AIZUCHI_ONLY_PROBE_REPLIES)
         | {AIZUCHI_ONLY_GREETING}
     )
@@ -3361,8 +3564,9 @@ def sanitize_aizuchi_only_turns(
             # 相手が黙っている間は聞き手も黙る。ここを埋めると、沈黙のたびに
             # 相づちを吐き続けるモデルになる。
             continue
-        # 直近3回に使った語は、間に user 発話が何回挟まっていても使わない。
-        if text in recent_moshi:
+        # 直近に使った語は、間に user 発話が何回挟まっていても使わない。窓は
+        # 語彙の広さに合わせる（AIZUCHI_NO_REPEAT_WINDOW=0 で無効）。
+        if AIZUCHI_NO_REPEAT_WINDOW and text in recent_moshi:
             continue
         # 「そうなんですね」は1対話1回まで。もとの方針は語ごとの制限なので、
         # 二語をまとめて1回に絞っていた実装のほうが厳しすぎた。
@@ -3372,7 +3576,10 @@ def sanitize_aizuchi_only_turns(
             limited_used[text] = 1
         out.append(turn)
         recent_moshi.append(text)
-        del recent_moshi[:-3]
+        if AIZUCHI_NO_REPEAT_WINDOW:
+            del recent_moshi[:-AIZUCHI_NO_REPEAT_WINDOW]
+        else:
+            recent_moshi.clear()
     # 末尾の沈黙は誰も話さないまま終わる音声にしかならない。
     while out and out[-1].speaker == "silence":
         out.pop()
@@ -4696,6 +4903,18 @@ def write_dialogues_only(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
+    # 語彙の差し替えは生成が始まる前に一度だけ。parse も sanitize もこの集合を
+    # 見るので、途中で変えると同じ対話の中で基準が変わる。
+    if getattr(args, "aizuchi_vocab_file", None):
+        words = load_aizuchi_vocab_file(args.aizuchi_vocab_file)
+        set_aizuchi_vocab(words, args.aizuchi_no_repeat_window)
+        print(
+            f"相づち語彙を差し替えました ({len(words)} 語, "
+            f"no-repeat-window={AIZUCHI_NO_REPEAT_WINDOW}): {' / '.join(words)}",
+            file=sys.stderr,
+        )
+    elif getattr(args, "aizuchi_no_repeat_window", 3) != 3:
+        set_aizuchi_vocab((), args.aizuchi_no_repeat_window)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     random.seed(args.seed)
     np.random.seed(args.seed)

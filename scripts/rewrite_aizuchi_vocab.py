@@ -117,6 +117,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--num-dialogues", type=int, default=0, help="先頭 N 本だけ")
+    parser.add_argument(
+        "--keep-text",
+        action="store_true",
+        help=(
+            "相槌を書き換えず、user のみの写しと語彙ファイルだけ作る。対話生成の"
+            "時点ですでに実録音の語彙で作ってある場合はこちら"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args(argv)
 
@@ -136,10 +144,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not dialogues:
         raise SystemExit(f"対話がありません: {args.dialogues_jsonl}")
 
-    rewritten, replaced, kept = rewrite(
-        dialogues, words, weights, args.max_chars,
-        args.all_listener_turns, random.Random(args.seed),
-    )
+    if args.keep_text:
+        rewritten = list(dialogues)
+        replaced = {}
+        kept = {}
+        for dialogue in rewritten:
+            for turn in dialogue.get("turns") or []:
+                text = str(turn.get("text", "")).strip()
+                if str(turn.get("speaker", "")).strip().lower() != LISTENER or not text:
+                    continue
+                if is_backchannel(text, args.max_chars):
+                    stripped = text.strip(STRIP_CHARS)
+                    replaced[stripped] = replaced.get(stripped, 0) + 1
+                else:
+                    kept[text] = kept.get(text, 0) + 1
+    else:
+        rewritten, replaced, kept = rewrite(
+            dialogues, words, weights, args.max_chars,
+            args.all_listener_turns, random.Random(args.seed),
+        )
 
     args.out_jsonl.parent.mkdir(parents=True, exist_ok=True)
     with args.out_jsonl.open("w", encoding="utf-8") as handle:
@@ -171,7 +194,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"user のみ: {kept_turns} ターン -> {args.user_only_jsonl}")
 
     total = sum(replaced.values())
-    print(f"対話 {len(rewritten)} 本 / 相槌 {total} 箇所を書き換えました")
+    verb = "そのまま数えました" if args.keep_text else "書き換えました"
+    print(f"対話 {len(rewritten)} 本 / 相槌 {total} 箇所を{verb}")
     for word, count in sorted(replaced.items(), key=lambda kv: -kv[1]):
         share = 100.0 * count / total if total else 0.0
         print(f"  {word} x{count} ({share:.0f}%)")

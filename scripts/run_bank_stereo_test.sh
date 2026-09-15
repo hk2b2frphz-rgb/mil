@@ -63,8 +63,14 @@ case "$AIZUCHI_PRESET" in
     *) echo "ERROR: AIZUCHI_PRESET must be normal, eager or flood" >&2; exit 1 ;;
 esac
 AIZUCHI_VERSION="${AIZUCHI_VERSION:-$PRESET_VERSION}"
-CORPUS_ROOT="aizuchi_${AIZUCHI_PRESET}_3000_${AIZUCHI_VERSION}"
+# CORPUS_ROOT can be set directly for a corpus that is not one of the aizuchi
+# presets -- the listening-mode 500 uses that.
+CORPUS_ROOT="${CORPUS_ROOT:-aizuchi_${AIZUCHI_PRESET}_3000_${AIZUCHI_VERSION}}"
 SOURCE_DIALOGUES="${DIALOGUES_JSONL:-$REPO_ROOT/data/runs/$CORPUS_ROOT/dialogue/llm_dialogues/dialogues.jsonl}"
+# The dialogues may already carry the real vocabulary (generated that way
+# rather than rewritten into it). Then the rewrite must not draw new words --
+# it only writes the user-only copy and the vocabulary list.
+KEEP_TEXT="${KEEP_TEXT:-0}"
 RASTER_MODE="${RASTER_MODE:-pred}"
 MATCH_TOP_K="${MATCH_TOP_K:-5}"
 SEED="${SEED:-0}"
@@ -113,7 +119,9 @@ REWRITE_ARGS=(
     --num-dialogues "$NUM_DIALOGUES"
     --seed "$SEED"
 )
-if [[ -n "${BACKCHANNEL_TEXT:-}" ]]; then
+if [[ "$KEEP_TEXT" == "1" ]]; then
+    REWRITE_ARGS+=(--keep-text)
+elif [[ -n "${BACKCHANNEL_TEXT:-}" ]]; then
     REWRITE_ARGS+=(--text "$BACKCHANNEL_TEXT")
 elif [[ -n "${BACKCHANNEL_DIST:-}" ]]; then
     REWRITE_ARGS+=(--dist "$BACKCHANNEL_DIST")
