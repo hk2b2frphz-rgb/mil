@@ -28,6 +28,11 @@ export AIZUCHI_ONLY_PLACEMENT="llm"
 export AIZUCHI_VOCAB_FILE="$PWD/scripts/2026-09-15/listening_vocab.tsv"
 export AIZUCHI_PROBE_REPLIES_FILE="$PWD/scripts/2026-09-15/listening_probe_replies.txt"
 export AIZUCHI_NO_REPEAT_WINDOW="0"
+# Shows aizuchiAI one real example (non-backchannel content stripped from an
+# actual transcript excerpt) instead of zero-shot. On by default here: the
+# real recording showed the model's job is closer to "match this rhythm" than
+# "follow this rule", which a worked example teaches better than more prose.
+export AIZUCHI_ONLY_EXAMPLE="${AIZUCHI_ONLY_EXAMPLE:-1}"
 
 export AIZUCHI_ENABLE_THINKING="${AIZUCHI_ENABLE_THINKING:-0}"
 export AIZUCHI_THINKING_MAX_TOKENS="${AIZUCHI_THINKING_MAX_TOKENS:-1600}"

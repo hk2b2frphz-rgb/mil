@@ -89,6 +89,32 @@ class ListeningParseTest(unittest.TestCase):
     def test_junk_returns_nothing_rather_than_raising(self) -> None:
         self.assertEqual(gen.parse_aizuchi_listening_reactions("no json here", self.clauses()), [])
 
+    def test_bare_single_words_are_no_longer_forbidden(self) -> None:
+        # The real recording showed "un" repeated bare, back to back. The
+        # earlier prompt told the model never to do that; it was wrong.
+        prompt = gen.build_aizuchi_listening_prompt(
+            {"id": "x"}, [], self.TEXT, ["うん", "そっか"]
+        )
+        self.assertNotIn("並べないでください", prompt.user)
+        self.assertIn("裸の一語（「うん」「そっか」）は普通に使ってください", prompt.user)
+
+    def test_the_example_is_omitted_by_default(self) -> None:
+        prompt = gen.build_aizuchi_listening_prompt(
+            {"id": "x"}, [], self.TEXT, ["うん", "そっか"]
+        )
+        self.assertNotIn("娘が一人いるんですけど", prompt.user)
+
+    def test_the_real_example_appears_when_requested(self) -> None:
+        # Drawn from an actual transcript rather than invented, with the
+        # non-backchannel half of a fused turn ("sokka-. nan'nensei kana?")
+        # stripped out -- this mode only reproduces the backchannel.
+        prompt = gen.build_aizuchi_listening_prompt(
+            {"id": "x"}, [], self.TEXT, ["うん", "そっか"], with_example=True
+        )
+        self.assertIn("娘が一人いるんですけど", prompt.user)
+        self.assertIn("実際の相談ダイヤルの書き起こしから", prompt.user)
+        self.assertNotIn("何年生かな", prompt.user)
+
     def test_the_prompt_names_the_last_clause_and_the_vocabulary(self) -> None:
         prompt = gen.build_aizuchi_listening_prompt(
             {"id": "x"}, [], self.TEXT, ["うん", "そっか"]
