@@ -570,6 +570,157 @@ class BankLoadTest(unittest.TestCase):
                 splice.load_bank(path, "ありえない語", None, False)
 
 
+class LevelTest(unittest.TestCase):
+    """This module promises it moves the other speaker's audio by not one
+    sample. Two ways it used to break that promise, both through the level."""
+
+    def speaker_channel(self, speech_ratio: float, amplitude: float = 0.3) -> np.ndarray:
+        signal = np.zeros(SAMPLE_RATE * 10)
+        spoken = int(SAMPLE_RATE * 10 * speech_ratio)
+        signal[:spoken] = tone(120.0, spoken / SAMPLE_RATE, amplitude)[:spoken]
+        return signal
+
+    def insert(self, stereo, clips, anchors, gain="none"):
+        rows = [["はなします", [0.0, 9.0], "SPEAKER_USER"]]
+        return splice.insert_backchannels(
+            stereo, SAMPLE_RATE, rows, anchors, clips,
+            default_args(gain=gain), random.Random(0),
+        )
+
+    def test_overlapping_backchannels_do_not_turn_the_speaker_down(self) -> None:
+        # Summing two clips can exceed 1.0 on the listener channel. Dividing
+        # the whole array by that peak took the speaker down with it (measured
+        # 0.90 -> 0.50), so a dialogue's speaker level depended on whether two
+        # backchannels happened to land close together.
+        stereo = np.zeros((2, SAMPLE_RATE * 10))
+        stereo[1] = tone(120.0, 10.0, 0.9)[: stereo.shape[-1]]
+        before = stereo[1].copy()
+        loud = dict(clip(1.0, amplitude=0.9), text="はい。")
+        anchors = [
+            {"text": "はい。", "dur_sec": 1.0, "anchor": -1, "mode": "absolute", "value": v}
+            for v in (2.0, 2.2)
+        ]
+        out, _rows, _swaps = self.insert(stereo, [loud], anchors)
+        np.testing.assert_array_equal(out[1], before)
+        self.assertLessEqual(float(np.max(np.abs(out[0]))), 1.0 + 1e-9)
+
+    def test_gain_matching_follows_the_speech_not_the_silence(self) -> None:
+        # The reference used to be the RMS of the whole speaker channel, so a
+        # dialogue with more pauses got a quieter listener for no reason
+        # (-3 dB at half silence, and a listening call has more than that).
+        levels = []
+        for ratio in (0.5, 0.9):
+            stereo = np.zeros((2, SAMPLE_RATE * 10))
+            stereo[1] = self.speaker_channel(ratio)
+            anchors = [{"text": "うん", "dur_sec": 0.4, "anchor": 0,
+                        "mode": "after", "value": 0.2}]
+            out, _rows, _swaps = self.insert(stereo, [clip(0.4)], anchors, gain="match")
+            placed = out[0][np.abs(out[0]) > 1e-9]
+            levels.append(float(np.sqrt(np.mean(np.square(placed)))))
+        # Same speaker loudness, different amounts of silence -> same listener.
+        self.assertAlmostEqual(levels[0], levels[1], places=2)
+
+    def test_the_listener_lands_at_the_speakers_speaking_level(self) -> None:
+        stereo = np.zeros((2, SAMPLE_RATE * 10))
+        speaker = self.speaker_channel(0.5)
+        stereo[1] = speaker
+        anchors = [{"text": "うん", "dur_sec": 0.4, "anchor": 0,
+                    "mode": "after", "value": 0.2}]
+        out, _rows, _swaps = self.insert(stereo, [clip(0.4)], anchors, gain="match")
+        spoken = speaker[np.abs(speaker) > 1e-9]
+        placed = out[0][np.abs(out[0]) > 1e-9]
+        self.assertAlmostEqual(
+            float(np.sqrt(np.mean(np.square(placed)))),
+            float(np.sqrt(np.mean(np.square(spoken)))),
+            places=2,
+        )
+
+    def test_active_rms_ignores_the_silence(self) -> None:
+        signal = np.zeros(1000)
+        signal[:500] = 0.4
+        self.assertAlmostEqual(splice.active_rms(signal), 0.4, places=6)
+
+    def test_active_rms_of_pure_silence_is_zero(self) -> None:
+        self.assertEqual(splice.active_rms(np.zeros(100)), 0.0)
+
+
+class AlignmentEndTest(unittest.TestCase):
+    """Bank clips keep their trailing silence on purpose (the 5%-of-peak
+    silence test would otherwise clip the soft decay of "un"), but the
+    alignment must still close at the end of the SOUND. alignment_words splits
+    an entry longer than 8 characters into words spread across its span, so an
+    end inflated by trailing silence puts the later words where nothing is
+    audible -- teaching the model to run text on with no audio under it."""
+
+    def clip_with_trailing_silence(self, speech: float, silence: float) -> dict:
+        signal = np.concatenate([
+            tone(180.0, speech), np.zeros(int(SAMPLE_RATE * silence))
+        ])
+        return {
+            "wav": "wav/padded.wav", "text": "そうだったんですね。",
+            "temperature": 1.0, "signal": signal, "sample_rate": SAMPLE_RATE,
+            "speech_sec": speech,
+        }
+
+    def insert(self, clip: dict) -> list:
+        stereo = np.zeros((2, SAMPLE_RATE * 10))
+        rows = [["今日は疲れました", [0.0, 8.0], "SPEAKER_USER"]]
+        anchors = [{
+            "text": clip["text"], "dur_sec": clip["speech_sec"],
+            "anchor": 0, "mode": "after", "value": 0.5,
+        }]
+        _out, new_rows, _swaps = splice.insert_backchannels(
+            stereo, SAMPLE_RATE, rows, anchors, [clip],
+            default_args(match_text=True, aizuchi_max_chars=12), random.Random(0),
+        )
+        return [row for row in new_rows if row[2] == "SPEAKER_MAIN"]
+
+    def test_the_entry_ends_at_the_end_of_the_sound(self) -> None:
+        placed = self.insert(self.clip_with_trailing_silence(0.4, 0.6))[0]
+        self.assertAlmostEqual(placed[1][1] - placed[1][0], 0.4, places=3)
+
+    def test_every_split_word_lands_on_audio(self) -> None:
+        from alignment_words import split_utterance_alignments
+
+        placed = self.insert(self.clip_with_trailing_silence(0.4, 0.6))[0]
+        words, _stats = split_utterance_alignments([placed])
+        self.assertGreater(len(words), 1)  # long enough to be split
+        audio_ends = placed[1][0] + 0.4
+        for word in words:
+            self.assertLessEqual(word[1][0], audio_ends + 1e-6, word)
+
+    def test_the_trailing_silence_is_still_written_to_the_audio(self) -> None:
+        # Only the alignment is shortened. Cutting the audio would take the
+        # decay with it, which is the reason the tail is kept in the first place.
+        clip = self.clip_with_trailing_silence(0.4, 0.6)
+        stereo = np.zeros((2, SAMPLE_RATE * 10))
+        rows = [["今日は疲れました", [0.0, 8.0], "SPEAKER_USER"]]
+        anchors = [{"text": clip["text"], "dur_sec": 0.4, "anchor": 0,
+                    "mode": "after", "value": 0.5}]
+        _out, _rows, swaps = splice.insert_backchannels(
+            stereo, SAMPLE_RATE, rows, anchors, [clip],
+            default_args(match_text=True, aizuchi_max_chars=12), random.Random(0),
+        )
+        self.assertAlmostEqual(swaps[0]["placed_sec"], 1.0, places=2)
+
+    def test_a_clip_with_no_trailing_silence_is_unchanged(self) -> None:
+        placed = self.insert(self.clip_with_trailing_silence(0.4, 0.0))[0]
+        self.assertAlmostEqual(placed[1][1] - placed[1][0], 0.4, places=3)
+
+    def test_truncation_still_shortens_the_entry(self) -> None:
+        # Cut by the end of the dialogue: the entry follows the audio that
+        # actually fit, not the clip's nominal speech length.
+        clip = dict(self.clip_with_trailing_silence(0.9, 0.0))
+        self.assertAlmostEqual(
+            splice.speech_written(clip, int(SAMPLE_RATE * 0.2), SAMPLE_RATE), 0.2
+        )
+
+    def test_a_clip_without_a_measurement_falls_back_to_the_audio(self) -> None:
+        self.assertAlmostEqual(
+            splice.speech_written({}, int(SAMPLE_RATE * 0.3), SAMPLE_RATE), 0.3
+        )
+
+
 class FadeTest(unittest.TestCase):
     """A backchannel sits alone in an otherwise silent listener channel, so a
     discontinuity at its edge is audible as a click rather than being masked.

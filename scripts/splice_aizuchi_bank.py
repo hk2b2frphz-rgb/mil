@@ -359,7 +359,7 @@ def insert_backchannels(
         placed = fade_in(signal.astype(np.float64), sample_rate)
         if args.gain == "match":
             # 消す相槌が無いので、相手のチャンネルの音量に合わせる。
-            reference = float(np.sqrt(np.mean(np.square(out[1 - LEFT_CHANNEL]))))
+            reference = active_rms(out[1 - LEFT_CHANNEL])
             level = float(np.sqrt(np.mean(np.square(placed)))) if placed.size else 0.0
             if reference > 0 and level > 0:
                 placed = placed * (reference / level)
@@ -375,7 +375,7 @@ def insert_backchannels(
         # 切り詰めてから尻を落とす。順序が逆だと、末尾に当たって切られた
         # ぶんだけフェードも一緒に落ちて不連続が残る。
         out[LEFT_CHANNEL, begin:stop] += fade_out(placed[:written], sample_rate)
-        placed_end = round(target + written / sample_rate, 4)
+        placed_end = round(target + speech_written(clip, written, sample_rate), 4)
         new_rows.append([clip["text"], [round(target, 4), placed_end], MAIN_LABEL])
         swaps.append(
             {
@@ -397,9 +397,7 @@ def insert_backchannels(
             }
         )
 
-    peak = float(np.max(np.abs(out))) if out.size else 0.0
-    if peak > 1.0:
-        out = out / peak
+    normalize_listener(out)
     new_rows.sort(key=lambda row: row[1][0])
     return out, new_rows, swaps
 
@@ -438,6 +436,66 @@ def pick_clip(
             fell_back = True
     ordered = sorted(pool, key=lambda clip: abs(clip["speech_sec"] - target_sec))
     return rng.choice(ordered[: max(1, top_k)]), fell_back
+
+
+def active_rms(signal: np.ndarray) -> float:
+    """鳴っているところだけの RMS。
+
+    チャンネル全体の RMS だと無音の割合で薄まる。相手の発話に合わせたつもりが
+    「その対話にどれだけ間があったか」で決まってしまい、間の多い対話ほど相槌が
+    小さくなる（無音 50% で -3dB。傾聴の通話は間が多いのでもっと開く）。
+    相手の声の大きさに合わせたいのだから、声のあるところだけで測る。
+    """
+    if signal.size == 0:
+        return 0.0
+    peak = float(np.max(np.abs(signal)))
+    if peak <= 0:
+        return 0.0
+    voiced = signal[np.abs(signal) >= 0.05 * peak]
+    if voiced.size == 0:
+        voiced = signal
+    return float(np.sqrt(np.mean(np.square(voiced))))
+
+
+def normalize_listener(out: np.ndarray) -> None:
+    """聞き手チャンネルが 1.0 を超えたときだけ、そのチャンネルを縮める。
+
+    以前はステレオ全体を最大値で割っていた。相槌が 2 本近接して足し合わさり
+    1.0 を超えると、それだけで相手の発話まで一緒に下がる（実測で 0.90 -> 0.50、
+    -5dB）。相手の音量が、相手とは関係のない事情で対話ごとにばらつくことに
+    なるし、このモジュールの「配置も相手の発話も 1 サンプルも動かさない」と
+    いう前提そのものが崩れる。超えたチャンネルだけを直す。
+    """
+    if out.size == 0:
+        return
+    peak = float(np.max(np.abs(out[LEFT_CHANNEL])))
+    if peak > 1.0:
+        out[LEFT_CHANNEL] /= peak
+
+
+def speech_written(
+    clip: dict[str, Any], written: int, sample_rate: int
+) -> float:
+    """置いた音のうち、実際に鳴っている長さ（秒）。
+
+    アライメントはこれで閉じる。バンクのクリップは尻の無音を落としていない
+    （無音判定がピークの 5% 打ち切りなので、「うん」の終わりの鼻音のように
+    緩やかに減衰する音が削れてしまうため、意図的に残している）。信号の長さで
+    閉じると、その無音まで発話区間に入る。
+
+    それが実害になるのは、alignment_words が 8 文字を超える語を単語に割る
+    ときで、区間が無音ぶん伸びていると後半の単語が音の無いところに置かれる。
+    「音を出さずにテキストだけ進む」書き方を教えることになる。
+    （今の語彙では「そうだったんですね。」「はい、大丈夫ですよ。」が該当。）
+
+    音そのものは無音込みで置く。聞き手チャンネルの無音は害が無いし、
+    切り落とすと上記の減衰が消える。
+    """
+    audio_sec = written / sample_rate
+    speech_sec = float(clip.get("speech_sec") or 0.0)
+    if speech_sec <= 0:
+        return audio_sec
+    return min(audio_sec, speech_sec)
 
 
 def fade_in(signal: np.ndarray, sample_rate: int) -> np.ndarray:
@@ -557,7 +615,9 @@ def splice_dialogue(
         out[LEFT_CHANNEL, slot_begin:stop] += fade_out(placed[:written], sample_rate)
 
         placed_start = slot_begin / sample_rate
-        placed_end = round(placed_start + written / sample_rate, 4)
+        placed_end = round(
+            placed_start + speech_written(clip, written, sample_rate), 4
+        )
         new_rows.append([clip["text"], [round(placed_start, 4), placed_end], label])
         swaps.append(
             {
@@ -576,9 +636,7 @@ def splice_dialogue(
             }
         )
 
-    peak = float(np.max(np.abs(out))) if out.size else 0.0
-    if peak > 1.0:
-        out = out / peak
+    normalize_listener(out)
     new_rows.sort(key=lambda row: row[1][0])
     return out, new_rows, swaps
 
