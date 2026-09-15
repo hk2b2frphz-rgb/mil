@@ -1305,13 +1305,24 @@ class LLMDialogueGenerator:
                 # support it.
                 payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
         else:
-            no_think = self.args.llm_completions_no_think
+            # enable_thinking=True/False is an explicit per-call override and
+            # must win outright; only enable_thinking=None falls back to the
+            # job-wide default. A previous version of this branch checked
+            # only the True case, so an explicit False (as the aizuchi
+            # thinking-timeout retry passes) fell through to the default and
+            # did nothing -- on a job that had not set
+            # --llm-completions-no-think, the retry kept thinking enabled,
+            # now with a smaller max_tokens than the call it was retrying.
             if enable_thinking is True:
-                no_think = False
+                no_think, force_think = False, True
+            elif enable_thinking is False:
+                no_think, force_think = True, False
+            else:
+                no_think, force_think = self.args.llm_completions_no_think, False
             payload["prompt"] = messages_to_completion_prompt(
                 messages,
                 no_think=no_think,
-                force_think=enable_thinking is True,
+                force_think=force_think,
             )
             payload["stop"] = ["<|im_end|>"]
         # vLLM extension: multiplicative repetition penalty. Strongly discourages

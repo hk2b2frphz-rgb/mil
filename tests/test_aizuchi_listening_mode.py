@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import argparse
+import json
 import sys
 import tempfile
 import unittest
+import unittest.mock
+import urllib.error
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -221,6 +225,84 @@ class ThinkingTruncationTest(unittest.TestCase):
         self.assertFalse(
             gen.aizuchi_thinking_truncated('{"reactions":[{"after_clause":1,"text":"うん"}]}')
         )
+
+
+class CompletionsThinkingOverrideTest(unittest.TestCase):
+    """enable_thinking=True/False must win outright on the completions
+    endpoint, not just enable_thinking=True. A previous version of the branch
+    only special-cased True, so the aizuchi thinking-timeout retry's explicit
+    False fell through to the job-wide default and did nothing -- on a job
+    that had not set --llm-completions-no-think, the retry kept thinking on,
+    now with a smaller max_tokens than the call it was retrying."""
+
+    def make_generator(self, *, llm_completions_no_think: bool) -> gen.LLMDialogueGenerator:
+        args = argparse.Namespace(
+            llm_backend="openai-compatible",
+            llm_openai_endpoint="completions",
+            llm_completions_no_think=llm_completions_no_think,
+            llm_api_base="http://localhost:9",
+            llm_api_key="",
+            llm_temperature=0.7,
+            llm_frequency_penalty=0.0,
+            llm_presence_penalty=0.0,
+            llm_max_new_tokens=64,
+            llm_repetition_penalty=0.0,
+            llm_reasoning_effort="",
+            llm_timeout_sec=5.0,
+            llm_model="x",
+            llm_served_model_name="",
+            dialogue_generation_mode="multi-agent",
+            out_dir=Path("/tmp"),
+            llm_task="dialogue",
+        )
+        generator = gen.LLMDialogueGenerator(args)
+        # Bypass the /v1/models discovery call resolve_served_model() makes
+        # on first use -- irrelevant to what this test checks, and would
+        # otherwise need its own network stub.
+        generator._served_model = "x"
+        return generator
+
+    def captured_prompt(self, generator, **kwargs) -> str:
+        # generate_openai_compatible_messages's own try/except only wraps the
+        # urlopen() call, so the payload is captured at Request() construction
+        # (unpatched, so it behaves normally) and the network failure is
+        # injected at urlopen() instead, where the code actually expects and
+        # handles one.
+        captured = {}
+        real_request = urllib.request.Request
+
+        def spying_request(url, data=None, headers=None, method=None):
+            captured["prompt"] = json.loads(data.decode("utf-8"))["prompt"]
+            return real_request(url, data=data, headers=headers, method=method)
+
+        with unittest.mock.patch("urllib.request.Request", side_effect=spying_request), \
+             unittest.mock.patch(
+                 "urllib.request.urlopen",
+                 side_effect=urllib.error.URLError("no network in this test"),
+             ):
+            try:
+                generator.generate_openai_compatible_messages(
+                    [{"role": "user", "content": "hello"}], role_name="test", **kwargs
+                )
+            except RuntimeError:
+                pass  # expected: the stubbed network call always fails
+        return captured["prompt"]
+
+    def test_explicit_false_forces_no_think_even_without_the_job_default(self) -> None:
+        generator = self.make_generator(llm_completions_no_think=False)
+        prompt = self.captured_prompt(generator, enable_thinking=False)
+        self.assertIn("/no_think", prompt)
+
+    def test_explicit_true_forces_think_even_with_the_job_default_on(self) -> None:
+        generator = self.make_generator(llm_completions_no_think=True)
+        prompt = self.captured_prompt(generator, enable_thinking=True)
+        self.assertIn("/think", prompt)
+        self.assertNotIn("/no_think", prompt)
+
+    def test_none_falls_back_to_the_job_wide_default(self) -> None:
+        generator = self.make_generator(llm_completions_no_think=True)
+        prompt = self.captured_prompt(generator, enable_thinking=None)
+        self.assertIn("/no_think", prompt)
 
 
 if __name__ == "__main__":
