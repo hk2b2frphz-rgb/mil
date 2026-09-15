@@ -19,11 +19,9 @@
 # established path, but normalize shorthand such as `proxy:8080` before
 # requests/httpx sees it.
 
-# Idempotent: PBS wrappers source this before invoking the reusable .sh
-# runners, while users may invoke a runner directly on a compute node.
-if [[ "${PROXY_CONFIG_INITIALIZED:-0}" == "1" ]]; then
-    return 0 2>/dev/null || exit 0
-fi
+# Reapply settings on every source. PBS -V and child shells inherit the
+# INITIALIZED flag, so it cannot prove that the current explicit PROXY_URL
+# has been applied. Normalizing the same settings again is idempotent.
 unset PROXY_CONFIG_VALID
 
 if [[ -n "${PROXY_URL:-}" ]]; then
