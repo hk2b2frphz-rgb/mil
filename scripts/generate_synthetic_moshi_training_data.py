@@ -551,11 +551,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--aizuchi-only-placement",
-        choices=("rule", "llm"),
+        choices=("rule", "llm", "density"),
         default=os.environ.get("AIZUCHI_ONLY_PLACEMENT") or "rule",
         help=(
-            "相づちを打つ位置の決め方。rule=句の切れ目ごとの確率で抽選（既定）/ "
-            "llm=どこで打つかもモデルが決める（上限なし・末尾も候補）"
+            "相づちを打つ位置の決め方。rule=句の切れ目ごとの確率で抽選、語は"
+            "モデルが選ぶ（既定）/ llm=どこで打つかもモデルが決める（上限なし・"
+            "末尾も候補）/ density=文末は必ず、それ以外は --aizuchi-density の"
+            "確率で抽選。語彙からランダムに選ぶだけで LLM は呼ばない"
+        ),
+    )
+    parser.add_argument(
+        "--aizuchi-density",
+        type=float,
+        default=float(os.environ.get("AIZUCHI_DENSITY") or 0.5),
+        help=(
+            "--aizuchi-only-placement density のときの相槌の密度。0=相槌 0 件、"
+            "1=flood 相当（打ちすぎ側の上限。使う想定では無い）。0.25 あたりが"
+            "reserved、0.5 が normal、0.75 が eager 相当で、その間は連続的に"
+            "補間する。文末は密度に関わらず（0 を除き）必ず打つ"
         ),
     )
     parser.add_argument(
@@ -1775,11 +1788,12 @@ class LLMDialogueGenerator:
         frequency: dict[str, Any],
         rng: random.Random,
     ) -> list[DialogueTurn]:
-        """聞き手の反応を入れる。位置の決め方は 2 通り（--aizuchi-only-placement）。"""
+        """聞き手の反応を入れる。位置の決め方は 3 通り（--aizuchi-only-placement）。"""
         clauses = split_text_into_clauses(user_turn.text)
         if len(clauses) < 1:
             return [user_turn]
-        if getattr(self.args, "aizuchi_only_placement", "rule") == "llm":
+        placement = getattr(self.args, "aizuchi_only_placement", "rule")
+        if placement == "llm":
             return self._react_by_listening(
                 use_case=use_case,
                 visible_turns=visible_turns,
@@ -1787,6 +1801,15 @@ class LLMDialogueGenerator:
                 clauses=clauses,
                 case_id=case_id,
                 block_index=block_index,
+            )
+        if placement == "density":
+            return self._react_by_density(
+                visible_turns=visible_turns,
+                user_turn=user_turn,
+                clauses=clauses,
+                case_id=case_id,
+                block_index=block_index,
+                rng=rng,
             )
         points = pick_reaction_points(clauses, frequency, rng)
         if not points:
@@ -1817,6 +1840,49 @@ class LLMDialogueGenerator:
                 "prompt_system": prompt.system,
                 "prompt_user": prompt.user,
                 "raw_text": raw[:1000],
+                "reactions": reactions,
+            }
+        )
+        return user_turns_with_aizuchi(user_turn.text, reactions)
+
+    def _react_by_density(
+        self,
+        *,
+        visible_turns: list[DialogueTurn],
+        user_turn: DialogueTurn,
+        clauses: list[str],
+        case_id: str,
+        block_index: int,
+        rng: random.Random,
+    ) -> list[DialogueTurn]:
+        """位置は確率（文末は必ず）、語はランダム。LLM を呼ばない。
+
+        --aizuchi-density（0〜1）が reserved/normal/eager/flood の間を連続的に
+        補間する。0 は相槌 0 件、1 は flood 相当（打ちすぎ側の上限。使う想定
+        では無い）。語彙の選び方に文脈判断は要らないという判断から、位置も
+        語も LLM を呼ばずに決める。
+        """
+        density = float(getattr(self.args, "aizuchi_density", 0.5))
+        frequency = resolve_aizuchi_density(density)
+        if frequency is None:
+            return [user_turn]
+        points = pick_density_points(clauses, frequency, rng)
+        if not points:
+            return [user_turn]
+        recent = (
+            recent_aizuchi_texts(visible_turns, AIZUCHI_NO_REPEAT_WINDOW)
+            if AIZUCHI_NO_REPEAT_WINDOW
+            else []
+        )
+        reactions = pick_aizuchi_words(points, recent, rng)
+        self.trace_event(
+            {
+                "event": "aizuchi_decision",
+                "case_id": case_id,
+                "block_index": block_index,
+                "placement": "density",
+                "density": density,
+                "points": points,
                 "reactions": reactions,
             }
         )
@@ -3644,6 +3710,124 @@ def complete_aizuchi_reactions(
         recent.add(text)
         used_in_dialogue.add(text)
     return [completed[index] for index in sorted(completed)]
+
+
+AIZUCHI_DENSITY_ANCHORS: tuple[tuple[float, dict[str, Any] | None], ...] = (
+    (0.0, None),
+    (0.25, AIZUCHI_FREQUENCY_PRESETS["reserved"]),
+    (0.5, AIZUCHI_FREQUENCY_PRESETS["normal"]),
+    (0.75, AIZUCHI_FREQUENCY_PRESETS["eager"]),
+    (1.0, AIZUCHI_FREQUENCY_PRESETS["flood"]),
+)
+
+
+def resolve_aizuchi_density(density: float) -> dict[str, Any] | None:
+    """0(相槌 0 件) から 1(flood 相当。使わない前提の上限)までの連続値を、
+    reserved/normal/eager/flood の間で線形補間した頻度設定に変換する。
+
+    文末(end)はここに含めない -- 「相槌の頻度」は文中にどれだけ差し込むかの
+    調整で、言い切った所で受け止めるかどうかとは別の判断だという整理から、
+    文末は密度に関係なく pick_density_points 側で無条件に足す。0 だけは
+    例外で、文末も含め一切打たない。
+    """
+    density = max(0.0, min(1.0, float(density)))
+    if density <= 0.0:
+        return None
+    anchors = AIZUCHI_DENSITY_ANCHORS
+    lo_d, lo = anchors[0][0], anchors[1][1]
+    hi_d, hi = anchors[-1]
+    for (a_d, a_p), (b_d, b_p) in zip(anchors, anchors[1:]):
+        if density <= b_d:
+            lo_d, lo, hi_d, hi = a_d, (a_p or b_p), b_d, b_p
+            break
+    span = hi_d - lo_d
+    t = (density - lo_d) / span if span > 0 else 1.0
+
+    def rate(kind: str) -> float:
+        a = float((lo or {}).get("rates", {}).get(kind, 0.0))
+        b = float((hi or {}).get("rates", {}).get(kind, 0.0))
+        return a + (b - a) * t
+
+    def num(key: str, default: float = 0.0) -> float:
+        a = float((lo or {}).get(key, default))
+        b = float((hi or {}).get(key, default))
+        return a + (b - a) * t
+
+    return {
+        "label": f"density={density:.2f}",
+        "rates": {"cont": rate("cont"), "weak": rate("weak")},
+        "max_per_turn": max(1, round(num("max_per_turn", 1))),
+        "min_gap": max(0, round(num("min_gap", 0))),
+        "min_chunk_chars": max(0, round(num("min_chunk_chars", 0))),
+    }
+
+
+def pick_density_points(
+    clauses: list[str], frequency: dict[str, Any], rng: random.Random
+) -> list[dict[str, Any]]:
+    """句の切れ目ごとに確率で反応位置を決める。文末は確率を引かず必ず入る。
+
+    pick_reaction_points との違いはそこだけ: あちらは文末も rates["end"] の
+    抽選を通すので、プリセットや短い発話の min_chars 次第で文末にすら何も
+    置かれないことがある。「文末は必ず受け止める」という要件を確率任せに
+    しないよう、ここでは分けてある。
+    """
+    if not clauses:
+        return []
+    rates = frequency.get("rates") or {}
+    max_per_turn = max(1, int(frequency.get("max_per_turn", 1)))
+    min_gap = max(0, int(frequency.get("min_gap", 0)))
+    min_chunk_chars = max(0, int(frequency.get("min_chunk_chars", 0)))
+    last = len(clauses)
+
+    points: list[dict[str, Any]] = []
+    previous: int | None = None
+    chunk_start = 0
+    for index, clause in enumerate(clauses[:-1], start=1):
+        if len(points) >= max_per_turn - 1:
+            break  # 文末の枠を 1 つ残しておく
+        kind = clause_boundary_kind(clause)
+        if rng.random() >= float(rates.get(kind, 0.0)):
+            continue
+        if previous is not None and index - previous <= min_gap:
+            continue
+        chunk = "".join(clauses[chunk_start:index]).strip()
+        if min_chunk_chars and len(chunk) < min_chunk_chars:
+            continue
+        points.append({"after_clause": index, "kind": kind})
+        previous = index
+        chunk_start = index
+    points.append({"after_clause": last, "kind": "end"})
+    return points
+
+
+def pick_aizuchi_words(
+    points: list[dict[str, Any]], recent: list[str], rng: random.Random
+) -> list[dict[str, Any]]:
+    """位置ごとに語彙からランダムに語を選ぶ。LLM は呼ばない。
+
+    「どこで打つか」は決まっているので、あとは語彙の中からどれかを選ぶだけの
+    問題になる。文脈を見て選ばせても、結局は語彙の中の一つを返すだけなら、
+    ランダム抽選と実質差が無く、LLM 呼び出しの分だけ遅く・不安定になる
+    （そっか系への偏り、thinking の予算切れなど、今日の問題の大半はこの
+    呼び出しから来ていた）。直近 AIZUCHI_NO_REPEAT_WINDOW 回に使った語は
+    避け、候補が尽きたら（語彙がそれより少なければ）諦めて許す。
+    """
+    vocab = list(AIZUCHI_ACTIVE_VOCAB)
+    if not vocab:
+        return []
+    reactions: list[dict[str, Any]] = []
+    window = list(recent)
+    for point in points:
+        candidates = [w for w in vocab if w not in window] or vocab
+        word = rng.choice(candidates)
+        reactions.append({"after_clause": point["after_clause"], "text": word})
+        window.append(word)
+        if AIZUCHI_NO_REPEAT_WINDOW:
+            del window[: -AIZUCHI_NO_REPEAT_WINDOW]
+        else:
+            window.clear()
+    return reactions
 
 
 def pick_reaction_points(

@@ -24,20 +24,32 @@ export OUT_ROOT="$PWD/data/runs/real_aizuchi_500_${CORPUS_VERSION}/dialogue"
 export NUM_CASES="${NUM_CASES:-500}"
 
 export DIALOGUE_GENERATION_MODE="aizuchi-only"
-export AIZUCHI_ONLY_PLACEMENT="llm"
+# Position: probability per clause boundary, like the original rule-based
+# route, with one change -- the end of the utterance is now guaranteed
+# (previously it was drawn from the same rates as mid-utterance positions, so
+# a listener could still go quiet after the speaker finished). Word: chosen
+# at random from the vocabulary, not by an LLM call. Deciding among a handful
+# of short acknowledgement words does not need contextual judgement, and
+# every failure mode hit today (favoring "sokka", the hardcoded example
+# words, the thinking-timeout bug) traced back to that call.
+export AIZUCHI_ONLY_PLACEMENT="density"
+# 0 = no backchannels at all, 0.25/0.5/0.75 = reserved/normal/eager, 1 = flood
+# (the "too much" upper bound; not meant to be used). Values between anchors
+# interpolate continuously, replacing the discrete preset choice.
+export AIZUCHI_DENSITY="${AIZUCHI_DENSITY:-0.5}"
 # Vocabulary is the written default (AIZUCHI_ONLY_VOCAB: hai/ee/sou-nan-desu-ne/
-# aa... etc) minus one entry, not the real-recording-derived listening_vocab.tsv
-# this run used earlier. That vocabulary put "sokka" in reach for almost every
-# position, and with only a few examples all built around "sokka" family
-# forms, the model leaned on it far past what felt natural. Reverting to the
-# plain written list traded that problem for a smaller one: bare "un." alone
-# then stood out the same way, while "un, un." and "hai, hai." (also in the
-# written list) did not. aizuchi_vocab_no_bare_un.tsv is the written list with
-# only that one entry removed.
-# scripts/2026-09-15/listening_vocab.tsv and real_aizuchi_examples.md are kept
-# on disk if the real-vocabulary direction is worth revisiting, just not
-# wired in by default here.
+# aa... etc) minus one entry. The real-recording-derived listening_vocab.tsv
+# put "sokka" in reach for almost every position and it stood out; reverting
+# to the plain written list traded that for a smaller version of the same
+# problem, bare "un." alone standing out the same way, while "un, un." and
+# "hai, hai." (also in the written list) did not.
+# aizuchi_vocab_no_bare_un.tsv is the written list with only that one entry
+# removed. scripts/2026-09-15/listening_vocab.tsv and real_aizuchi_examples.md
+# are kept on disk if the real-vocabulary direction is worth revisiting.
 export AIZUCHI_VOCAB_FILE="$PWD/scripts/2026-09-15/aizuchi_vocab_no_bare_un.tsv"
+# Examples and thinking are unused in density mode (no LLM call happens for
+# backchannel decisions at all), left here only so they take effect again if
+# --aizuchi-only-placement is switched back to llm.
 export AIZUCHI_ONLY_EXAMPLE="${AIZUCHI_ONLY_EXAMPLE:-0}"
 
 export AIZUCHI_ENABLE_THINKING="${AIZUCHI_ENABLE_THINKING:-0}"

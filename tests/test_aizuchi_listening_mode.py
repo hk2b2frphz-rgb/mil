@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 import tempfile
 import unittest
@@ -310,6 +311,160 @@ class CompletionsThinkingOverrideTest(unittest.TestCase):
         generator = self.make_generator(llm_completions_no_think=True)
         prompt = self.captured_prompt(generator, enable_thinking=None)
         self.assertIn("/no_think", prompt)
+
+
+class DensityInterpolationTest(unittest.TestCase):
+    def test_zero_disables_backchannels_entirely(self) -> None:
+        self.assertIsNone(gen.resolve_aizuchi_density(0.0))
+
+    def test_the_named_anchors_match_the_existing_presets(self) -> None:
+        reserved = gen.resolve_aizuchi_density(0.25)
+        normal = gen.resolve_aizuchi_density(0.5)
+        eager = gen.resolve_aizuchi_density(0.75)
+        flood = gen.resolve_aizuchi_density(1.0)
+        # "end" is deliberately not part of resolve_aizuchi_density's output --
+        # the end position is guaranteed unconditionally elsewhere, not by
+        # interpolating the presets' end rate -- so compare cont/weak only.
+        for name, resolved in (
+            ("reserved", reserved), ("normal", normal), ("eager", eager), ("flood", flood)
+        ):
+            preset_rates = gen.AIZUCHI_FREQUENCY_PRESETS[name]["rates"]
+            self.assertEqual(resolved["rates"]["cont"], preset_rates["cont"], name)
+            self.assertEqual(resolved["rates"]["weak"], preset_rates["weak"], name)
+
+    def test_a_value_between_two_anchors_is_interpolated(self) -> None:
+        low = gen.resolve_aizuchi_density(0.25)["rates"]["cont"]
+        high = gen.resolve_aizuchi_density(0.5)["rates"]["cont"]
+        mid = gen.resolve_aizuchi_density(0.375)["rates"]["cont"]
+        self.assertAlmostEqual(mid, (low + high) / 2, places=6)
+
+    def test_values_are_clamped_to_the_valid_range(self) -> None:
+        self.assertEqual(gen.resolve_aizuchi_density(-1.0), gen.resolve_aizuchi_density(0.0))
+        self.assertEqual(gen.resolve_aizuchi_density(5.0), gen.resolve_aizuchi_density(1.0))
+
+
+class DensityPlacementTest(unittest.TestCase):
+    CLAUSES = ["今日は疲れて、", "何もできなくて、", "ずっと横になっていました。"]
+
+    def test_the_end_of_the_utterance_always_gets_a_point(self) -> None:
+        # Even at the lowest nonzero density, over many seeds.
+        frequency = gen.resolve_aizuchi_density(0.01)
+        for seed in range(30):
+            points = gen.pick_density_points(self.CLAUSES, frequency, random.Random(seed))
+            self.assertEqual(points[-1]["after_clause"], len(self.CLAUSES))
+            self.assertEqual(points[-1]["kind"], "end")
+
+    def test_no_clauses_yields_no_points(self) -> None:
+        # The density==0 case is handled upstream in _react_by_density
+        # (resolve_aizuchi_density(0.0) returns None, short-circuiting before
+        # this is ever called); this function's own empty-input guard is
+        # simpler: no clauses, no points, regardless of frequency.
+        self.assertEqual(gen.pick_density_points([], {}, random.Random(0)), [])
+
+    def test_a_single_clause_utterance_still_gets_its_end_point(self) -> None:
+        frequency = gen.resolve_aizuchi_density(0.5)
+        points = gen.pick_density_points(["少し疲れました。"], frequency, random.Random(0))
+        self.assertEqual(points, [{"after_clause": 1, "kind": "end"}])
+
+    def test_max_per_turn_reserves_a_slot_for_the_end_point(self) -> None:
+        # flood's max_per_turn is 6, so a long utterance must not exceed it
+        # even counting the guaranteed end point.
+        frequency = gen.resolve_aizuchi_density(1.0)
+        clauses = [f"それで{i}、" for i in range(10)] + ["終わりです。"]
+        points = gen.pick_density_points(clauses, frequency, random.Random(0))
+        self.assertLessEqual(len(points), frequency["max_per_turn"])
+        self.assertEqual(points[-1]["after_clause"], len(clauses))
+
+
+class DensityWordPickTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.saved = set(gen.AIZUCHI_ACTIVE_VOCAB)
+        self.window = gen.AIZUCHI_NO_REPEAT_WINDOW
+
+    def tearDown(self) -> None:
+        gen.AIZUCHI_ACTIVE_VOCAB = self.saved
+        gen.AIZUCHI_NO_REPEAT_WINDOW = self.window
+
+    def test_no_llm_call_is_needed_a_word_is_chosen_per_point(self) -> None:
+        gen.set_aizuchi_vocab(["うん", "そっか", "はい"], 0)
+        points = [{"after_clause": 1, "kind": "cont"}, {"after_clause": 3, "kind": "end"}]
+        reactions = gen.pick_aizuchi_words(points, [], random.Random(0))
+        self.assertEqual(len(reactions), 2)
+        for reaction in reactions:
+            self.assertIn(reaction["text"], {"うん", "そっか", "はい"})
+
+    def test_recently_used_words_are_avoided_when_alternatives_exist(self) -> None:
+        gen.set_aizuchi_vocab(["うん", "そっか", "はい"], 3)
+        points = [{"after_clause": i, "kind": "cont"} for i in range(1, 4)]
+        reactions = gen.pick_aizuchi_words(points, ["うん"], random.Random(0))
+        self.assertNotIn("うん", [r["text"] for r in reactions[:2]])
+
+    def test_a_vocabulary_smaller_than_the_window_still_produces_output(self) -> None:
+        # Only one word available; avoiding "recently used" would leave no
+        # candidates, so the restriction must be dropped rather than crash.
+        gen.set_aizuchi_vocab(["うん"], 3)
+        points = [{"after_clause": 1, "kind": "end"}]
+        reactions = gen.pick_aizuchi_words(points, ["うん", "うん", "うん"], random.Random(0))
+        self.assertEqual(reactions, [{"after_clause": 1, "text": "うん"}])
+
+    def test_an_empty_vocabulary_yields_no_reactions(self) -> None:
+        gen.AIZUCHI_ACTIVE_VOCAB = set()
+        points = [{"after_clause": 1, "kind": "end"}]
+        self.assertEqual(gen.pick_aizuchi_words(points, [], random.Random(0)), [])
+
+
+class DensityDispatchTest(unittest.TestCase):
+    """react_to_user_turn end to end in density mode: no LLM call needed."""
+
+    def make_generator(self, density: float) -> gen.LLMDialogueGenerator:
+        args = argparse.Namespace(
+            llm_backend="template",
+            dialogue_generation_mode="aizuchi-only",
+            out_dir=Path("/tmp"),
+            aizuchi_only_placement="density",
+            aizuchi_density=density,
+            llm_task="dialogue",
+        )
+        return gen.LLMDialogueGenerator(args)
+
+    def setUp(self) -> None:
+        self.saved = set(gen.AIZUCHI_ACTIVE_VOCAB)
+        self.window = gen.AIZUCHI_NO_REPEAT_WINDOW
+        gen.set_aizuchi_vocab(["うん", "そっか", "はい"], 0)
+
+    def tearDown(self) -> None:
+        gen.AIZUCHI_ACTIVE_VOCAB = self.saved
+        gen.AIZUCHI_NO_REPEAT_WINDOW = self.window
+
+    def test_a_multi_clause_utterance_ends_with_a_backchannel(self) -> None:
+        generator = self.make_generator(0.5)
+        user_turn = gen.DialogueTurn(
+            "user", "今日は疲れて、何もできなくて、ずっと横になっていました。"
+        )
+        turns = generator.react_to_user_turn(
+            use_case={"id": "x"},
+            visible_turns=[],
+            user_turn=user_turn,
+            case_id="c1",
+            block_index=0,
+            frequency={},
+            rng=random.Random(0),
+        )
+        self.assertEqual(turns[-1].speaker, "moshi")
+
+    def test_density_zero_returns_the_utterance_untouched(self) -> None:
+        generator = self.make_generator(0.0)
+        user_turn = gen.DialogueTurn("user", "今日は疲れて、何もできなくて。")
+        turns = generator.react_to_user_turn(
+            use_case={"id": "x"},
+            visible_turns=[],
+            user_turn=user_turn,
+            case_id="c1",
+            block_index=0,
+            frequency={},
+            rng=random.Random(0),
+        )
+        self.assertEqual(turns, [user_turn])
 
 
 if __name__ == "__main__":
