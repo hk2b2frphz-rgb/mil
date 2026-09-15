@@ -44,6 +44,7 @@ def default_args(**overrides) -> argparse.Namespace:
         "aizuchi_max_chars": 6,
         "match_top_k": 1,
         "gain": "none",
+        "match_text": False,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -108,8 +109,27 @@ class ContinuerVocabTest(unittest.TestCase):
 class PickTest(unittest.TestCase):
     def test_the_nearest_length_is_taken_when_k_is_one(self) -> None:
         clips = [clip(0.2), clip(0.5), clip(0.9)]
-        chosen = splice.pick_clip(clips, 0.52, 1, random.Random(0))
+        chosen, fell_back = splice.pick_clip(clips, 0.52, 1, random.Random(0))
         self.assertAlmostEqual(chosen["speech_sec"], 0.5, places=2)
+        self.assertFalse(fell_back)
+
+    def test_the_word_is_matched_before_the_length(self) -> None:
+        # A dialogue that alternates "un" and "sokka" must not get "un" for
+        # both, or the distinction it was built to carry disappears.
+        clips = [clip(0.30), clip(0.32), {**clip(0.80), "text": "そっか"}]
+        chosen, fell_back = splice.pick_clip(
+            clips, 0.31, 1, random.Random(0), want_text="そっか"
+        )
+        self.assertEqual(chosen["text"], "そっか")
+        self.assertFalse(fell_back)
+
+    def test_a_word_the_bank_lacks_falls_back_and_says_so(self) -> None:
+        clips = [clip(0.30), clip(0.32)]
+        chosen, fell_back = splice.pick_clip(
+            clips, 0.31, 1, random.Random(0), want_text="へー"
+        )
+        self.assertEqual(chosen["text"], "うん")
+        self.assertTrue(fell_back)
 
     def test_a_wider_k_stops_the_same_clip_coming_back_every_time(self) -> None:
         # Always taking the closest gives a corpus where every backchannel is
@@ -117,7 +137,7 @@ class PickTest(unittest.TestCase):
         clips = [clip(0.30), clip(0.32), clip(0.34), clip(0.36)]
         rng = random.Random(0)
         picked = {
-            splice.pick_clip(clips, 0.33, 4, rng)["speech_sec"] for _ in range(20)
+            splice.pick_clip(clips, 0.33, 4, rng)[0]["speech_sec"] for _ in range(20)
         }
         self.assertGreater(len(picked), 1)
 

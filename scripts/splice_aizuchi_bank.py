@@ -268,10 +268,24 @@ def pick_clip(
     target_sec: float,
     top_k: int,
     rng: random.Random,
-) -> dict[str, Any]:
-    """尺の近い順に top_k 本を出し、その中から引く。"""
-    ordered = sorted(clips, key=lambda clip: abs(clip["speech_sec"] - target_sec))
-    return rng.choice(ordered[: max(1, top_k)])
+    want_text: str = "",
+) -> tuple[dict[str, Any], bool]:
+    """尺の近い順に top_k 本を出し、その中から引く。
+
+    want_text があれば、まず同じ語のクリップだけに絞る。対話が「うん」と
+    「そっか」を打ち分けているのに、どちらにも「うん」を差したら打ち分けが
+    消える。同じ語が 1 本も無いときはバンク全体から引き、その旨を返す。
+    """
+    pool = clips
+    fell_back = False
+    if want_text:
+        same = [clip for clip in clips if str(clip["text"]).strip() == want_text]
+        if same:
+            pool = same
+        else:
+            fell_back = True
+    ordered = sorted(pool, key=lambda clip: abs(clip["speech_sec"] - target_sec))
+    return rng.choice(ordered[: max(1, top_k)]), fell_back
 
 
 def fade(signal: np.ndarray, sample_rate: int) -> np.ndarray:
@@ -325,7 +339,8 @@ def splice_dialogue(
         slot_sec = float(end) - float(start)
         moved_to = new_starts.get(row_index)
         place_at = float(start) if moved_to is None else float(moved_to)
-        clip = pick_clip(clips, slot_sec, args.match_top_k, rng)
+        want = str(text).strip().strip("。、．，!?！？…・ 　") if args.match_text else ""
+        clip, fell_back = pick_clip(clips, slot_sec, args.match_top_k, rng, want)
         signal = clip["signal"]
         if clip["sample_rate"] != sample_rate:
             # バンクと対話のサンプリングレートが違うなら線形で合わせる。どちらも
@@ -381,6 +396,7 @@ def splice_dialogue(
                 "placed_sec": round(written / sample_rate, 4),
                 "length_error_sec": round(written / sample_rate - slot_sec, 4),
                 "truncated": bool(written < placed.size),
+                "text_fallback": fell_back,
                 "original_start_sec": round(float(start), 4),
                 "start_sec": round(placed_start, 4),
                 "moved_sec": round(placed_start - float(start), 4),
@@ -411,7 +427,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--out-dir", type=Path, required=True)
-    parser.add_argument("--bank-text", default="うん", help="空文字でバンク全体を使う")
+    parser.add_argument(
+        "--bank-text",
+        default="",
+        help="バンクをこの 1 語に絞る。既定は絞らず、発話ごとに同じ語を引く",
+    )
     parser.add_argument("--bank-temperature", type=float, default=None)
     parser.add_argument("--keep-bank-outliers", action="store_true")
     parser.add_argument("--aizuchi-max-chars", type=int, default=DEFAULT_MAX_CHARS)
@@ -419,6 +439,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--aizuchi-vocab-file", type=Path, default=None, help="1 行 1 語。文字数判定の代わり"
     )
     parser.add_argument("--match-top-k", type=int, default=5)
+    parser.add_argument(
+        "--no-match-text",
+        dest="match_text",
+        action="store_false",
+        help="語を合わせず、尺だけでバンクから引く",
+    )
     parser.add_argument("--gain", choices=("match", "none"), default="match")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--limit", type=int, default=0, help="対話数の上限(0 で全部)")
@@ -474,6 +500,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     missing = 0
     replaced_texts: dict[str, int] = {}
     left_alone: dict[str, int] = {}
+    text_fallbacks = 0
+    missing_texts: dict[str, int] = {}
     errors: list[float] = []
     moves: list[float] = []
     for json_path in json_paths:
@@ -542,7 +570,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "bank_text": args.bank_text or "(all)",
             "bank_temperature": args.bank_temperature,
             "n_clips": len(clips),
-            "match": "duration",
+            "match": "text+duration" if args.match_text else "duration",
             "match_top_k": args.match_top_k,
             "gain": args.gain,
             "seed": args.seed,
@@ -571,6 +599,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         for swap in swaps:
             key = str(swap["original_text"]).strip()
             replaced_texts[key] = replaced_texts.get(key, 0) + 1
+            if swap.get("text_fallback"):
+                text_fallbacks += 1
+                missing_texts[key] = missing_texts.get(key, 0) + 1
         # 置き換えなかった聞き手側の短い発話。語彙を広げるかどうかの判断材料に
         # なるので、黙って落とさず数えておく。
         for text, _span, label in rows:
@@ -609,6 +640,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         over = sum(1 for value in errors if value > 0)
         print(f"  うち区間より長くなった: {over}/{len(errors)} (相手に食い込む方向)")
+    if text_fallbacks:
+        print(f"バンクに同じ語が無くて別の語を差したもの: {text_fallbacks} 箇所")
+        for word, count in sorted(missing_texts.items(), key=lambda kv: -kv[1])[:10]:
+            print(f"  {word} x{count}")
     if moves:
         absolute = [abs(value) for value in moves]
         earlier = sum(1 for value in moves if value < 0)
