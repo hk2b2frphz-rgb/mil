@@ -209,6 +209,75 @@ class PadPreservesAudioFormatTest(unittest.TestCase):
                 np.testing.assert_allclose(written[24000:], source, atol=1e-9)
 
 
+@unittest.skipUnless(HAS_SOUNDFILE, "soundfile not installed in this environment")
+class BuildTrainingManifestTest(unittest.TestCase):
+    """Step 4 pairs the injector with a manifest rebuild: padding changes every
+    duration, and a dialogue whose tag could not be placed is absent from the
+    output, so the manifest that came out of step 3 no longer describes what is
+    on disk. prepare_nu_fullft_dataset.py resolves paths relative to the
+    manifest's own directory, which is what the path format here has to match."""
+
+    def build(self, training_set: Path) -> list[dict]:
+        import subprocess
+
+        result = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts/build_training_manifest.py"),
+             "--training-set", str(training_set)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = training_set / "synthetic_moshi_train.jsonl"
+        return [json.loads(line) for line in manifest.read_text().splitlines()]
+
+    def make_sample(self, data_stereo: Path, stem: str, duration_sec: float,
+                    *, sidecar: bool = True) -> None:
+        import numpy as np
+        import soundfile as sf
+
+        sf.write(str(data_stereo / f"{stem}.wav"),
+                 np.zeros((int(duration_sec * 24000), 2), dtype="float32"), 24000)
+        if sidecar:
+            (data_stereo / f"{stem}.json").write_text("{}", encoding="utf-8")
+
+    def test_durations_come_from_the_audio_not_a_stale_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            training_set = Path(tmp) / "training_set"
+            data_stereo = training_set / "data_stereo"
+            data_stereo.mkdir(parents=True)
+            self.make_sample(data_stereo, "sample_001", 4.0)
+            # A stale manifest claiming the pre-pad duration must be replaced,
+            # not trusted.
+            (training_set / "synthetic_moshi_train.jsonl").write_text(
+                json.dumps({"path": "data_stereo/sample_001.wav", "duration": 1.0}) + "\n",
+                encoding="utf-8",
+            )
+            rows = self.build(training_set)
+        self.assertEqual(rows, [{"path": "data_stereo/sample_001.wav", "duration": 4.0}])
+
+    def test_paths_resolve_from_the_manifest_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            training_set = Path(tmp) / "training_set"
+            data_stereo = training_set / "data_stereo"
+            data_stereo.mkdir(parents=True)
+            self.make_sample(data_stereo, "sample_001", 2.0)
+            rows = self.build(training_set)
+            root = (training_set / "synthetic_moshi_train.jsonl").parent
+            for row in rows:
+                self.assertTrue((root / row["path"]).resolve().is_file(), row)
+
+    def test_a_wav_without_a_sidecar_is_left_out(self) -> None:
+        # prepare_nu_fullft_dataset.py needs both; listing one alone only
+        # produces a warning there and an entry that can never be used.
+        with tempfile.TemporaryDirectory() as tmp:
+            training_set = Path(tmp) / "training_set"
+            data_stereo = training_set / "data_stereo"
+            data_stereo.mkdir(parents=True)
+            self.make_sample(data_stereo, "sample_001", 2.0)
+            self.make_sample(data_stereo, "orphan", 2.0, sidecar=False)
+            rows = self.build(training_set)
+        self.assertEqual([row["path"] for row in rows], ["data_stereo/sample_001.wav"])
+
+
 class ShiftAlignmentsTest(unittest.TestCase):
     def test_every_entry_start_and_end_move_by_the_same_offset(self) -> None:
         entries = [["a", [0.0, 1.0], "SPEAKER_MAIN"], ["b", [1.5, 3.0], "SPEAKER_USER"]]
