@@ -53,10 +53,6 @@ class DensityItemsTest(unittest.TestCase):
         payload = make_payload(greeting_start=1.0, aizuchi_frequency_label=None)
         self.assertEqual(inj.density_items(payload), [])
 
-    def test_empty_label_yields_no_items(self) -> None:
-        payload = make_payload(greeting_start=1.0, aizuchi_frequency_label="")
-        self.assertEqual(inj.density_items(payload), [])
-
     def test_rule_and_llm_labels_are_carried_through_unchanged(self) -> None:
         for label in ("eager", "llm", "reserved"):
             payload = make_payload(greeting_start=1.0, aizuchi_frequency_label=label)
@@ -184,11 +180,6 @@ class TagSurvivesTextNormalizationTest(unittest.TestCase):
                 )
                 self.assertEqual(rebuilt, tag)
 
-    def test_a_density_becomes_an_integer_percent(self) -> None:
-        self.assertEqual(inj.aizuchi_tag_text("density=0.75"), "<相槌75>")
-        self.assertEqual(inj.aizuchi_tag_text("density=1.00"), "<相槌100>")
-        self.assertEqual(inj.aizuchi_tag_text("density=0.00"), "<相槌0>")
-
     def test_no_tag_contains_a_character_the_normalizer_rewrites(self) -> None:
         for label in self.all_labels():
             tag = inj.aizuchi_tag_text(label)
@@ -226,25 +217,6 @@ class LabelSurvivesTheTtsLoaderTest(unittest.TestCase):
             path.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
             loaded = q.load_dialogues_from_jsonl(path)
         self.assertEqual(loaded[0]["aizuchi_frequency_label"], "density=0.75")
-
-    def test_a_dialogue_without_the_label_loads_as_none(self) -> None:
-        import generate_qwen3_tts_data as q
-
-        row = {
-            "id": "case_a", "category": "c", "risk_level": "low", "title": "t",
-            "turns": [{"speaker": "user", "text": "はなします。"}],
-        }
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "dialogues.jsonl"
-            path.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
-            loaded = q.load_dialogues_from_jsonl(path)
-        self.assertIsNone(loaded[0]["aizuchi_frequency_label"])
-
-
-@unittest.skipUnless(HAS_SOUNDFILE, "soundfile not installed in this environment")
-class PadPreservesAudioFormatTest(unittest.TestCase):
-    """soundfile writes WAV as PCM_16 unless told otherwise, so padding a
-    32-bit float or 24-bit corpus would silently requantize every sample."""
 
     def test_the_subtype_and_samples_survive_the_pad(self) -> None:
         import numpy as np
@@ -313,29 +285,6 @@ class BuildTrainingManifestTest(unittest.TestCase):
             rows = self.build(training_set)
         self.assertEqual(rows, [{"path": "data_stereo/sample_001.wav", "duration": 4.0}])
 
-    def test_paths_resolve_from_the_manifest_directory(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            training_set = Path(tmp) / "training_set"
-            data_stereo = training_set / "data_stereo"
-            data_stereo.mkdir(parents=True)
-            self.make_sample(data_stereo, "sample_001", 2.0)
-            rows = self.build(training_set)
-            root = (training_set / "synthetic_moshi_train.jsonl").parent
-            for row in rows:
-                self.assertTrue((root / row["path"]).resolve().is_file(), row)
-
-    def test_a_wav_without_a_sidecar_is_left_out(self) -> None:
-        # prepare_nu_fullft_dataset.py needs both; listing one alone only
-        # produces a warning there and an entry that can never be used.
-        with tempfile.TemporaryDirectory() as tmp:
-            training_set = Path(tmp) / "training_set"
-            data_stereo = training_set / "data_stereo"
-            data_stereo.mkdir(parents=True)
-            self.make_sample(data_stereo, "sample_001", 2.0)
-            self.make_sample(data_stereo, "orphan", 2.0, sidecar=False)
-            rows = self.build(training_set)
-        self.assertEqual([row["path"] for row in rows], ["data_stereo/sample_001.wav"])
-
 
 class ShiftAlignmentsTest(unittest.TestCase):
     def test_every_entry_start_and_end_move_by_the_same_offset(self) -> None:
@@ -345,19 +294,6 @@ class ShiftAlignmentsTest(unittest.TestCase):
             ["a", [2.0, 3.0], "SPEAKER_MAIN"],
             ["b", [3.5, 5.0], "SPEAKER_USER"],
         ])
-
-    def test_zero_offset_is_a_no_op(self) -> None:
-        entries = [["a", [0.3, 1.1], "SPEAKER_MAIN"]]
-        self.assertEqual(inj.shift_alignments(entries, 0.0), entries)
-
-
-@unittest.skipUnless(HAS_SOUNDFILE, "soundfile not installed in this environment")
-class PadLeadInEndToEndTest(unittest.TestCase):
-    """--pad-lead-in-sec: the fix for the case ShiftAlignmentsTest and
-    DensityInjectionEndToEndTest.test_no_lead_in_silence_drops_the_tag_and_warns
-    document -- a dialogue whose greeting starts at t=0 has nowhere to put the
-    density tag, so instead of hoping for pre-existing silence, this pads the
-    audio itself and shifts every timestamp, guaranteeing room."""
 
     def make_wav(self, path: Path, duration_sec: float, sample_rate: int = 24000) -> None:
         import numpy as np

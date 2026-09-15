@@ -464,6 +464,54 @@ def _getattr_chain(obj, name: str, default):
 # Core inference loop
 # ---------------------------------------------------------------------------
 
+def encode_aizuchi_tag(text_tokenizer, tag: str) -> list[int]:
+    """Turn a backchannel-density tag into the text token ids to force.
+
+    The tag is written in the listener's text stream during training
+    (scripts/inject_inner_thoughts.py --from-aizuchi-density), one token per
+    frame from the start of the call, over silence. Forcing the same tokens
+    here puts the model in the state that spelling corresponded to.
+    """
+    for attr in ("encode", "encode_as_ids", "EncodeAsIds"):
+        method = getattr(text_tokenizer, attr, None)
+        if method is None:
+            continue
+        try:
+            ids = method(tag)
+        except Exception:  # noqa: BLE001 - try the next spelling
+            continue
+        return [int(i) for i in ids]
+    raise RuntimeError("text tokenizer exposes no usable encode method")
+
+
+class ForcedTextPrefix:
+    """Overwrite the text token the model sampled, for the first N steps.
+
+    moshi's LMGen samples the text token itself; step() takes only the user's
+    audio codes, so there is no argument to condition on. But on_text_hook is
+    called with that token BEFORE it drives the depformer (which produces the
+    audio) and BEFORE it is written into the streaming cache, and it is handed
+    the tensor itself -- so writing into it in place redirects both.
+
+    Without this the model samples whichever tag it likes and then follows its
+    own sample, which gives a different density per run rather than one that
+    can be asked for.
+    """
+
+    def __init__(self, token_ids: list[int]) -> None:
+        self.token_ids = list(token_ids)
+        self.step = 0
+
+    def __call__(self, text_token) -> None:
+        if self.step < len(self.token_ids):
+            text_token.fill_(self.token_ids[self.step])
+        self.step += 1
+
+    @property
+    def done(self) -> bool:
+        return self.step >= len(self.token_ids)
+
+
 def run_trial(
     pcm: np.ndarray,
     seed: int,
@@ -474,6 +522,7 @@ def run_trial(
     silence_sec: float,
     max_gen_sec: float,
     acoustic_delay: int,
+    aizuchi_tag: Optional[str] = None,
 ) -> dict:
     """
     Run a single inference trial.
@@ -494,14 +543,26 @@ def run_trial(
     frame_rate = float(mimi.frame_rate)
     frame_size = int(sample_rate / frame_rate)
 
-    # ---- Build full PCM: input + silence --------------------------------
+    # ---- Build full PCM: (tag lead-in) + input + silence -----------------
     silence_samples = int(silence_sec * sample_rate)
+    forced = None
+    lead_in_samples = 0
+    if aizuchi_tag:
+        forced = ForcedTextPrefix(encode_aizuchi_tag(text_tokenizer, aizuchi_tag))
+        # During training the tag sits on silence before anyone speaks. Give
+        # it the same room here, or the model reads the tag while the speaker
+        # is already talking -- a situation it never saw.
+        lead_in_samples = len(forced.token_ids) * frame_size
     full_pcm = np.concatenate(
-        [pcm, np.zeros(silence_samples, dtype=np.float32)]
+        [
+            np.zeros(lead_in_samples, dtype=np.float32),
+            pcm,
+            np.zeros(silence_samples, dtype=np.float32),
+        ]
     )
 
     # ---- Determine number of steps to run --------------------------------
-    input_steps = (len(pcm) + frame_size - 1) // frame_size
+    input_steps = (lead_in_samples + len(pcm) + frame_size - 1) // frame_size
     max_steps = int(max_gen_sec * frame_rate)
     total_frames = (len(full_pcm) + frame_size - 1) // frame_size
     n_steps = min(total_frames, max_steps)
@@ -527,6 +588,9 @@ def run_trial(
     first_response_step: Optional[int] = None
 
     # ---- Streaming inference loop ----------------------------------------
+    previous_hook = getattr(lm_gen, "on_text_hook", None)
+    if forced is not None:
+        lm_gen.on_text_hook = forced
     with torch.no_grad():
         with lm_gen.streaming(1):
             with mimi.streaming(1):
@@ -571,9 +635,13 @@ def run_trial(
                         if first_response_step is None:
                             first_response_step = step
 
+    if forced is not None:
+        lm_gen.on_text_hook = previous_hook
+
     return {
         "audio_frames": audio_frames,
         "text_events": text_events,
+        "forced_tag_steps": len(forced.token_ids) if forced is not None else 0,
         "total_steps": n_steps,
         "input_steps": input_steps,
         "first_audio_step": first_audio_step,

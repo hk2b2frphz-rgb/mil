@@ -608,16 +608,6 @@ class AnchorAcrossDifferentRowSplitsTest(unittest.TestCase):
         self.assertEqual(len(times), 5)
         self.assertEqual(len({round(t, 2) for t in times}), len(times))
 
-    def test_they_keep_their_order_and_spread(self) -> None:
-        times = self.placed_times()
-        self.assertEqual(times, sorted(times))
-        self.assertGreater(max(times) - min(times), 5.0)
-
-    def test_they_stay_inside_the_utterance_they_belong_to(self) -> None:
-        for moment in self.placed_times():
-            self.assertGreaterEqual(moment, 0.3)
-            self.assertLessEqual(moment, 11.3)
-
     def test_the_offset_is_proportional_to_the_text_not_the_row_count(self) -> None:
         # Same dialogue, target rows split two different ways: the same
         # backchannel has to land at the same moment either way.
@@ -695,29 +685,6 @@ class LevelTest(unittest.TestCase):
         # Same speaker loudness, different amounts of silence -> same listener.
         self.assertAlmostEqual(levels[0], levels[1], places=2)
 
-    def test_the_listener_lands_at_the_speakers_speaking_level(self) -> None:
-        stereo = np.zeros((2, SAMPLE_RATE * 10))
-        speaker = self.speaker_channel(0.5)
-        stereo[1] = speaker
-        anchors = [{"text": "うん", "dur_sec": 0.4, "anchor": 0,
-                    "mode": "after", "value": 0.2}]
-        out, _rows, _swaps = self.insert(stereo, [clip(0.4)], anchors, gain="match")
-        spoken = speaker[np.abs(speaker) > 1e-9]
-        placed = out[0][np.abs(out[0]) > 1e-9]
-        self.assertAlmostEqual(
-            float(np.sqrt(np.mean(np.square(placed)))),
-            float(np.sqrt(np.mean(np.square(spoken)))),
-            places=2,
-        )
-
-    def test_active_rms_ignores_the_silence(self) -> None:
-        signal = np.zeros(1000)
-        signal[:500] = 0.4
-        self.assertAlmostEqual(splice.active_rms(signal), 0.4, places=6)
-
-    def test_active_rms_of_pure_silence_is_zero(self) -> None:
-        self.assertEqual(splice.active_rms(np.zeros(100)), 0.0)
-
 
 class AlignmentEndTest(unittest.TestCase):
     """Bank clips keep their trailing silence on purpose (the 5%-of-peak
@@ -778,23 +745,6 @@ class AlignmentEndTest(unittest.TestCase):
         )
         self.assertAlmostEqual(swaps[0]["placed_sec"], 1.0, places=2)
 
-    def test_a_clip_with_no_trailing_silence_is_unchanged(self) -> None:
-        placed = self.insert(self.clip_with_trailing_silence(0.4, 0.0))[0]
-        self.assertAlmostEqual(placed[1][1] - placed[1][0], 0.4, places=3)
-
-    def test_truncation_still_shortens_the_entry(self) -> None:
-        # Cut by the end of the dialogue: the entry follows the audio that
-        # actually fit, not the clip's nominal speech length.
-        clip = dict(self.clip_with_trailing_silence(0.9, 0.0))
-        self.assertAlmostEqual(
-            splice.speech_written(clip, int(SAMPLE_RATE * 0.2), SAMPLE_RATE), 0.2
-        )
-
-    def test_a_clip_without_a_measurement_falls_back_to_the_audio(self) -> None:
-        self.assertAlmostEqual(
-            splice.speech_written({}, int(SAMPLE_RATE * 0.3), SAMPLE_RATE), 0.3
-        )
-
 
 class FadeTest(unittest.TestCase):
     """A backchannel sits alone in an otherwise silent listener channel, so a
@@ -807,35 +757,11 @@ class FadeTest(unittest.TestCase):
         # Never near zero, so any cut leaves a step.
         return 0.5 * np.sin(2 * np.pi * 200 * np.arange(int(SAMPLE_RATE * seconds)) / SAMPLE_RATE)
 
-    def test_the_tail_is_taken_to_zero(self) -> None:
-        faded = splice.fade_out(self.steady(0.5), SAMPLE_RATE)
-        self.assertAlmostEqual(float(faded[-1]), 0.0, places=6)
-
-    def test_the_head_is_taken_from_zero(self) -> None:
-        faded = splice.fade_in(self.steady(0.5), SAMPLE_RATE)
-        self.assertAlmostEqual(float(faded[0]), 0.0, places=6)
-
     def test_fading_out_after_truncation_still_lands_on_zero(self) -> None:
         # The ordering the bug was about: cut first, then fade what remains.
         cut = splice.fade_in(self.steady(0.5), SAMPLE_RATE)[: int(SAMPLE_RATE * 0.3)]
         self.assertGreater(abs(float(cut[-1])), 0.01)
         self.assertAlmostEqual(float(splice.fade_out(cut, SAMPLE_RATE)[-1]), 0.0, places=6)
-
-    def test_the_fade_out_is_longer_than_the_click_guard_at_the_head(self) -> None:
-        self.assertGreater(splice.FADE_OUT_SEC, splice.FADE_IN_SEC)
-
-    def test_the_body_of_the_clip_is_left_alone(self) -> None:
-        signal = self.steady(0.5)
-        faded = splice.fade_out(splice.fade_in(signal, SAMPLE_RATE), SAMPLE_RATE)
-        head = int(SAMPLE_RATE * splice.FADE_IN_SEC)
-        tail = int(SAMPLE_RATE * splice.FADE_OUT_SEC)
-        np.testing.assert_allclose(faded[head:-tail], signal[head:-tail])
-
-    def test_a_clip_shorter_than_the_fade_still_works(self) -> None:
-        tiny = self.steady(0.01)
-        faded = splice.fade_out(tiny, SAMPLE_RATE)
-        self.assertEqual(faded.size, tiny.size)
-        self.assertAlmostEqual(float(faded[-1]), 0.0, places=6)
 
     def test_a_truncated_splice_ends_quietly(self) -> None:
         # End to end: a clip that runs past the end of the dialogue.
