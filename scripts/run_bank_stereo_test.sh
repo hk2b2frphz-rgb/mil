@@ -13,12 +13,22 @@ set -euo pipefail
 #                "un" in it -- the four words that were 76% of the 116 real
 #                backchannels are none of them in it -- so a corpus to test a
 #                bank of them against has to be made, not found. CPU, instant.
-#   2. Qwen3     synthesize the whole dialogue as usual. The user side is what
-#                is kept; the listener side is thrown away by step 4 and only
-#                serves as the A/B baseline. V100.
-#   3. KABURI    where the listener should come in. CPU, no acoustic model.
-#   4. splice    replace the listener channel: each backchannel moves to
-#                KABURI's gap and is voiced by a bank clip of the SAME word.
+#                It also writes a user-only copy for the next step.
+#   2. Qwen3     synthesize the USER SIDE ONLY. The listener is never
+#                synthesized: its audio comes from the bank, and rendering it
+#                to throw it away would also push the user's turns later on
+#                the timeline, since a listener turn that is not overlapped
+#                occupies time of its own. V100.
+#   3. KABURI    where the listener should come in, from the full dialogue
+#                text. CPU, no acoustic model.
+#   4. insert    write the bank clips into the silent listener channel at
+#                KABURI's positions, matched on word and length.
+#
+# FULL_RENDER=1 goes back to synthesizing the whole dialogue and replacing the
+# listener channel afterwards. That costs the wasted synthesis and the shifted
+# timeline, and buys one thing: the discarded listener audio is an A/B
+# baseline -- the same words in the same places, synthesized rather than
+# retrieved.
 #
 # So the output has a user side that was synthesized, a listener side that was
 # retrieved, and timing that was predicted -- which is the whole proposal, end
@@ -78,6 +88,8 @@ fi
 BATCH_ID="${CORPUS_ROOT}_bank_stereo_${STAMP}"
 OUT_ROOT="${OUT_ROOT:-$REPO_ROOT/data/runs/smoke/$BATCH_ID}"
 DIALOGUE_OUT="$OUT_ROOT/dialogues_bank.jsonl"
+USER_ONLY_OUT="$OUT_ROOT/dialogues_user_only.jsonl"
+FULL_RENDER="${FULL_RENDER:-0}"
 QWEN_ROOT="$OUT_ROOT/qwen"
 QWEN_DIR="$QWEN_ROOT/shard_000/training_set"
 PLACEMENT_OUT="$OUT_ROOT/kaburi_placement"
@@ -97,6 +109,7 @@ echo ">>> 1/4 rewrite the backchannels -> $DIALOGUE_OUT"
 REWRITE_ARGS=(
     --dialogues-jsonl "$SOURCE_DIALOGUES"
     --out-jsonl "$DIALOGUE_OUT"
+    --user-only-jsonl "$USER_ONLY_OUT"
     --num-dialogues "$NUM_DIALOGUES"
     --seed "$SEED"
 )
@@ -109,11 +122,17 @@ uv run python scripts/rewrite_aizuchi_vocab.py "${REWRITE_ARGS[@]}"
 VOCAB_FILE="${DIALOGUE_OUT}.vocab.txt"
 
 echo
-echo ">>> 2/4 Qwen3-TTS over the rewritten dialogues -> $QWEN_DIR"
+if [[ "$FULL_RENDER" == "1" ]]; then
+    TTS_DIALOGUES="$DIALOGUE_OUT"
+    echo ">>> 2/4 Qwen3-TTS over the WHOLE dialogue (FULL_RENDER=1) -> $QWEN_DIR"
+else
+    TTS_DIALOGUES="$USER_ONLY_OUT"
+    echo ">>> 2/4 Qwen3-TTS over the user side only -> $QWEN_DIR"
+fi
 (
     export CLONE_OUT_DIR_MOSHI CUDA_VISIBLE_DEVICES
     export SOURCE_BATCH_ID="${BATCH_ID}_src"
-    export DIALOGUES_JSONL="$DIALOGUE_OUT"
+    export DIALOGUES_JSONL="$TTS_DIALOGUES"
     export BATCH_ID="${BATCH_ID}_qwen"
     export OUT_ROOT="$QWEN_ROOT"
     export NUM_DIALOGUES NUM_SHARDS=1 SPARE_RATIO=0 RESUME=0 LOG_EVERY=1

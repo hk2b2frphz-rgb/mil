@@ -75,6 +75,7 @@ split_outliers = _probe.split_outliers
 
 # 左が moshi(聞き手)、右が user。KABURI の出力もこの並び。
 MAIN_LABEL = "SPEAKER_MAIN"
+STRIP_CHARS = "。、．，!?！？…・ 　"
 LEFT_CHANNEL = 0
 # 継ぎ目のプチッを消すだけの長さ。相槌の立ち上がりを鈍らせない範囲で。
 FADE_SEC = 0.005
@@ -178,7 +179,7 @@ def load_bank(
 
 
 def is_backchannel(text: str, max_chars: int, vocab: set[str] | None) -> bool:
-    stripped = text.strip().strip("。、．，!?！？ 　")
+    stripped = text.strip().strip(STRIP_CHARS)
     if not stripped:
         return False
     if vocab is not None:
@@ -218,9 +219,15 @@ def backchannel_anchors(
             for index, user in enumerate(users)
             if float(user["start_sec"]) <= start
         ]
+        common = {
+            "text": str(row["text"]).strip().strip(STRIP_CHARS),
+            "dur_sec": round(float(row["end_sec"]) - start, 4),
+        }
         if not prior:
             # 相手が話し始める前。位置をそのまま持つしかない。
-            anchors.append({"anchor": -1, "mode": "absolute", "value": round(start, 4)})
+            anchors.append(
+                {**common, "anchor": -1, "mode": "absolute", "value": round(start, 4)}
+            )
             continue
         index, anchor = prior[-1]
         anchor_start = float(anchor["start_sec"])
@@ -229,6 +236,7 @@ def backchannel_anchors(
         if start < anchor_end and span > 0:
             anchors.append(
                 {
+                    **common,
                     "anchor": index,
                     "mode": "inside",
                     "value": round((start - anchor_start) / span, 4),
@@ -236,7 +244,12 @@ def backchannel_anchors(
             )
         else:
             anchors.append(
-                {"anchor": index, "mode": "after", "value": round(start - anchor_end, 4)}
+                {
+                    **common,
+                    "anchor": index,
+                    "mode": "after",
+                    "value": round(start - anchor_end, 4),
+                }
             )
     return anchors
 
@@ -264,21 +277,10 @@ def retime_backchannels(
     if len(targets) != len(anchors):
         return {}
 
+    user_rows = [rows[i] for i in users]
     new_starts: dict[int, float] = {}
     for position, row_index in enumerate(targets):
-        anchor = anchors[position]
-        index = int(anchor.get("anchor", -1))
-        if index < 0 or index >= len(users):
-            moved = float(anchor.get("value", rows[row_index][1][0]))
-        else:
-            user_row = rows[users[index]]
-            user_start = float(user_row[1][0])
-            user_end = float(user_row[1][1])
-            if anchor.get("mode") == "inside":
-                span = max(0.0, user_end - user_start)
-                moved = user_start + float(anchor["value"]) * span
-            else:
-                moved = user_end + float(anchor["value"])
+        moved = anchor_time(anchors[position], user_rows, float(rows[row_index][1][0]))
         new_starts[row_index] = min(max(0.0, moved), max(0.0, duration_sec - 0.01))
     return new_starts
 
@@ -299,6 +301,110 @@ def load_placements(placement_dir: Path) -> dict[str, dict[str, Any]]:
     if not index:
         raise SystemExit(f"配置 JSON がありません（または id が無い）: {placement_dir}")
     return index
+
+
+def anchor_time(
+    anchor: dict[str, Any], user_rows: Sequence[Sequence[Any]], fallback: float
+) -> float:
+    """anchor を既存側の時間軸の秒に直す。"""
+    index = int(anchor.get("anchor", -1))
+    if index < 0 or index >= len(user_rows):
+        return float(anchor.get("value", fallback))
+    row = user_rows[index]
+    start, end = float(row[1][0]), float(row[1][1])
+    if anchor.get("mode") == "inside":
+        return start + float(anchor["value"]) * max(0.0, end - start)
+    return end + float(anchor["value"])
+
+
+def insert_backchannels(
+    stereo: np.ndarray,
+    sample_rate: int,
+    rows: Sequence[Sequence[Any]],
+    anchors: Sequence[dict[str, Any]],
+    clips: Sequence[dict[str, Any]],
+    args: argparse.Namespace,
+    rng: random.Random,
+) -> tuple[np.ndarray, list[list[Any]], list[dict[str, Any]]]:
+    """聞き手のいない音声に、KABURI の位置へ相槌を差し込む。
+
+    差し替え（splice_dialogue）と違い、消すものが無い。user 側だけを合成して
+    おけば聞き手の音は一度も作らずに済む -- 作って捨てるのは無駄なだけでなく、
+    捨てる音が user 側のタイムラインを押してしまうので害がある。
+
+    相槌の尺は KABURI が見込んだ長さ (dur_sec) を目標にする。空いている区間が
+    無いので、既存側から取れる手がかりはこれしかない。
+    """
+    out = stereo.copy()
+    new_rows = [list(row) for row in rows]
+    user_rows = sorted(
+        (row for row in rows if row[2] != MAIN_LABEL), key=lambda row: row[1][0]
+    )
+    duration = out.shape[-1] / sample_rate
+    swaps: list[dict[str, Any]] = []
+
+    for anchor in anchors:
+        target = min(max(0.0, anchor_time(anchor, user_rows, 0.0)), max(0.0, duration - 0.01))
+        want = str(anchor.get("text", "")) if args.match_text else ""
+        clip, fell_back = pick_clip(
+            clips, float(anchor.get("dur_sec", 0.0)), args.match_top_k, rng, want
+        )
+        signal = resample_to(clip, sample_rate)
+        placed = fade(signal.astype(np.float64), sample_rate)
+        if args.gain == "match":
+            # 消す相槌が無いので、相手のチャンネルの音量に合わせる。
+            reference = float(np.sqrt(np.mean(np.square(out[1 - LEFT_CHANNEL]))))
+            level = float(np.sqrt(np.mean(np.square(placed)))) if placed.size else 0.0
+            if reference > 0 and level > 0:
+                placed = placed * (reference / level)
+        peak = float(np.max(np.abs(placed))) if placed.size else 0.0
+        if peak > 1.0:
+            placed = placed / peak
+
+        begin = int(round(target * sample_rate))
+        stop = min(out.shape[-1], begin + placed.size)
+        written = max(0, stop - begin)
+        if written <= 0:
+            continue
+        out[LEFT_CHANNEL, begin:stop] += placed[:written]
+        placed_end = round(target + written / sample_rate, 4)
+        new_rows.append([clip["text"], [round(target, 4), placed_end], MAIN_LABEL])
+        swaps.append(
+            {
+                "original_text": "",
+                "bank_text": clip["text"],
+                "bank_wav": clip["wav"],
+                "bank_temperature": clip["temperature"],
+                "slot_sec": float(anchor.get("dur_sec", 0.0)),
+                "placed_sec": round(written / sample_rate, 4),
+                "length_error_sec": round(
+                    written / sample_rate - float(anchor.get("dur_sec", 0.0)), 4
+                ),
+                "truncated": bool(written < placed.size),
+                "text_fallback": fell_back,
+                "anchor_mode": anchor.get("mode"),
+                "original_start_sec": None,
+                "start_sec": round(target, 4),
+                "moved_sec": 0.0,
+            }
+        )
+
+    peak = float(np.max(np.abs(out))) if out.size else 0.0
+    if peak > 1.0:
+        out = out / peak
+    new_rows.sort(key=lambda row: row[1][0])
+    return out, new_rows, swaps
+
+
+def resample_to(clip: dict[str, Any], sample_rate: int) -> np.ndarray:
+    """バンクと対話のレートが違うときだけ線形で合わせる。"""
+    signal = clip["signal"]
+    if clip["sample_rate"] == sample_rate:
+        return signal
+    n = int(round(signal.size * sample_rate / clip["sample_rate"]))
+    return np.interp(
+        np.linspace(0.0, signal.size - 1, max(1, n)), np.arange(signal.size), signal
+    )
 
 
 def pick_clip(
@@ -377,18 +483,9 @@ def splice_dialogue(
         slot_sec = float(end) - float(start)
         moved_to = new_starts.get(row_index)
         place_at = float(start) if moved_to is None else float(moved_to)
-        want = str(text).strip().strip("。、．，!?！？…・ 　") if args.match_text else ""
+        want = str(text).strip().strip(STRIP_CHARS) if args.match_text else ""
         clip, fell_back = pick_clip(clips, slot_sec, args.match_top_k, rng, want)
-        signal = clip["signal"]
-        if clip["sample_rate"] != sample_rate:
-            # バンクと対話のサンプリングレートが違うなら線形で合わせる。どちらも
-            # 24kHz の想定だが、黙って音程がずれるよりは伸縮したと言う方がよい。
-            n = int(round(signal.size * sample_rate / clip["sample_rate"]))
-            signal = np.interp(
-                np.linspace(0.0, signal.size - 1, max(1, n)),
-                np.arange(signal.size),
-                signal,
-            )
+        signal = resample_to(clip, sample_rate)
 
         slot_begin = int(round(place_at * sample_rate))
         if slot_begin >= out.shape[-1]:
@@ -478,6 +575,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--match-top-k", type=int, default=5)
     parser.add_argument(
+        "--placement-mode",
+        choices=("auto", "replace", "insert"),
+        default="auto",
+        help=(
+            "replace=既存の相槌を動かして差し替える / insert=聞き手側が無い音声に"
+            "差し込む / auto=既存の相槌があれば replace"
+        ),
+    )
+    parser.add_argument(
         "--no-match-text",
         dest="match_text",
         action="store_false",
@@ -541,6 +647,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     text_fallbacks = 0
     missing_texts: dict[str, int] = {}
     anchor_modes: dict[str, int] = {}
+    inserted_total = 0
     errors: list[float] = []
     moves: list[float] = []
     for json_path in json_paths:
@@ -570,6 +677,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         stereo = wav.numpy().astype(np.float64)
 
         new_starts: dict[int, float] = {}
+        spliced = None
+        mode_used = "replace"
         if placement is not None:
             anchors = backchannel_anchors(
                 placement.get("placements", []), args.aizuchi_max_chars, vocab
@@ -579,21 +688,40 @@ def main(argv: Sequence[str] | None = None) -> int:
                     anchor_modes.get(str(anchor.get("mode")), 0) + 1
                 )
             duration = stereo.shape[-1] / sample_rate
-            new_starts = retime_backchannels(
-                rows, anchors, args.aizuchi_max_chars, vocab, duration
+            existing = [
+                row
+                for row in rows
+                if row[2] == MAIN_LABEL
+                and is_backchannel(str(row[0]), args.aizuchi_max_chars, vocab)
+            ]
+            insert = args.placement_mode == "insert" or (
+                args.placement_mode == "auto" and not existing
             )
-            if not new_starts and anchors:
-                # 本数が合わない = 対応が取れない。黙ってずらすより飛ばす。
-                print(
-                    f"[skip] 相槌の本数が配置と合いません: {json_path.name} "
-                    f"(KABURI {len(anchors)} 箇所)"
+            if insert:
+                # 聞き手側が最初から無い（user だけ合成した）音声。消すものが
+                # 無いので差し込む。
+                mode_used = "insert"
+                inserted_total += len(anchors)
+                spliced, new_rows, swaps = insert_backchannels(
+                    stereo, sample_rate, rows, anchors, clips, args, rng
                 )
-                continue
-            retimed_total += len(new_starts)
+            else:
+                new_starts = retime_backchannels(
+                    rows, anchors, args.aizuchi_max_chars, vocab, duration
+                )
+                if not new_starts and anchors:
+                    # 本数が合わない = 対応が取れない。黙ってずらすより飛ばす。
+                    print(
+                        f"[skip] 相槌の本数が配置と合いません: {json_path.name} "
+                        f"(KABURI {len(anchors)} 箇所 / 既存 {len(existing)} 箇所)"
+                    )
+                    continue
+                retimed_total += len(new_starts)
 
-        spliced, new_rows, swaps = splice_dialogue(
-            stereo, sample_rate, rows, clips, args, rng, vocab, new_starts
-        )
+        if spliced is None:
+            spliced, new_rows, swaps = splice_dialogue(
+                stereo, sample_rate, rows, clips, args, rng, vocab, new_starts
+            )
         if not swaps:
             print(f"[skip] 相槌が見つかりません: {json_path.name}")
 
@@ -618,6 +746,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "gain": args.gain,
             "seed": args.seed,
             "n_swapped": len(swaps),
+            "placement_mode": mode_used,
             "n_retimed": len(new_starts),
             "placement_dir": str(args.placement_dir) if args.placement_dir else None,
             "turns_text_rewritten": False,
@@ -651,14 +780,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             stripped = str(text).strip()
             if (
                 label == MAIN_LABEL
-                and len(stripped.strip("。、．，!?！？ 　")) <= SHORT_UTTERANCE_CHARS
+                and len(stripped.strip(STRIP_CHARS)) <= SHORT_UTTERANCE_CHARS
                 and not is_backchannel(stripped, args.aizuchi_max_chars, vocab)
             ):
                 left_alone[stripped] = left_alone.get(stripped, 0) + 1
         total_swaps += len(swaps)
         errors.extend(swap["length_error_sec"] for swap in swaps)
         moves.extend(swap["moved_sec"] for swap in swaps if swap["moved_sec"])
-        print(f"[ok] {json_path.stem}: {len(swaps)} 箇所を差し替え -> {out_wav.name}")
+        verb = "差し込み" if mode_used == "insert" else "差し替え"
+        print(f"[ok] {json_path.stem}: {len(swaps)} 箇所を{verb} -> {out_wav.name}")
         if limit and processed >= limit:
             break
 
@@ -673,6 +803,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("代用できるものがあれば --aizuchi-vocab-file に足す）:")
         for text, count in sorted(left_alone.items(), key=lambda kv: -kv[1])[:15]:
             print(f"  {text} x{count}")
+    if inserted_total:
+        print(f"  うち差し込み（聞き手側は元から無し）: {inserted_total} 箇所")
     if missing:
         print(f"  配置が無くて飛ばしたもの: {missing} 本")
     if errors:

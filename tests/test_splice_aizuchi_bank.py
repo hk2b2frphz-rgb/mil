@@ -41,6 +41,7 @@ def default_args(**overrides) -> argparse.Namespace:
         "match_top_k": 1,
         "gain": "none",
         "match_text": False,
+        "placement_mode": "auto",
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -426,6 +427,83 @@ class PlacementIndexTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(SystemExit):
                 splice.load_placements(Path(directory))
+
+
+class InsertTest(unittest.TestCase):
+    def user_only(self) -> tuple[np.ndarray, list]:
+        # What a user-only render looks like: the right channel carries the
+        # speech, the listener channel is silent, and there is nothing to
+        # replace -- the backchannels have to be put in, not moved.
+        stereo = np.zeros((2, SAMPLE_RATE * 8))
+        speech = tone(120.0, 6.0, 0.2)
+        stereo[1, : speech.size] = speech
+        rows = [["今日は本当に疲れてしまって", [0.0, 6.0], "SPEAKER_USER"]]
+        return stereo, rows
+
+    def test_a_backchannel_is_written_where_the_anchor_says(self) -> None:
+        stereo, rows = self.user_only()
+        anchors = [{"anchor": 0, "mode": "inside", "value": 0.5,
+                    "text": "うん", "dur_sec": 0.3}]
+        out, new_rows, swaps = splice.insert_backchannels(
+            stereo, SAMPLE_RATE, rows, anchors, [clip(0.3)],
+            default_args(gain="none"), random.Random(0),
+        )
+        self.assertEqual(len(swaps), 1)
+        # Halfway through a 6s utterance.
+        self.assertAlmostEqual(swaps[0]["start_sec"], 3.0, places=2)
+        window = out[0, int(3.0 * SAMPLE_RATE) : int(3.25 * SAMPLE_RATE)]
+        self.assertGreater(float(np.max(np.abs(window))), 0.0)
+        # And it overlaps: the user is still speaking there.
+        self.assertGreater(float(np.max(np.abs(out[1, int(3.1 * SAMPLE_RATE)]))), 0.0)
+
+    def test_the_user_channel_is_untouched(self) -> None:
+        stereo, rows = self.user_only()
+        anchors = [{"anchor": 0, "mode": "inside", "value": 0.5,
+                    "text": "うん", "dur_sec": 0.3}]
+        out, _rows, _swaps = splice.insert_backchannels(
+            stereo, SAMPLE_RATE, rows, anchors, [clip(0.3)],
+            default_args(gain="none"), random.Random(0),
+        )
+        np.testing.assert_array_equal(out[1], stereo[1])
+
+    def test_the_alignment_gains_a_row_for_the_inserted_word(self) -> None:
+        stereo, rows = self.user_only()
+        anchors = [{"anchor": 0, "mode": "after", "value": 0.4,
+                    "text": "うん", "dur_sec": 0.3}]
+        _out, new_rows, _swaps = splice.insert_backchannels(
+            stereo, SAMPLE_RATE, rows, anchors, [clip(0.3)],
+            default_args(gain="none"), random.Random(0),
+        )
+        self.assertEqual(len(new_rows), 2)
+        added = [row for row in new_rows if row[2] == "SPEAKER_MAIN"][0]
+        self.assertEqual(added[0], "うん")
+        self.assertAlmostEqual(added[1][0], 6.4, places=2)
+
+    def test_the_clip_is_chosen_against_kaburi_s_own_duration(self) -> None:
+        # There is no slot to measure, so the length KABURI expected is the
+        # only handle on how long the backchannel should be.
+        stereo, rows = self.user_only()
+        anchors = [{"anchor": 0, "mode": "inside", "value": 0.5,
+                    "text": "うん", "dur_sec": 0.8}]
+        _out, _rows, swaps = splice.insert_backchannels(
+            stereo, SAMPLE_RATE, rows, anchors, [clip(0.2), clip(0.8)],
+            default_args(gain="none"), random.Random(0),
+        )
+        self.assertAlmostEqual(swaps[0]["placed_sec"], 0.8, delta=0.05)
+
+    def test_several_backchannels_all_land(self) -> None:
+        stereo, rows = self.user_only()
+        anchors = [
+            {"anchor": 0, "mode": "inside", "value": frac,
+             "text": "うん", "dur_sec": 0.3}
+            for frac in (0.2, 0.5, 0.8)
+        ]
+        _out, new_rows, swaps = splice.insert_backchannels(
+            stereo, SAMPLE_RATE, rows, anchors, [clip(0.3)],
+            default_args(gain="none"), random.Random(0),
+        )
+        self.assertEqual(len(swaps), 3)
+        self.assertEqual(sum(1 for row in new_rows if row[2] == "SPEAKER_MAIN"), 3)
 
 
 class BankLoadTest(unittest.TestCase):

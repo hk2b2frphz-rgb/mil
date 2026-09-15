@@ -106,6 +106,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="長さを問わず聞き手のターンを全部書き換える",
     )
+    parser.add_argument(
+        "--user-only-jsonl",
+        type=Path,
+        default=None,
+        help=(
+            "聞き手のターンを落としたものも書き出す。TTS はこちらに掛ける -- "
+            "聞き手の音はバンクから来るので作る必要が無く、作ると捨てる音が "
+            "user 側のタイムラインを押してしまう"
+        ),
+    )
     parser.add_argument("--num-dialogues", type=int, default=0, help="先頭 N 本だけ")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args(argv)
@@ -143,6 +153,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         + "\n".join(sorted(replaced)) + "\n",
         encoding="utf-8",
     )
+
+    if args.user_only_jsonl is not None:
+        args.user_only_jsonl.parent.mkdir(parents=True, exist_ok=True)
+        kept_turns = 0
+        with args.user_only_jsonl.open("w", encoding="utf-8") as handle:
+            for dialogue in rewritten:
+                turns = [
+                    turn
+                    for turn in dialogue["turns"]
+                    if str(turn.get("speaker", "")).strip().lower() != LISTENER
+                ]
+                kept_turns += len(turns)
+                handle.write(
+                    json.dumps({**dialogue, "turns": turns}, ensure_ascii=False) + "\n"
+                )
+        print(f"user のみ: {kept_turns} ターン -> {args.user_only_jsonl}")
 
     total = sum(replaced.values())
     print(f"対話 {len(rewritten)} 本 / 相槌 {total} 箇所を書き換えました")
