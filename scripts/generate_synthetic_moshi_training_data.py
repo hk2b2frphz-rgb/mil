@@ -569,6 +569,16 @@ def parse_args() -> argparse.Namespace:
         help="相づち語彙を差し替える。1 行 1 語（<語>\\t<重み> も可）",
     )
     parser.add_argument(
+        "--aizuchi-probe-replies-file",
+        type=Path,
+        default=(
+            Path(os.environ["AIZUCHI_PROBE_REPLIES_FILE"])
+            if os.environ.get("AIZUCHI_PROBE_REPLIES_FILE")
+            else None
+        ),
+        help="「聞いていますか?」への返事を差し替える。1 行 1 文",
+    )
+    parser.add_argument(
         "--aizuchi-no-repeat-window",
         type=int,
         default=int(os.environ.get("AIZUCHI_NO_REPEAT_WINDOW") or 3),
@@ -2836,6 +2846,9 @@ AIZUCHI_ONLY_VOCAB = (
 # 上位 4 語をひとつも含んでいないので、その 4 語で学習データを作りたければ
 # 差し替えるしかない。parse と sanitize はこの集合を見る。
 AIZUCHI_ACTIVE_VOCAB: set[str] = set(AIZUCHI_ONLY_VOCAB)
+# 「聞いていますか?」への返事。相づち語彙を口語に差し替えたのに、ここだけ
+# 「はい、聞いていますよ。」のままだと、同じ聞き手が急に敬語に戻る。
+AIZUCHI_ACTIVE_PROBE_REPLIES: tuple[str, ...] = ()
 # 直近この回数に使った語は使わない。語彙が 17 語あるうちは 3 で足りるが、実録音の
 # 7 語に絞ると「うん」が 3 回に 1 回しか打てなくなる（実録音では 116 件中 28 件が
 # 「うん」= 4 回に 1 回は同じ語）。語彙の広さに合わせて動かす。
@@ -2853,6 +2866,19 @@ def set_aizuchi_vocab(words: Sequence[str], no_repeat_window: int | None = None)
         AIZUCHI_NO_REPEAT_WINDOW = max(0, int(no_repeat_window))
 
 
+def set_aizuchi_probe_replies(replies: Sequence[str]) -> None:
+    """「聞いていますか?」への返事を差し替える。空なら既定のまま。"""
+    global AIZUCHI_ACTIVE_PROBE_REPLIES
+
+    cleaned = tuple(str(r).strip() for r in replies if str(r).strip())
+    if cleaned:
+        AIZUCHI_ACTIVE_PROBE_REPLIES = cleaned
+
+
+def active_probe_replies() -> tuple[str, ...]:
+    return AIZUCHI_ACTIVE_PROBE_REPLIES or AIZUCHI_ONLY_PROBE_REPLIES
+
+
 def load_aizuchi_vocab_file(path: Path) -> list[str]:
     """1 行 1 語。<語>\t<重み> の形（real_backchannel_dist.tsv）も受ける。"""
     words: list[str] = []
@@ -2860,7 +2886,7 @@ def load_aizuchi_vocab_file(path: Path) -> list[str]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        words.append(line.split("\t")[0].split()[0])
+        words.append(line.split("\t")[0].strip())
     if not words:
         raise SystemExit(f"相づち語彙が空です: {path}")
     return words
@@ -3302,7 +3328,10 @@ def build_aizuchi_listening_prompt(
     transcript = dialogue_turns_to_transcript(turns) or "(まだ会話は始まっていません)"
     clauses = split_text_into_clauses(user_text)
     numbered = "\n".join(f"{i + 1}: {clause}" for i, clause in enumerate(clauses))
-    words = " / ".join(vocab)
+    # 24 語ほどあるので 1 行に詰めると読み飛ばされる。改行して並べる。
+    words = "\n  ".join(
+        " / ".join(vocab[i : i + 6]) for i in range(0, len(vocab), 6)
+    )
     last = len(clauses)
     sample_word = vocab[0] if vocab else "うん"
     # 句が 1 つしかない発話で同じ位置を 2 回並べると、重複を返してよいと
@@ -3330,7 +3359,14 @@ def build_aizuchi_listening_prompt(
 - 数に上限はありません。打つべき所には打ち、打つ必要のない所では黙ってください。
   相手が言い淀んでいる途中、単語の途中のような所では打ちません。
 - つらさがこぼれた所、事実の区切り、言い切った所には打ちます。
-- 使える語はこれだけです: {words}
+- **裸の一語（「うん」「そっか」だけ）を並べないでください。** それだけでは
+  聞き流しているように聞こえます。伸ばし（うーん…）、重ね（そっかそっか）、
+  余韻（うん…）、二つ繋げたもの（あー、そっか… / あーなるほど…）を使って、
+  受け止めの深さを声の形で表します。
+- 深さは相手に合わせます。話が進んでいるだけの所は短く軽く、つらさが出た所や
+  言い切った所は伸ばして余韻を残します。同じ形を続けて使いません。
+- 使える語はこれだけです:
+  {words}
 - 相手の言葉を言い換えたり、質問したり、助言したりしません。
 
 JSONだけを返してください:
@@ -3500,8 +3536,9 @@ def pick_reaction_points(
 
 def pick_probe_reply(rng: random.Random, used: set[str]) -> str:
     """確認への応答。1対話で同じ文面を繰り返さないよう、使い切るまで避ける。"""
-    remaining = [text for text in AIZUCHI_ONLY_PROBE_REPLIES if text not in used]
-    choice = rng.choice(remaining or list(AIZUCHI_ONLY_PROBE_REPLIES))
+    replies = list(active_probe_replies())
+    remaining = [text for text in replies if text not in used]
+    choice = rng.choice(remaining or replies)
     used.add(choice)
     return choice
 
@@ -3529,7 +3566,7 @@ def sanitize_aizuchi_only_turns(
     """
     allowed = (
         set(AIZUCHI_ACTIVE_VOCAB)
-        | set(AIZUCHI_ONLY_PROBE_REPLIES)
+        | set(active_probe_replies())
         | {AIZUCHI_ONLY_GREETING}
     )
     out: list[DialogueTurn] = []
@@ -3551,7 +3588,7 @@ def sanitize_aizuchi_only_turns(
         text = turn.text.strip()
         if text not in allowed:
             continue
-        is_probe_reply = text in AIZUCHI_ONLY_PROBE_REPLIES
+        is_probe_reply = text in active_probe_replies()
         # 名乗りは相づちではないので、相づちの規則で落とさない。
         if text == AIZUCHI_ONLY_GREETING and not out:
             out.append(turn)
@@ -3628,7 +3665,7 @@ def aizuchi_only_prompt_preview(
         "userAI_probe": asdict(probe_prompt),
         "aizuchi": asdict(aizuchi_prompt),
         "aizuchi_points_example": points,
-        "probe_replies": list(AIZUCHI_ONLY_PROBE_REPLIES),
+        "probe_replies": list(active_probe_replies()),
     }
 
 def multi_agent_prompt_preview(
@@ -4915,6 +4952,13 @@ def main() -> None:
         )
     elif getattr(args, "aizuchi_no_repeat_window", 3) != 3:
         set_aizuchi_vocab((), args.aizuchi_no_repeat_window)
+    if getattr(args, "aizuchi_probe_replies_file", None):
+        replies = load_aizuchi_vocab_file(args.aizuchi_probe_replies_file)
+        set_aizuchi_probe_replies(replies)
+        print(
+            f"確認への返事を差し替えました ({len(replies)} 文): {' / '.join(replies)}",
+            file=sys.stderr,
+        )
     args.out_dir.mkdir(parents=True, exist_ok=True)
     random.seed(args.seed)
     np.random.seed(args.seed)

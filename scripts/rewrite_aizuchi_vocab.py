@@ -43,7 +43,7 @@ def load_distribution(path: Path) -> tuple[list[str], list[float]]:
         if not line or line.startswith("#"):
             continue
         parts = line.split("\t") if "\t" in line else line.split()
-        words.append(parts[0])
+        words.append(parts[0].strip())
         weights.append(float(parts[1]) if len(parts) > 1 else 1.0)
     if not words:
         raise SystemExit(f"語彙が空です: {path}")

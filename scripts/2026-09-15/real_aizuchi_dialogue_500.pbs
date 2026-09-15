@@ -16,10 +16,18 @@
 #
 # Two things differ from the aizuchi_normal corpora.
 #
-# The vocabulary is the one measured in the real recording rather than the
-# written one. Its top four words -- 76% of the 116 backchannels counted --
+# The vocabulary is built on the one measured in the real recording rather than
+# the written one. Its top four words -- 76% of the 116 backchannels counted --
 # appear nowhere in the vocabulary the earlier corpora were generated from, so
 # a corpus built on the written list cannot be used to study them.
+#
+# But the measured list alone is not enough. A transcript flattens a
+# backchannel to one word; what was actually said carries a lengthening and a
+# trailing fall, and that is where the listening is. A corpus of bare "un" and
+# "sokka" sounds like someone half-attending. So the vocabulary here keeps the
+# measured family frequencies and splits each family across its lengthened,
+# doubled and trailing forms -- listening_vocab.tsv -- and the prompt asks for
+# them rather than merely permitting them.
 #
 # The placement is the model's. The earlier route scored each clause boundary,
 # rolled dice against a per-boundary probability, and capped the count per
@@ -46,7 +54,8 @@ export NUM_CASES="${NUM_CASES:-500}"
 
 export DIALOGUE_GENERATION_MODE="aizuchi-only"
 export AIZUCHI_ONLY_PLACEMENT="llm"
-export AIZUCHI_VOCAB_FILE="$PWD/scripts/2026-09-15/real_backchannel_dist.tsv"
+export AIZUCHI_VOCAB_FILE="$PWD/scripts/2026-09-15/listening_vocab.tsv"
+export AIZUCHI_PROBE_REPLIES_FILE="$PWD/scripts/2026-09-15/listening_probe_replies.txt"
 export AIZUCHI_NO_REPEAT_WINDOW="0"
 
 # The frequency preset only feeds the rule-based placement, which is off here.
@@ -55,9 +64,15 @@ export AIZUCHI_ONLY_FREQUENCY="normal"
 export AIZUCHI_ONLY_MIN_BLOCKS="${AIZUCHI_ONLY_MIN_BLOCKS:-4}"
 export AIZUCHI_ONLY_MAX_BLOCKS="${AIZUCHI_ONLY_MAX_BLOCKS:-6}"
 
-# No silences and no "are you still listening?" checks, as in normal v6.
-export AIZUCHI_ONLY_MAX_SILENCES="0"
-export AIZUCHI_ONLY_SILENCE_RATE="0"
-export AIZUCHI_ONLY_PROBE_RATE="0"
+# Silences and "are you still listening?" checks are ON here, unlike normal v6.
+# A listener model has to learn two things that only exist in this data: that a
+# silence is not to be filled with backchannels, and that a direct question is
+# to be answered rather than acknowledged. A check only follows a silence --
+# that is what provokes it -- so the silence rate gates both.
+export AIZUCHI_ONLY_MAX_SILENCES="${AIZUCHI_ONLY_MAX_SILENCES:-2}"
+export AIZUCHI_ONLY_SILENCE_RATE="${AIZUCHI_ONLY_SILENCE_RATE:-0.25}"
+export AIZUCHI_ONLY_SILENCE_MIN_SEC="${AIZUCHI_ONLY_SILENCE_MIN_SEC:-2.0}"
+export AIZUCHI_ONLY_SILENCE_MAX_SEC="${AIZUCHI_ONLY_SILENCE_MAX_SEC:-5.0}"
+export AIZUCHI_ONLY_PROBE_RATE="${AIZUCHI_ONLY_PROBE_RATE:-0.5}"
 
 exec bash scripts/run_dialogues_qwen_3000.pbs

@@ -904,7 +904,7 @@ def load_texts(path: Path | None) -> list[str]:
     # 1 列目だけ取る。重みはここでは使わない -- 何本ずつ作るかは --repeats で
     # 決めており、バンクは語ごとに同じ深さで持っておく方が引きやすい。
     texts = [
-        line.strip().split("\t")[0].split()[0]
+        line.split("\t")[0].strip()
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
