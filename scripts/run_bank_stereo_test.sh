@@ -119,6 +119,12 @@ REWRITE_ARGS=(
     --num-dialogues "$NUM_DIALOGUES"
     --seed "$SEED"
 )
+# 語彙を渡さないと文字数で相槌を判定することになり、冒頭の名乗りと
+# 「聞いていますか?」への応答まで相槌扱いになる。前者は user のみの写しから
+# 落ちて音声に残らず、後者はバンクに無いので別の語の音が当たる。
+if [[ -n "${AIZUCHI_VOCAB_FILE:-}" ]]; then
+    REWRITE_ARGS+=(--aizuchi-vocab-file "$AIZUCHI_VOCAB_FILE")
+fi
 if [[ "$KEEP_TEXT" == "1" ]]; then
     REWRITE_ARGS+=(--keep-text)
 elif [[ -n "${BACKCHANNEL_TEXT:-}" ]]; then

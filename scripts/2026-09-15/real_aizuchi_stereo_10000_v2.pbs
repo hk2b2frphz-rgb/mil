@@ -49,6 +49,20 @@
 # unknown dialogue fields, the TTS step copies the label into each sidecar's
 # metadata.dialogue, and the splice pass rewrites only alignments and audio.
 
+# AIZUCHI_VOCAB_FILE must be the same file step 1 used. Without it the
+# rewrite pass decides what is a backchannel by character count, and the
+# opening greeting and the "are you still there?" reply get counted as
+# backchannels too: the greeting is then dropped from the speaker-only copy
+# and never synthesized, and the reply is looked up in a bank that does not
+# hold it, so a clip of some other word is used instead.
+#
+# LEAD_IN_SEC=1.5 instead of the usual 0.3 so the density tag step 4 writes
+# has somewhere to sit. The tag goes before the listener's first sound, which
+# with the greeting restored is the greeting itself at LEAD_IN_SEC. The tag
+# needs about 0.75s and 0.3 leaves 0.2. Widening the lead-in costs 1.2s of
+# silence per dialogue at render time; the alternative (padding the audio in
+# step 4) rewrites every wav and doubles the corpus on disk.
+
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
 
@@ -59,6 +73,9 @@ export BANK_DIR="${BANK_DIR:-$PWD/data/runs/diversity/real_aizuchi_bank_${CORPUS
 export OUT_ROOT="$PWD/data/runs/$CORPUS_ROOT/tts"
 export NUM_DIALOGUES="${NUM_DIALOGUES:-10000}"
 export KEEP_TEXT=1
+# See the notes above -- both matter for the greeting and the tag.
+export AIZUCHI_VOCAB_FILE="${AIZUCHI_VOCAB_FILE:-$PWD/scripts/2026-09-15/aizuchi_vocab_no_bare_un.tsv}"
+export LEAD_IN_SEC="${LEAD_IN_SEC:-1.5}"
 export MATCH_TOP_K="${MATCH_TOP_K:-5}"
 # See the note above: both differ from the smoke defaults on purpose.
 export NUM_SHARDS="${NUM_SHARDS:-4}"

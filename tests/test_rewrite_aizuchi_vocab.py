@@ -126,5 +126,55 @@ class CliTest(unittest.TestCase):
             self.assertIn("うん", vocab)
 
 
+class SpeakerOnlyCopyTest(unittest.TestCase):
+    """The speaker-only copy is what gets synthesized, so anything dropped from
+    it never reaches the audio. Only backchannels may be dropped -- the bank
+    supplies those. The opening greeting and the reply to "are you still
+    there?" have to be synthesized, and a character count cannot tell them
+    apart from a backchannel ("hai, kiite-imasu." and "hai, daijoubu desu yo."
+    are both 9 characters, and only the second is in the vocabulary)."""
+
+    VOCAB = REPO_ROOT / "scripts/2026-09-15/aizuchi_vocab_no_bare_un.tsv"
+
+    def run_rewrite(self, *extra: str) -> tuple[list[str], str]:
+        rows = dialogue(
+            ("moshi", "もしもし、こちら孤独孤立相談窓口になります。"),
+            ("user", "少し話してもいいですか。"),
+            ("moshi", "はい。"),
+            ("user", "あの、聞いていますか。"),
+            ("moshi", "はい、聞いていますよ。"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            source = path / "in.jsonl"
+            source.write_text(json.dumps(rows, ensure_ascii=False) + "\n", encoding="utf-8")
+            out = path / "out.jsonl"
+            user_only = path / "user_only.jsonl"
+            rewriter.main([
+                "--dialogues-jsonl", str(source), "--out-jsonl", str(out),
+                "--user-only-jsonl", str(user_only), "--keep-text", *extra,
+            ])
+            kept = json.loads(user_only.read_text(encoding="utf-8"))["turns"]
+            vocab = Path(str(out) + ".vocab.txt").read_text(encoding="utf-8")
+        return [t["text"] for t in kept if t["speaker"] == "moshi"], vocab
+
+    def test_with_the_vocabulary_only_backchannels_are_left_to_the_bank(self) -> None:
+        synthesized, vocab = self.run_rewrite("--aizuchi-vocab-file", str(self.VOCAB))
+        self.assertEqual(
+            synthesized,
+            ["もしもし、こちら孤独孤立相談窓口になります。", "はい、聞いていますよ。"],
+        )
+        # And the splice is only told about the real backchannel, so it never
+        # goes looking for a probe reply the bank does not have.
+        self.assertIn("はい", vocab)
+        self.assertNotIn("聞いていますよ", vocab)
+
+    def test_without_it_the_greeting_and_the_reply_are_lost(self) -> None:
+        # The behaviour this option exists to prevent.
+        synthesized, vocab = self.run_rewrite()
+        self.assertNotIn("はい、聞いていますよ。", synthesized)
+        self.assertIn("聞いていますよ", vocab)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -50,8 +50,22 @@ def load_distribution(path: Path) -> tuple[list[str], list[float]]:
     return words, weights
 
 
-def is_backchannel(text: str, max_chars: int) -> bool:
-    return 0 < len(text.strip().strip(STRIP_CHARS)) <= max_chars
+def is_backchannel(
+    text: str, max_chars: int, vocab: set[str] | None = None
+) -> bool:
+    """バンクから差し込む相槌か。
+
+    聞き手の発話は相槌だけではない。冒頭の名乗りと、「聞いていますか?」への
+    応答は合成しなければならない発話で、バンクには無い。文字数では見分けが
+    付かない -- 「はい、聞いています。」(9) と「はい、大丈夫ですよ。」(9) は
+    同じ長さで、前者は応答、後者は相槌。語彙を渡せるならそちらで判定する。
+    """
+    stripped = text.strip().strip(STRIP_CHARS)
+    if not stripped:
+        return False
+    if vocab is not None:
+        return stripped in vocab
+    return len(stripped) <= max_chars
 
 
 def rewrite(
@@ -61,6 +75,7 @@ def rewrite(
     max_chars: int,
     rewrite_all: bool,
     rng: random.Random,
+    vocab: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, int]]:
     out: list[dict[str, Any]] = []
     replaced: dict[str, int] = {}
@@ -72,7 +87,7 @@ def rewrite(
             if str(turn.get("speaker", "")).strip().lower() != LISTENER or not text:
                 turns.append(turn)
                 continue
-            if not rewrite_all and not is_backchannel(text, max_chars):
+            if not rewrite_all and not is_backchannel(text, max_chars, vocab):
                 kept[text] = kept.get(text, 0) + 1
                 turns.append(turn)
                 continue
@@ -101,6 +116,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--dist", type=Path, default=DEFAULT_DIST)
     parser.add_argument("--text", default="", help="この 1 語だけにする（--dist より優先）")
     parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
+    parser.add_argument(
+        "--aizuchi-vocab-file",
+        type=Path,
+        default=None,
+        help=(
+            "1 行 1 語。文字数判定の代わりに使う。対話生成に渡したものと同じ"
+            "ファイルを渡すこと。渡さないと名乗りや「聞いていますか?」への応答"
+            "まで相槌と見なされ、user のみの写しから落ちて音声に残らない"
+        ),
+    )
     parser.add_argument(
         "--all-listener-turns",
         action="store_true",
@@ -144,6 +169,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not dialogues:
         raise SystemExit(f"対話がありません: {args.dialogues_jsonl}")
 
+    vocab: set[str] | None = None
+    if args.aizuchi_vocab_file is not None:
+        # 判定側が句読点を落としてから比べるので、語彙も揃えて持つ。生成に
+        # 渡すファイルは「はい。」のように句点付きで書かれている。
+        vocab = {
+            line.strip().strip(STRIP_CHARS)
+            for line in args.aizuchi_vocab_file.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        vocab.discard("")
+
     if args.keep_text:
         rewritten = list(dialogues)
         replaced = {}
@@ -153,7 +189,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 text = str(turn.get("text", "")).strip()
                 if str(turn.get("speaker", "")).strip().lower() != LISTENER or not text:
                     continue
-                if is_backchannel(text, args.max_chars):
+                if is_backchannel(text, args.max_chars, vocab):
                     stripped = text.strip(STRIP_CHARS)
                     replaced[stripped] = replaced.get(stripped, 0) + 1
                 else:
@@ -161,7 +197,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         rewritten, replaced, kept = rewrite(
             dialogues, words, weights, args.max_chars,
-            args.all_listener_turns, random.Random(args.seed),
+            args.all_listener_turns, random.Random(args.seed), vocab,
         )
 
     args.out_jsonl.parent.mkdir(parents=True, exist_ok=True)
@@ -182,10 +218,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         kept_turns = 0
         with args.user_only_jsonl.open("w", encoding="utf-8") as handle:
             for dialogue in rewritten:
+                # 落とすのは相槌だけ。冒頭の名乗りと「聞いていますか?」への
+                # 応答はバンクに無いので、ここで落とすと音声に一切残らない
+                # （テキストには在るのに音が無い対話になる）。合成させる。
                 turns = [
                     turn
                     for turn in dialogue["turns"]
                     if str(turn.get("speaker", "")).strip().lower() != LISTENER
+                    or not is_backchannel(
+                        str(turn.get("text", "")).strip(), args.max_chars, vocab
+                    )
                 ]
                 kept_turns += len(turns)
                 handle.write(
