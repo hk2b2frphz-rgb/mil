@@ -19,7 +19,7 @@
     読み上げられない。音声トークンも再利用できる。
 
     例外が --pad-lead-in-sec（--from-aizuchi-density 用）。相槌頻度のタグは
-    対話ごとに値が変わってはいけないので置き場所は冒頭挨拶の直前の1箇所しか
+    対話ごとに値が変わってはいけないので置き場所は聞き手が最初に音を出す前の1箇所しか
     無いが、KABURI レンダラーは無音ターンを明示的なタイミングとして扱わず
     (`generate_kaburi_tts_data.py` の `load_dialogues` を参照。無音ターンは
     落として自前のタイミングモデルで間を作る)、対話生成側から無音の長さを
@@ -98,9 +98,9 @@ def parse_args() -> argparse.Namespace:
                      help="metadata.dialogue.aizuchi_frequency_label "
                           "（generate_synthetic_moshi_training_data.py が "
                           "aizuchi-only モードで記録する相槌頻度）から、対話の"
-                          "冒頭挨拶の直前に読み上げないタグを1つだけ置く。"
-                          "モデルに相槌頻度を条件付けさせるためのもの。挨拶の"
-                          "前に無音が無い対話では置き場所が無く skip される"
+                          "聞き手の最初の発話の直前に読み上げないタグを1つだけ置く。"
+                          "モデルに相槌頻度を条件付けさせるためのもの。その前に"
+                          "無音が無い対話では置き場所が無く skip される"
                           "（統計の skip_gap_too_short / skip_no_anchor / "
                           "WARNING の density_tag_dropped を確認すること）。"
                           "--pad-lead-in-sec と併用すると置き場所を保証できる。"
@@ -286,13 +286,19 @@ def bootstrap_items(payload: dict[str, Any], entries: list[list[Any]]) -> list[d
 
 
 def density_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """相槌頻度の条件付けタグを冒頭挨拶の直前に1つだけ置く。
+    """相槌頻度の条件付けタグを聞き手の最初の発話の直前に1つだけ置く。
 
     emotional_state と違い、対話全体を通して値が変わらないことが目的そのもの
     （density_mixed で対話ごとに引いた頻度をモデルに教えるタグなので、対話の
-    途中でぶれてはむしろ困る）。turn_index=0 は冒頭挨拶自身を指すので、
+    途中でぶれてはむしろ困る）。turn_index=0 は聞き手の最初の発話を指すので、
     bootstrap_items が「まだ何も聴いていない」ことを理由に避けている場所に、
     ここでは意図して置く。
+
+    それが何になるかはレンダリング経路で変わる。聞き手側も合成する経路では
+    冒頭の名乗りだが、バンク経路（run_bank_stereo_test.sh）は user 側だけを
+    合成して聞き手の音をバンクから差し込むので、名乗りは音声に存在せず、
+    最初の SPEAKER_MAIN は最初の相槌になる。どちらでも「聞き手が最初に音を
+    出す前」であることは変わらないので、置き場所としては同じ意味を持つ。
     """
     meta = payload.get("metadata") or {}
     dialogue = meta.get("dialogue") or {}
@@ -429,7 +435,7 @@ def main() -> int:
             )
             print(
                 f"\nWARNING: density タグを置けなかった対話が {dropped}/{labeled} "
-                f"件あります（冒頭挨拶の前に十分な無音が無かった）。この分は"
+                f"件あります（聞き手が最初に音を出す前に十分な無音が無かった）。この分は"
                 f"{fate}。--pad-lead-in-sec を（十分な秒数で）指定すれば確実に"
                 f"置けます。指定済みで出ている場合はタグの長さに対して値が"
                 f"短すぎるので、増やすか --chars-per-sec を上げてください。"

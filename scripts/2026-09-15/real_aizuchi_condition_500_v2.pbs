@@ -36,7 +36,11 @@
 #    from the output (see the WARNING the tool prints).
 # 2. --from-aizuchi-density reads metadata.dialogue.aizuchi_frequency_label,
 #    which step 1 recorded and steps 2-3 carried through, and writes one tag
-#    per dialogue just before the greeting.
+#    per dialogue just before the listener's first sound. Note that in this
+#    route that is the first backchannel, not the greeting: step 3 synthesizes
+#    the speaker side only, so the greeting never reaches the audio at all.
+#    Either way the tag lands before the listener has made any sound, which is
+#    what matters -- and with the pad it sits in reserved silence regardless.
 # 3. The manifest is rebuilt from the audio that actually came out: durations
 #    changed by the pad, and any dialogue whose tag could not be placed is not
 #    in the output at all.
