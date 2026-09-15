@@ -130,5 +130,40 @@ class RepeatWindowTest(unittest.TestCase):
         self.assertEqual(sum(1 for t in kept if t.text == "うん"), 3)
 
 
+class ThinkingPromptTest(unittest.TestCase):
+    def test_force_think_appends_the_slash_command(self) -> None:
+        prompt = gen.messages_to_completion_prompt(
+            [{"role": "user", "content": "hello"}], force_think=True
+        )
+        self.assertIn("/think", prompt)
+        self.assertNotIn("/no_think", prompt)
+
+    def test_no_think_still_wins_when_force_think_is_false(self) -> None:
+        prompt = gen.messages_to_completion_prompt(
+            [{"role": "user", "content": "hello"}], no_think=True, force_think=False
+        )
+        self.assertIn("/no_think", prompt)
+
+    def test_a_leaked_think_block_does_not_break_json_extraction(self) -> None:
+        # A reasoning model with no server-side parser configured leaks
+        # <think>...</think> straight into the content channel; the answer
+        # that follows must still parse.
+        gen.set_aizuchi_vocab(["うん"], 0)
+        raw = (
+            "<think>まだ続きそうなので軽く受ける。</think>\n"
+            '{"reactions":[{"after_clause":1,"text":"うん"}]}'
+        )
+        self.assertEqual(
+            gen.parse_aizuchi_listening_reactions(raw, ["今日は疲れて"]),
+            [{"after_clause": 1, "text": "うん"}],
+        )
+
+    def test_an_unclosed_think_block_yields_no_answer(self) -> None:
+        # The whole token budget went to reasoning; there is nothing to parse,
+        # and this must not be mistaken for valid JSON.
+        raw = "<think>ここでずっと考え続けて token 切れ"
+        self.assertEqual(gen.parse_aizuchi_listening_reactions(raw, ["a"]), [])
+
+
 if __name__ == "__main__":
     unittest.main()

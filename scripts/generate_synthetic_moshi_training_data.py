@@ -579,6 +579,26 @@ def parse_args() -> argparse.Namespace:
         help="「聞いていますか?」への返事を差し替える。1 行 1 文",
     )
     parser.add_argument(
+        "--aizuchi-enable-thinking",
+        action="store_true",
+        default=(os.environ.get("AIZUCHI_ENABLE_THINKING") == "1"),
+        help=(
+            "Let aizuchiAI (--aizuchi-only-placement llm) reason before "
+            "answering, instead of the /no_think this pipeline otherwise "
+            "defaults toward. Raises that call's max_tokens to "
+            "--aizuchi-thinking-max-tokens, since a small budget spent "
+            "entirely on reasoning would leave no room for the JSON answer. "
+            "Only affects the aizuchi placement call; every other agent "
+            "keeps its existing thinking behavior."
+        ),
+    )
+    parser.add_argument(
+        "--aizuchi-thinking-max-tokens",
+        type=int,
+        default=int(os.environ.get("AIZUCHI_THINKING_MAX_TOKENS") or 1600),
+        help="max_tokens for the aizuchi call when --aizuchi-enable-thinking is set.",
+    )
+    parser.add_argument(
         "--aizuchi-no-repeat-window",
         type=int,
         default=int(os.environ.get("AIZUCHI_NO_REPEAT_WINDOW") or 3),
@@ -1249,7 +1269,15 @@ class LLMDialogueGenerator:
         json_schema: dict[str, Any] | None = None,
         json_schema_name: str = "dialogue",
         role_name: str = "llm",
+        enable_thinking: bool | None = None,
     ) -> str:
+        # enable_thinking=None leaves the server/template default (which this
+        # codebase otherwise steers toward off, via /no_think and a lowered
+        # reasoning_effort, because most agent calls have a token budget too
+        # small for a reasoning model to reach its content channel at all).
+        # Passing True here is an explicit per-call override, and the caller
+        # is responsible for giving that call enough max_tokens to finish
+        # reasoning AND still emit the answer.
         url = openai_generation_url(
             self.args.llm_api_base,
             self.args.llm_openai_endpoint,
@@ -1271,10 +1299,19 @@ class LLMDialogueGenerator:
         }
         if self.args.llm_openai_endpoint == "chat":
             payload["messages"] = messages
+            if enable_thinking is not None:
+                # vLLM forwards this to the chat template for Qwen3-family
+                # models. Harmless (ignored) on servers/models that don't
+                # support it.
+                payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
         else:
+            no_think = self.args.llm_completions_no_think
+            if enable_thinking is True:
+                no_think = False
             payload["prompt"] = messages_to_completion_prompt(
                 messages,
-                no_think=self.args.llm_completions_no_think,
+                no_think=no_think,
+                force_think=enable_thinking is True,
             )
             payload["stop"] = ["<|im_end|>"]
         # vLLM extension: multiplicative repetition penalty. Strongly discourages
@@ -1366,6 +1403,7 @@ class LLMDialogueGenerator:
         temperature: float,
         max_tokens: int,
         role_name: str,
+        enable_thinking: bool | None = None,
     ) -> str:
         if self.args.llm_backend != "openai-compatible":
             raise RuntimeError(
@@ -1384,6 +1422,7 @@ class LLMDialogueGenerator:
             presence_penalty=0.0,
             response_format=None,
             role_name=role_name,
+            enable_thinking=enable_thinking,
         )
 
     def call_agent_utterance(
@@ -1787,11 +1826,16 @@ class LLMDialogueGenerator:
         prompt = build_aizuchi_listening_prompt(
             use_case, visible_turns, user_turn.text, vocab
         )
+        thinking = bool(getattr(self.args, "aizuchi_enable_thinking", False))
+        max_tokens = (
+            int(self.args.aizuchi_thinking_max_tokens) if thinking else 400
+        )
         raw = self.call_agent(
             prompt,
             temperature=self.args.multi_agent_aizuchi_temperature,
-            max_tokens=400,
+            max_tokens=max_tokens,
             role_name="aizuchiAI",
+            enable_thinking=thinking or None,
         )
         reactions = parse_aizuchi_listening_reactions(raw, clauses)
         self.trace_event(
@@ -2085,18 +2129,25 @@ def messages_to_completion_prompt(
     messages: list[dict[str, str]],
     *,
     no_think: bool = False,
+    force_think: bool = False,
 ) -> str:
+    """force_think appends Qwen's /think slash command instead of /no_think.
+
+    Raw completions bypass the chat template's enable_thinking kwarg entirely,
+    so the completions endpoint has no way to request thinking except this
+    in-band command (mirrors the existing /no_think path below)."""
     last_user_index = -1
-    if no_think:
+    if no_think or force_think:
         for index, message in enumerate(messages):
             if str(message.get("role", "")).strip() == "user":
                 last_user_index = index
+    tag = "/no_think" if no_think else "/think" if force_think else ""
     parts: list[str] = []
     for index, message in enumerate(messages):
         role = str(message.get("role", "user")).strip() or "user"
         content = str(message.get("content", "")).strip()
-        if no_think and index == last_user_index and "/no_think" not in content:
-            content = f"{content}\n\n/no_think".strip()
+        if tag and index == last_user_index and tag not in content:
+            content = f"{content}\n\n{tag}".strip()
         parts.append(f"<|im_start|>{role}\n{content}<|im_end|>")
     parts.append("<|im_start|>assistant\n")
     return "\n".join(parts)

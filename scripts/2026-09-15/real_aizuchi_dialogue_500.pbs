@@ -58,6 +58,19 @@ export AIZUCHI_VOCAB_FILE="$PWD/scripts/2026-09-15/listening_vocab.tsv"
 export AIZUCHI_PROBE_REPLIES_FILE="$PWD/scripts/2026-09-15/listening_probe_replies.txt"
 export AIZUCHI_NO_REPEAT_WINDOW="0"
 
+# Thinking, off by default. This pipeline otherwise steers models AWAY from
+# reasoning (via /no_think and a lowered reasoning_effort) because most agent
+# calls have too small a token budget for a reasoning model to reach its
+# content channel at all. The aizuchi placement call is the one place that
+# might benefit from it -- it is deciding WHERE to respond by weighing what
+# has been said, how far the sentence has gone, and how much weight it
+# carries, which is closer to reasoning than most of what the other agents do.
+# AIZUCHI_ENABLE_THINKING=1 gives it a much larger token budget
+# (AIZUCHI_THINKING_MAX_TOKENS, default 1600) so reasoning does not simply eat
+# the whole response and leave nothing for the JSON answer.
+export AIZUCHI_ENABLE_THINKING="${AIZUCHI_ENABLE_THINKING:-0}"
+export AIZUCHI_THINKING_MAX_TOKENS="${AIZUCHI_THINKING_MAX_TOKENS:-1600}"
+
 # The frequency preset only feeds the rule-based placement, which is off here.
 # It is still set so the run records which one it would have been.
 export AIZUCHI_ONLY_FREQUENCY="normal"
