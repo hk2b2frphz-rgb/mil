@@ -17,9 +17,12 @@
 #
 # Needs step 1 (the dialogues) and step 2 (the bank).
 #
-# RE-SUBMIT THE SAME FILE TO CONTINUE. RESUME=1 below makes the Qwen3-TTS pass
-# keep the shards it already rendered. Without it a walltime cut throws away
-# everything, which at this scale is most of a day.
+# RE-SUBMIT THE SAME FILE TO CONTINUE. RESUME=auto below makes the Qwen3-TTS
+# pass keep the shards it already rendered, and start clean when there is
+# nothing there yet (it decides by looking under OUT_ROOT). Without it a
+# walltime cut throws away everything, which at this scale is most of a day.
+# Not RESUME=1: that forces resume even on the first submission, when there is
+# nothing to resume.
 #
 # NUM_SHARDS=4 uses all four V100s. run_bank_stereo_test.sh defaults to 1
 # because it was written for 3-dialogue checks; 10,000 on one GPU does not
@@ -59,6 +62,6 @@ export KEEP_TEXT=1
 export MATCH_TOP_K="${MATCH_TOP_K:-5}"
 # See the note above: both differ from the smoke defaults on purpose.
 export NUM_SHARDS="${NUM_SHARDS:-4}"
-export RESUME="${RESUME:-1}"
+export RESUME="${RESUME:-auto}"
 
 exec bash scripts/run_bank_stereo_test.sh "$NUM_DIALOGUES"

@@ -27,7 +27,7 @@
 # Check the rendered durations before committing a reservation:
 #   uv run python scripts/build_training_manifest.py --dry-run \
 #       --training-set data/runs/real_aizuchi_500_v2/tts/placement_bank/shard_000_conditioned/training_set
-# Note the p95/max it prints include step 4's lead-in pad.
+# Note the p95/max it prints include any lead-in pad step 4 added.
 #
 # 500 dialogues is a fifth of the corpora the f01 pattern was tuned on, so
 # treat the first run as a check that the data trains at all rather than as a

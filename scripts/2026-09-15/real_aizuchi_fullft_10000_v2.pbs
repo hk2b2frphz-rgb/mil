@@ -27,7 +27,7 @@
 # Check the rendered durations before committing a reservation:
 #   uv run python scripts/build_training_manifest.py --dry-run \
 #       --training-set data/runs/real_aizuchi_10000_v2/tts/placement_bank/shard_000_conditioned/training_set
-# Note the p95/max it prints include step 4's lead-in pad.
+# Note the p95/max it prints include any lead-in pad step 4 added.
 #
 # 10,000 dialogues is the scale the f01 pattern was tuned on, so read this run
 # as a result rather than as a check that the data trains at all.
