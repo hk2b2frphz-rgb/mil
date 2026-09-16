@@ -27,6 +27,9 @@
 # NUM_SHARDS=4 uses all four V100s. run_bank_stereo_test.sh defaults to 1
 # because it was written for 3-dialogue checks; 10,000 on one GPU does not
 # finish. Both are plain overrides -- the smoke path keeps its old defaults.
+# CUDA_VISIBLE_DEVICES is listed explicitly to match: the shell script now
+# derives it from NUM_SHARDS when it is unset, but saying it here keeps the
+# two visible together (they have to agree, or the TTS step refuses to start).
 #
 # Three passes, of which only the middle one uses the GPU:
 #   Qwen3-TTS   the speaker side, V100 x4
@@ -84,6 +87,7 @@ export DROP_GREETING="${DROP_GREETING:-1}"
 export MATCH_TOP_K="${MATCH_TOP_K:-5}"
 # See the note above: both differ from the smoke defaults on purpose.
 export NUM_SHARDS="${NUM_SHARDS:-4}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 export RESUME="${RESUME:-auto}"
 
 exec bash scripts/run_bank_stereo_test.sh "$NUM_DIALOGUES"

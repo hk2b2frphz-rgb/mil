@@ -75,7 +75,13 @@ RASTER_MODE="${RASTER_MODE:-pred}"
 MATCH_TOP_K="${MATCH_TOP_K:-5}"
 SEED="${SEED:-0}"
 CLONE_OUT_DIR_MOSHI="${CLONE_OUT_DIR_MOSHI:-$REPO_ROOT/data/clone_examples/99999}"
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+NUM_SHARDS="${NUM_SHARDS:-1}"
+# GPU の既定はシャード数に合わせる。ここを 1 枚に固定していると、NUM_SHARDS=4
+# を渡しても下流の既定 (0,1,2,3) は「すでに設定済み」で効かず、
+# 「CUDA_VISIBLE_DEVICES has 1 GPU(s), but NUM_SHARDS=4」で止まる。
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    CUDA_VISIBLE_DEVICES="$(seq -s, 0 "$((NUM_SHARDS - 1))")"
+fi
 STAMP="$(run_id_stamp)"
 
 if [[ ! -s "$SOURCE_DIALOGUES" ]]; then
@@ -158,7 +164,7 @@ fi
     # 要る。10000 本を 1 GPU で回すと walltime に収まらず、RESUME=0 だと
     # 途中で切れたぶんが全部消える。既定は従来どおりなので smoke は不変。
     export NUM_DIALOGUES SPARE_RATIO=0 LOG_EVERY=1
-    export NUM_SHARDS="${NUM_SHARDS:-1}"
+    export NUM_SHARDS
     export RESUME="${RESUME:-0}"
     bash scripts/run_qwen_tts_vllm_3000_4gpu.pbs
 )
