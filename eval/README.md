@@ -99,11 +99,61 @@ credentials configures both halves of the evaluation.  The in-house gateway
 in `/v1`), not Azure-shaped, so it is configured with the `OPENAI_*` variables:
 
 ```bash
-python -m pip install websocket-client
+# UTMOS in the evaluation step needs soundfile and a CPU PyTorch build.
+python -m pip install websocket-client soundfile torch torchaudio
 export OPENAI_API_KEY="..."
 export OPENAI_BASE_URL="https://api.rdg-genai.crl.hitachi.co.jp/v1"
+export OPENAI_REALTIME_SCHEMA=legacy        # this gateway speaks the beta schema
+export GPT_REALTIME_TURN_DETECTION=manual   # do not let server VAD cut the WAV
 MODEL_ID=gpt_realtime REAL_CASES_PER_TASK=1 bash scripts/run_real_gpt_realtime_eval.sh
 ```
+
+`OPENAI_REALTIME_SCHEMA=legacy` sends the older beta `session.update` (flat
+`modalities` / `input_audio_format` / `max_response_output_tokens`) together
+with the `OpenAI-Beta: realtime=v1` header.  The two dialects are not
+compatible, so an endpoint serving only one rejects the other outright rather
+than degrading; `ga` remains the default for api.openai.com and Azure.
+
+`GPT_REALTIME_TURN_DETECTION=manual` sends an explicit `"turn_detection": null`
+and commits the buffer by hand.  The input is a pre-recorded WAV streamed at
+wall-clock speed, and a server VAD fires on the pauses inside it, ending the
+turn before the user utterance is finished.
+
+A run can be interrupted and continued.  `REAL_RESUME=1` with the same `RUN_ID`
+keeps every case that already has its `.meta.json` instead of paying for it
+again, and `GPT_REALTIME_CONNECT_RETRIES` / `GPT_REALTIME_CASE_RETRIES`
+(default 4 / 3) retry a refused or dropped socket, a case at a time from a fresh
+session:
+
+```bash
+RUN_ID=gpt_realtime_20260916_104807 REAL_RESUME=1   MODEL_ID=gpt_realtime bash scripts/run_real_gpt_realtime_eval.sh
+```
+
+Judging stays on the local PC: the server never calls the API.
+
+### Same metrics as the batch
+
+Only the inference differs.  The scoring is `scripts/real_eval_metrics.sh`,
+which `scripts/run_real_eval.sh` -- the runner
+`scripts/run_full_duplex_eval_batch.sh` uses for every real-track row -- sources
+as well, so the two cannot drift apart: `evaluate_real_response.py` (response
+rate, latency, UTMOS, honouring `REAL_MAX_LATENCY_SEC`),
+`evaluate_real_dialogue_backchannel.py`, and `pack_real_dialogue_judge_input.py`
+feeding the same judge.
+
+To have the locally-run system appear in the batch's own table, write it into
+the batch layout and rebuild the combined summary:
+
+```bash
+REAL_BATCH_DIR=eval_runs/real_batches/<batch> OUTPUT_NAME=gpt_realtime   MODEL_ID=gpt_realtime bash scripts/run_real_gpt_realtime_eval.sh
+uv run python eval/combine_real_summaries.py   --batch-dir eval_runs/real_batches/<batch>   --status-file eval_runs/real_batches/<batch>/batch_status.jsonl   --out eval_runs/real_batches/<batch>/combined_summary.json
+```
+
+The run writes `<batch>/<output_name>/` and its `batch_status.jsonl` row, so the
+combiner reads it exactly as it reads an HPC row.  Note that the synthetic
+Full-Duplex-Bench-JA track (`FDB_SYSTEM=cascade` and friends) is a different
+protocol on different data; the combiner deliberately refuses to put its numbers
+in the same columns.
 
 The realtime socket is derived from that same base URL
 (`wss://api.rdg-genai.crl.hitachi.co.jp/v1/realtime?model=...`), and the judge

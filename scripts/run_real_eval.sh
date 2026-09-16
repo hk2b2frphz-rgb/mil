@@ -155,43 +155,8 @@ else
     "${inference_args[@]}"
 fi
 
-# 3) 評価。応答率・応答速度・音声品質。
-eval_args=(
-    uv run python eval/evaluate_real_response.py
-    --run-dir "$REAL_OUT_DIR/inference"
-    --out-dir "$REAL_OUT_DIR/benchmark_results"
-    --mos-backend "$REAL_MOS_BACKEND"
-    --mos-device "$REAL_MOS_DEVICE"
-)
-if [[ -n "$REAL_MAX_LATENCY_SEC" ]]; then
-    eval_args+=(--max-latency-sec "$REAL_MAX_LATENCY_SEC")
-fi
-"${eval_args[@]}"
-
-# 3b) 相槌。User 発話中の別軸。応答評価とは指標の形が違うので別ファイルに出す。
-#     REAL_BACKCHANNEL=0 で飛ばせる。
-if [[ "${REAL_BACKCHANNEL:-1}" == "1" ]]; then
-    uv run python eval/evaluate_real_dialogue_backchannel.py \
-        --run-dir "$REAL_OUT_DIR/inference" \
-        --out "$REAL_OUT_DIR/benchmark_results/backchannel.json" \
-        --tolerance-sec "${REAL_BC_TOLERANCE_SEC:-1.0}"
-fi
-
-# 4) LLM-as-a-judge 入力(モデルと相談員の両方を採点対象として出す)。
-#    gold は自分自身が相談員なので、人間側の行は重複させない。
-judge_args=(
-    uv run python eval/pack_real_dialogue_judge_input.py
-    --per-case "$REAL_OUT_DIR/benchmark_results/per_case.jsonl"
-    --out "$REAL_OUT_DIR/real_judge_input.jsonl"
-)
-if [[ "$MODEL_ID" == "gold" ]]; then
-    judge_args+=(--skip-human)
-fi
-"${judge_args[@]}"
-
-echo "[real] summary:          $REAL_OUT_DIR/benchmark_results/summary.json"
-echo "[real] backchannel:      $REAL_OUT_DIR/benchmark_results/backchannel.json"
-echo "[real] per_case:         $REAL_OUT_DIR/benchmark_results/per_case.jsonl"
-echo "[real] judge input only: $REAL_OUT_DIR/real_judge_input.jsonl"
+# 3) 4) 評価は scripts/real_eval_metrics.sh に一本化してある。実データトラックの
+#     指標は全システム共通でなければ表として読めないので、経路ごとに書かない。
+source "$REPO_ROOT/scripts/real_eval_metrics.sh"
 echo "[real] No OpenAI/Azure API was called by this server run."
 echo "finished_at: $(date -Iseconds)"

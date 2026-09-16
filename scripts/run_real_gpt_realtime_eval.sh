@@ -48,6 +48,18 @@ RUN_ID="${RUN_ID:-${MODEL_ID}_$(date +%Y%m%d_%H%M%S)}"
 LOCAL_PYTHON="${LOCAL_PYTHON:-python}"
 TEST_DATA_DIR="${TEST_DATA_DIR:-$REPO_ROOT/data/test_data/real_dialogue}"
 REAL_DATASET_DIR="${REAL_DATASET_DIR:-$REPO_ROOT/data/eval_sets/real_response}"
+# REAL_BATCH_DIR points at a batch produced by scripts/run_full_duplex_eval_batch.sh.
+# Writing into its <output_name>/ layout is what lets this locally-run system
+# appear in the same combined_summary.json as the systems evaluated on the HPC,
+# instead of in a table of its own that cannot be compared.
+OUTPUT_NAME="${OUTPUT_NAME:-$MODEL_ID}"
+if [[ -n "${REAL_BATCH_DIR:-}" ]]; then
+    if ! [[ "$OUTPUT_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "ERROR: OUTPUT_NAME must match [A-Za-z0-9._-]+ to sit in a batch directory: $OUTPUT_NAME" >&2
+        exit 2
+    fi
+    REAL_OUT_DIR="${REAL_OUT_DIR:-$REAL_BATCH_DIR/$OUTPUT_NAME}"
+fi
 REAL_OUT_DIR="${REAL_OUT_DIR:-$REPO_ROOT/eval_runs/real_response/$RUN_ID}"
 
 "$LOCAL_PYTHON" -c "import websocket" 2>/dev/null || { echo "ERROR: install websocket-client locally: $LOCAL_PYTHON -m pip install websocket-client" >&2; exit 2; }
@@ -57,11 +69,36 @@ if [[ ! -f "$REAL_DATASET_DIR/manifest.json" || "${REBUILD_REAL_DATASET:-0}" == 
     [[ "${REBUILD_REAL_DATASET:-0}" == "1" ]] && build_args+=(--overwrite)
     "${build_args[@]}"
 fi
-run_args=("$LOCAL_PYTHON" eval/run_gpt_realtime_eval.py --dataset-dir "$REAL_DATASET_DIR" --out-dir "$REAL_OUT_DIR/inference" --model-id "$MODEL_ID" --provider "$GPT_REALTIME_PROVIDER" --voice "${GPT_REALTIME_VOICE:-marin}" --seeds "${REAL_SEEDS:-0}" --tasks "${REAL_TASKS:-all}" --input-mode "${GPT_REALTIME_INPUT_MODE:-realtime}" --turn-detection "${GPT_REALTIME_TURN_DETECTION:-server_vad}" --chunk-ms "${GPT_REALTIME_CHUNK_MS:-100}" --response-timeout-sec "${GPT_REALTIME_TIMEOUT_SEC:-90}" --max-output-tokens "${GPT_REALTIME_MAX_OUTPUT_TOKENS:-200}" --overwrite)
+run_args=("$LOCAL_PYTHON" eval/run_gpt_realtime_eval.py --dataset-dir "$REAL_DATASET_DIR" --out-dir "$REAL_OUT_DIR/inference" --model-id "$MODEL_ID" --provider "$GPT_REALTIME_PROVIDER" --voice "${GPT_REALTIME_VOICE:-marin}" --seeds "${REAL_SEEDS:-0}" --tasks "${REAL_TASKS:-all}" --input-mode "${GPT_REALTIME_INPUT_MODE:-realtime}" --turn-detection "${GPT_REALTIME_TURN_DETECTION:-server_vad}" --chunk-ms "${GPT_REALTIME_CHUNK_MS:-100}" --response-timeout-sec "${GPT_REALTIME_TIMEOUT_SEC:-90}" --max-output-tokens "${GPT_REALTIME_MAX_OUTPUT_TOKENS:-200}" --realtime-schema "${OPENAI_REALTIME_SCHEMA:-ga}" --connect-retries "${GPT_REALTIME_CONNECT_RETRIES:-4}" --case-retries "${GPT_REALTIME_CASE_RETRIES:-3}")
+# REAL_RESUME=1 keeps cases that already have their .meta.json, so a run that
+# died partway is continued with RUN_ID set to the same directory instead of
+# paying for every completed case again.
+if [[ "${REAL_RESUME:-0}" != "1" ]]; then
+    run_args+=(--overwrite)
+fi
 [[ -n "${GPT_REALTIME_MODEL:-}" ]] && run_args+=(--model "$GPT_REALTIME_MODEL")
 [[ -n "${REAL_CASES_PER_TASK:-}" ]] && run_args+=(--cases-per-task "$REAL_CASES_PER_TASK")
 "${run_args[@]}"
-"$LOCAL_PYTHON" eval/evaluate_real_response.py --run-dir "$REAL_OUT_DIR/inference" --out-dir "$REAL_OUT_DIR/benchmark_results" --mos-backend "${REAL_MOS_BACKEND:-utmos}" --mos-device "${REAL_MOS_DEVICE:-cpu}"
-"$LOCAL_PYTHON" eval/evaluate_real_dialogue_backchannel.py --run-dir "$REAL_OUT_DIR/inference" --out "$REAL_OUT_DIR/benchmark_results/backchannel.json" --tolerance-sec "${REAL_BC_TOLERANCE_SEC:-1.0}"
-"$LOCAL_PYTHON" eval/pack_real_dialogue_judge_input.py --per-case "$REAL_OUT_DIR/benchmark_results/per_case.jsonl" --out "$REAL_OUT_DIR/real_judge_input.jsonl"
+# Scoring is the batch's, not this script's: same evaluators, same thresholds,
+# same judge-input packing, so the row is readable next to the HPC systems.
+REAL_START_SEC="${REAL_START_SEC:-$SECONDS}"
+REAL_PY_RUNNER="$LOCAL_PYTHON"
+source "$REPO_ROOT/scripts/real_eval_metrics.sh"
+
+if [[ -n "${REAL_BATCH_DIR:-}" ]]; then
+    # Replace any earlier row for this output_name rather than appending a
+    # second one; combine_real_summaries.py keeps the last row it reads, but a
+    # file that grows on every rerun is hard to read by hand.
+    status_file="$REAL_BATCH_DIR/batch_status.jsonl"
+    elapsed="$(( SECONDS - REAL_START_SEC ))"
+    if [[ -f "$status_file" ]]; then
+        grep -v "\"output_name\":\"$OUTPUT_NAME\"" "$status_file" > "$status_file.tmp" || true
+        mv "$status_file.tmp" "$status_file"
+    fi
+    printf '{"model_id":"%s","output_name":"%s","status":"%s","elapsed_sec":"%s"}
+'         "$MODEL_ID" "$OUTPUT_NAME" "ok" "$elapsed" >> "$status_file"
+    echo "[gpt-realtime] batch row: $status_file ($OUTPUT_NAME)"
+    echo "[gpt-realtime] rebuild the combined table with:"
+    echo "  uv run python eval/combine_real_summaries.py --batch-dir $REAL_BATCH_DIR --status-file $status_file --out $REAL_BATCH_DIR/combined_summary.json"
+fi
 echo "[gpt-realtime] summary: $REAL_OUT_DIR/benchmark_results/summary.json"
