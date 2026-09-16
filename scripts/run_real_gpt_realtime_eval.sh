@@ -57,7 +57,13 @@ if [[ ! -f "$REAL_DATASET_DIR/manifest.json" || "${REBUILD_REAL_DATASET:-0}" == 
     [[ "${REBUILD_REAL_DATASET:-0}" == "1" ]] && build_args+=(--overwrite)
     "${build_args[@]}"
 fi
-run_args=("$LOCAL_PYTHON" eval/run_gpt_realtime_eval.py --dataset-dir "$REAL_DATASET_DIR" --out-dir "$REAL_OUT_DIR/inference" --model-id "$MODEL_ID" --provider "$GPT_REALTIME_PROVIDER" --voice "${GPT_REALTIME_VOICE:-marin}" --seeds "${REAL_SEEDS:-0}" --tasks "${REAL_TASKS:-all}" --input-mode "${GPT_REALTIME_INPUT_MODE:-realtime}" --turn-detection "${GPT_REALTIME_TURN_DETECTION:-server_vad}" --chunk-ms "${GPT_REALTIME_CHUNK_MS:-100}" --response-timeout-sec "${GPT_REALTIME_TIMEOUT_SEC:-90}" --max-output-tokens "${GPT_REALTIME_MAX_OUTPUT_TOKENS:-200}" --overwrite)
+run_args=("$LOCAL_PYTHON" eval/run_gpt_realtime_eval.py --dataset-dir "$REAL_DATASET_DIR" --out-dir "$REAL_OUT_DIR/inference" --model-id "$MODEL_ID" --provider "$GPT_REALTIME_PROVIDER" --voice "${GPT_REALTIME_VOICE:-marin}" --seeds "${REAL_SEEDS:-0}" --tasks "${REAL_TASKS:-all}" --input-mode "${GPT_REALTIME_INPUT_MODE:-realtime}" --turn-detection "${GPT_REALTIME_TURN_DETECTION:-server_vad}" --chunk-ms "${GPT_REALTIME_CHUNK_MS:-100}" --response-timeout-sec "${GPT_REALTIME_TIMEOUT_SEC:-90}" --max-output-tokens "${GPT_REALTIME_MAX_OUTPUT_TOKENS:-200}" --realtime-schema "${OPENAI_REALTIME_SCHEMA:-ga}" --connect-retries "${GPT_REALTIME_CONNECT_RETRIES:-4}" --case-retries "${GPT_REALTIME_CASE_RETRIES:-3}")
+# REAL_RESUME=1 keeps cases that already have their .meta.json, so a run that
+# died partway is continued with RUN_ID set to the same directory instead of
+# paying for every completed case again.
+if [[ "${REAL_RESUME:-0}" != "1" ]]; then
+    run_args+=(--overwrite)
+fi
 [[ -n "${GPT_REALTIME_MODEL:-}" ]] && run_args+=(--model "$GPT_REALTIME_MODEL")
 [[ -n "${REAL_CASES_PER_TASK:-}" ]] && run_args+=(--cases-per-task "$REAL_CASES_PER_TASK")
 "${run_args[@]}"
