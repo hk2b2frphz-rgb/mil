@@ -90,14 +90,57 @@ GB.
 ## GPT Realtime (local PC only)
 
 GPT Realtime uses an outbound WebSocket and is intentionally not reachable
-from `scripts/run_full_duplex_eval_batch.pbs` or any PBS wrapper.  From a local
-Bash shell with the repository dependencies available:
+from `scripts/run_full_duplex_eval_batch.pbs` or any PBS wrapper.  Run it from a
+local Bash shell with the repository dependencies available.
+
+It calls the API through the same environment as the judge above, so one set of
+credentials configures both halves of the evaluation.  The in-house gateway
+`https://api.rdg-genai.crl.hitachi.co.jp/v1` is OpenAI-compatible (its path ends
+in `/v1`), not Azure-shaped, so it is configured with the `OPENAI_*` variables:
 
 ```bash
 python -m pip install websocket-client
 export OPENAI_API_KEY="..."
-MODEL_ID=gpt_realtime bash scripts/run_real_gpt_realtime_eval.sh
+export OPENAI_BASE_URL="https://api.rdg-genai.crl.hitachi.co.jp/v1"
+MODEL_ID=gpt_realtime REAL_CASES_PER_TASK=1 bash scripts/run_real_gpt_realtime_eval.sh
 ```
+
+The realtime socket is derived from that same base URL
+(`wss://api.rdg-genai.crl.hitachi.co.jp/v1/realtime?model=...`), and the judge
+sends its requests to the same place, so there is one endpoint to configure.
+The model defaults to `gpt-realtime`; override it with `OPENAI_REALTIME_MODEL`
+or `GPT_REALTIME_MODEL`.  It is deliberately not read from `OPENAI_MODEL`,
+which is the judge's text model.  `--provider` defaults to `auto`: `OPENAI_BASE_URL` selects the
+OpenAI-compatible surface, `AZURE_OPENAI_ENDPOINT` selects Azure, and setting
+both is an error rather than a guess.  The resolved endpoint is printed at
+startup.
+
+For an Azure OpenAI resource instead:
+
+```bash
+export AZURE_OPENAI_KEY="..."
+export AZURE_OPENAI_ENDPOINT="https://<resource>.openai.azure.com"
+export AZURE_OPENAI_REALTIME_DEPLOYMENT="<realtime-deployment-name>"
+```
+
+The WebSocket then defaults to the `/openai/v1/realtime` surface, which accepts
+the GA session schema this evaluator sends; set
+`AZURE_OPENAI_REALTIME_API_VERSION=2025-04-01-preview` (or another dated
+version) to use the older `/openai/realtime?api-version=...&deployment=...` form.
+
+### Gateways that need more
+
+| Variable | Purpose |
+| --- | --- |
+| `OPENAI_REALTIME_URL` / `AZURE_OPENAI_REALTIME_URL` | Full WebSocket URL, used verbatim, when the socket is not next to the base URL. `{model}` / `{deployment}` is substituted. |
+| `OPENAI_REALTIME_AUTH_HEADER` / `AZURE_OPENAI_REALTIME_AUTH_HEADER` | Auth header name (default `Authorization` with `Bearer`, and `api-key` on Azure). |
+| `OPENAI_REALTIME_EXTRA_HEADERS` | JSON object of extra headers, e.g. `{"X-Tenant-Id": "lab01"}`. |
+| `HTTPS_PROXY` / `NO_PROXY` | Honoured for the WebSocket, since websocket-client does not read them itself. |
+
+The API key is always the one the judge uses; only the header name and the URL
+change.  Note that the gateway must proxy the WebSocket upgrade itself -- a
+chat-completions-only gateway will reject `/realtime` however the client is
+configured, and that is an endpoint issue rather than a client one.
 
 It streams each test WAV to a fresh Realtime API session, keeps the received
 audio and transcript in the normal `inference/` layout, then invokes the same
