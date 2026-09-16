@@ -4,15 +4,40 @@ set -euo pipefail
 # LOCAL PC ONLY.  This script intentionally has no .pbs companion and refuses
 # scheduler environments because GPT Realtime needs outbound WebSocket access.
 #
+# It uses the same API environment as the judge.  For the in-house
+# OpenAI-compatible gateway:
+#
 #   export OPENAI_API_KEY='...'
+#   export OPENAI_BASE_URL='https://api.rdg-genai.crl.hitachi.co.jp/v1'
 #   MODEL_ID=gpt_realtime bash scripts/run_real_gpt_realtime_eval.sh
+#
+# For an Azure resource, set AZURE_OPENAI_KEY, AZURE_OPENAI_ENDPOINT and
+# AZURE_OPENAI_REALTIME_DEPLOYMENT instead.  GPT_REALTIME_PROVIDER defaults to
+# auto, which follows whichever of the two is configured.
 
 if [[ -n "${PBS_JOBID:-}${SLURM_JOB_ID:-}${LSB_JOBID:-}" ]]; then
     echo "ERROR: GPT Realtime evaluation is local-only; do not submit this script through PBS." >&2
     exit 2
 fi
-if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-    echo "ERROR: set OPENAI_API_KEY in the local shell before running this script." >&2
+GPT_REALTIME_PROVIDER="${GPT_REALTIME_PROVIDER:-auto}"
+# The evaluator re-checks all of this; these guards only fail before the dataset
+# build, which is slow enough to be worth not running on a bad configuration.
+if [[ "$GPT_REALTIME_PROVIDER" == "azure" ]]; then
+    if [[ -z "${AZURE_OPENAI_KEY:-}" || -z "${AZURE_OPENAI_ENDPOINT:-}" ]]; then
+        echo "ERROR: set AZURE_OPENAI_KEY and AZURE_OPENAI_ENDPOINT in the local shell (same variables as the Azure judge)." >&2
+        exit 2
+    fi
+    if [[ -z "${AZURE_OPENAI_REALTIME_DEPLOYMENT:-}${AZURE_OPENAI_DEPLOYMENT:-}${GPT_REALTIME_MODEL:-}" ]]; then
+        echo "ERROR: set AZURE_OPENAI_REALTIME_DEPLOYMENT to the realtime deployment name." >&2
+        exit 2
+    fi
+elif [[ "$GPT_REALTIME_PROVIDER" == "openai" || -n "${OPENAI_BASE_URL:-}${OPENAI_API_BASE:-}" ]]; then
+    if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+        echo "ERROR: set OPENAI_API_KEY for ${OPENAI_BASE_URL:-${OPENAI_API_BASE:-api.openai.com}}." >&2
+        exit 2
+    fi
+elif [[ -z "${AZURE_OPENAI_ENDPOINT:-}" ]]; then
+    echo "ERROR: set OPENAI_BASE_URL + OPENAI_API_KEY (OpenAI-compatible gateway) or AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_KEY (Azure)." >&2
     exit 2
 fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,7 +57,8 @@ if [[ ! -f "$REAL_DATASET_DIR/manifest.json" || "${REBUILD_REAL_DATASET:-0}" == 
     [[ "${REBUILD_REAL_DATASET:-0}" == "1" ]] && build_args+=(--overwrite)
     "${build_args[@]}"
 fi
-run_args=("$LOCAL_PYTHON" eval/run_gpt_realtime_eval.py --dataset-dir "$REAL_DATASET_DIR" --out-dir "$REAL_OUT_DIR/inference" --model-id "$MODEL_ID" --model "${GPT_REALTIME_MODEL:-gpt-realtime}" --voice "${GPT_REALTIME_VOICE:-marin}" --seeds "${REAL_SEEDS:-0}" --tasks "${REAL_TASKS:-all}" --input-mode "${GPT_REALTIME_INPUT_MODE:-realtime}" --turn-detection "${GPT_REALTIME_TURN_DETECTION:-server_vad}" --chunk-ms "${GPT_REALTIME_CHUNK_MS:-100}" --response-timeout-sec "${GPT_REALTIME_TIMEOUT_SEC:-90}" --max-output-tokens "${GPT_REALTIME_MAX_OUTPUT_TOKENS:-200}" --overwrite)
+run_args=("$LOCAL_PYTHON" eval/run_gpt_realtime_eval.py --dataset-dir "$REAL_DATASET_DIR" --out-dir "$REAL_OUT_DIR/inference" --model-id "$MODEL_ID" --provider "$GPT_REALTIME_PROVIDER" --voice "${GPT_REALTIME_VOICE:-marin}" --seeds "${REAL_SEEDS:-0}" --tasks "${REAL_TASKS:-all}" --input-mode "${GPT_REALTIME_INPUT_MODE:-realtime}" --turn-detection "${GPT_REALTIME_TURN_DETECTION:-server_vad}" --chunk-ms "${GPT_REALTIME_CHUNK_MS:-100}" --response-timeout-sec "${GPT_REALTIME_TIMEOUT_SEC:-90}" --max-output-tokens "${GPT_REALTIME_MAX_OUTPUT_TOKENS:-200}" --overwrite)
+[[ -n "${GPT_REALTIME_MODEL:-}" ]] && run_args+=(--model "$GPT_REALTIME_MODEL")
 [[ -n "${REAL_CASES_PER_TASK:-}" ]] && run_args+=(--cases-per-task "$REAL_CASES_PER_TASK")
 "${run_args[@]}"
 "$LOCAL_PYTHON" eval/evaluate_real_response.py --run-dir "$REAL_OUT_DIR/inference" --out-dir "$REAL_OUT_DIR/benchmark_results" --mos-backend "${REAL_MOS_BACKEND:-utmos}" --mos-device "${REAL_MOS_DEVICE:-cpu}"

@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """Evaluate GPT Realtime against the real-dialogue audio test set.
 
-This program is deliberately local-only.  It opens a WebSocket to the OpenAI
-Realtime API, so it refuses PBS/Slurm/LSF environments rather than silently
-failing after a costly scheduler allocation.  Each test case receives a fresh
-Realtime session; therefore no conversation context can leak between cases.
+This program is deliberately local-only.  It opens a WebSocket to the Azure
+OpenAI (or OpenAI) Realtime API, so it refuses PBS/Slurm/LSF environments rather
+than silently failing after a costly scheduler allocation.  Each test case
+receives a fresh Realtime session; therefore no conversation context can leak
+between cases.
+
+Credentials come from eval/openai_judge_common.py, the same place the Azure
+judge reads them, so one AZURE_OPENAI_* environment configures both halves of
+the evaluation.
 """
 from __future__ import annotations
 
@@ -28,6 +33,7 @@ if str(REPO_ROOT) not in sys.path:
 from full_duplex_audio import read_wav_mono, resample_linear, write_wav_mono, write_wav_stereo
 from full_duplex_sample_selection import select_samples
 from local_baseline_common import COUNSELOR_SYSTEM_PROMPT
+from openai_judge_common import load_realtime_connection, realtime_proxy_options, resolve_provider
 
 SCHEDULER_VARIABLES = ("PBS_JOBID", "SLURM_JOB_ID", "LSB_JOBID")
 PCM_RATE = 24000
@@ -38,7 +44,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-dir", required=True, type=Path)
     parser.add_argument("--out-dir", required=True, type=Path)
     parser.add_argument("--model-id", default="gpt-realtime")
-    parser.add_argument("--model", default="gpt-realtime")
+    parser.add_argument("--provider", choices=["auto", "azure", "openai"], default="auto",
+                        help="auto picks openai when OPENAI_BASE_URL is set, azure when AZURE_OPENAI_ENDPOINT is.")
+    # Unset by default: the deployment/model name comes from the environment,
+    # exactly as it does for the judge, and a hard-coded "gpt-realtime" here
+    # would silently override a correctly configured one.
+    parser.add_argument("--model", help="Azure realtime deployment name, or realtime model id on an OpenAI-compatible endpoint.")
     parser.add_argument("--voice", default="marin")
     parser.add_argument("--instructions", default=COUNSELOR_SYSTEM_PROMPT)
     parser.add_argument("--tasks", default="all")
@@ -60,8 +71,6 @@ def reject_server() -> None:
             "GPT Realtime evaluation is local-only and must not run through PBS/Slurm/LSF "
             f"(detected {', '.join(seen)}). Run scripts/run_real_gpt_realtime_eval.sh on the local PC."
         )
-    if not os.environ.get("OPENAI_API_KEY"):
-        raise SystemExit("OPENAI_API_KEY is required for GPT Realtime evaluation.")
 
 
 def _websocket():
@@ -93,12 +102,16 @@ def _receive_until_configured(ws: Any, timeout_sec: float) -> None:
 
 def run_realtime_turn(args: argparse.Namespace, pcm: np.ndarray, sample_rate: int) -> tuple[np.ndarray, str, float | None, float]:
     websocket = _websocket()
-    url = f"wss://api.openai.com/v1/realtime?model={args.model}"
-    headers = [
-        f"Authorization: Bearer {os.environ['OPENAI_API_KEY']}",
-        "OpenAI-Beta: realtime=v1",
-    ]
-    ws = websocket.create_connection(url, header=headers, timeout=args.response_timeout_sec)
+    # The session.update below is the GA realtime schema, so no "OpenAI-Beta:
+    # realtime=v1" header is sent: that header pins the older beta schema and
+    # makes the server reject this payload.
+    url, headers, _ = load_realtime_connection(args.provider, args.model)
+    ws = websocket.create_connection(
+        url,
+        header=headers,
+        timeout=args.response_timeout_sec,
+        **realtime_proxy_options(url),
+    )
     try:
         turn_detection: dict[str, Any] | None
         if args.turn_detection == "server_vad":
@@ -226,12 +239,18 @@ def process_variant(args: argparse.Namespace, sample: dict[str, Any], seed: int,
     if transcript and response_pcm.size:
         chunks.append({"text": transcript, "timestamp": [round(start_sec, 4), round(start_sec + len(response_at_input_rate) / sample_rate, 4)]})
     (trial_dir / f"{output_stem}.json").write_text(json.dumps({"text": transcript, "chunks": chunks, "source": "gpt_realtime_output_audio_transcript", "language": "ja"}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    (trial_dir / f"{output_stem}.meta.json").write_text(json.dumps({"model_id": args.model_id, "system": "gpt_realtime", "seed": seed, "task": sample["task"], "case_id": sample["id"], "variant": variant, "input_duration_sec": round(len(pcm) / sample_rate, 4), "wall_time_sec": round(wall, 4), "audible_response_start_sec": round(start_sec, 4), "response_chars": len(transcript), "realtime_model": args.model, "realtime_voice": args.voice, "input_mode": args.input_mode, "turn_detection": args.turn_detection}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (trial_dir / f"{output_stem}.meta.json").write_text(json.dumps({"model_id": args.model_id, "system": "gpt_realtime", "seed": seed, "task": sample["task"], "case_id": sample["id"], "variant": variant, "input_duration_sec": round(len(pcm) / sample_rate, 4), "wall_time_sec": round(wall, 4), "audible_response_start_sec": round(start_sec, 4), "response_chars": len(transcript), "realtime_provider": args.provider, "realtime_model": args.model, "realtime_voice": args.voice, "input_mode": args.input_mode, "turn_detection": args.turn_detection}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def main() -> int:
     args = parse_args()
     reject_server()
+    # Resolve the endpoint, credentials and the deployment/model name once,
+    # before any audio is read, so a misconfigured environment fails immediately
+    # instead of after the first case has been prepared.
+    args.provider = resolve_provider(args.provider)
+    url, _, args.model = load_realtime_connection(args.provider, args.model)
+    print(f"[gpt-realtime] provider={args.provider} endpoint={url}", file=sys.stderr)
     if args.chunk_ms <= 0:
         raise SystemExit("--chunk-ms must be positive")
     args.dataset_dir = args.dataset_dir.resolve()
@@ -241,7 +260,7 @@ def main() -> int:
     tasks = None if args.tasks == "all" else {item.strip() for item in args.tasks.split(",") if item.strip()}
     samples = select_samples(manifest["samples"], tasks, args.cases_per_task)
     seeds = [int(item) for item in args.seeds.split(",") if item.strip()]
-    (args.out_dir / "run_config.json").write_text(json.dumps({"model_id": args.model_id, "system": "gpt_realtime", "model": args.model, "voice": args.voice, "seeds": seeds, "tasks": sorted(tasks) if tasks else "all", "cases_per_task": args.cases_per_task, "input_mode": args.input_mode, "turn_detection": args.turn_detection, "local_only": True}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (args.out_dir / "run_config.json").write_text(json.dumps({"model_id": args.model_id, "system": "gpt_realtime", "provider": args.provider, "model": args.model, "voice": args.voice, "seeds": seeds, "tasks": sorted(tasks) if tasks else "all", "cases_per_task": args.cases_per_task, "input_mode": args.input_mode, "turn_detection": args.turn_detection, "local_only": True}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     total = len(samples) * len(seeds)
     completed = 0
     for sample in samples:

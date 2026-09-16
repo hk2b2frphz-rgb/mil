@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from collections.abc import Callable, Iterable
 from typing import Any, TextIO
+from urllib.parse import unquote, urlsplit
 
 
 BATCH_ENV_MARKERS = (
@@ -108,7 +109,200 @@ def load_client(provider: str, model: str | None):
         openai_model = model or os.environ.get("OPENAI_MODEL")
         if not api_key or not openai_model:
             raise SystemExit("OpenAI judge requires OPENAI_API_KEY and OPENAI_MODEL or --model.")
-        return OpenAI(api_key=api_key), openai_model
+        # Explicit rather than relying on the SDK's own OPENAI_BASE_URL lookup,
+        # so the judge and the realtime evaluator provably share one endpoint.
+        return OpenAI(api_key=api_key, base_url=openai_base_url()), openai_model
+
+    raise ValueError(f"Unknown provider: {provider}")
+
+
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+# The model id served for realtime, on api.openai.com and on the in-house
+# gateway alike. Azure is the exception: there the name is a deployment the
+# resource owner chose, so it has no default.
+DEFAULT_REALTIME_MODEL = "gpt-realtime"
+
+
+def openai_base_url() -> str:
+    """Base URL for the OpenAI-compatible surface, judge and realtime alike.
+
+    An in-house gateway such as https://api.rdg-genai.crl.hitachi.co.jp/v1 is
+    OpenAI-compatible rather than Azure-shaped, so it is configured here and not
+    through AZURE_OPENAI_ENDPOINT.  The OpenAI SDK would read OPENAI_BASE_URL by
+    itself, but resolving it here keeps the judge and the realtime WebSocket --
+    which has no SDK to read it -- pointed at one endpoint.
+    """
+    raw = os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_BASE")
+    if not raw:
+        return DEFAULT_OPENAI_BASE_URL
+    raw = raw.strip().rstrip("/")
+    if not raw.startswith(("http://", "https://")):
+        raw = "https://" + raw
+    return raw
+
+
+def _to_websocket_scheme(url: str) -> str:
+    """Rewrite an http(s) endpoint to its ws(s) form, leaving any base path."""
+    if url.startswith("https://"):
+        return "wss://" + url[len("https://") :]
+    if url.startswith("http://"):
+        return "ws://" + url[len("http://") :]
+    if url.startswith(("ws://", "wss://")):
+        return url
+    return "wss://" + url
+
+
+def _extra_realtime_headers() -> list[str]:
+    """Headers a corporate gateway may require on top of authentication.
+
+    Read from OPENAI_REALTIME_EXTRA_HEADERS as a JSON object, e.g.
+    '{"X-Tenant-Id": "abc"}'.  Routing or cost-centre headers are site-specific,
+    so they are configuration rather than code.
+    """
+    raw = os.environ.get("OPENAI_REALTIME_EXTRA_HEADERS")
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"OPENAI_REALTIME_EXTRA_HEADERS is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise SystemExit("OPENAI_REALTIME_EXTRA_HEADERS must be a JSON object of header names to values.")
+    return [f"{name}: {value}" for name, value in parsed.items()]
+
+
+def realtime_proxy_options(url: str) -> dict[str, Any]:
+    """Proxy settings for websocket-client, which ignores HTTPS_PROXY itself.
+
+    urllib and the OpenAI SDK pick the proxy up from the environment on their
+    own, so without this the judge would reach a corporate proxy and the
+    realtime socket would not -- the same environment behaving two ways.
+    """
+    target = urlsplit(url).hostname or ""
+    no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+    for entry in (item.strip().lstrip(".").lower() for item in no_proxy.split(",")):
+        if entry and (entry == "*" or target.lower() == entry or target.lower().endswith("." + entry)):
+            return {}
+    raw = (
+        os.environ.get("HTTPS_PROXY")
+        or os.environ.get("https_proxy")
+        or os.environ.get("ALL_PROXY")
+        or os.environ.get("all_proxy")
+    )
+    if not raw:
+        return {}
+    parsed = urlsplit(raw if "://" in raw else f"http://{raw}")
+    if not parsed.hostname:
+        return {}
+    options: dict[str, Any] = {
+        "http_proxy_host": parsed.hostname,
+        "http_proxy_port": parsed.port or (443 if parsed.scheme == "https" else 80),
+    }
+    if parsed.username:
+        options["http_proxy_auth"] = (unquote(parsed.username), unquote(parsed.password or ""))
+    return options
+
+
+def resolve_provider(provider: str) -> str:
+    """Pick the API surface from the environment when --provider is 'auto'.
+
+    AZURE_OPENAI_ENDPOINT is Azure-shaped (/openai/deployments/...) while
+    OPENAI_BASE_URL is OpenAI-compatible (.../v1); they are not interchangeable,
+    so the one that is configured decides.
+    """
+    if provider != "auto":
+        return provider
+    azure = bool(os.environ.get("AZURE_OPENAI_ENDPOINT"))
+    openai_compatible = bool(os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_BASE"))
+    if azure and openai_compatible:
+        raise SystemExit(
+            "Both AZURE_OPENAI_ENDPOINT and OPENAI_BASE_URL are set; pass --provider "
+            "azure or --provider openai to say which endpoint to use."
+        )
+    if openai_compatible:
+        return "openai"
+    if azure:
+        return "azure"
+    raise SystemExit(
+        "Set OPENAI_BASE_URL (OpenAI-compatible gateway, e.g. "
+        "https://api.rdg-genai.crl.hitachi.co.jp/v1) with OPENAI_API_KEY, or "
+        "AZURE_OPENAI_ENDPOINT with AZURE_OPENAI_KEY."
+    )
+
+
+def load_realtime_connection(provider: str, model: str | None) -> tuple[str, list[str], str]:
+    """Return (url, websocket headers, resolved model/deployment) for the Realtime API.
+
+    The Realtime API is a WebSocket, so it cannot go through the AzureOpenAI
+    client used by the judges -- but it must read the same environment, because
+    it is the same API subscription.  Keeping the variable names identical to
+    load_client() is the point: one set of credentials configures both.
+    """
+    if provider == "azure":
+        api_key = os.environ.get("AZURE_OPENAI_KEY")
+        endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+        # The judge deployment is a text model, so a realtime deployment name
+        # is read first; AZURE_OPENAI_DEPLOYMENT is only the last resort, for
+        # resources where the two happen to be the same deployment.
+        deployment = (
+            model
+            or os.environ.get("AZURE_OPENAI_REALTIME_DEPLOYMENT")
+            or os.environ.get("AZURE_OPENAI_DEPLOYMENT")
+        )
+        if not api_key or not endpoint or not deployment:
+            raise SystemExit(
+                "Azure Realtime requires AZURE_OPENAI_KEY, AZURE_OPENAI_ENDPOINT, and "
+                "AZURE_OPENAI_REALTIME_DEPLOYMENT (or AZURE_OPENAI_DEPLOYMENT), unless "
+                "--model is provided."
+            )
+        # An in-house gateway may publish the realtime socket at a path that
+        # neither Azure shape below can produce. AZURE_OPENAI_REALTIME_URL takes
+        # the whole URL verbatim so such a deployment does not need a code
+        # change; {deployment} in it is filled in.
+        override = os.environ.get("AZURE_OPENAI_REALTIME_URL")
+        if override:
+            url = _to_websocket_scheme(override.replace("{deployment}", deployment))
+        else:
+            # Base paths are preserved, so a gateway mounted at
+            # https://gw.example/azure-openai works the same way it does for the
+            # judge's AzureOpenAI(azure_endpoint=...) client.
+            host = _to_websocket_scheme(endpoint.rstrip("/"))
+            # Deliberately not falling back to AZURE_OPENAI_API_VERSION: the
+            # judge's dated chat-completions version does not necessarily serve
+            # /realtime, and inheriting it would turn a working judge setup into
+            # a 404 here.
+            api_version = os.environ.get("AZURE_OPENAI_REALTIME_API_VERSION", "v1")
+            if api_version == "v1":
+                # The v1 surface takes the GA session schema this evaluator sends.
+                url = f"{host}/openai/v1/realtime?model={deployment}"
+            else:
+                url = f"{host}/openai/realtime?api-version={api_version}&deployment={deployment}"
+        # Azure authenticates the WebSocket with api-key rather than a bearer
+        # token, but a gateway in front of it may want a different header name
+        # (Authorization, Ocp-Apim-Subscription-Key, ...), so the name is
+        # configurable while the value stays the one key the judge also uses.
+        auth_header = os.environ.get("AZURE_OPENAI_REALTIME_AUTH_HEADER", "api-key")
+        value = f"Bearer {api_key}" if auth_header.lower() == "authorization" else api_key
+        headers = [f"{auth_header}: {value}"] + _extra_realtime_headers()
+        return url, headers, deployment
+
+    if provider == "openai":
+        api_key = os.environ.get("OPENAI_API_KEY")
+        # Not falling back to OPENAI_MODEL: that is the judge's text model, and
+        # silently judging with it here would fail in a confusing way.
+        openai_model = model or os.environ.get("OPENAI_REALTIME_MODEL") or DEFAULT_REALTIME_MODEL
+        if not api_key:
+            raise SystemExit("OpenAI Realtime requires OPENAI_API_KEY.")
+        override = os.environ.get("OPENAI_REALTIME_URL")
+        if override:
+            url = _to_websocket_scheme(override.replace("{model}", openai_model))
+        else:
+            # Same base URL as the judge: an OpenAI-compatible gateway serves
+            # the realtime socket next to chat/completions under /v1.
+            url = f"{_to_websocket_scheme(openai_base_url())}/realtime?model={openai_model}"
+        auth_header = os.environ.get("OPENAI_REALTIME_AUTH_HEADER", "Authorization")
+        value = f"Bearer {api_key}" if auth_header.lower() == "authorization" else api_key
+        return url, [f"{auth_header}: {value}"] + _extra_realtime_headers(), openai_model
 
     raise ValueError(f"Unknown provider: {provider}")
 
