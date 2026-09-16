@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N moshi_cont_phase0
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=03:00:00
+#PBS -j oe
+#PBS -V
+# ===========================================================================
+# Phase 0: verify prompted dialogue continuation with a converted
+# llm-jp-moshi-v1 model, separate from our production data path.
+#
+# Background: nu-dialogue/moshi-finetune provides the stereo dialogue
+# continuation reference path via generate.py. It expects its own
+# MoshiForFinetuning model layout, so this job converts llm-jp-moshi-v1
+# with tools.init_moshi_for_ft, runs the bundled spokenwoz_sample
+# 10s->20s continuation, then decodes generated tokens to stereo wav.
+#
+# Checkpoint: v1 should already support both streams. Do not enable
+# --extend_modules_for_user_stream by default; retry with
+# EXTEND_USER_STREAM=1 only if conversion/generation fails.
+#
+# Run from repo root: qsub scripts/run_moshi_continuation_phase0.pbs
+# Local GPU run:       bash scripts/run_moshi_continuation_phase0.pbs
+# Note: queue/select resources follow the local xvn_s small-GPU jobs.
+# ===========================================================================
+set -euo pipefail
+
+if [[ -n "${PBS_O_WORKDIR:-}" ]]; then
+    cd "$PBS_O_WORKDIR"
+else
+    cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+source scripts/setup_proxy.sh
+REPO_ROOT="$(pwd)"
+mkdir -p experiments/pbs_logs
+JOB_TAG="${PBS_JOBID%%.*}"
+JOB_LOG="experiments/pbs_logs/moshi_cont_phase0_${JOB_TAG:-local}.log"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
+echo "===== moshi continuation phase0 ====="
+echo "repo_root: $REPO_ROOT"
+echo "host:      $(hostname)"
+echo "started:   $(date -Iseconds)"
+echo "job_log:   $JOB_LOG"
+
+# --- Parameters -----------------------------------------------------------
+# Keep nu-dialogue/moshi-finetune in a separate sibling checkout; its
+# run_pipeline.sh assumes ../moshi-finetune unless overridden.
+NU_FT_REPO="${NU_FT_REPO:-$REPO_ROOT/../moshi-finetune-nu}"
+MOSHI_V1_REPO="${MOSHI_V1_REPO:-llm-jp/llm-jp-moshi-v1}"
+MODEL_DTYPE="${MODEL_DTYPE:-float32}"
+EXTEND_USER_STREAM="${EXTEND_USER_STREAM:-0}"   # 1 adds --extend_modules_for_user_stream.
+INIT_DIR="${INIT_DIR:-$NU_FT_REPO/init_models/llmjp_moshi_v1-${MODEL_DTYPE}}"
+# 10s prompt -> 20s generation, with 80ms frames: 125 / 250.
+PROMPT_LENGTH="${PROMPT_LENGTH:-125}"
+GENERATION_LENGTH="${GENERATION_LENGTH:-250}"
+TEMPERATURE="${TEMPERATURE:-0.8}"
+NPROC="${NPROC:-1}"
+OUT_DIR="${OUT_DIR:-$INIT_DIR/continuation_phase0}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+
+echo "nu_ft_repo:  $NU_FT_REPO"
+echo "v1_repo:     $MOSHI_V1_REPO"
+echo "init_dir:    $INIT_DIR (dtype=$MODEL_DTYPE, extend_user_stream=$EXTEND_USER_STREAM)"
+echo "prompt/gen:  $PROMPT_LENGTH / $GENERATION_LENGTH frames (80ms each)"
+echo "cuda_visible: $CUDA_VISIBLE_DEVICES"
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH." >&2
+    exit 1
+}
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+fi
+
+# --- 0. Prepare nu-dialogue/moshi-finetune -------------------------------
+if [[ ! -d "$NU_FT_REPO" ]]; then
+    echo "[0] clone nu-dialogue/moshi-finetune -> $NU_FT_REPO"
+    git clone https://github.com/nu-dialogue/moshi-finetune.git "$NU_FT_REPO"
+fi
+cd "$NU_FT_REPO"
+if [[ ! -d ".venv" ]]; then
+    echo "[0] uv sync (nu-dialogue/moshi-finetune)"
+    uv sync
+fi
+
+# --- 1. Convert llm-jp-moshi-v1 to MoshiForFinetuning --------------------
+# This is the core v1 compatibility check; retry with EXTEND_USER_STREAM if needed.
+if [[ ! -f "$INIT_DIR/model.safetensors" ]]; then
+    echo "[1] init_moshi_for_ft: $MOSHI_V1_REPO -> $INIT_DIR"
+    EXTEND_FLAG=()
+    if [[ "$EXTEND_USER_STREAM" == "1" ]]; then
+        EXTEND_FLAG=(--extend_modules_for_user_stream)
+        echo "    (with --extend_modules_for_user_stream)"
+    fi
+    uv run -m tools.init_moshi_for_ft \
+        --moshi_lm_repo "$MOSHI_V1_REPO" \
+        --save_dir "$INIT_DIR" \
+        --model_dtype "$MODEL_DTYPE" \
+        "${EXTEND_FLAG[@]}"
+else
+    echo "[1] init_dir already exists, skip conversion: $INIT_DIR"
+fi
+
+# --- 2. Run continuation on bundled spokenwoz_sample parquet -------------
+# Use bundled sample data first to confirm converted v1 can run generate.py.
+EVAL_GLOB="${EVAL_GLOB:-processed_data/spokenwoz_sample/test-*.parquet}"
+if ! ls $EVAL_GLOB >/dev/null 2>&1; then
+    echo "[2] sample parquet missing; build it first (tokenize_audio/text -> prepare_dataset)"
+    # Build parquet from the bundled raw sample, following the README preprocessing path.
+    uv run -m tools.tokenize_audio \
+        --audio_dir data/spokenwoz_sample/audio \
+        --output_dir data/spokenwoz_sample/tokenized_audio
+    uv run -m tools.tokenize_text \
+        --word_transcript data/spokenwoz_sample/text \
+        --output_dir data/spokenwoz_sample/tokenized_text
+    uv run -m tools.prepare_dataset \
+        --tokenized_text_dir data/spokenwoz_sample/tokenized_text \
+        --tokenized_audio_dir data/spokenwoz_sample/tokenized_audio \
+        --output_prefix processed_data/spokenwoz_sample/test
+fi
+
+echo "[3] generate.py: prompted dialogue continuation"
+uv run accelerate launch \
+    --num_machines 1 \
+    --num_processes "$NPROC" \
+    generate.py \
+        --output_dir "$OUT_DIR" \
+        --model_dir "$INIT_DIR" \
+        --eval_data_files "$EVAL_GLOB" \
+        --prompt_length "$PROMPT_LENGTH" \
+        --generation_length "$GENERATION_LENGTH" \
+        --temperature "$TEMPERATURE"
+
+# --- 4. Decode generated tokens to stereo wav (left=system, right=user) ---
+echo "[4] decode_tokens -> stereo wav"
+uv run -m tools.decode_tokens \
+    --tokens_dir "$OUT_DIR/generated_tokens" \
+    --output_dir "$OUT_DIR/generated_wavs"
+
+echo
+echo "===== phase0 done ====="
+echo "init_model: $INIT_DIR"
+echo "tokens:     $OUT_DIR/generated_tokens"
+echo "wavs:       $OUT_DIR/generated_wavs  (manual listening check)"
+echo "ended:      $(date -Iseconds)"

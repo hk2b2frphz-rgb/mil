@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N real_dialogue_eval
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII characters anywhere in this file
+# (not even in comments) -- the job dies immediately at submission.
+#
+# Server-side run of the real-dialogue replay evaluation. No OpenAI/Azure API
+# calls at all.
+#
+# Prerequisites, per target dialogue dir:
+#   1) scripts/run_real_dialogue_analysis.pbs    (diarization)
+#   2) scripts/run_real_dialogue_separation.pbs  (separation + re-transcription)
+#   3) touch counselor_A.txt or counselor_B.txt
+#   4) prune rows via the keep column in <speaker>_segments_review.tsv
+#
+# Base model:
+#   qsub -v 'MODEL_ID=base,ANALYSIS_DIRS=data/real_dialogue/pilot/dialogue1' \
+#     scripts/run_real_dialogue_eval.pbs
+#
+# Merged LoRA / exported full-FT:
+#   qsub -v 'MODEL_ID=lora_h01,MODEL_WEIGHT=/path/model.safetensors,ANALYSIS_DIRS=data/real_dialogue/pilot/dialogue1' \
+#     scripts/run_real_dialogue_eval.pbs
+#
+# To combine several dialogues into one dataset, separate them with SPACES.
+# qsub -v treats a comma inside a value as a variable separator, so commas
+# must not be used here:
+#   qsub -v 'MODEL_ID=base,ANALYSIS_DIRS=data/real_dialogue/pilot/d1 data/real_dialogue/pilot/d2' \
+#     scripts/run_real_dialogue_eval.pbs
+#
+# Main overrides:
+#   REAL_CONTEXT_SEC=30        length of context prepended to each eval point.
+#                              The single knob that moves the open-loop
+#                              trade-off. If you change it, use a different
+#                              RUN_ID -- mixing values breaks comparability.
+#   REAL_TASKS=backchannel,pause_handling,smooth_turn_taking
+#   REAL_CASES_PER_TASK=1      smoke test (first N cases per task only)
+#   REAL_SEEDS=0,1,2
+#   REAL_TAIL_SEC=8
+#   REAL_BC_TOLERANCE_SEC=1.5  start-time tolerance for counting a backchannel match
+#   MODEL_CONFIG=/path/moshi_lm_kwargs.json
+#                              (auto-detected next to MODEL_WEIGHT, normally unneeded)
+#
+# This is a separate track from the synthetic Full-Duplex-Bench-JA
+# (scripts/run_full_duplex_eval.pbs). It is open-loop and not the v1.5
+# protocol, so the two score sets must never share a table.
+# See docs/real_dialogue_evaluation.md for details.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+MODEL_ID="${MODEL_ID:?Set MODEL_ID (e.g. base, lora_h01, full_f01)}"
+ANALYSIS_DIRS="${ANALYSIS_DIRS:?Set ANALYSIS_DIRS to one or more separated dialogue dirs}"
+
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+export RUN_ID="${RUN_ID:-${MODEL_ID}_${JOB_ID_SHORT}}"
+export MODEL_ID ANALYSIS_DIRS
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export HALF="${HALF:-1}"
+export REAL_CONTEXT_SEC="${REAL_CONTEXT_SEC:-30}"
+export REAL_TASKS="${REAL_TASKS:-all}"
+export REAL_SEEDS="${REAL_SEEDS:-0}"
+export REAL_TAIL_SEC="${REAL_TAIL_SEC:-30}"
+export REAL_BC_TOLERANCE_SEC="${REAL_BC_TOLERANCE_SEC:-1.5}"
+
+# Disable Triton / torch.compile -- V100 lacks support for many Triton kernels.
+export TORCHINDUCTOR_DISABLE=1
+export NO_TORCH_COMPILE="${NO_TORCH_COMPILE:-1}"
+export TORCH_COMPILE_DISABLE=1
+
+# Running before the manual prep is finished would silently build a dataset
+# from every un-pruned segment and still complete normally. Fail here instead.
+for dir in $ANALYSIS_DIRS; do
+    if [[ ! -d "$dir" ]]; then
+        echo "ERROR: analysis dir not found: $dir" >&2
+        exit 1
+    fi
+    if [[ ! -f "$dir/timeline_separated.jsonl" ]]; then
+        echo "ERROR: $dir/timeline_separated.jsonl is missing." >&2
+        echo "       Run scripts/run_real_dialogue_separation.pbs first." >&2
+        exit 1
+    fi
+    marker_count=$(find "$dir" -maxdepth 1 -name 'counselor_*.txt' | wc -l)
+    if [[ "$marker_count" -ne 1 ]]; then
+        echo "ERROR: $dir has $marker_count counselor markers (exactly 1 required)." >&2
+        echo "       Place either counselor_A.txt or counselor_B.txt, not both." >&2
+        exit 1
+    fi
+done
+
+mkdir -p experiments/pbs_logs
+exec > >(tee -a "experiments/pbs_logs/real_dialogue_${RUN_ID}.log") 2>&1
+
+echo "job_id:       ${PBS_JOBID:-n/a}"
+echo "queue:        xvn_s"
+echo "host:         $(hostname)"
+echo "workdir:      $(pwd)"
+echo "run_id:       $RUN_ID"
+echo "model_id:     $MODEL_ID"
+echo "analysis:     $ANALYSIS_DIRS"
+echo "context_sec:  $REAL_CONTEXT_SEC"
+echo "cuda:         $CUDA_VISIBLE_DEVICES"
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+fi
+
+bash scripts/run_real_dialogue_eval.sh

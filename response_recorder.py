@@ -9,6 +9,7 @@ Outputs: response.wav, transcript.jsonl, transcript.txt, meta.json per trial.
 """
 
 import argparse
+import hashlib
 import inspect
 import json
 import logging
@@ -109,6 +110,27 @@ def collect_input_files(inputs: list[str]) -> list[Path]:
         else:
             logger.warning("Input path not found, skipping: %s", inp)
     return files
+
+
+def build_unique_labels(input_files: list[Path]) -> dict[Path, str]:
+    """Map each input path to a unique output label.
+
+    Inputs that share a filename stem (e.g. ``hello.wav`` from two different
+    directories) would otherwise write to the same ``out_dir/<stem>/seed_N``
+    directory and overwrite each other. For colliding stems we append a short
+    hash of the resolved path to keep outputs distinct.
+    """
+    from collections import Counter
+
+    stem_counts = Counter(p.stem for p in input_files)
+    labels: dict[Path, str] = {}
+    for p in input_files:
+        if stem_counts[p.stem] > 1:
+            digest = hashlib.sha1(str(p.resolve()).encode("utf-8")).hexdigest()[:8]
+            labels[p] = f"{p.stem}_{digest}"
+        else:
+            labels[p] = p.stem
+    return labels
 
 
 def collect_text_prompts(args: argparse.Namespace) -> list[str]:
@@ -442,6 +464,54 @@ def _getattr_chain(obj, name: str, default):
 # Core inference loop
 # ---------------------------------------------------------------------------
 
+def encode_aizuchi_tag(text_tokenizer, tag: str) -> list[int]:
+    """Turn a backchannel-density tag into the text token ids to force.
+
+    The tag is written in the listener's text stream during training
+    (scripts/inject_inner_thoughts.py --from-aizuchi-density), one token per
+    frame from the start of the call, over silence. Forcing the same tokens
+    here puts the model in the state that spelling corresponded to.
+    """
+    for attr in ("encode", "encode_as_ids", "EncodeAsIds"):
+        method = getattr(text_tokenizer, attr, None)
+        if method is None:
+            continue
+        try:
+            ids = method(tag)
+        except Exception:  # noqa: BLE001 - try the next spelling
+            continue
+        return [int(i) for i in ids]
+    raise RuntimeError("text tokenizer exposes no usable encode method")
+
+
+class ForcedTextPrefix:
+    """Overwrite the text token the model sampled, for the first N steps.
+
+    moshi's LMGen samples the text token itself; step() takes only the user's
+    audio codes, so there is no argument to condition on. But on_text_hook is
+    called with that token BEFORE it drives the depformer (which produces the
+    audio) and BEFORE it is written into the streaming cache, and it is handed
+    the tensor itself -- so writing into it in place redirects both.
+
+    Without this the model samples whichever tag it likes and then follows its
+    own sample, which gives a different density per run rather than one that
+    can be asked for.
+    """
+
+    def __init__(self, token_ids: list[int]) -> None:
+        self.token_ids = list(token_ids)
+        self.step = 0
+
+    def __call__(self, text_token) -> None:
+        if self.step < len(self.token_ids):
+            text_token.fill_(self.token_ids[self.step])
+        self.step += 1
+
+    @property
+    def done(self) -> bool:
+        return self.step >= len(self.token_ids)
+
+
 def run_trial(
     pcm: np.ndarray,
     seed: int,
@@ -452,6 +522,7 @@ def run_trial(
     silence_sec: float,
     max_gen_sec: float,
     acoustic_delay: int,
+    aizuchi_tag: Optional[str] = None,
 ) -> dict:
     """
     Run a single inference trial.
@@ -472,14 +543,26 @@ def run_trial(
     frame_rate = float(mimi.frame_rate)
     frame_size = int(sample_rate / frame_rate)
 
-    # ---- Build full PCM: input + silence --------------------------------
+    # ---- Build full PCM: (tag lead-in) + input + silence -----------------
     silence_samples = int(silence_sec * sample_rate)
+    forced = None
+    lead_in_samples = 0
+    if aizuchi_tag:
+        forced = ForcedTextPrefix(encode_aizuchi_tag(text_tokenizer, aizuchi_tag))
+        # During training the tag sits on silence before anyone speaks. Give
+        # it the same room here, or the model reads the tag while the speaker
+        # is already talking -- a situation it never saw.
+        lead_in_samples = len(forced.token_ids) * frame_size
     full_pcm = np.concatenate(
-        [pcm, np.zeros(silence_samples, dtype=np.float32)]
+        [
+            np.zeros(lead_in_samples, dtype=np.float32),
+            pcm,
+            np.zeros(silence_samples, dtype=np.float32),
+        ]
     )
 
     # ---- Determine number of steps to run --------------------------------
-    input_steps = (len(pcm) + frame_size - 1) // frame_size
+    input_steps = (lead_in_samples + len(pcm) + frame_size - 1) // frame_size
     max_steps = int(max_gen_sec * frame_rate)
     total_frames = (len(full_pcm) + frame_size - 1) // frame_size
     n_steps = min(total_frames, max_steps)
@@ -487,30 +570,35 @@ def run_trial(
     # ---- Fix seed --------------------------------------------------------
     seed_all(seed)
 
+    # Moving one 80-ms frame to CUDA at a time adds an allocation and a
+    # host-to-device transfer to every streaming step.  The complete trial is
+    # only a few MB, so stage it on the target device once and take views in
+    # the loop.  Padding is done before the transfer to keep the final frame
+    # byte-for-byte equivalent to the former per-frame np.pad path.
+    padded_samples = n_steps * frame_size
+    if len(full_pcm) < padded_samples:
+        full_pcm = np.pad(full_pcm, (0, padded_samples - len(full_pcm)))
+    trial_pcm = torch.from_numpy(
+        np.ascontiguousarray(full_pcm[:padded_samples], dtype=np.float32)
+    ).to(device)
+
     audio_frames: list[torch.Tensor] = []   # each: (num_codebooks, 1) cpu
     text_events: list[dict] = []
     first_audio_step: Optional[int] = None
     first_response_step: Optional[int] = None
 
     # ---- Streaming inference loop ----------------------------------------
+    previous_hook = getattr(lm_gen, "on_text_hook", None)
+    if forced is not None:
+        lm_gen.on_text_hook = forced
     with torch.no_grad():
         with lm_gen.streaming(1):
             with mimi.streaming(1):
                 for step in range(n_steps):
                     start = step * frame_size
-                    chunk_np = full_pcm[start: start + frame_size]
-
-                    # Pad last chunk if shorter than frame_size
-                    if len(chunk_np) < frame_size:
-                        chunk_np = np.pad(
-                            chunk_np, (0, frame_size - len(chunk_np))
-                        )
-
                     # (1, 1, frame_size)
                     chunk = (
-                        torch.from_numpy(chunk_np)
-                        .float()
-                        .to(device)
+                        trial_pcm[start: start + frame_size]
                         .unsqueeze(0)
                         .unsqueeze(0)
                     )
@@ -525,8 +613,12 @@ def run_trial(
                         continue
 
                     # Split text token and audio tokens
-                    text_id = int(out[0, 0, 0].item())
-                    audio_tok = out[0, 1:, :].cpu()  # (num_codebooks, 1)
+                    # Transfer the tiny combined text/audio result once.  A
+                    # separate scalar .item() followed by .cpu() causes two
+                    # CUDA synchronizations per generated frame.
+                    out_cpu = out[0].cpu()
+                    text_id = int(out_cpu[0, 0].item())
+                    audio_tok = out_cpu[1:, :]  # (num_codebooks, 1)
                     if _audio_tokens_are_decodable(audio_tok):
                         if first_audio_step is None:
                             first_audio_step = step
@@ -543,9 +635,13 @@ def run_trial(
                         if first_response_step is None:
                             first_response_step = step
 
+    if forced is not None:
+        lm_gen.on_text_hook = previous_hook
+
     return {
         "audio_frames": audio_frames,
         "text_events": text_events,
+        "forced_tag_steps": len(forced.token_ids) if forced is not None else 0,
         "total_steps": n_steps,
         "input_steps": input_steps,
         "first_audio_step": first_audio_step,
@@ -713,6 +809,7 @@ def save_trial_outputs(
     mimi,
     acoustic_delay: int,
     wall_time: float,
+    trial_label: str | None = None,
 ) -> None:
     """Write response.wav, transcript.jsonl, transcript.txt, meta.json."""
     import sphn  # type: ignore[import]
@@ -720,7 +817,8 @@ def save_trial_outputs(
     sample_rate = int(mimi.sample_rate)
     frame_rate = float(mimi.frame_rate)
 
-    trial_dir = out_dir / input_path.stem / f"seed_{seed}"
+    label = trial_label or input_path.stem
+    trial_dir = out_dir / label / f"seed_{seed}"
     trial_dir.mkdir(parents=True, exist_ok=True)
 
     audio_frames = trial_result["audio_frames"]
@@ -1036,6 +1134,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    if args.silence_sec < 0:
+        logger.error("--silence-sec must be >= 0 (got %s).", args.silence_sec)
+        sys.exit(2)
+
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1046,6 +1148,7 @@ def main() -> None:
         logger.error("No input WAV files or text prompts found. Exiting.")
         return
     logger.info("Found %d input file(s).", len(input_files))
+    input_labels = build_unique_labels(input_files)
 
     # ---- Parse seeds --------------------------------------------------------
     if args.seeds is not None:
@@ -1135,6 +1238,7 @@ def main() -> None:
                     mimi=mimi,
                     acoustic_delay=acoustic_delay,
                     wall_time=wall_time,
+                    trial_label=input_labels.get(input_path),
                 )
 
                 first_step = result["first_response_step"]
