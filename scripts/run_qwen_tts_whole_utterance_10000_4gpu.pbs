@@ -10,16 +10,26 @@
 # Qwen3-TTS whole-utterance production: per-speaker concatenated TTS + MMS_FA
 # forced alignment, with aizuchi merge and style presets. 4-GPU parallel shards.
 #
-# 10000-dialogue scale. The 1000-dialogue run took ~12h wall on 4 GPUs, so
-# 10000 is ~120h of compute -- far past any single reservation. Instead of one
-# giant walltime this job RESUMES: walltime=24:00:00 (the value every other TTS
-# job here uses), and you just re-submit the SAME script until it finishes.
+# 10000-dialogue scale. THE THROUGHPUT DEPENDS ON THE ENGINE, and the two are
+# an order of magnitude apart:
+#
+#   QWEN_ENGINE=transformers (this file's default)  1000 took ~12h on 4 GPUs,
+#       so 10000 is ~120h -- far past any single reservation.
+#   QWEN_ENGINE=vllm-omni (scripts/run_qwen_tts_vllm_*_4gpu.pbs, which exec
+#       this file after setting the engine)  10000 in ~12h on 4 GPUs, i.e. one
+#       reservation covers it.
+#
+# The resume machinery below was built for the transformers figure and is still
+# what makes a walltime cut survivable on either engine: walltime=24:00:00 (the
+# value every other TTS job here uses), and you re-submit the SAME script until
+# it finishes. On the vLLM path that is a safety net rather than the plan.
 #
 # Each re-submit continues where the previous one was killed:
 #   * per-shard   -- finished shards are skipped (no model reload);
 #   * per-dialogue -- generate_qwen3_tts_data.py --resume skips dialogues whose
 #                     WAV+JSON already exist and only renders the remainder.
-# Roughly ~6 back-to-back 24h jobs cover 10000; the run is done once the final
+# On transformers, roughly ~6 back-to-back 24h jobs cover 10000; on vllm-omni
+# one is usually enough. Either way the run is done once the final
 # "merged_manifest" line appears (step 3/3 succeeds).
 #
 # Submit (repeat until it prints the merged manifest):
