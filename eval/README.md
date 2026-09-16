@@ -131,6 +131,30 @@ RUN_ID=gpt_realtime_20260916_104807 REAL_RESUME=1   MODEL_ID=gpt_realtime bash s
 
 Judging stays on the local PC: the server never calls the API.
 
+### Same metrics as the batch
+
+Only the inference differs.  The scoring is `scripts/real_eval_metrics.sh`,
+which `scripts/run_real_eval.sh` -- the runner
+`scripts/run_full_duplex_eval_batch.sh` uses for every real-track row -- sources
+as well, so the two cannot drift apart: `evaluate_real_response.py` (response
+rate, latency, UTMOS, honouring `REAL_MAX_LATENCY_SEC`),
+`evaluate_real_dialogue_backchannel.py`, and `pack_real_dialogue_judge_input.py`
+feeding the same judge.
+
+To have the locally-run system appear in the batch's own table, write it into
+the batch layout and rebuild the combined summary:
+
+```bash
+REAL_BATCH_DIR=eval_runs/real_batches/<batch> OUTPUT_NAME=gpt_realtime   MODEL_ID=gpt_realtime bash scripts/run_real_gpt_realtime_eval.sh
+uv run python eval/combine_real_summaries.py   --batch-dir eval_runs/real_batches/<batch>   --status-file eval_runs/real_batches/<batch>/batch_status.jsonl   --out eval_runs/real_batches/<batch>/combined_summary.json
+```
+
+The run writes `<batch>/<output_name>/` and its `batch_status.jsonl` row, so the
+combiner reads it exactly as it reads an HPC row.  Note that the synthetic
+Full-Duplex-Bench-JA track (`FDB_SYSTEM=cascade` and friends) is a different
+protocol on different data; the combiner deliberately refuses to put its numbers
+in the same columns.
+
 The realtime socket is derived from that same base URL
 (`wss://api.rdg-genai.crl.hitachi.co.jp/v1/realtime?model=...`), and the judge
 sends its requests to the same place, so there is one endpoint to configure.
