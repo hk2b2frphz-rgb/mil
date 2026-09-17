@@ -184,14 +184,14 @@ fi
 if [[ "$NUM_SHARDS" -gt 1 ]]; then
     MERGED_STEREO="$QWEN_ROOT/merged_stereo/training_set"
     mkdir -p "$MERGED_STEREO/data_stereo"
+    # find -exec ... + で 1 プロセスにまとめる（1 ファイルごとに ln を起動すると
+    # 20000 ファイルでは分単位になる）。シャードのパスは絶対。
     linked=0
     for shard_stereo in "$QWEN_ROOT"/shard_*/training_set/data_stereo; do
         [[ -d "$shard_stereo" ]] || continue
-        for f in "$shard_stereo"/*; do
-            [[ -e "$f" ]] || continue
-            ln -sfn "$(readlink -f "$f")" "$MERGED_STEREO/data_stereo/$(basename "$f")"
-            linked=$((linked + 1))
-        done
+        find "$shard_stereo" -maxdepth 1 -type f \
+            -exec ln -sfn -t "$MERGED_STEREO/data_stereo" {} +
+        linked=$((linked + $(find "$shard_stereo" -maxdepth 1 -type f | wc -l)))
     done
     echo "merged $linked shard file(s) into $MERGED_STEREO/data_stereo"
     QWEN_DIR="$MERGED_STEREO"
