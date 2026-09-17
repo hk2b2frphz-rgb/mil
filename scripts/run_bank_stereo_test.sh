@@ -163,11 +163,39 @@ fi
     # 3 本の動作確認では 1 GPU・再開なしでよいが、本番の規模ではどちらも
     # 要る。10000 本を 1 GPU で回すと walltime に収まらず、RESUME=0 だと
     # 途中で切れたぶんが全部消える。既定は従来どおりなので smoke は不変。
-    export NUM_DIALOGUES SPARE_RATIO=0 LOG_EVERY=1
+    # SPARE_RATIO は FA 失敗を予備の対話で埋めるための余裕。0 だと 1 件でも
+    # 失敗した時点で success-target に届かず TTS が異常終了し、後段の CPU
+    # パスまで巻き添えで走らない。予備は失敗が出たときにだけ合成されるので、
+    # 順調なら費用はかからない。ただし既存の run に対して途中で値を変えると
+    # generation config lock に弾かれる（FRESH=1 か別 BATCH_ID を要求される）
+    # ので、変えるのは新しい run を始めるときだけにすること。
+    export NUM_DIALOGUES LOG_EVERY=1
+    export SPARE_RATIO="${SPARE_RATIO:-0}"
     export NUM_SHARDS
     export RESUME="${RESUME:-0}"
     bash scripts/run_qwen_tts_vllm_3000_4gpu.pbs
 )
+
+# 複数シャードで回したときは、TTS の出力が shard_000..N に分かれている。
+# 下流 (KABURI 配置・差し込み) は data_stereo を 1 つ見るので、全シャードを
+# 束ねた view を作ってそこを指す。merged/ は絶対パスのマニフェストだけで
+# data_stereo を持たないため使えない。symlink なので音声は複製しない。
+# stem は対話 ID を含むのでシャードをまたいでも衝突しない。
+if [[ "$NUM_SHARDS" -gt 1 ]]; then
+    MERGED_STEREO="$QWEN_ROOT/merged_stereo/training_set"
+    mkdir -p "$MERGED_STEREO/data_stereo"
+    linked=0
+    for shard_stereo in "$QWEN_ROOT"/shard_*/training_set/data_stereo; do
+        [[ -d "$shard_stereo" ]] || continue
+        for f in "$shard_stereo"/*; do
+            [[ -e "$f" ]] || continue
+            ln -sfn "$(readlink -f "$f")" "$MERGED_STEREO/data_stereo/$(basename "$f")"
+            linked=$((linked + 1))
+        done
+    done
+    echo "merged $linked shard file(s) into $MERGED_STEREO/data_stereo"
+    QWEN_DIR="$MERGED_STEREO"
+fi
 
 echo
 echo ">>> 3/4 KABURI placement (no acoustic model) -> $PLACEMENT_OUT"
