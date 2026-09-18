@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N fd_smoke
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII characters anywhere in this file
+# (not even in comments) -- the job dies immediately at submission.
+#
+# Smoke-test the agent server on a V100 while the A100s are busy. No arguments:
+#
+#   qsub -V agent_hpc/pbs/smoke_v100.pbs
+#
+# It answers the three questions that do not depend on which model is loaded:
+#   1. does the endpoint file get written, and does the tunnel work
+#   2. does the LiteLLM proxy translate Anthropic <-> OpenAI correctly
+#   3. do tool calls actually form, so Claude Code can drive it
+#
+# Everything below is chosen so those answers are about the plumbing and not
+# about the hardware. Qwen3-8B uses ordinary attention, so it avoids the
+# DeltaNet CUDA kernels that are barely exercised on Volta -- a crash there
+# would tell us nothing. At Q8_0 it is ~9GB, comfortable inside a 32GB V100
+# alongside a 16K context.
+#
+# Once this passes, the same stack on an A100 is one variable away: submit
+# run_llamacpp_agent_server.pbs (Qwen3.8-27B) or run_qwen_agent_server.pbs
+# (vLLM, Qwen3.6-27B) instead.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+# Small, tool-capable, and plain-attention: right for testing wiring.
+export GGUF_REPO="unsloth/Qwen3-8B-GGUF"
+export GGUF_FILE="Qwen3-8B-Q8_0.gguf"
+export MAX_MODEL_LEN=16384
+
+# Volta specifics. The release binaries are built without sm_70, so this has to
+# compile; llama.cpp has no working flash-attn path on Volta either.
+export LLAMACPP_FROM_SOURCE=1
+export LLAMACPP_CUDA_ARCH=70
+export LLAMA_FLASH_ATTN=0
+# Kept apart from the A100 build directory: these binaries are compiled for a
+# different architecture and must not be picked up by the A100 jobs.
+export LLAMACPP_DIR="$PWD/.llamacpp_sm70"
+
+# If the build cannot find nvcc, set this to a cuda12.x module name and
+# resubmit. Never a cuda13 module -- the 570.x driver cannot run CUDA 13.
+export LLAMACPP_CUDA_MODULE="${LLAMACPP_CUDA_MODULE:-}"
+
+# Own port range, so this can run beside a real A100 server without either
+# stealing the other's port or its endpoint file.
+export PROXY_PORT="${PROXY_PORT:-45000}"
+export ENDPOINT_FILE="${ENDPOINT_FILE:-$HOME/.miltoka/agent_endpoint_smoke.json}"
+
+echo "===== V100 smoke test ====="
+echo "model:    ${GGUF_REPO} / ${GGUF_FILE}"
+echo "endpoint: ${ENDPOINT_FILE}"
+echo "note:     this proves the plumbing, not the speed or the quality"
+echo "==========================="
+
+exec bash agent_hpc/pbs/run_llamacpp_agent_server.pbs

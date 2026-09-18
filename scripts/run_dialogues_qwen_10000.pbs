@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N fd_qwen_10000
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# Generate ~10000 Japanese dialogues with Qwen3.6-27B (bf16) on one A100 80GB.
+# Same pipeline/install as run_dialogues_qwen_1000.pbs, scaled to 10000 cases and
+# carrying the throughput/quality knobs added for the smoke run (concurrent
+# multi-agent generation, denser aizuchi, CUDA graphs on). No server health-check
+# timeout: we wait indefinitely for vLLM to come up (the job only fails if the
+# vLLM process dies).
+#
+# TODO(cluster): verify that `select=1:res=small` allocates one A100 80GB GPU.
+# walltime=24:00:00 is the xan_s queue cap (the hard limit). 10000 cases is ~10x
+# the 1000 run; concurrency offsets much of that, but if 24h is not enough, split
+# into shards (SEED/NUM_CASES + merge) across multiple jobs, or raise
+# MULTI_AGENT_CONCURRENCY.
+#
+# Submit:
+#   qsub -V scripts/run_dialogues_qwen_10000.pbs
+# Override count / concurrency:
+#   NUM_CASES=5000 MULTI_AGENT_CONCURRENCY=96 qsub -V scripts/run_dialogues_qwen_10000.pbs
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+if [[ -f "$PWD/scripts/setup_proxy.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$PWD/scripts/setup_proxy.sh"
+fi
+# shellcheck source=/dev/null
+source "$PWD/scripts/run_id_utils.sh"
+
+# Versioned stable batch id so the whole-utterance TTS jobs pick this batch up
+# automatically (their SOURCE_BATCH_ID defaults to the same name). Bump
+# DIALOGUES_VERSION (v2, ...) for a new generation round.
+export DIALOGUES_VERSION="${DIALOGUES_VERSION:-v1}"
+export BATCH_ID="${BATCH_ID:-qwen_dialogues_10000_${DIALOGUES_VERSION}}"
+if ! [[ "$BATCH_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "ERROR: BATCH_ID may contain only letters, digits, dot, underscore, hyphen." >&2
+    exit 1
+fi
+
+mkdir -p experiments/pbs_logs
+JOB_TAG="${PBS_JOBID%%.*}"
+JOB_LOG="experiments/pbs_logs/${BATCH_ID}_${JOB_TAG:-local}.log"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH." >&2
+    exit 1
+}
+command -v curl >/dev/null 2>&1 || {
+    echo "ERROR: curl is not available on PATH." >&2
+    exit 1
+}
+
+if [[ -z "${PORT:-}" ]]; then
+    if [[ -n "${PBS_JOBID:-}" ]]; then
+        JOB_NUM="${PBS_JOBID%%.*}"
+        JOB_NUM="${JOB_NUM//[^0-9]/}"
+        if [[ -n "$JOB_NUM" ]]; then
+            export PORT="$((18000 + (10#$JOB_NUM % 20000)))"
+        else
+            export PORT="8000"
+        fi
+    else
+        export PORT="8000"
+    fi
+fi
+export MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
+export VLLM_MODEL="${VLLM_MODEL:-Qwen/Qwen3.6-27B}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export UV_TORCH_BACKEND="${UV_TORCH_BACKEND:-cu129}"
+# Pinned to 0.21.0: vLLM 0.22+ hard-require CUDA 13 (nvidia-cutlass-dsl[cu13]) which the 570.x driver cannot run.
+export VLLM_VERSION="${VLLM_VERSION:-0.21.0}"
+# Leave empty by default; pip-bundled CUDA runtime is expected. Set this to a
+# cuda12.x module only if your cluster requires an explicit CUDA module; do NOT
+# use a cuda13.x module -- the node driver (570.x) does not support CUDA 13.
+export VLLM_CUDA_MODULE="${VLLM_CUDA_MODULE:-}"
+export VLLM_ENV_DIR="${VLLM_ENV_DIR:-.venv_vllm_qwen_10000}"
+export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
+# Disable multimodal profiling for the (multimodal) Qwen3.6-27B to cut startup
+# time/memory; set this var empty to keep multimodal enabled.
+if [[ ! -v VLLM_LIMIT_MM_PER_PROMPT ]]; then
+    export VLLM_LIMIT_MM_PER_PROMPT='{"image": 0, "video": 0}'
+else
+    export VLLM_LIMIT_MM_PER_PROMPT
+fi
+
+VLLM_PYTHON="$VLLM_ENV_DIR/bin/python"
+VLLM_BIN="$VLLM_ENV_DIR/bin/vllm"
+CPU_ARCH="$(uname -m)"
+VLLM_WHEEL_URL="${VLLM_WHEEL_URL:-https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu129-cp38-abi3-manylinux_2_34_${CPU_ARCH}.whl}"
+VLLM_INSTALL_SPEC="${VLLM_INSTALL_SPEC:-$VLLM_WHEEL_URL}"
+
+export NUM_CASES="${NUM_CASES:-10000}"
+export SEED="${SEED:-0}"
+export RUN_ID="${BATCH_ID}"
+export OUT_ROOT="${OUT_ROOT:-$PWD/data/runs/${BATCH_ID}}"
+
+# Refuse to clobber a completed batch: bump DIALOGUES_VERSION for a new round,
+# or pass OVERWRITE=1 to regenerate in place. A partial batch (no final
+# dialogues.jsonl yet) is regenerated without complaint.
+if [[ "${OVERWRITE:-0}" != "1" && -s "$OUT_ROOT/llm_dialogues/dialogues.jsonl" ]]; then
+    echo "ERROR: $OUT_ROOT/llm_dialogues/dialogues.jsonl already exists (complete batch)." >&2
+    echo "       Bump DIALOGUES_VERSION (e.g. v2) or set OVERWRITE=1 to regenerate." >&2
+    exit 1
+fi
+export LLM_TEMPERATURE="${LLM_TEMPERATURE:-0.9}"
+
+if ! [[ "$NUM_CASES" =~ ^[0-9]+$ ]] || [[ "$NUM_CASES" -lt 1 ]]; then
+    echo "ERROR: NUM_CASES must be a positive integer: $NUM_CASES" >&2
+    exit 1
+fi
+
+mkdir -p "$OUT_ROOT"
+
+echo "===== Qwen 10000-dialogue generation ====="
+echo "job_id:        ${PBS_JOBID:-n/a}"
+echo "host:          $(hostname)"
+echo "model:         $VLLM_MODEL"
+echo "num_cases:     $NUM_CASES"
+echo "cuda_devices:  $CUDA_VISIBLE_DEVICES"
+echo "port:          $PORT"
+echo "max_model_len: $MAX_MODEL_LEN"
+echo "gpu_mem_util:  $VLLM_GPU_MEMORY_UTILIZATION"
+echo "torch_backend: $UV_TORCH_BACKEND"
+echo "vllm_version:  $VLLM_VERSION"
+echo "cuda_module:   ${VLLM_CUDA_MODULE:-n/a}"
+echo "vllm_install:  $VLLM_INSTALL_SPEC"
+echo "mm_limit:      $VLLM_LIMIT_MM_PER_PROMPT"
+echo "venv:          $VLLM_ENV_DIR"
+echo "out_root:      $OUT_ROOT"
+echo "job_log:       $JOB_LOG"
+echo "started_at:    $(date -Iseconds)"
+echo "=========================================="
+
+if [[ -n "$VLLM_CUDA_MODULE" ]]; then
+    if ! command -v module >/dev/null 2>&1; then
+        for module_init in /etc/profile.d/modules.sh /usr/share/Modules/init/bash; do
+            if [[ -f "$module_init" ]]; then
+                # shellcheck source=/dev/null
+                source "$module_init"
+                break
+            fi
+        done
+    fi
+    command -v module >/dev/null 2>&1 || {
+        echo "ERROR: environment modules are not available; cannot load $VLLM_CUDA_MODULE." >&2
+        exit 1
+    }
+    module load "$VLLM_CUDA_MODULE"
+fi
+
+[[ -d "$VLLM_ENV_DIR" ]] || uv venv "$VLLM_ENV_DIR"
+# Put the venv bin on PATH so ninja/cmake/python resolve by name. We invoke vllm
+# by absolute path, which does NOT activate the venv, so without this torch's
+# inductor (shutil.which("ninja")) cannot find ninja at serve time.
+export PATH="$(cd "$VLLM_ENV_DIR" && pwd)/bin:$PATH"
+# Build tools for any source builds at install time and for torch.compile/inductor
+# kernel compilation at serve time (ninja must be on PATH inside the venv).
+# shellcheck disable=SC2086
+uv pip install --python "$VLLM_PYTHON" ${VLLM_BUILD_TOOLS:-ninja cmake}
+uv pip install --python "$VLLM_PYTHON" "$VLLM_INSTALL_SPEC" --torch-backend="$UV_TORCH_BACKEND"
+
+vllm_args=(
+    "$VLLM_BIN" serve "$VLLM_MODEL"
+    --tensor-parallel-size 1
+    --host 127.0.0.1
+    --port "$PORT"
+    --max-model-len "$MAX_MODEL_LEN"
+    --gpu-memory-utilization "$VLLM_GPU_MEMORY_UTILIZATION"
+    --reasoning-parser qwen3
+)
+# --enforce-eager disables CUDA graphs (slower decode) but starts faster. With
+# concurrent requests we want graphs ON for throughput, so default to off here.
+# Re-enable by exporting VLLM_ENFORCE_EAGER=1.
+if [[ "${VLLM_ENFORCE_EAGER:-0}" == "1" ]]; then
+    vllm_args+=(--enforce-eager)
+fi
+# Qwen3 thinking runs away on this JSON-generation task: it over-reasons, fails
+# to summarize, and emits broken/unterminated JSON. Disable thinking by default
+# so the model goes straight to the (json_object-constrained) answer. Override by
+# exporting VLLM_QWEN_CHAT_TEMPLATE_KWARGS yourself (e.g. to re-enable thinking).
+if [[ -z "${VLLM_QWEN_CHAT_TEMPLATE_KWARGS:-}" ]]; then
+    VLLM_QWEN_CHAT_TEMPLATE_KWARGS='{"enable_thinking": false}'
+fi
+if [[ -n "${VLLM_QWEN_CHAT_TEMPLATE_KWARGS:-}" ]]; then
+    vllm_args+=(--default-chat-template-kwargs "$VLLM_QWEN_CHAT_TEMPLATE_KWARGS")
+fi
+if [[ -n "$VLLM_LIMIT_MM_PER_PROMPT" ]]; then
+    vllm_args+=(--limit-mm-per-prompt "$VLLM_LIMIT_MM_PER_PROMPT")
+fi
+
+"${vllm_args[@]}" &
+VLLM_PID=$!
+
+cleanup() {
+    if kill -0 "$VLLM_PID" 2>/dev/null; then
+        kill "$VLLM_PID"
+        wait "$VLLM_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+# No health-check timeout: wait indefinitely until OUR vLLM is ready. Readiness
+# requires that /v1/models actually serves $VLLM_MODEL -- otherwise a stale vLLM
+# (e.g. a leftover gpt-oss) still bound to this port would answer and we'd
+# silently generate with the wrong model. If our own process dies (e.g. it could
+# not bind the port because a stale server holds it), fail fast.
+echo "waiting for vLLM ($VLLM_MODEL) to become ready (no health-check timeout)..."
+while true; do
+    if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+        echo "ERROR: vLLM exited before serving $VLLM_MODEL (port ${PORT} may be held by another server)." >&2
+        exit 1
+    fi
+    if curl --fail --silent --show-error \
+        "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null | grep -qF "$VLLM_MODEL"; then
+        break
+    fi
+    sleep 5
+done
+echo "vLLM is ready and serving $VLLM_MODEL; starting dialogue generation."
+
+# This scaled run mirrors the smoke multi-agent dialogue generator: userAI carries
+# the randomized client state, systemAI is a short casual-listening
+# responder, judgeAI decides when the exchange is complete, and aizuchiAI inserts
+# short polite moshi backchannels inside longer user turns.
+export STEPS="use_cases,dialogues"
+export LISTENING_RATIO="${LISTENING_RATIO:-1.0}"
+export LLM_NUM_FEWSHOT="${LLM_NUM_FEWSHOT:-2}"
+export LLM_BACKEND="openai-compatible"
+export LLM_API_BASE="http://127.0.0.1:${PORT}/v1"
+export LLM_API_KEY="${LLM_API_KEY:-}"
+# Prefer /v1/chat/completions when the server actually serves it; vLLM normally
+# exposes both chat and completions, so chat is the right default. Only fall back
+# to /v1/completions if a live probe says chat is unavailable (404 / no chat
+# template). Override either way by exporting LLM_OPENAI_ENDPOINT yourself.
+if [[ -z "${LLM_OPENAI_ENDPOINT:-}" ]]; then
+    CHAT_PROBE_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+        -X POST "http://127.0.0.1:${PORT}/v1/chat/completions" \
+        -H 'Content-Type: application/json' \
+        -d "{\"model\":\"${VLLM_MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"ping /no_think\"}],\"max_tokens\":1}" \
+        2>/dev/null || true)"
+    if [[ "$CHAT_PROBE_CODE" == "200" ]]; then
+        export LLM_OPENAI_ENDPOINT="chat"
+    else
+        export LLM_OPENAI_ENDPOINT="completions"
+    fi
+    echo "endpoint probe: /v1/chat/completions -> HTTP ${CHAT_PROBE_CODE:-none}; using LLM_OPENAI_ENDPOINT=$LLM_OPENAI_ENDPOINT"
+else
+    export LLM_OPENAI_ENDPOINT
+    echo "endpoint: LLM_OPENAI_ENDPOINT=$LLM_OPENAI_ENDPOINT (explicit override)"
+fi
+# Only used for the completions path: append /no_think to the prompt since raw
+# completions do not apply the chat template's enable_thinking flag. Harmless
+# (ignored) when the chat endpoint is selected.
+export LLM_COMPLETIONS_NO_THINK="${LLM_COMPLETIONS_NO_THINK:-1}"
+export LLM_MODEL="$VLLM_MODEL"
+export LLM_TEMPERATURE
+export LLM_FREQUENCY_PENALTY="0.3"
+export LLM_PRESENCE_PENALTY="0.1"
+export DIALOGUE_GENERATION_MODE="${DIALOGUE_GENERATION_MODE:-multi-agent}"
+export MULTI_AGENT_MIN_PAIRS="${MULTI_AGENT_MIN_PAIRS:-3}"
+export MULTI_AGENT_MAX_PAIRS="${MULTI_AGENT_MAX_PAIRS:-5}"
+# Dialogues are independent; generate many at once so the vLLM server batches
+# requests instead of sitting near-idle. KV cache usage scales ~linearly with
+# this value; raise it until KV approaches a comfortable ceiling (~70-80%).
+export MULTI_AGENT_CONCURRENCY="${MULTI_AGENT_CONCURRENCY:-64}"
+export MULTI_AGENT_USER_TEMPERATURE="${MULTI_AGENT_USER_TEMPERATURE:-0.85}"
+export MULTI_AGENT_SYSTEM_TEMPERATURE="${MULTI_AGENT_SYSTEM_TEMPERATURE:-0.2}"
+export MULTI_AGENT_JUDGE_TEMPERATURE="${MULTI_AGENT_JUDGE_TEMPERATURE:-0.0}"
+export MULTI_AGENT_AIZUCHI_TEMPERATURE="${MULTI_AGENT_AIZUCHI_TEMPERATURE:-0.2}"
+# Make aizuchi actually appear: lower the min-length gate and allow up to 2 per turn.
+export MULTI_AGENT_AIZUCHI_MIN_CHARS="${MULTI_AGENT_AIZUCHI_MIN_CHARS:-16}"
+export MULTI_AGENT_MAX_AIZUCHI_PER_USER="${MULTI_AGENT_MAX_AIZUCHI_PER_USER:-2}"
+export MULTI_AGENT_EMPTY_POLICY="${MULTI_AGENT_EMPTY_POLICY:-fail}"
+export MULTI_AGENT_AIZUCHI_MODE="${MULTI_AGENT_AIZUCHI_MODE:-separate}"
+export DUMP_AGENT_PROMPTS="${DUMP_AGENT_PROMPTS:-1}"
+# Dialogues are generated as a plain pipe-delimited transcript (not JSON), which
+# the model produces far more reliably, so no response_format is forced. Qwen
+# thinking is controlled separately via the chat template kwargs.
+export RUN_ID
+export OUT_ROOT
+
+bash scripts/run_full_duplex_training_data.sh
+
+DIALOGUES_FINAL="$OUT_ROOT/llm_dialogues/dialogues.jsonl"
+test -s "$DIALOGUES_FINAL"
+
+# Diversity report is best-effort; do not fail the data job if it errors.
+uv run python scripts/report_dialogue_diversity.py \
+    --in "$DIALOGUES_FINAL" \
+    --out "$OUT_ROOT/diversity_report.txt" \
+    --samples 8 || echo "WARNING: diversity report failed (dialogues are still saved)." >&2
+
+echo "dialogues: $DIALOGUES_FINAL"
+echo "report:    $OUT_ROOT/diversity_report.txt"
+echo "finished_at: $(date -Iseconds)"

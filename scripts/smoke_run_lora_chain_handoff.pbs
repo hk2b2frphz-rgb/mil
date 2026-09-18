@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N smoke_lora_chain_handoff
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=00:15:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# Smoke test for run_full_duplex_lora_chain.pbs's chain-handoff mechanics
+# only: does timebox_run actually stop the stage and does submit_successor
+# actually qsub a working next link. Not a test of data quality, MLflow, or
+# any model install -- TIMEBOX_WALLTIME_SEC/TIMEBOX_LEAD_SEC below force the
+# very first data-stage job to be killed within a few seconds (still inside
+# the cheap, GPU-free use_cases step), so nothing downstream of that ever
+# runs. DATA_RUNNER is pinned to the plain (non-Qwen) data script so this
+# never touches vLLM or any model download either. Uses xvn_s (V100) for
+# both stages since A100 is often busy and this run needs neither GPU.
+#
+# Submit:
+#   qsub -V scripts/smoke_run_lora_chain_handoff.pbs
+#
+# What "pass" looks like:
+#   - experiments/pbs_logs/<chain_id>_link01_data.log ends with
+#     "[chain] data time budget reached; continuing in another data job."
+#     and "[chain] submitted: <job_id>"
+#   - link02's log (same chain_id, link02_data) starts and also times out
+#     the same way (its own deadline is ~5s after ITS start), so you should
+#     see a link03 submitted too -- proof the resubmission loop is healthy,
+#     not a one-off.
+#   - qstat shows the successor jobs queued/running
+#   - $OUT_ROOT/.full_duplex_lora_chain.state shows status=submitted after
+#     each link
+
+set -euo pipefail
+
+REPO_ROOT="${PBS_O_WORKDIR:-$(pwd)}"
+cd "$REPO_ROOT"
+
+export RUN_ID="${RUN_ID:-smoke_handoff_$(date +%Y%m%d_%H%M%S)}"
+export NUM_CASES="${NUM_CASES:-4}"
+export DATA_RUNNER="${DATA_RUNNER:-scripts/run_full_duplex_training_data.sh}"
+export DATA_QUEUE="${DATA_QUEUE:-xvn_s}"
+export DATA_SELECT="${DATA_SELECT:-1:res=small}"
+export AUDIO_QUEUE="${AUDIO_QUEUE:-xvn_s}"
+export AUDIO_SELECT="${AUDIO_SELECT:-1:res=small}"
+export TRAIN_QUEUE="${TRAIN_QUEUE:-xvn_s}"
+export TRAIN_SELECT="${TRAIN_SELECT:-1:res=small}"
+export PIPELINE_WALLTIME="${PIPELINE_WALLTIME:-00:15:00}"
+
+# Forces timebox_init's deadline to ~5s after this job starts, regardless of
+# the real PBS walltime, so the stage is always stopped and handed off.
+export TIMEBOX_WALLTIME_SEC="${TIMEBOX_WALLTIME_SEC:-20}"
+export TIMEBOX_LEAD_SEC="${TIMEBOX_LEAD_SEC:-15}"
+export TIMEBOX_POLL_SEC="${TIMEBOX_POLL_SEC:-2}"
+export TIMEBOX_GRACE_SEC="${TIMEBOX_GRACE_SEC:-5}"
+
+# Stop the loop after a few links so a broken handoff cannot run away.
+export MAX_CHAIN_JOBS="${MAX_CHAIN_JOBS:-3}"
+
+echo "===== smoke: chain handoff only (no data/model correctness tested) ====="
+echo "run_id:          $RUN_ID"
+echo "data_runner:     $DATA_RUNNER"
+echo "data_resource:   $DATA_QUEUE / $DATA_SELECT"
+echo "train_resource:  $TRAIN_QUEUE / $TRAIN_SELECT"
+echo "timebox:         walltime=${TIMEBOX_WALLTIME_SEC}s lead=${TIMEBOX_LEAD_SEC}s poll=${TIMEBOX_POLL_SEC}s"
+echo "max_chain_jobs:  $MAX_CHAIN_JOBS"
+echo "=========================================================================="
+
+exec bash scripts/run_full_duplex_lora_chain.pbs

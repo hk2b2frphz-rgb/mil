@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N setup_gemma4_vllm
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# Build the separate Gemma 4 vLLM runtime for a V100.  It uses CUDA 12.6 and a
+# source build for sm70; it does not change .venv-vllm-omni.
+#
+#   PROXY_URL=http://<proxy-host>:<port> qsub -V scripts/setup_vllm_gemma4_v100_env.pbs
+#
+# Build progress is written to vllm_gemma4_build.log on the shared filesystem.
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+exec bash scripts/setup_vllm_gemma4_v100_env.sh

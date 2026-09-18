@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N az_n_dlg3k6
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# 3,000 listener-only dialogues, talkative-normal frequency, v6.
+# This is the small-corpus counterpart of aizuchi_normal_dialogue_10000.pbs:
+# no explicit silence or inline pauses, no learned closings, and dense replies.
+# Output is isolated from the 10,000-dialogue corpus.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export AIZUCHI_VERSION="v6"
+export BATCH_ID="qwen_aizuchi_3000_normal_${AIZUCHI_VERSION}"
+export OUT_ROOT="$PWD/data/runs/aizuchi_normal_3000_${AIZUCHI_VERSION}/dialogue"
+export NUM_CASES="${NUM_CASES:-3000}"
+export DIALOGUE_GENERATION_MODE="aizuchi-only"
+export AIZUCHI_ONLY_FREQUENCY="normal"
+
+export AIZUCHI_ONLY_MIN_BLOCKS="${AIZUCHI_ONLY_MIN_BLOCKS:-4}"
+export AIZUCHI_ONLY_MAX_BLOCKS="${AIZUCHI_ONLY_MAX_BLOCKS:-6}"
+
+# The v6 experiment assumes the listener responds instead of learning periodic
+# quiet stretches. Zero also suppresses userAI inline pause tags.
+export AIZUCHI_ONLY_MAX_SILENCES="0"
+export AIZUCHI_ONLY_SILENCE_RATE="0"
+export AIZUCHI_ONLY_SILENCE_MIN_SEC="${AIZUCHI_ONLY_SILENCE_MIN_SEC:-2.0}"
+export AIZUCHI_ONLY_SILENCE_MAX_SEC="${AIZUCHI_ONLY_SILENCE_MAX_SEC:-4.0}"
+export AIZUCHI_ONLY_PROBE_RATE="0"
+
+exec bash scripts/run_dialogues_qwen_3000.pbs
