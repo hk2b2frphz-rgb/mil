@@ -113,6 +113,23 @@ def rewrite(
     return out, replaced, kept
 
 
+def without_punctuation(text: str) -> str:
+    """句読点・記号・空白を落とす。名乗りの照合用。"""
+    return "".join(ch for ch in text if ch not in STRIP_CHARS)
+
+
+def is_greeting(text: str) -> bool:
+    """固定の名乗りかどうか。
+
+    端を strip するだけの完全一致だと、途中の句読点が 1 つ違うだけで
+    (「もしもし。こちら...」「もしもしこちら...」) 別物と判定されて名乗りが
+    残る。--drop-greeting を渡したのに音声に名乗りが入るという形で出るうえ、
+    その場合コーパスの先頭に無音が無くなるので、あとから density タグを
+    置こうとしても全件落ちる。記号を全部落としてから比べる。
+    """
+    return without_punctuation(text) == without_punctuation(AIZUCHI_ONLY_GREETING)
+
+
 def keep_listener_turn(
     turn: dict[str, Any],
     max_chars: int,
@@ -128,7 +145,7 @@ def keep_listener_turn(
     text = str(turn.get("text", "")).strip()
     if is_backchannel(text, max_chars, vocab):
         return False
-    if drop_greeting and text.strip(STRIP_CHARS) == AIZUCHI_ONLY_GREETING.strip(STRIP_CHARS):
+    if drop_greeting and is_greeting(text):
         return False
     return True
 

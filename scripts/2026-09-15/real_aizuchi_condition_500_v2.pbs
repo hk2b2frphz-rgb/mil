@@ -44,28 +44,37 @@
 #    could not be placed is not in the output, and padding (when used) changes
 #    every duration.
 #
-# NOT IDEMPOTENT WHEN PADDING: with PAD_LEAD_IN_SEC > 0, running it twice over
-# the same --out-dir pads twice. Delete the output directory and re-run rather
-# than re-running on top.
+# NOT IDEMPOTENT WHEN PADDING: with a pad above 0, running it twice over the
+# same --out-dir pads twice. Delete the output directory and re-run rather than
+# re-running on top.
 #
-# PAD_LEAD_IN_SEC DEFAULTS TO 0, i.e. the audio is not rewritten at all and
-# the wavs are symlinked into the output. In THIS route the tag does not need
-# reserved silence: step 3 synthesizes the speaker only and drops the opening,
-# so the listener channel is empty until its first backchannel -- seconds of
-# room,
-# and the tag is under a second. (Overlapping the SPEAKER is fine and is what
-# inject_inner_thoughts.py has always allowed; only a collision with the
-# listener's own audio is avoided.) Padding matters for the full-render route,
-# where a greeting starts 0.3s in and leaves no window.
+# PAD_LEAD_IN_SEC DEFAULTS TO auto, which measures the corpus before touching
+# any audio and uses the smallest pad that lets every dialogue take the tag.
+# The measurement reads only the sidecar JSON, so it costs seconds. It prints
+# the value it picked and whether it is going to rewrite the wavs.
 #
-# That default is also what keeps this step cheap. Padding rewrites every wav,
-# i.e. a second copy of the corpus; at the 10,000 scale that is on the order
-# of 100-300 GB depending on length and sample rate.
+# The pad it picks is 0 whenever the listener is silent long enough at the
+# start, and then nothing is rewritten at all -- the wavs are symlinked and the
+# step stays in the minutes. That is the case when step 3 dropped the opening
+# (DROP_GREETING=1), which leaves the listener channel empty until its first
+# backchannel: seconds of room against a tag under a second.
+#
+# It is NOT the case when a greeting survived into the audio. Then the listener
+# starts talking about 0.3s in, the window is 0.2s against the 0.75s the tag
+# needs, and EVERY dialogue loses its tag. That is what auto exists to catch:
+# it used to default to 0, and a 10,000-dialogue run reported
+# density_tag_dropped 9997/9997 after the fact.
+#
+# Padding is not free: it rewrites every wav, i.e. a second copy of the corpus
+# (order of 100-300 GB at the 10,000 scale, depending on length and sample
+# rate) and an hour or more rather than minutes. Check the free space when the
+# measured value comes out above 0. PAD_LEAD_IN_SEC=0 forces the old behavior.
+#
+# (Overlapping the SPEAKER is fine and is what inject_inner_thoughts.py has
+# always allowed; only a collision with the listener's own audio is avoided.)
 #
 # CHECK BEFORE MOVING ON: the tool must not print a density_tag_dropped
-# WARNING. A few dialogues can still miss out if their first backchannel comes
-# in under about a second. If the count matters, set PAD_LEAD_IN_SEC=1.5 and
-# accept the disk cost.
+# WARNING. With auto it should print none.
 
 set -euo pipefail
 cd "${PBS_O_WORKDIR:-$(pwd)}"
@@ -73,7 +82,7 @@ cd "${PBS_O_WORKDIR:-$(pwd)}"
 export CORPUS_VERSION="${CORPUS_VERSION:-v2}"
 SRC_SHARD="${SRC_SHARD:-$PWD/data/runs/real_aizuchi_500_${CORPUS_VERSION}/tts/placement_bank/shard_000}"
 DST_SHARD="${DST_SHARD:-${SRC_SHARD}_conditioned}"
-PAD_LEAD_IN_SEC="${PAD_LEAD_IN_SEC:-0}"
+PAD_LEAD_IN_SEC="${PAD_LEAD_IN_SEC:-auto}"
 
 SRC_DIR="$SRC_SHARD/training_set/data_stereo"
 DST_DIR="$DST_SHARD/training_set/data_stereo"

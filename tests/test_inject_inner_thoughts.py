@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+from collections import Counter
 import unittest
 from pathlib import Path
 
@@ -344,6 +345,66 @@ class ShiftAlignmentsTest(unittest.TestCase):
 
             data, sample_rate = sf.read(str(out_dir / "sample_001.wav"))
             self.assertAlmostEqual(len(data) / sample_rate, 9.0, places=1)
+
+
+class RequiredPadTest(unittest.TestCase):
+    """auto の pad を、音声に触る前に JSON だけで測れること。"""
+
+    def write(self, directory: Path, name: str, greeting_start: float) -> None:
+        payload = make_payload(
+            greeting_start=greeting_start, aizuchi_frequency_label="density=0.75"
+        )
+        (directory / name).write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def measure(self, starts: list[float]) -> float:
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            for i, start in enumerate(starts):
+                self.write(d, f"sample_{i:03d}.json", start)
+            pad, measured = inj.required_pad_sec(
+                sorted(d.glob("*.json")),
+                inj.DEFAULT_CHARS_PER_SEC,
+                inj.DEFAULT_GAP_MARGIN_SEC,
+            )
+            self.assertEqual(measured, len(starts))
+            return pad
+
+    def test_no_pad_when_the_listener_starts_late_enough(self) -> None:
+        # "<相槌75>" は 6 文字 / 8 cps = 0.75s、margin 0.1s。
+        self.assertEqual(self.measure([2.0, 5.0, 1.0]), 0.0)
+
+    def test_a_greeting_at_the_very_start_needs_one(self) -> None:
+        # 0.3s から喋り出すなら 0.75 + 0.1 - 0.3 = 0.55 -> 0.1 刻みで切り上げ。
+        self.assertAlmostEqual(self.measure([0.3]), 0.6, places=6)
+
+    def test_the_worst_dialogue_sets_the_pad_for_the_corpus(self) -> None:
+        # 全対話に同じ無音を足すので、一番きついものに合わせる。
+        self.assertAlmostEqual(self.measure([5.0, 0.28, 2.0]), 0.6, places=6)
+
+    def test_the_measured_pad_actually_places_every_tag(self) -> None:
+        # 測った値で本当に 1 件も落ちないこと（切り上げが足りていること）。
+        starts = [0.3, 0.28, 0.35, 0.9, 5.0]
+        pad = self.measure(starts)
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            for i, start in enumerate(starts):
+                self.write(d, f"sample_{i:03d}.json", start)
+            for json_path in sorted(d.glob("*.json")):
+                payload = json.loads(json_path.read_text(encoding="utf-8"))
+                entries = inj.shift_alignments(
+                    inj.utterance_alignments(payload), pad
+                )
+                stats: Counter = Counter()
+                _merged, injected = inj.inject_one(
+                    entries,
+                    inj.density_items(payload),
+                    inj.DEFAULT_CHARS_PER_SEC,
+                    inj.DEFAULT_GAP_MARGIN_SEC,
+                    stats,
+                )
+                self.assertEqual(injected, 1, json_path.name)
 
 
 if __name__ == "__main__":

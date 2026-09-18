@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import sys
 from collections import Counter
@@ -106,8 +107,11 @@ def parse_args() -> argparse.Namespace:
                           "--pad-lead-in-sec と併用すると置き場所を保証できる。"
                           "emotional_state と違い対話内で不変であることが狙い"
                           "なので学習用途に使ってよい")
-    parser.add_argument("--pad-lead-in-sec", type=float, default=0.0,
-                        help="0 より大きいと、音声の先頭にこの秒数の無音を足し"
+    parser.add_argument("--pad-lead-in-sec", default="0",
+                        help="auto を渡すと、置くのに要る最小の秒数を全対話から"
+                             "measure してから使う（足す必要が無ければ 0 のまま"
+                             "音声に触らない）。数値なら"
+                             "0 より大きいと、音声の先頭にこの秒数の無音を足し"
                              "全タイムスタンプをその分だけ後ろへずらしてから"
                              "タグを挿す。KABURI レンダラーは無音ターンを"
                              "落として自前でタイミングを作るため、生成側からは"
@@ -131,8 +135,18 @@ def parse_args() -> argparse.Namespace:
         parser.error("--chars-per-sec must be > 0")
     if args.gap_margin_sec < 0:
         parser.error("--gap-margin-sec must be >= 0")
-    if args.pad_lead_in_sec < 0:
-        parser.error("--pad-lead-in-sec must be >= 0")
+    args.pad_lead_in_auto = str(args.pad_lead_in_sec).strip().lower() == "auto"
+    if args.pad_lead_in_auto:
+        args.pad_lead_in_sec = 0.0
+    else:
+        try:
+            args.pad_lead_in_sec = float(args.pad_lead_in_sec)
+        except ValueError:
+            parser.error("--pad-lead-in-sec must be a number or 'auto'")
+        if args.pad_lead_in_sec < 0:
+            parser.error("--pad-lead-in-sec must be >= 0")
+    if args.pad_lead_in_auto and not args.from_aizuchi_density:
+        parser.error("--pad-lead-in-sec auto は --from-aizuchi-density 専用")
     return args
 
 
@@ -337,6 +351,49 @@ def density_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [{"turn_index": 0, "text": aizuchi_tag_text(label)}]
 
 
+def required_pad_sec(
+    json_paths: list[Path], chars_per_sec: float, gap_margin_sec: float
+) -> tuple[float, int]:
+    """density タグを全対話に置くのに要る最小の無音を測る。
+
+    タグを置く窓は [直前の聞き手発話の終わり, 最初の聞き手発話 - margin]。
+    turn_index=0 には直前の聞き手発話が無いので窓の始まりは常に 0.0 で、
+    先頭に P 秒足すと窓は P だけ広がる。つまり 1 対話に要る P は
+
+        needed + margin - anchor
+
+    で、コーパス全体にはその最大値が要る。挨拶を残したコーパスでは聞き手が
+    0.3 秒あたりで喋り出すので、既定の 0 では 1 件も置けない。それを 10000 件
+    走らせてから WARNING で知るのは高くつくので、先に測る。
+
+    JSON しか読まないので、音声を書き直すかどうかを決める前に済む。
+    """
+    required = 0.0
+    measured = 0
+    for json_path in json_paths:
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        entries = utterance_alignments(payload)
+        if entries is None:
+            continue
+        items = density_items(payload)
+        if not items:
+            continue
+        anchor = resolve_anchor(items[0], entries)
+        if anchor is None:
+            continue
+        measured += 1
+        needed = len(str(items[0].get("text") or "")) / chars_per_sec
+        short = needed + gap_margin_sec - (anchor - prev_moshi_end(entries, anchor))
+        required = max(required, short)
+    if required <= 0:
+        return 0.0, measured
+    # 測った値ちょうどだと丸めで際どい対話が落ちる。0.1 秒刻みで切り上げる。
+    return math.ceil(required * 10.0) / 10.0, measured
+
+
 def main() -> int:
     args = parse_args()
     if not args.data_dir.is_dir():
@@ -351,6 +408,18 @@ def main() -> int:
     json_paths = sorted(args.data_dir.glob("*.json"))
     if args.limit > 0:
         json_paths = json_paths[: args.limit]
+
+    if args.pad_lead_in_auto:
+        args.pad_lead_in_sec, measured = required_pad_sec(
+            json_paths, args.chars_per_sec, args.gap_margin_sec
+        )
+        print(f"[pad] measured {measured} dialogue(s) -> "
+              f"--pad-lead-in-sec {args.pad_lead_in_sec}")
+        if args.pad_lead_in_sec > 0:
+            print("[pad] 先頭に無音を足すので全 WAV を書き直します"
+                  "（元の音声と同じだけディスクを使います）。")
+        else:
+            print("[pad] 足す必要なし。WAV は触りません。")
 
     for json_path in json_paths:
         stats["samples"] += 1

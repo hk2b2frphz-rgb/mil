@@ -178,6 +178,28 @@ class SpeakerOnlyCopyTest(unittest.TestCase):
         )
         self.assertEqual(synthesized, ["はい、聞いていますよ。"])
 
+    def test_the_greeting_is_dropped_whatever_its_punctuation(self) -> None:
+        # 端を strip するだけの完全一致だと、句読点が 1 つ違うだけで名乗りが
+        # 残る。残ると聞き手が 0.3 秒あたりで喋り出すので、あとから density
+        # タグを置く無音が無くなる。
+        for spelling in (
+            "もしもし、こちら孤独孤立相談窓口になります。",
+            "もしもし。こちら孤独孤立相談窓口になります",
+            "もしもしこちら孤独孤立相談窓口になります！",
+            "  もしもし、こちら孤独孤立相談窓口になります… ",
+        ):
+            with self.subTest(spelling=spelling):
+                self.assertTrue(rewriter.is_greeting(spelling))
+
+    def test_other_listener_turns_are_not_taken_for_the_greeting(self) -> None:
+        for spelling in (
+            "はい、聞いていますよ。",
+            "もしもし、聞こえていますか。",
+            "こちら孤独孤立相談窓口の担当です。",
+        ):
+            with self.subTest(spelling=spelling):
+                self.assertFalse(rewriter.is_greeting(spelling))
+
     def test_the_copied_greeting_matches_the_generator(self) -> None:
         import generate_synthetic_moshi_training_data as generator
 
