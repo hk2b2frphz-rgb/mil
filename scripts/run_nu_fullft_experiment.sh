@@ -132,7 +132,10 @@ fi
 
 RUN_TS="$(date +%Y-%m-%d_%H%M%S)"
 EXP_LOG="$EXP_DIR/run_nu_${RUN_TS}.log"
-NU_OUTPUT_DIR="$EXP_DIR/checkpoints/nu_${RUN_TS}"
+# 既定は実行ごとに新しいディレクトリ。再開させたいときだけ NU_OUTPUT_DIR を
+# 固定して渡す（同じ場所に step_<N> が貯まるので、そこから続きを走らせられる）。
+NU_OUTPUT_DIR="${NU_OUTPUT_DIR:-$EXP_DIR/checkpoints/nu_${RUN_TS}}"
+NU_OUTPUT_DIR="$(realpath -m "$NU_OUTPUT_DIR")"
 NU_DATA_DIR="${NU_DATA_DIR:-$REPO_ROOT/data/nu_fullft/${RUN_ID:-$(basename "$SRC_RUN_DIR")}}"
 NU_DATA_DIR="$(realpath -m "$NU_DATA_DIR")"
 NU_LAUNCH_CONFIG="$EXP_DIR/nu_launch_${RUN_TS}.json"
@@ -477,11 +480,69 @@ fi
 if [[ "${NU_REPORT_TO_WANDB:-0}" == "1" ]]; then
     LAUNCH_CMD+=(--report_to wandb --project_name "${NU_WANDB_PROJECT:-moshi-finetuning}")
 fi
-# Keep only the best-eval-loss checkpoint (plus the just-saved one) during
-# training instead of accumulating every step_<N> ZeRO shard. Default on;
-# set NU_KEEP_BEST_ONLY=0 to keep every checkpoint.
-if [[ "${NU_KEEP_BEST_ONLY:-1}" == "1" ]]; then
+# checkpoint を何個残すか。full-FT の ZeRO checkpoint は 1 つで数十 GB あるので、
+# step ごとに貯めると walltime より先にディスクが尽きる。
+#
+#   NU_KEEP_TOP_K > 0  eval loss の良い順に K 個 + 最新を残す（既定、K=3）。
+#                      trainer の --keep_best_only は使わず、学習中に
+#                      prune_fullft_checkpoints.py を回して掃除する。最新を
+#                      必ず残すので、次のジョブがそこから再開できる。
+#                      1 つ壊れていても次に戻れる、というのがこの既定の理由。
+#   NU_KEEP_TOP_K=0    従来どおり trainer 任せ。NU_KEEP_BEST_ONLY=1 なら最良 1 つ
+#                      + 直近だけ、0 なら全部残る。
+NU_KEEP_TOP_K="${NU_KEEP_TOP_K:-3}"
+if [[ "$NU_KEEP_TOP_K" -gt 0 ]]; then
+    if [[ "${NU_KEEP_BEST_ONLY:-}" == "1" ]]; then
+        echo "[nu-fullft] NU_KEEP_TOP_K=$NU_KEEP_TOP_K なので --keep_best_only は渡しません" \
+             "（trainer に消させると上位 K 個が残らない）"
+    fi
+elif [[ "${NU_KEEP_BEST_ONLY:-1}" == "1" ]]; then
     LAUNCH_CMD+=(--keep_best_only)
+fi
+
+# ---------------------------------------------------------------------------
+# 再開。NU_RESUME=1 かつ NU_OUTPUT_DIR に step_<N> があれば、そこから続ける。
+#
+# trainer 側のフラグ名はこちらのリポジトリからは分からないので --help から
+# 探す。見つからなければ「黙って step 0 からやり直す」のが一番損なので、
+# 止める。NU_RESUME=0 で明示的に最初からやり直せる。
+# ---------------------------------------------------------------------------
+NU_RESUME="${NU_RESUME:-1}"
+RESUME_STEP_DIR=""
+if [[ "$NU_RESUME" == "1" ]]; then
+    RESUME_STEP_DIR="$(ls -d "$NU_OUTPUT_DIR"/step_* 2>/dev/null \
+        | sed 's#.*/step_##' | sort -n | tail -n 1 || true)"
+    if [[ -n "$RESUME_STEP_DIR" ]]; then
+        RESUME_STEP_DIR="$NU_OUTPUT_DIR/step_$RESUME_STEP_DIR"
+    fi
+fi
+if [[ -n "$RESUME_STEP_DIR" ]]; then
+    NU_RESUME_FLAG="${NU_RESUME_FLAG:-}"
+    if [[ -z "$NU_RESUME_FLAG" ]]; then
+        NU_HELP="$( (cd "$NU_MOSHI_FT_REPO" && uv run python finetune.py --help) 2>/dev/null || true)"
+        for candidate in --resume_from_checkpoint --resume-from-checkpoint \
+                         --resume_from --resume_checkpoint --resume; do
+            if grep -q -- "$candidate" <<<"$NU_HELP"; then
+                NU_RESUME_FLAG="$candidate"
+                break
+            fi
+        done
+    fi
+    if [[ -z "$NU_RESUME_FLAG" ]]; then
+        echo "ERROR: $NU_OUTPUT_DIR に $(basename "$RESUME_STEP_DIR") があるのに," >&2
+        echo "  finetune.py の再開フラグが見つかりませんでした。このまま起動すると" >&2
+        echo "  step 0 からやり直しになり、ここまでの学習を捨てることになります。" >&2
+        echo "  対処:" >&2
+        echo "    - フラグ名が分かっているなら NU_RESUME_FLAG=--<name> を渡す" >&2
+        echo "    - 本当に最初からやり直すなら NU_RESUME=0 を渡す" >&2
+        echo "    - 別の場所に出すなら NU_OUTPUT_DIR を変える" >&2
+        echo "  finetune.py --help の中身:" >&2
+        echo "$NU_HELP" | grep -i -- "resume\|checkpoint" >&2 || \
+            echo "  (resume/checkpoint を含む行は無し)" >&2
+        exit 1
+    fi
+    echo "[nu-fullft] 再開: $NU_RESUME_FLAG $RESUME_STEP_DIR"
+    LAUNCH_CMD+=("$NU_RESUME_FLAG" "$RESUME_STEP_DIR")
 fi
 # Early stopping on eval loss, with patience counted in evaluations (so it
 # tracks HP_EVAL_EVERY_EPOCH rather than a raw step count). 0 disables it.
@@ -563,6 +624,39 @@ if [[ -n "${MLFLOW_EXPERIMENT_NAME:-}" || -n "${MLFLOW_TRACKING_URI:-}" ]]; then
     fi
 fi
 
+# 学習中の掃除。ログに eval が出るたびに上位 K 個 + 最新へ落とす。走らせて
+# おかないと、1 ジョブ分の walltime のあいだに貯まったぶんでディスクが尽きる。
+# 最新には触らず、更新の新しいディレクトリも避けるので、書き込み中のものを
+# 消すことはない。掃除が失敗しても学習は止めない。
+PRUNE_PID=""
+prune_once() {
+    # このジョブのログだけを渡すと、再開前のジョブで eval を通った step が
+    # 「metric 無し」に見えて消える。実験ディレクトリのログを全部渡す。
+    local logs=()
+    local f
+    for f in "$EXP_DIR"/run_nu_*.log; do
+        [[ -f "$f" ]] && logs+=("$f")
+    done
+    [[ ${#logs[@]} -gt 0 ]] || logs=("$EXP_LOG")
+    uv run python "$REPO_ROOT/scripts/prune_fullft_checkpoints.py" \
+        --checkpoints-dir "$NU_OUTPUT_DIR" \
+        --log-file "${logs[@]}" \
+        --keep "$NU_KEEP_TOP_K" \
+        || echo "[nu-fullft] WARN: checkpoint の掃除に失敗しました" >&2
+}
+if [[ "$NU_KEEP_TOP_K" -gt 0 ]]; then
+    NU_PRUNE_INTERVAL="${NU_PRUNE_INTERVAL:-600}"
+    (
+        while true; do
+            sleep "$NU_PRUNE_INTERVAL"
+            prune_once
+        done
+    ) &
+    PRUNE_PID="$!"
+    echo "[nu-fullft] checkpoint は上位 $NU_KEEP_TOP_K 個 + 最新を残します" \
+         "(${NU_PRUNE_INTERVAL}s ごと)"
+fi
+
 set +e
 (
     cd "$NU_MOSHI_FT_REPO" && \
@@ -580,6 +674,39 @@ if [[ -n "$MLFLOW_SYNC_PID" ]]; then
     wait "$MLFLOW_SYNC_PID" 2>/dev/null || true
 fi
 
+if [[ -n "$PRUNE_PID" ]]; then
+    kill "$PRUNE_PID" >/dev/null 2>&1 || true
+    wait "$PRUNE_PID" 2>/dev/null || true
+fi
+
+# どこまで進んだかを 1 ファイルに書く。walltime で切られたジョブを次へ繋ぐ側
+# (チェーン用の PBS) が、続きが要るかどうかをこれで判断する。学習が落ちていても
+# 書く -- 「進んでいない」ことが分かるのが大事で、それが無限に投げ直すのを防ぐ。
+NU_LAST_STEP="$(ls -d "$NU_OUTPUT_DIR"/step_* 2>/dev/null \
+    | sed 's#.*/step_##' | sort -n | tail -n 1 || true)"
+NU_LAST_STEP="${NU_LAST_STEP:-0}"
+if [[ -n "${NU_PROGRESS_FILE:-}" ]]; then
+    mkdir -p "$(dirname "$NU_PROGRESS_FILE")"
+    cat > "$NU_PROGRESS_FILE" <<EOF
+{
+  "run_ts": "$RUN_TS",
+  "exp_name": "$EXP_NAME",
+  "output_dir": "$NU_OUTPUT_DIR",
+  "log_file": "$EXP_LOG",
+  "last_step": $NU_LAST_STEP,
+  "max_steps": $HP_MAX_STEPS,
+  "train_status": $TRAIN_STATUS,
+  "keep_top_k": $NU_KEEP_TOP_K
+}
+EOF
+    echo "[nu-fullft] progress: step $NU_LAST_STEP / $HP_MAX_STEPS -> $NU_PROGRESS_FILE"
+fi
+
+if [[ "$NU_KEEP_TOP_K" -gt 0 ]]; then
+    echo "[nu-fullft] checkpoint の最終掃除"
+    prune_once
+fi
+
 if [[ "$MLFLOW_ENABLED" == "1" ]]; then
     echo "[nu-fullft] final MLflow sync"
     run_mlflow_sync_once || echo "[nu-fullft] WARN: final MLflow sync failed" >&2
@@ -593,15 +720,32 @@ fi
 # ---------------------------------------------------------------------------
 # eval loss が最小の checkpoint を自動選択して export する。
 # SKIP_AUTO_POSTPROCESS=1 で無効化できる。
+#
+# SKIP_AUTO_POSTPROCESS=auto は「最後まで走り切ったときだけやる」。walltime を
+# またいで何本かに分けて回すとき、途中のジョブごとに export と
+# Full-Duplex-Bench を走らせても時間を使うだけなので、そのための値。
 # ---------------------------------------------------------------------------
+if [[ "${SKIP_AUTO_POSTPROCESS:-0}" == "auto" ]]; then
+    if [[ "$NU_LAST_STEP" -ge "$HP_MAX_STEPS" ]]; then
+        SKIP_AUTO_POSTPROCESS=0
+        echo "[nu-fullft] 最後まで到達 ($NU_LAST_STEP/$HP_MAX_STEPS)。export と評価を行います"
+    else
+        SKIP_AUTO_POSTPROCESS=1
+        echo "[nu-fullft] 途中 ($NU_LAST_STEP/$HP_MAX_STEPS)。export と評価は最後の回に回します"
+    fi
+fi
 if [[ "${SKIP_AUTO_POSTPROCESS:-0}" != "1" ]]; then
     echo
     echo "[nu-fullft] selecting best checkpoint by eval loss"
 
     BEST_JSON="$EXP_DIR/best_checkpoint_nu_${RUN_TS}.json"
+    # 再開して走らせた場合、metric はジョブごとのログに散っている。1 本に
+    # まとめてから選ぶ。同じ step が重複しても後勝ちで問題ない。
+    COMBINED_LOG="$EXP_DIR/.combined_metrics_${RUN_TS}.log"
+    cat "$EXP_DIR"/run_nu_*.log > "$COMBINED_LOG" 2>/dev/null || cp "$EXP_LOG" "$COMBINED_LOG"
     if uv run python "$REPO_ROOT/scripts/select_best_checkpoint.py" \
         --mode fullft \
-        --log-file "$EXP_LOG" \
+        --log-file "$COMBINED_LOG" \
         --checkpoints-dir "$NU_OUTPUT_DIR" \
         --output-json "$BEST_JSON"; then
 
