@@ -1,0 +1,50 @@
+# Voice-synthesis experiment config (clone + CustomVoice).
+#
+# Copy this to a working file (gitignored) and edit it:
+#   cp configs/voice_synth.example.yaml configs/voice_synth.local.yaml
+# Then submit, pointing CONFIG at your copy:
+#   qsub -v CONFIG=configs/voice_synth.local.yaml scripts/run_clone_voice_examples.pbs
+#
+# Precedence: qsub -v env vars / CLI flags  >  this config  >  built-in defaults.
+# Blank ("") values fall back to the built-in default.
+
+# --- proxy (exported before any network / model download; blank = skip) ---
+proxy:
+  http_proxy: ""
+  https_proxy: ""
+  no_proxy: ""
+
+# --- GPU orchestration ---
+num_shards: 4
+cuda_visible_devices: "0,1,2,3"
+
+# --- input / output ---
+analysis_dir: ""          # analyze_real_dialogue.py output <wav_stem>/ (needed for clone)
+ref_dir: ""               # OR: own-recording folder (1.wav, 2.wav ... + transcripts).
+                          # Mutually exclusive with analysis_dir; skips diarization.
+transcripts: ""           # transcript list file; blank = auto-detect (reference.tsv etc.)
+speaker: A                # diarized speaker to clone (A / B)
+out_dir: ""               # blank = data/clone_examples/<jobid>
+examples_file: ""         # one sentence per line; blank = built-in examples
+
+# --- generation ---
+language: Japanese
+dtype: float16            # V100 -> float16
+max_new_tokens: 4096      # per-utterance cap; stops runaway-generation OOM
+gen_batch_size: 8         # examples synthesized at once; lower = less VRAM
+
+# --- clone (Qwen3-TTS-Base zero-shot) ---
+clone_enabled: true       # set false to run CustomVoice only
+model: Qwen/Qwen3-TTS-12Hz-1.7B-Base
+num_refs: 3               # auto-selected references to compare
+modes: in-context,x-vector
+xvector_all: true         # also try aggregated x-vector from all clean clips
+xvector_max_sec: 90       # 0 = concatenate every clip (default for ref_dir)
+ref_wav: ""               # optional explicit reference (forces 1 ref)
+ref_text: ""
+
+# --- CustomVoice (preset-speaker baseline) ---
+customvoice: true         # set false to run clone only
+customvoice_model: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+customvoice_speaker: Serena   # production's --speaker-moshi; the baseline to beat
+customvoice_instruct: ""

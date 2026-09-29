@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N qwen_div200
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=03:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# 200 backchannels through Qwen3-TTS from ONE clone reference, then a report on
+# how far apart they came out.
+#
+#   qsub -V scripts/2026-09-14/qwen3_tts_diversity_probe.pbs
+#   REPEATS=20 qsub -V scripts/2026-09-14/qwen3_tts_diversity_probe.pbs
+#   TEMPERATURE=1.2 qsub -V scripts/2026-09-14/qwen3_tts_diversity_probe.pbs
+#
+# Interactive node equivalent:
+#
+#   bash scripts/run_qwen3_tts_diversity.sh
+#
+# Why: the bank-and-retrieve idea (synthesize backchannels in bulk, then pick
+# the one whose timing and prosody fit) only pays off if the bank is varied.
+# Two candidate sources of variety are measured separately -- resampling the
+# same string, and respelling it (uun / uuun / uun with a small u, 20 spellings
+# x 10 each) -- and the report prints the ratio between them. A ratio near 1
+# means respelling buys nothing over resampling; a near-zero within-text CV
+# means resampling buys nothing at all, and the bank has to be built out of
+# spellings.
+#
+# One GPU, one engine, ~200 requests of well under a second each, so this is
+# minutes of compute plus the model load. The walltime is mostly for the load
+# and the first-run HuggingFace fetch.
+#
+# Needs .venv-vllm-omni (scripts/setup_vllm_omni_v100_env.sh) and the moshi
+# clone reference at data/clone_examples/99999 -- the same voice every Qwen3
+# corpus in this repo uses, which is the point: these numbers describe the
+# production voice, not a generic one.
+#
+# Output: data/runs/diversity/<batch>/{report.md,report.json,samples.jsonl,wav/}
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export REPEATS="${REPEATS:-10}"
+
+exec bash scripts/run_qwen3_tts_diversity.sh

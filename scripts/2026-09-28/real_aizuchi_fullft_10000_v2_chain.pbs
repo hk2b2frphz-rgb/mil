@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N ra_ft10kchain
+#PBS -q xan_s
+#PBS -l select=1:res=middle
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# STEP 5 of 5, as a chain that survives walltime.
+#
+#   qsub -V scripts/2026-09-28/real_aizuchi_fullft_10000_v2_chain.pbs
+#
+# Submit it ONCE. Each link trains until walltime, then submits the next link,
+# which picks up from the newest checkpoint. It stops on its own when training
+# reaches max_steps.
+#
+# WHY THIS EXISTS
+#
+# real_aizuchi_fullft_10000_v2.pbs cannot be resubmitted to continue. Two
+# reasons, both now fixed but only on this route:
+#   - run_nu_fullft_experiment.sh put every run in checkpoints/nu_<timestamp>,
+#     a fresh directory each time, so a second submission had nothing to
+#     resume from. NU_OUTPUT_DIR below pins one directory instead.
+#   - the sweep chain (sweep_chain.sh) hands off whole PATTERNS, not steps
+#     within one. With a single pattern it never had anything to hand off, so
+#     a run cut at 2755/6756 simply restarted at 0.
+#
+# CONTINUING THE RUN THAT WAS ALREADY CUT
+#
+# Point NU_OUTPUT_DIR at its checkpoint directory and its steps are picked up:
+#   qsub -V -v NU_OUTPUT_DIR=/path/to/experiments/<exp>/checkpoints/nu_<ts> \
+#       scripts/2026-09-28/real_aizuchi_fullft_10000_v2_chain.pbs
+# Look it up with:
+#   ls -d experiments/_fullft_sweeps/*/checkpoints/nu_*
+# The run keeps its own EXP_NAME, so its earlier logs stay next to it and the
+# eval metrics from before the cut are still read (they decide which
+# checkpoints survive pruning, and which one is exported at the end).
+#
+# DISK
+#
+# NU_KEEP_TOP_K=3 keeps the three best checkpoints by eval loss, plus the
+# newest one whatever its loss, because that is what the next link resumes
+# from. Everything else is removed while training runs, so the directory stays
+# at four checkpoints rather than growing with every save. Three rather than
+# one so that a corrupt or unusable checkpoint still leaves somewhere to go
+# back to.
+#
+# The pruner never touches the newest checkpoint, never touches a directory
+# written in the last two minutes, and does nothing at all if it cannot read
+# any eval metric -- deleting on a bad parse would take out everything but the
+# newest. A failed delete is a warning, never a failed job.
+#
+# WHAT STOPS THE CHAIN
+#
+# Any of these, and no next link is submitted:
+#   - training reached max_steps (the run is done; the export ran)
+#   - the run failed (train_status != 0) -- fix it rather than burn the queue
+#   - this link made no progress (last_step did not advance) -- that is a loop,
+#     not a long job
+#   - MAX_LINKS reached (default 8)
+#   - the stop file exists: touch ~/.miltoka/stop_fullft_chain
+#
+# The auto export and the Full-Duplex-Bench eval are skipped on every link but
+# the last (SKIP_AUTO_POSTPROCESS), so the benchmark is not re-run each time
+# the job rolls over.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export CORPUS_VERSION="${CORPUS_VERSION:-v2}"
+export RUN_ID="${RUN_ID:-real_aizuchi_10000_${CORPUS_VERSION}_fullft}"
+export SRC_RUN_DIR="${SRC_RUN_DIR:-$PWD/data/runs/real_aizuchi_10000_${CORPUS_VERSION}/tts/placement_bank/shard_000_conditioned}"
+export SWEEP_PATTERNS="${SWEEP_PATTERNS:-f01}"
+export SELF_PBS="scripts/2026-09-28/real_aizuchi_fullft_10000_v2_chain.pbs"
+
+# One directory for the whole chain. This is what makes resuming possible.
+export NU_OUTPUT_DIR="${NU_OUTPUT_DIR:-$PWD/experiments/_fullft_sweeps/${RUN_ID}/checkpoints/nu_chain}"
+export NU_RESUME="${NU_RESUME:-1}"
+export NU_KEEP_TOP_K="${NU_KEEP_TOP_K:-3}"
+# NU_KEEP_BEST_ONLY is what the old job set; it would make the trainer delete
+# the other two of the three. NU_KEEP_TOP_K wins, but say so plainly.
+export NU_KEEP_BEST_ONLY=0
+
+CHAIN_INDEX="${CHAIN_INDEX:-1}"
+MAX_LINKS="${MAX_LINKS:-8}"
+STOP_FILE="${STOP_FILE:-$HOME/.miltoka/stop_fullft_chain}"
+PROGRESS_FILE="$PWD/experiments/pbs_logs/${RUN_ID}_chain_progress.json"
+export NU_PROGRESS_FILE="$PROGRESS_FILE"
+
+# sweep_chain.sh would resubmit as well, on its own rules. Two chains driving
+# the same job file is one too many.
+export SWEEP_CHAIN=0
+
+mkdir -p "$(dirname "$PROGRESS_FILE")"
+
+read_progress() {
+    python3 - "$PROGRESS_FILE" "$1" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as handle:
+        print(json.load(handle).get(sys.argv[2], ""))
+except Exception:
+    print("")
+PY
+}
+
+PREV_STEP="$(read_progress last_step)"
+PREV_STEP="${PREV_STEP:-0}"
+
+echo "===== fullft chain ====="
+echo "link:        $CHAIN_INDEX / $MAX_LINKS"
+echo "run:         $RUN_ID"
+echo "checkpoints: $NU_OUTPUT_DIR"
+echo "keep top k:  $NU_KEEP_TOP_K"
+echo "step so far: $PREV_STEP"
+echo "started_at:  $(date -Iseconds)"
+echo "========================"
+
+# The export and the benchmark belong on the last link only. "auto" leaves that
+# to run_nu_fullft_experiment.sh, which compares the step it reached against
+# max_steps once training has stopped and only then exports and evaluates.
+export SKIP_AUTO_POSTPROCESS=auto
+
+set +e
+bash scripts/fullft_sweep.pbs
+SWEEP_STATUS=$?
+set -e
+
+LAST_STEP="$(read_progress last_step)";   LAST_STEP="${LAST_STEP:-0}"
+MAX_STEPS="$(read_progress max_steps)";   MAX_STEPS="${MAX_STEPS:-0}"
+TRAIN_STATUS="$(read_progress train_status)"; TRAIN_STATUS="${TRAIN_STATUS:-1}"
+
+echo
+echo "===== link done ====="
+echo "sweep exit:   $SWEEP_STATUS"
+echo "train status: $TRAIN_STATUS"
+echo "step:         $LAST_STEP / $MAX_STEPS  (was $PREV_STEP)"
+echo "finished_at:  $(date -Iseconds)"
+echo "====================="
+
+stop() {
+    echo
+    echo "[chain] not submitting a next link: $1"
+    exit "${2:-0}"
+}
+
+if [[ "$TRAIN_STATUS" != "0" ]]; then
+    stop "training failed (status $TRAIN_STATUS). Read the log before resubmitting." 1
+fi
+if [[ "$MAX_STEPS" == "0" ]]; then
+    stop "no progress file was written, so there is nothing to continue from. \
+This usually means the run stopped before training started." 1
+fi
+if [[ "$LAST_STEP" -ge "$MAX_STEPS" ]]; then
+    echo
+    echo "[chain] training is complete ($LAST_STEP / $MAX_STEPS)."
+    echo "[chain] the export and the benchmark ran in this link; see the log above."
+    stop "done"
+fi
+if [[ "$LAST_STEP" -le "$PREV_STEP" ]]; then
+    stop "this link did not advance past step $PREV_STEP. Resubmitting would \
+loop without training. Read the log." 1
+fi
+if [[ -f "$STOP_FILE" ]]; then
+    stop "stop file exists: $STOP_FILE"
+fi
+if [[ "$CHAIN_INDEX" -ge "$MAX_LINKS" ]]; then
+    stop "reached MAX_LINKS=$MAX_LINKS. Resubmit by hand to carry on."
+fi
+
+NEXT_INDEX=$((CHAIN_INDEX + 1))
+echo
+echo "[chain] submitting link $NEXT_INDEX"
+qsub -V -v "CHAIN_INDEX=${NEXT_INDEX},MAX_LINKS=${MAX_LINKS},RUN_ID=${RUN_ID},SRC_RUN_DIR=${SRC_RUN_DIR},NU_OUTPUT_DIR=${NU_OUTPUT_DIR},NU_KEEP_TOP_K=${NU_KEEP_TOP_K},SWEEP_PATTERNS=${SWEEP_PATTERNS},STOP_FILE=${STOP_FILE}" \
+    "$SELF_PBS"

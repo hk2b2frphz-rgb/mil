@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N chain_check
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=00:10:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII characters anywhere in this file
+# (not even in comments) -- the job dies immediately at submission.
+#
+# Verify scripts/run_train_chain.pbs before trusting it with a real multi-day
+# training chain.
+#
+# Runs no training and submits no jobs. It builds a sandbox, stubs out
+# run_experiment.sh and qsub, and checks only the chaining logic and the
+# runaway guards:
+#
+#   1. slice boundaries (resume_step / stop_at_step)
+#   2. each job resuming from the previous job's checkpoint
+#   3. the chain stopping at TOTAL_STEPS instead of submitting forever
+#   4. early stopping ending the chain quietly instead of resubmitting
+#   5. runaway guards (job-count cap, instant-exit detection)
+#   6. rejection of inconsistent settings
+#
+# No GPU is used, so this finishes in seconds.
+#
+# Submit:
+#   qsub scripts/check_train_chain.pbs
+#
+# Or run it directly on a login node -- it needs nothing from PBS:
+#   bash scripts/check_train_chain.sh
+#
+# A non-zero exit means the chain logic is wrong. Do not launch a real chain
+# until this passes.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+mkdir -p experiments/pbs_logs
+LOG_FILE="experiments/pbs_logs/chain_check_${PBS_JOBID:-manual}.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "job_id:  ${PBS_JOBID:-n/a}"
+echo "host:    $(hostname)"
+echo "workdir: $(pwd)"
+echo "log:     $LOG_FILE"
+echo ""
+
+bash scripts/check_train_chain.sh

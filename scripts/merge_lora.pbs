@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N merge_lora
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -V
+
+# Merge a Kyutai moshi-finetune LoRA adapter into the llm-jp Moshi base model.
+#
+# Required:
+#   qsub -v \
+# LORA_CKPT=/path/to/checkpoint/consolidated/lora.safetensors \
+# scripts/merge_lora.pbs
+#
+# Explicit output/scaling:
+#   qsub -v \
+# LORA_CKPT=/path/to/lora.safetensors,\
+# OUT_WEIGHT=/path/to/merged/consolidated.safetensors,\
+# LORA_SCALING=2.0 \
+# scripts/merge_lora.pbs
+#
+# Optional:
+#   HF_REPO=llm-jp/llm-jp-moshi-v1
+#   MOSHI_FT_REPO=../moshi-finetune
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+LORA_CKPT="${LORA_CKPT:?Set LORA_CKPT to consolidated/lora.safetensors}"
+HF_REPO="${HF_REPO:-llm-jp/llm-jp-moshi-v1}"
+MOSHI_FT_REPO="${MOSHI_FT_REPO:-$PWD/../moshi-finetune}"
+
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+RUN_ID="${RUN_ID:-merge_lora_${JOB_ID_SHORT}}"
+OUT_WEIGHT="${OUT_WEIGHT:-$PWD/merged_model/$RUN_ID/consolidated.safetensors}"
+
+if ! [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "ERROR: RUN_ID may contain only letters, digits, dot, underscore, and hyphen." >&2
+    exit 1
+fi
+
+LORA_CKPT="$(realpath -m "$LORA_CKPT")"
+MOSHI_FT_REPO="$(realpath -m "$MOSHI_FT_REPO")"
+OUT_WEIGHT="$(realpath -m "$OUT_WEIGHT")"
+
+if [[ ! -f "$LORA_CKPT" ]]; then
+    echo "ERROR: LoRA checkpoint not found: $LORA_CKPT" >&2
+    exit 1
+fi
+if [[ ! -f "$MOSHI_FT_REPO/pyproject.toml" ]]; then
+    echo "ERROR: moshi-finetune project not found: $MOSHI_FT_REPO" >&2
+    exit 1
+fi
+if [[ -e "$OUT_WEIGHT" ]]; then
+    echo "ERROR: output already exists: $OUT_WEIGHT" >&2
+    echo "Choose a new OUT_WEIGHT; existing model files are never overwritten." >&2
+    exit 1
+fi
+
+mkdir -p experiments/pbs_logs "$(dirname "$OUT_WEIGHT")"
+JOB_LOG="experiments/pbs_logs/${RUN_ID}.log"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
+echo "===== LoRA merge PBS job ====="
+echo "job_id:       ${PBS_JOBID:-n/a}"
+echo "host:         $(hostname)"
+echo "workdir:      $(pwd)"
+echo "run_id:       $RUN_ID"
+echo "lora_ckpt:    $LORA_CKPT"
+echo "hf_repo:      $HF_REPO"
+echo "scaling:      ${LORA_SCALING:-<read from config.json>}"
+echo "ft_project:   $MOSHI_FT_REPO"
+echo "out_weight:   $OUT_WEIGHT"
+echo "job_log:      $JOB_LOG"
+echo "started_at:   $(date -Iseconds)"
+echo "=============================="
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH." >&2
+    exit 1
+}
+
+merge_args=(
+    uv run --project "$MOSHI_FT_REPO"
+    python "$PWD/scripts/merge_lora.py"
+    --lora-ckpt "$LORA_CKPT"
+    --out "$OUT_WEIGHT"
+    --hf-repo "$HF_REPO"
+)
+if [[ -n "${LORA_SCALING:-}" ]]; then
+    merge_args+=(--scaling "$LORA_SCALING")
+fi
+
+"${merge_args[@]}"
+
+if [[ ! -s "$OUT_WEIGHT" ]]; then
+    echo "ERROR: merged weight was not created or is empty: $OUT_WEIGHT" >&2
+    exit 1
+fi
+
+echo "merged_weight: $OUT_WEIGHT"
+echo "finished_at:   $(date -Iseconds)"

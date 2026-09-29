@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N qwen_tts_vllm_10000
+#PBS -q xvn_s
+#PBS -l select=1:res=middle2
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# Qwen3-TTS vLLM-Omni production, 10000-dialogue corpus.
+#
+# Mixed voices (user=CustomVoice, moshi=clone_voice_examples result):
+#   QWEN_VOICE_MODE=mixed \
+#   CLONE_OUT_DIR_MOSHI=data/clone_examples/<moshi-result> \
+#   USER_SPEAKER_POOL=Ono_Anna \
+#   qsub -V scripts/run_qwen_tts_vllm_10000_4gpu.pbs
+#
+# 24h is not enough for 10000; re-submit the same command until the merged
+# manifest appears.  Finished shards, dialogues and requests are all skipped.
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+export SOURCE_BATCH_ID="${SOURCE_BATCH_ID:-qwen_dialogues_10000_${DIALOGUES_VERSION:-v1}}"
+exec bash scripts/run_qwen_tts_vllm_common.sh

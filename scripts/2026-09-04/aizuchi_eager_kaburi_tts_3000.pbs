@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N az_e_kab3k7
+#PBS -q xan_s
+#PBS -l select=1:res=middle
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# KABURI-TTS for the EAGER, silence-free 3,000-dialogue corpus, v7.
+# Same corpus as aizuchi_eager_tts_3000.pbs (Qwen3-TTS), rendered by
+# KABURI-TTS instead, so the two training sets differ only in the TTS stage.
+# Eager counterpart of aizuchi_normal_kaburi_tts_3000.pbs.
+#
+# Why: the Qwen3/Kokoro path synthesizes each utterance on its own and lays the
+# pieces out, so where the backchannels land is decided by this repo
+# (apply_aizuchi_overlap forces each one onto the preceding user turn). KABURI
+# renders both speakers together and lets its gap model decide, which is the
+# thing being compared. Feed the result to aizuchi_eager_fullft_3000.pbs with
+# SRC_RUN_DIR=data/runs/aizuchi_eager_3000_v7/kaburi_tts/merged.
+#
+# Measure before committing 3,000: run the smoke first,
+# scripts/2026-09-04/aizuchi_eager_kaburi_smoke.pbs.
+#
+# One A100 queue, two GPUs: the codec decodes in bfloat16, which V100 lacks.
+# Prerequisite (once per environment): bash scripts/setup_kaburi_env.sh
+#
+# Re-submit this file to resume unfinished shards.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+# Same listener voice as the Qwen3 corpora (aizuchi_eager_tts_3000.pbs and the
+# mixed-corpus stages all clone from this directory), so the two training sets
+# differ in the TTS stage and not in who is speaking. The reference pack is
+# built from it once and cached under data/kaburi_ref_packs/.
+# The user side has no counterpart to inherit -- the Qwen3 path drives it with
+# a CustomVoice preset, not a reference wav -- so it falls back to KABURI's
+# bundled DEMO_F2 voice. Set USER_REF_WAV or CLONE_OUT_DIR_USER to override.
+export CLONE_OUT_DIR_MOSHI="$PWD/data/clone_examples/99999"
+
+export AIZUCHI_VERSION="v7"
+export SOURCE_BATCH_ID="qwen_aizuchi_3000_eager_${AIZUCHI_VERSION}"
+export BATCH_ID="aizuchi_eager_3000_${AIZUCHI_VERSION}_kaburi"
+export DIALOGUES_JSONL="$PWD/data/runs/aizuchi_eager_3000_${AIZUCHI_VERSION}/dialogue/llm_dialogues/dialogues.jsonl"
+export OUT_ROOT="$PWD/data/runs/aizuchi_eager_3000_${AIZUCHI_VERSION}/kaburi_tts"
+export NUM_DIALOGUES="${NUM_DIALOGUES:-3000}"
+
+exec bash scripts/run_kaburi_tts.pbs
