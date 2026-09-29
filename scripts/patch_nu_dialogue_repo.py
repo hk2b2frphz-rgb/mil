@@ -574,6 +574,45 @@ def _prune_checkpoints_keep_best(output_dir, current_steps, eval_loss_by_step, a
     return True
 
 
+def patch_finetune_resume_run_id(path: Path) -> bool:
+    """再開時に prev_config["run_id"] を必読にしているのをやめさせる。
+
+    checkpoint に一緒に保存された設定に run_id キーが無いと、そこで
+    KeyError: 'run_id' で落ちる。run_id は wandb / MLflow の run を引き継ぐための
+    ものなので、無ければ引き継がずに学習を続ければよい。checkpoint 自体は健全
+    なのに、tracking のメタデータが 1 つ足りないだけで再開できず学習を最初から
+    やり直す、というのは高くつきすぎる。
+
+    run_id を記録せずに保存された checkpoint（このキーを書くようになる前に
+    走らせたもの）から再開するのに要る。
+    """
+    src = path.read_text(encoding="utf-8")
+    if "AUTO_PATCH_RESUME_WITHOUT_RUN_ID" in src:
+        return False
+    pattern = re.compile(
+        r'^(?P<indent>[ \t]*)(?P<lhs>[\w.]*run_id_to_resume)\s*=\s*'
+        r'(?P<cfg>[\w.]+)\[(?P<quote>["\'])run_id(?P=quote)\][ \t]*$',
+        re.MULTILINE,
+    )
+    match = pattern.search(src)
+    if not match:
+        raise RuntimeError(
+            "Could not locate the resume run_id assignment in "
+            f"{path}. Expected a line assigning <x>.run_id_to_resume from "
+            "a config lookup of 'run_id'."
+        )
+    indent = match.group("indent")
+    lines = [
+        f"{indent}# AUTO_PATCH_RESUME_WITHOUT_RUN_ID: run_id を持たない checkpoint",
+        f"{indent}# からでも再開できるようにする。無いときは tracking の run を",
+        f"{indent}# 引き継がないだけで、学習そのものは続けられる。",
+        f'{indent}{match.group("lhs")} = {match.group("cfg")}.get("run_id")',
+    ]
+    src = src[: match.start()] + "\n".join(lines) + src[match.end():]
+    path.write_text(src, encoding="utf-8")
+    return True
+
+
 def patch_utils_data(path: Path) -> bool:
     src = path.read_text(encoding="utf-8")
     updated = src.replace("np.concat(", "np.concatenate(")
@@ -604,6 +643,8 @@ def main() -> int:
         changes.append("finetune.py:keep-best-only")
     if patch_finetune_early_stopping(nu_repo / "finetune.py"):
         changes.append("finetune.py:early-stopping")
+    if patch_finetune_resume_run_id(nu_repo / "finetune.py"):
+        changes.append("finetune.py:resume-without-run-id")
     if patch_utils_data(nu_repo / "utils" / "data.py"):
         changes.append("utils/data.py")
 
