@@ -574,6 +574,127 @@ def _prune_checkpoints_keep_best(output_dir, current_steps, eval_loss_by_step, a
     return True
 
 
+def patch_finetune_save_best(path: Path) -> bool:
+    """Save improvements even between periodic saves, including after resume."""
+    src = path.read_text(encoding="utf-8")
+    if "AUTO_PATCH_SAVE_BEST_ON_EVAL" in src:
+        return False
+
+    helper = '''# AUTO_PATCH_SAVE_BEST_ON_EVAL: preserve the evaluated weights, not the
+# weights at the next periodic save. Persist scores with the checkpoint so a
+# resumed trainer and the selector do not depend on a previous job's stdout.
+def _load_miltoka_checkpoint_metrics(output_dir):
+    scores = {}
+    if not os.path.isdir(output_dir):
+        return scores
+    names = [name for name in os.listdir(output_dir)
+             if name.startswith("step_") and name[5:].isdigit()]
+    for name in sorted(names, key=lambda name: int(name[5:])):
+        metric_path = os.path.join(output_dir, name, "miltoka_eval_metrics.json")
+        try:
+            with open(metric_path, encoding="utf-8") as handle:
+                saved = json.load(handle)["eval_loss_by_step"]
+            for step, loss in saved.items():
+                if isinstance(loss, (int, float)) and math.isfinite(loss):
+                    scores[int(step)] = float(loss)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+    return scores
+
+
+def _save_miltoka_checkpoint(args, current_steps, eval_loss_by_step, accelerator):
+    output_dir = os.path.join(args.output_dir, f"step_{current_steps}")
+    accelerator.save_state(output_dir)
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        metric_path = os.path.join(output_dir, "miltoka_eval_metrics.json")
+        scores = {
+            str(step): float(loss) for step, loss in eval_loss_by_step.items()
+            if isinstance(loss, (int, float)) and math.isfinite(loss)
+        }
+        with open(metric_path + ".tmp", "w", encoding="utf-8") as handle:
+            json.dump({"step": current_steps, "eval_loss_by_step": scores}, handle)
+        os.replace(metric_path + ".tmp", metric_path)
+    accelerator.wait_for_everyone()
+    if getattr(args, "keep_best_only", False):
+        _prune_checkpoints_keep_best(
+            args.output_dir, current_steps, eval_loss_by_step, accelerator
+        )
+    return current_steps
+
+
+'''
+    replacements = [
+        ("def _log_miltoka_metrics(split, step, epoch, metrics):", helper +
+         "def _log_miltoka_metrics(split, step, epoch, metrics):"),
+        ("    eval_loss_by_step: dict = {}\n", '''    eval_loss_by_step = _load_miltoka_checkpoint_metrics(args.output_dir)
+    best_checkpoint_loss = min(eval_loss_by_step.values(), default=float("inf"))
+    last_checkpoint_step = None
+'''),
+        ('                    eval_loss_by_step[current_steps] = eval_metrics_for_log.get("loss/total")\n', '''                    checkpoint_loss = eval_metrics_for_log.get("loss/total")
+                    if isinstance(checkpoint_loss, (int, float)) and math.isfinite(checkpoint_loss):
+                        eval_loss_by_step[current_steps] = float(checkpoint_loss)
+                        # All ranks see the same gathered loss and must enter
+                        # save_state together for DeepSpeed ZeRO checkpoints.
+                        # This is independent of early-stopping min_delta.
+                        if checkpoint_loss < best_checkpoint_loss:
+                            logger.info(
+                                f"[best-checkpoint] saving step {current_steps}: "
+                                f"eval_loss={checkpoint_loss:.6g}"
+                            )
+                            last_checkpoint_step = _save_miltoka_checkpoint(
+                                args, current_steps, eval_loss_by_step, accelerator
+                            )
+                            best_checkpoint_loss = float(checkpoint_loss)
+'''),
+        ('''                # Save checkpoint
+                if args.save_steps is not None and current_steps % args.save_steps == 0:
+                    output_dir = os.path.join(args.output_dir, f"step_{current_steps}")
+                    accelerator.save_state(output_dir)
+                    if getattr(args, "keep_best_only", False):
+                        _prune_checkpoints_keep_best(
+                            args.output_dir, current_steps, eval_loss_by_step, accelerator
+                        )
+''', '''                # Save checkpoint (avoid saving an improvement twice).
+                if (args.save_steps is not None and current_steps % args.save_steps == 0
+                        and last_checkpoint_step != current_steps):
+                    last_checkpoint_step = _save_miltoka_checkpoint(
+                        args, current_steps, eval_loss_by_step, accelerator
+                    )
+'''),
+        ('''    output_dir = os.path.join(args.output_dir, f"step_{current_steps}")
+    accelerator.save_state(output_dir)
+    if getattr(args, "keep_best_only", False):
+        _prune_checkpoints_keep_best(args.output_dir, current_steps, eval_loss_by_step, accelerator)
+''', '''    if last_checkpoint_step != current_steps:
+        _save_miltoka_checkpoint(args, current_steps, eval_loss_by_step, accelerator)
+'''),
+        ("        if loss is not None and step in step_dirs\n",
+         "        if isinstance(loss, (int, float)) and math.isfinite(loss) and step in step_dirs\n"),
+        ('''    if scored:
+        keep_steps.add(min(scored, key=scored.get))
+''', '''    if not scored:
+        return
+    keep_steps.add(min(scored, key=scored.get))
+    # Legacy checkpoints may lack persisted scores after resume. Keep them
+    # until they can be scored rather than deleting a previous best blindly.
+    keep_steps.update(
+        step for step, directory in step_dirs.items()
+        if step not in scored and not os.path.isfile(
+            os.path.join(directory, "miltoka_eval_metrics.json")
+        )
+    )
+'''),
+    ]
+    for old, new in replacements:
+        if old not in src:
+            raise RuntimeError(f"Could not locate best-checkpoint patch target in {path}: {old[:80]!r}")
+        src = src.replace(old, new, 1)
+    compile(src, str(path), "exec")
+    path.write_text(src, encoding="utf-8")
+    return True
+
+
 def patch_finetune_resume_run_id(path: Path) -> bool:
     """再開時に prev_config["run_id"] を必読にしているのをやめさせる。
 
@@ -643,6 +764,8 @@ def main() -> int:
         changes.append("finetune.py:keep-best-only")
     if patch_finetune_early_stopping(nu_repo / "finetune.py"):
         changes.append("finetune.py:early-stopping")
+    if patch_finetune_save_best(nu_repo / "finetune.py"):
+        changes.append("finetune.py:save-best-on-eval")
     if patch_finetune_resume_run_id(nu_repo / "finetune.py"):
         changes.append("finetune.py:resume-without-run-id")
     if patch_utils_data(nu_repo / "utils" / "data.py"):

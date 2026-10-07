@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -89,7 +90,7 @@ def load_lora_eval_points(metrics_jsonl: Path, metric_key: str) -> list[tuple[in
         if metric_key not in row or "step" not in row:
             continue
         value = row[metric_key]
-        if not isinstance(value, (int, float)):
+        if not isinstance(value, (int, float)) or not math.isfinite(value):
             continue
         points.append((int(row["step"]), float(value)))
     return points
@@ -111,9 +112,31 @@ def load_fullft_eval_points(log_file: Path, metric_key: str) -> list[tuple[int, 
             continue
         metrics = payload.get("metrics") or {}
         value = metrics.get(metric_key)
-        if not isinstance(value, (int, float)):
+        if not isinstance(value, (int, float)) or not math.isfinite(value):
             continue
         points.append((int(payload["step"]), float(value)))
+    return points
+
+
+def load_fullft_checkpoint_metrics(checkpoints_dir: Path, metric_key: str) -> dict[int, float]:
+    """Read checkpoint-local eval history even if a previous job's log is lost."""
+    if metric_key != "loss/total":
+        return {}
+    points: dict[int, float] = {}
+    paths = []
+    for path in checkpoints_dir.glob("step_*/miltoka_eval_metrics.json"):
+        try:
+            paths.append((int(path.parent.name.removeprefix("step_")), path))
+        except ValueError:
+            continue
+    for _, path in sorted(paths):
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))["eval_loss_by_step"]
+            for step, value in saved.items():
+                if isinstance(value, (int, float)) and math.isfinite(value):
+                    points[int(step)] = float(value)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
     return points
 
 
@@ -161,6 +184,9 @@ def main() -> None:
             sys.exit(2)
         metric_key = args.metric_key or "loss/total"
         eval_points = load_fullft_eval_points(args.log_file, metric_key)
+        # Checkpoint-local scores belong to these weights. Combined stdout
+        # may also contain another run with the same step numbers.
+        eval_points.extend(load_fullft_checkpoint_metrics(args.checkpoints_dir, metric_key).items())
 
         def ckpt_path_for(step: int) -> Path:
             return fullft_checkpoint_path(args.checkpoints_dir, step)

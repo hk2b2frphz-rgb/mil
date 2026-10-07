@@ -99,6 +99,33 @@ class PrunerTest(unittest.TestCase):
         # 360 が最新として残り、120 が metric で残り、240 は落ちる。
         self.assertEqual(survivors, [120, 360, 999])
 
+    def test_previous_best_with_missing_log_is_not_deleted(self) -> None:
+        checkpoints, log = self.build({120: None, 240: 1.0, 360: 2.0})
+        self.assertEqual(self.run_pruner(checkpoints, [log], keep=1), [120, 240, 360])
+
+    def test_checkpoint_scores_survive_loss_of_previous_job_logs(self) -> None:
+        checkpoints, log = self.build({120: None, 240: 1.0, 360: 2.0})
+        (checkpoints / "step_120" / "miltoka_eval_metrics.json").write_text(
+            json.dumps({"step": 120, "eval_loss_by_step": {"120": 0.5}}), encoding="utf-8"
+        )
+        self.assertEqual(self.run_pruner(checkpoints, [log], keep=1), [120, 360])
+
+    def test_persisted_scores_override_another_runs_log(self) -> None:
+        checkpoints, log = self.build({120: 9.0, 240: 1.0, 360: 2.0})
+        (checkpoints / "step_120" / "miltoka_eval_metrics.json").write_text(
+            json.dumps({"step": 120, "eval_loss_by_step": {"120": 0.5}}), encoding="utf-8"
+        )
+        self.assertEqual(self.run_pruner(checkpoints, [log], keep=1), [120, 360])
+
+    def test_known_unevaluated_resume_checkpoint_can_be_pruned(self) -> None:
+        checkpoints, log = self.build({120: None, 240: 1.0, 360: 2.0})
+        (checkpoints / "step_120" / "miltoka_eval_metrics.json").write_text(
+            json.dumps({"step": 120, "eval_loss_by_step": {}}), encoding="utf-8"
+        )
+        old = time.time() - 3600
+        os.utime(checkpoints / "step_120", (old, old))
+        self.assertEqual(self.run_pruner(checkpoints, [log], keep=1), [240, 360])
+
 
 class KeepSetTest(unittest.TestCase):
     def test_everything_survives_when_there_are_fewer_than_k(self) -> None:

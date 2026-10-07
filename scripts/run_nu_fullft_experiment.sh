@@ -376,8 +376,9 @@ fi
 if [[ -n "${HP_WARMUP_EPOCHS:-}" ]]; then
     NU_WARMUP_STEPS="$(epoch_to_steps "$HP_WARMUP_EPOCHS" 1)"
 fi
-# Every selectable checkpoint must have an eval metric. Align the save cadence
-# to eval_steps so best-checkpoint selection has at least one eligible step.
+# Best eval improvements are saved immediately by the trainer patch, including
+# between periodic saves. Align periodic saves too, so resume checkpoints are
+# usually scored and can participate in top-K retention.
 if [[ -n "${HP_EVAL_FREQ:-}" && "${HP_EVAL_FREQ:-0}" -gt 0 && "${HP_CKPT_FREQ:-0}" -gt 0 ]]; then
     ALIGNED_CKPT_FREQ="$(python3 - "$HP_CKPT_FREQ" "$HP_EVAL_FREQ" <<'PY'
 import sys

@@ -28,7 +28,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from select_best_checkpoint import load_fullft_eval_points  # noqa: E402
+from select_best_checkpoint import (  # noqa: E402
+    load_fullft_checkpoint_metrics,
+    load_fullft_eval_points,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -78,6 +81,11 @@ def keep_set(steps: dict[int, Path], metrics: dict[int, float], keep: int) -> se
         return set()
     # 再開する先なので、metric の有無に関わらず最新は必ず残す。
     survivors = {max(steps)}
+    # A missing previous-job log must not delete an unscored previous best.
+    survivors.update(
+        s for s, path in steps.items()
+        if s not in metrics and not (path / "miltoka_eval_metrics.json").is_file()
+    )
     scored = sorted(
         ((metrics[s], s) for s in steps if s in metrics),
         key=lambda pair: (pair[0], -pair[1]),
@@ -101,6 +109,10 @@ def main() -> int:
         for step, value in load_fullft_eval_points(log_file, args.metric_key):
             # 同じ step が複数回出たら最後の値を採る。
             metrics[step] = value
+
+    # Prefer scores stored with these weights to logs from another run that
+    # happens to reuse the same step numbers.
+    metrics.update(load_fullft_checkpoint_metrics(args.checkpoints_dir, args.metric_key))
 
     if not metrics:
         # metric が 1 つも読めていない状態で消すと、最新以外を全部落とすことに
@@ -148,7 +160,7 @@ def main() -> int:
     print(f"[prune] kept {kept} / removed {removed} dir(s) / freed {freed / 1e9:.1f} GB")
     missing = [s for s in kept if s not in metrics]
     if missing:
-        print(f"[prune] （うち metric 未記録は {missing}。最新を残す分）")
+        print(f"[prune] （うち metric 未記録は {missing}。評価値が不明なので保持）")
     return 0
 
 
