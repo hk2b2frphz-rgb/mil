@@ -226,7 +226,7 @@ def backchannel_anchors(
             if float(user["start_sec"]) <= start
         ]
         common = {
-            "text": str(row["text"]).strip().strip(STRIP_CHARS),
+            "text": str(row["text"]).strip(),
             "dur_sec": round(float(row["end_sec"]) - start, 4),
         }
         # 「相手の何文字目まで話したところか」。これが両側で唯一そろう量。
@@ -473,7 +473,16 @@ def pick_clip(
     pool = clips
     fell_back = False
     if want_text:
-        same = [clip for clip in clips if str(clip["text"]).strip() == want_text]
+        # Preserve exact forms (including expressive ellipses) when possible.
+        # Word-aligned transcripts may omit terminal punctuation, whereas the
+        # written-vocabulary bank retains it. Normalize both sides only after
+        # exact matching fails; never mistake this for a missing word.
+        wanted = want_text.strip()
+        same = [clip for clip in clips if str(clip["text"]).strip() == wanted]
+        if not same:
+            normalized = wanted.strip(STRIP_CHARS)
+            same = [clip for clip in clips
+                    if str(clip["text"]).strip().strip(STRIP_CHARS) == normalized]
         if same:
             pool = same
         else:
@@ -622,7 +631,7 @@ def splice_dialogue(
         slot_sec = float(end) - float(start)
         moved_to = new_starts.get(row_index)
         place_at = float(start) if moved_to is None else float(moved_to)
-        want = str(text).strip().strip(STRIP_CHARS) if args.match_text else ""
+        want = str(text).strip() if args.match_text else ""
         clip, fell_back = pick_clip(clips, slot_sec, args.match_top_k, rng, want)
         signal = resample_to(clip, sample_rate)
 

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N cmp_render_ai
+#PBS -q xvn_s
+#PBS -l select=1:res=middle2
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Shared settings: scripts/2026-10-07/common.sh
+set -euo pipefail
+export ARM=ai_placement
+exec bash scripts/2026-10-07/run_stage.sh render

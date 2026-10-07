@@ -104,6 +104,26 @@ class ContinuerVocabTest(unittest.TestCase):
 
 
 class PickTest(unittest.TestCase):
+    def test_terminal_punctuation_does_not_trigger_a_different_word_fallback(self) -> None:
+        clips = [{**clip(0.9), "text": "はい。"}, {**clip(0.2), "text": "うん。"}]
+        chosen, fell_back = splice.pick_clip(clips, 0.2, 1, random.Random(0), "はい")
+        self.assertEqual(chosen["text"], "はい。")
+        self.assertFalse(fell_back)
+
+    def test_exact_expressive_form_wins_over_normalized_word(self) -> None:
+        clips = [{**clip(0.2), "text": "そうですか。"}, {**clip(0.9), "text": "そうですか…。"}]
+        chosen, fell_back = splice.pick_clip(clips, 0.2, 1, random.Random(0), "そうですか…。")
+        self.assertEqual(chosen["text"], "そうですか…。")
+        self.assertFalse(fell_back)
+
+    def test_anchor_retains_exact_text_for_bank_matching(self) -> None:
+        placements = [
+            {"label": "SPEAKER_USER", "text": "話しています。", "start_sec": 0.0, "end_sec": 2.0},
+            {"label": "SPEAKER_MAIN", "text": "そうですか…。", "start_sec": 1.0, "end_sec": 1.5},
+        ]
+        anchors = splice.backchannel_anchors(placements, 99, None)
+        self.assertEqual(anchors[0]["text"], "そうですか…。")
+
     def test_the_nearest_length_is_taken_when_k_is_one(self) -> None:
         clips = [clip(0.2), clip(0.5), clip(0.9)]
         chosen, fell_back = splice.pick_clip(clips, 0.52, 1, random.Random(0))

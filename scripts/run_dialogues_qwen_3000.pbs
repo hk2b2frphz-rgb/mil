@@ -262,7 +262,19 @@ export DUMP_AGENT_PROMPTS="${DUMP_AGENT_PROMPTS:-1}"
 export RUN_ID
 export OUT_ROOT
 
-bash scripts/run_full_duplex_training_data.sh
+if [[ -n "${AIZUCHI_REPOSITION_SOURCE:-}" ]]; then
+    # Reuse this job's local Qwen server to place reactions on frozen dialogue
+    # text. Do not generate a new user conversation for the paired ablation.
+    uv run python scripts/aizuchi_comparison.py ai \
+        --source "$AIZUCHI_REPOSITION_SOURCE" \
+        --out "$OUT_ROOT/llm_dialogues/dialogues.jsonl" \
+        --vocab "${AIZUCHI_VOCAB_FILE:?}" \
+        --concurrency "${MULTI_AGENT_CONCURRENCY:-16}" \
+        --max-per-sentence "${AI_MAX_PER_SENTENCE:-3}" \
+        --min-chars "${AI_MIN_GAP_CHARS:-24}"
+else
+    bash scripts/run_full_duplex_training_data.sh
+fi
 
 DIALOGUES_FINAL="$OUT_ROOT/llm_dialogues/dialogues.jsonl"
 test -s "$DIALOGUES_FINAL"

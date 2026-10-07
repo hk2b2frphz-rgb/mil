@@ -588,3 +588,7 @@ qsub -v LORA_CKPT=/path/to/checkpoint/consolidated/lora.safetensors scripts/merg
 | `eval_sets/` | 評価シナリオと正解データ |
 | `gemma_runtime/` | 対話生成・カスケード用 Gemma の隔離 venv |
 | `agent_hpc/` | A100 上のコーディングモデルをローカルから使う一式 |
+
+2026-10-07追加のreal-v2・従来の重畳TTS・相槌AI配置の3条件比較は、
+[実験手順とPBS一覧](scripts/2026-10-07/README.md)を参照してください。
+`bash scripts/2026-10-07/submit_comparison.sh` で準備・学習チェーン・評価を投入できます。

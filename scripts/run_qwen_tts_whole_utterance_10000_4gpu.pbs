@@ -243,6 +243,7 @@ export VERBOSE="${VERBOSE:-0}"
 # a primary failure. Mixed mode must finish both model passes before alignment,
 # so it pre-synthesizes the spare set too (up to this additional fraction).
 export SPARE_RATIO="${SPARE_RATIO:-0.15}"
+export QWEN_NO_OPENING_GREETING="${QWEN_NO_OPENING_GREETING:-0}"
 
 if ! [[ "$NUM_SHARDS" =~ ^[0-9]+$ ]] || [[ "$NUM_SHARDS" -lt 1 ]]; then
     echo "ERROR: NUM_SHARDS must be a positive integer: $NUM_SHARDS" >&2
@@ -539,6 +540,11 @@ if env["TTS_BACKEND"] == "qwen3":
         "qwen3_tts_vllm_backend_sha256": sha256_file(qwen_backend),
     })
 
+# Keep pre-existing default locks compatible. The non-default behavior is
+# fingerprinted so a resume cannot silently change the opening audio.
+if env["QWEN_NO_OPENING_GREETING"] == "1":
+    config["no_opening_greeting"] = True
+
 if (
     env["TTS_BACKEND"] == "qwen3"
     and env["QWEN_VOICE_MODE"] in {"clone", "mixed"}
@@ -787,6 +793,9 @@ for ((i = 0; i < NUM_SHARDS; i++)); do
         fi
         if [[ "$RESUME" == "1" ]]; then
             tts_args+=(--resume)
+        fi
+        if [[ "$QWEN_NO_OPENING_GREETING" == "1" ]]; then
+            tts_args+=(--no-opening-greeting)
         fi
         if [[ "$VERBOSE" == "1" ]]; then
             tts_args+=(--verbose)

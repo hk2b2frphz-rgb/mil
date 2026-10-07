@@ -511,10 +511,22 @@ fi
 NU_RESUME="${NU_RESUME:-1}"
 RESUME_STEP_DIR=""
 if [[ "$NU_RESUME" == "1" ]]; then
-    RESUME_STEP_DIR="$(ls -d "$NU_OUTPUT_DIR"/step_* 2>/dev/null \
-        | sed 's#.*/step_##' | sort -n | tail -n 1 || true)"
-    if [[ -n "$RESUME_STEP_DIR" ]]; then
-        RESUME_STEP_DIR="$NU_OUTPUT_DIR/step_$RESUME_STEP_DIR"
+    if [[ -n "${NU_RESUME_STEP_DIR:-}" ]]; then
+        # The walltime chain can select a settled checkpoint while leaving a
+        # newer, interrupted save in place. Do not override that safe choice.
+        RESUME_STEP_DIR="$(realpath -m "$NU_RESUME_STEP_DIR")"
+        if [[ "$(dirname "$RESUME_STEP_DIR")" != "$NU_OUTPUT_DIR" \
+              || ! "$(basename "$RESUME_STEP_DIR")" =~ ^step_[0-9]+$ \
+              || ! -d "$RESUME_STEP_DIR" ]]; then
+            echo "ERROR: NU_RESUME_STEP_DIR must be an existing step_N under NU_OUTPUT_DIR" >&2
+            exit 1
+        fi
+    else
+        RESUME_STEP_DIR="$(ls -d "$NU_OUTPUT_DIR"/step_* 2>/dev/null \
+            | sed 's#.*/step_##' | sort -n | tail -n 1 || true)"
+        if [[ -n "$RESUME_STEP_DIR" ]]; then
+            RESUME_STEP_DIR="$NU_OUTPUT_DIR/step_$RESUME_STEP_DIR"
+        fi
     fi
 fi
 if [[ -n "$RESUME_STEP_DIR" ]]; then
