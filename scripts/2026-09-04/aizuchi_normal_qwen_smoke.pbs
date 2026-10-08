@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N az_n_qwnsmk
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# The comparison arm of aizuchi_normal_kaburi_smoke.pbs: the SAME dialogues
+# through the existing Qwen3-TTS whole-utterance path (per-speaker synthesis +
+# MMS_FA alignment), on one GPU, with the same moshi clone voice and the same
+# report at the end.
+#
+#   qsub -V scripts/2026-09-04/aizuchi_normal_qwen_smoke.pbs
+#   NUM_DIALOGUES=10 qsub -V scripts/2026-09-04/aizuchi_normal_qwen_smoke.pbs
+#
+# Interactive node equivalent:
+#
+#   bash scripts/run_tts_smoke.sh qwen 3
+#
+# Settings are exactly aizuchi_normal_tts_3000.pbs (vLLM-Omni engine, V100
+# queue, mixed voice mode) with the dialogue count cut down, so the timings
+# here scale to that job. Needs .venv-vllm-omni -- see
+# scripts/setup_vllm_omni_v100_env.sh.
+#
+# Both smokes leave their output under data/runs/smoke/, so afterwards the two
+# can be printed side by side:
+#
+#   uv run python scripts/report_tts_smoke.py \
+#       --training-dir data/runs/smoke/<kaburi_run>/shard_000/training_set --label kaburi \
+#       --training-dir data/runs/smoke/<qwen_run>/shard_000/training_set   --label qwen3
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+exec bash scripts/run_tts_smoke.sh qwen "${NUM_DIALOGUES:-3}"

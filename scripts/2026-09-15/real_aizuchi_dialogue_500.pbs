@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N ra_dlg500
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# STEP 1 of 4. 500 listener-only dialogues, real backchannel vocabulary,
+# placement decided by the model.
+#
+#   qsub -V scripts/2026-09-15/real_aizuchi_dialogue_500.pbs
+#
+# Two things differ from the aizuchi_normal corpora.
+#
+# The vocabulary is built on the one measured in the real recording rather than
+# the written one. Its top four words -- 76% of the 116 backchannels counted --
+# appear nowhere in the vocabulary the earlier corpora were generated from, so
+# a corpus built on the written list cannot be used to study them.
+#
+# But the measured list alone is not enough. A transcript flattens a
+# backchannel to one word; what was actually said carries a lengthening and a
+# trailing fall, and that is where the listening is. A corpus of bare "un" and
+# "sokka" sounds like someone half-attending. So the vocabulary here keeps the
+# measured family frequencies and splits each family across its lengthened,
+# doubled and trailing forms -- listening_vocab.tsv -- and the prompt asks for
+# them rather than merely permitting them.
+#
+# The placement is the model's. The earlier route scored each clause boundary,
+# rolled dice against a per-boundary probability, and capped the count per
+# utterance; the model was then asked only which word to say at positions
+# already chosen. Nothing in that asks whether this is a place a listener
+# should respond. Here the model is given the utterance split into clauses and
+# chooses the positions itself, with no cap, and is told explicitly to respond
+# where the speaker finishes -- a listener that goes quiet at the end of a
+# sentence sounds like one who stopped listening.
+#
+# no-repeat-window is 0 because the vocabulary is now seven words rather than
+# seventeen. The default of 3 would forbid a word for three turns after use,
+# and the real recording says "un" alone was one backchannel in four.
+#
+# A100 for the dialogue LLM (vLLM, Qwen3.6-27B).
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export CORPUS_VERSION="${CORPUS_VERSION:-v1}"
+export BATCH_ID="real_aizuchi_500_${CORPUS_VERSION}"
+export OUT_ROOT="$PWD/data/runs/real_aizuchi_500_${CORPUS_VERSION}/dialogue"
+export NUM_CASES="${NUM_CASES:-500}"
+
+export DIALOGUE_GENERATION_MODE="aizuchi-only"
+# Position: probability per clause boundary, like the original rule-based
+# route, with one change -- the end of the utterance is now guaranteed
+# (previously it was drawn from the same rates as mid-utterance positions, so
+# a listener could still go quiet after the speaker finished). Word: chosen
+# by the same LLM call the rule-based route used, not at random -- deciding
+# among a handful of short acknowledgement words still benefits from seeing
+# what was just said (e.g. preferring an acknowledgement word right after a
+# fact/feeling lands), which a uniform random pick can't do.
+export AIZUCHI_ONLY_PLACEMENT="density"
+# 0 = no backchannels at all, 0.25/0.5/0.75 = reserved/normal/eager, 1 = flood
+# (the "too much" upper bound; not the inference/production default, but fine
+# to use when generating training data). Values between anchors interpolate
+# continuously, replacing the discrete preset choice.
+export AIZUCHI_DENSITY="${AIZUCHI_DENSITY:-0.5}"
+# AIZUCHI_DENSITY_MIXED=1 ignores AIZUCHI_DENSITY and draws a fresh 0-1 value
+# per dialogue instead, so one job's output spans the whole range rather than
+# sitting at one fixed value. Needed if you want the model conditioned on
+# frequency -- see the "density conditioning" section in README.md -- since a
+# fixed-density job gives every dialogue the same unspoken tag, which is
+# nothing for the model to learn to distinguish. Off by default: it does not
+# change what a fixed-value run produces.
+export AIZUCHI_DENSITY_MIXED="${AIZUCHI_DENSITY_MIXED:-0}"
+# Vocabulary is the written default (AIZUCHI_ONLY_VOCAB: hai/ee/sou-nan-desu-ne/
+# aa... etc) minus one entry. The real-recording-derived listening_vocab.tsv
+# put "sokka" in reach for almost every position and it stood out; reverting
+# to the plain written list traded that for a smaller version of the same
+# problem, bare "un." alone standing out the same way, while "un, un." and
+# "hai, hai." (also in the written list) did not.
+# aizuchi_vocab_no_bare_un.tsv is the written list with only that one entry
+# removed. scripts/2026-09-15/listening_vocab.tsv and real_aizuchi_examples.md
+# are kept on disk if the real-vocabulary direction is worth revisiting.
+export AIZUCHI_VOCAB_FILE="$PWD/scripts/2026-09-15/aizuchi_vocab_no_bare_un.tsv"
+# Examples apply here too -- density mode calls the same word-choice prompt
+# builder (build_aizuchi_only_agent_prompt) as rule mode, only the position
+# logic differs. Thinking (below) is still llm-mode-only: density's LLM call
+# is a short word pick from a handful of options, not open-ended placement.
+export AIZUCHI_ONLY_EXAMPLE="${AIZUCHI_ONLY_EXAMPLE:-0}"
+
+# Thinking, off by default. This pipeline otherwise steers models AWAY from
+# reasoning (via /no_think and a lowered reasoning_effort) because most agent
+# calls have too small a token budget for a reasoning model to reach its
+# content channel at all. The aizuchi placement call is the one place that
+# might benefit from it -- it is deciding WHERE to respond by weighing what
+# has been said, how far the sentence has gone, and how much weight it
+# carries, which is closer to reasoning than most of what the other agents do.
+# AIZUCHI_ENABLE_THINKING=1 gives it a much larger token budget
+# (AIZUCHI_THINKING_MAX_TOKENS, default 1600) so reasoning does not simply eat
+# the whole response and leave nothing for the JSON answer.
+export AIZUCHI_ENABLE_THINKING="${AIZUCHI_ENABLE_THINKING:-0}"
+export AIZUCHI_THINKING_MAX_TOKENS="${AIZUCHI_THINKING_MAX_TOKENS:-1600}"
+
+# The frequency preset only feeds the rule-based placement, which is off here.
+# It is still set so the run records which one it would have been.
+export AIZUCHI_ONLY_FREQUENCY="normal"
+export AIZUCHI_ONLY_MIN_BLOCKS="${AIZUCHI_ONLY_MIN_BLOCKS:-4}"
+export AIZUCHI_ONLY_MAX_BLOCKS="${AIZUCHI_ONLY_MAX_BLOCKS:-6}"
+
+# Silences and "are you still listening?" checks are ON here, unlike normal v6.
+# A listener model has to learn two things that only exist in this data: that a
+# silence is not to be filled with backchannels, and that a direct question is
+# to be answered rather than acknowledged. A check only follows a silence --
+# that is what provokes it -- so the silence rate gates both.
+export AIZUCHI_ONLY_MAX_SILENCES="${AIZUCHI_ONLY_MAX_SILENCES:-2}"
+export AIZUCHI_ONLY_SILENCE_RATE="${AIZUCHI_ONLY_SILENCE_RATE:-0.25}"
+export AIZUCHI_ONLY_SILENCE_MIN_SEC="${AIZUCHI_ONLY_SILENCE_MIN_SEC:-2.0}"
+export AIZUCHI_ONLY_SILENCE_MAX_SEC="${AIZUCHI_ONLY_SILENCE_MAX_SEC:-5.0}"
+export AIZUCHI_ONLY_PROBE_RATE="${AIZUCHI_ONLY_PROBE_RATE:-0.5}"
+
+exec bash scripts/run_dialogues_qwen_3000.pbs

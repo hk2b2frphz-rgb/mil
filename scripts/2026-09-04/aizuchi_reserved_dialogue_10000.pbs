@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N az_r_dlg10k3
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# Experiment 1: 10,000 listener-only dialogues with reserved backchannels, v3.
+# Keep every setting aligned with the normal-v3 corpus except frequency, so
+# the comparison isolates the effect of the backchannel policy.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export AIZUCHI_VERSION="v3"
+export BATCH_ID="qwen_aizuchi_10000_reserved_${AIZUCHI_VERSION}"
+export OUT_ROOT="$PWD/data/runs/aizuchi_reserved_10000_${AIZUCHI_VERSION}/dialogue"
+export NUM_CASES="${NUM_CASES:-10000}"
+export DIALOGUE_GENERATION_MODE="aizuchi-only"
+export AIZUCHI_ONLY_FREQUENCY="reserved"
+
+export AIZUCHI_ONLY_MIN_BLOCKS="${AIZUCHI_ONLY_MIN_BLOCKS:-6}"
+export AIZUCHI_ONLY_MAX_BLOCKS="${AIZUCHI_ONLY_MAX_BLOCKS:-10}"
+export AIZUCHI_ONLY_SILENCE_RATE="${AIZUCHI_ONLY_SILENCE_RATE:-0.35}"
+export AIZUCHI_ONLY_SILENCE_MIN_SEC="${AIZUCHI_ONLY_SILENCE_MIN_SEC:-2.5}"
+export AIZUCHI_ONLY_SILENCE_MAX_SEC="${AIZUCHI_ONLY_SILENCE_MAX_SEC:-6.0}"
+export AIZUCHI_ONLY_PROBE_RATE="${AIZUCHI_ONLY_PROBE_RATE:-0.5}"
+
+exec bash scripts/run_dialogues_qwen_10000.pbs

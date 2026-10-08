@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N cmp_train_v2
+#PBS -q xan_s
+#PBS -l select=1:res=middle
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Shared settings: scripts/2026-10-07/common.sh
+set -euo pipefail
+export ARM=real_v2
+exec bash scripts/2026-10-07/run_stage.sh train

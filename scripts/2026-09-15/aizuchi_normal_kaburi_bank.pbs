@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N kab_bank
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# KABURI places the backchannels; the bank supplies the audio.
+#
+#   qsub -V scripts/2026-09-15/aizuchi_normal_kaburi_bank.pbs
+#   NUM_DIALOGUES=5 BANK_DIR=data/runs/diversity/<run> \
+#     qsub -V scripts/2026-09-15/aizuchi_normal_kaburi_bank.pbs
+#
+# Interactive node equivalent:
+#
+#   bash scripts/run_kaburi_bank_dialogues.sh 3
+#
+# The first thing the bank-and-retrieve idea can actually be listened to on.
+# The dialogue is rendered with KABURI as usual, then every backchannel on the
+# listener's channel is replaced, in the finished stereo file, by a clip drawn
+# from a diversity run and matched on length. Placement and the other speaker
+# are untouched down to the sample, so the two outputs are directly comparable
+# and the report prints both rows.
+#
+# BANK_DIR defaults to the newest data/runs/diversity/* -- build one first with
+# scripts/2026-09-14/qwen3_tts_diversity_probe.pbs (20 spellings) or
+# scripts/2026-09-14/qwen3_tts_temperature_sweep.pbs (one word, 150 draws).
+# The sweep is the better stock here: one word, more of it, wider in length.
+#
+# A100 because the KABURI codec decodes in bfloat16. The splice is CPU-only and
+# can be re-run by hand afterwards to try different matching:
+#
+#   uv run python scripts/splice_aizuchi_bank.py --training-dir <dir> \
+#       --bank-dir <bank> --out-dir <dir>_k1 --match-top-k 1
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export NUM_DIALOGUES="${NUM_DIALOGUES:-3}"
+export AIZUCHI_PRESET="${AIZUCHI_PRESET:-normal}"
+
+exec bash scripts/run_kaburi_bank_dialogues.sh "$NUM_DIALOGUES"

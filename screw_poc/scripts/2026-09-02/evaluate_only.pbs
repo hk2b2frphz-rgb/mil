@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N screw_0902_eval
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# Evaluation without training: render the held-out screw questions as Qwen3-TTS
+# user audio, run Moshi inference with an already trained model, and score the
+# responses. This is the second half of train_and_evaluate.pbs, split out so a
+# finished training run can be scored (or re-scored) on its own.
+#
+# Two things it is for:
+#   1. Continuing an evaluation that died after training succeeded -- the LoRA
+#      model is already merged on disk, so there is no need to train again.
+#   2. Evaluating any model: point MODEL_WEIGHT at its consolidated.safetensors.
+#
+# Submit:
+#   qsub -V screw_poc/scripts/2026-09-02/evaluate_only.pbs
+#
+# Evaluate a specific model instead of the newest merged one:
+#   qsub -V -v MODEL_WEIGHT=/path/to/consolidated.safetensors \
+#       screw_poc/scripts/2026-09-02/evaluate_only.pbs
+#
+# The job resumes: TTS inputs are reused when they are already complete, and
+# inference only runs for queries that have no transcript yet. So if it hits
+# the walltime, just submit it again with the same EVAL_OUT. Because EVAL_OUT
+# defaults to a fixed directory (no job id in the name), plain re-submission
+# already resumes; pass EVAL_OUT=<dir> to continue a specific earlier run, for
+# example one that train_and_evaluate.pbs created.
+#
+# Variables:
+#   MODEL_WEIGHT=<path>   Model to evaluate. Default: newest
+#                          screw_poc/experiments/lora_base_config/merged/**/consolidated.safetensors
+#   EVAL_OUT=<dir>        Output/resume directory.
+#   EVAL_SOURCE=<path>    Held-out dialogues. Default:
+#                          screw_poc/artifacts/evaluation_dialogues.jsonl
+#   EVAL_LIMIT=<n>        Number of queries. Default: 48.
+#   FORCE_INPUTS=1        Re-render the TTS inputs even if they look complete.
+#   FORCE_INFERENCE=1     Re-run inference for every query, not just missing ones.
+#
+# A100 (xan_s) matches train_and_evaluate.pbs. Everything here runs in
+# float16, so a V100 (qsub -q xvn_s) may also work, but that is untested.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+[[ -f screw_poc/scripts/run_train.sh ]] || { echo "ERROR: run from repository root" >&2; exit 1; }
+[[ -f scripts/setup_proxy.sh ]] && source scripts/setup_proxy.sh
+# Python run as a file only gets that file's directory on sys.path, so anything
+# under screw_poc/ importing scripts.* needs the repository root as well.
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+
+RUN_DATE="2026-09-02"
+JOB_ID="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"; JOB_ID="${JOB_ID%%.*}"
+EVAL_SOURCE="${EVAL_SOURCE:-$PWD/screw_poc/artifacts/evaluation_dialogues.jsonl}"
+EVAL_OUT="${EVAL_OUT:-$PWD/screw_poc/artifacts/${RUN_DATE}_heldout_eval}"
+EVAL_LIMIT="${EVAL_LIMIT:-48}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+
+[[ -s "$EVAL_SOURCE" ]] || { echo "ERROR: missing held-out dialogue data: $EVAL_SOURCE" >&2; exit 1; }
+if ! [[ "$EVAL_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: EVAL_LIMIT must be a positive integer: $EVAL_LIMIT" >&2
+    exit 1
+fi
+
+MODEL_WEIGHT="${MODEL_WEIGHT:-}"
+if [[ -z "$MODEL_WEIGHT" ]]; then
+    # '|| true': with pipefail a missing merged/ directory would otherwise abort
+    # the job here, before the explanatory error below can be printed.
+    MODEL_WEIGHT="$(find screw_poc/experiments/lora_base_config/merged \
+        -type f -name consolidated.safetensors -printf '%T@ %p\n' 2>/dev/null \
+        | sort -nr | head -1 | cut -d' ' -f2- || true)"
+fi
+if [[ -z "$MODEL_WEIGHT" || ! -f "$MODEL_WEIGHT" ]]; then
+    echo "ERROR: no model to evaluate. Train first (screw_poc/scripts/2026-09-02/train_and_evaluate.pbs)" >&2
+    echo "       or pass MODEL_WEIGHT=<path to consolidated.safetensors>." >&2
+    exit 1
+fi
+
+mkdir -p "$EVAL_OUT" screw_poc/artifacts/pbs_logs
+exec > >(tee -a "screw_poc/artifacts/pbs_logs/${RUN_DATE}_eval_${JOB_ID}.log") 2>&1
+
+echo "===== screw PoC ${RUN_DATE}: held-out evaluation only ====="
+echo "job_id:       ${PBS_JOBID:-n/a}"
+echo "host:         $(hostname)"
+echo "model:        $MODEL_WEIGHT"
+echo "eval_source:  $EVAL_SOURCE"
+echo "eval_out:     $EVAL_OUT"
+echo "eval_limit:   $EVAL_LIMIT"
+echo "started_at:   $(date -Iseconds)"
+echo "==========================================================="
+
+# ---------------------------------------------------------------------------
+# 1) Held-out questions -> Qwen3-TTS user audio (skipped when already complete)
+# ---------------------------------------------------------------------------
+NEED_INPUTS=1
+if [[ "${FORCE_INPUTS:-0}" != "1" && -s "$EVAL_OUT/reference.jsonl" ]]; then
+    have_ref="$(grep -c . "$EVAL_OUT/reference.jsonl" || true)"
+    have_wav="$(find "$EVAL_OUT/inputs" -type f -name '*.wav' 2>/dev/null | wc -l)"
+    if [[ "$have_ref" -eq "$EVAL_LIMIT" && "$have_wav" -eq "$EVAL_LIMIT" ]]; then
+        NEED_INPUTS=0
+        echo "[eval] reusing $have_wav existing TTS inputs"
+    else
+        echo "[eval] existing inputs are incomplete (ref=$have_ref wav=$have_wav of $EVAL_LIMIT); rebuilding"
+    fi
+fi
+if [[ "$NEED_INPUTS" == "1" ]]; then
+    uv run python "screw_poc/scripts/${RUN_DATE}/build_eval_inputs.py" \
+        --source "$EVAL_SOURCE" --out-dir "$EVAL_OUT" --limit "$EVAL_LIMIT" \
+        --device cuda --dtype float16
+fi
+
+# ---------------------------------------------------------------------------
+# 2) Moshi inference, only for queries that have no transcript yet
+# ---------------------------------------------------------------------------
+PENDING=()
+if [[ "${FORCE_INFERENCE:-0}" == "1" ]]; then
+    mapfile -t PENDING < <(find "$EVAL_OUT/inputs" -type f -name '*.wav' | sort)
+    echo "[eval] FORCE_INFERENCE=1: running inference for all ${#PENDING[@]} queries"
+else
+    mapfile -t PENDING < <(uv run python - "$EVAL_OUT/reference.jsonl" "$EVAL_OUT/inputs" "$EVAL_OUT/inference" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+reference, inputs, inference = map(Path, sys.argv[1:])
+for line in reference.read_text(encoding="utf-8").splitlines():
+    if not line.strip():
+        continue
+    row_id = str(json.loads(line)["id"])
+    if (inference / row_id / "seed_0" / "transcript.txt").is_file():
+        continue
+    wav = inputs / f"{row_id}.wav"
+    if wav.is_file():
+        print(wav)
+PY
+    )
+fi
+
+if [[ "${#PENDING[@]}" -eq 0 ]]; then
+    echo "[eval] every query already has a transcript; skipping inference"
+else
+    echo "[eval] running inference for ${#PENDING[@]} query/queries"
+    uv run python response_recorder.py --inputs "${PENDING[@]}" --out-dir "$EVAL_OUT/inference" \
+        --moshi-weight "$MODEL_WEIGHT" --device cuda --half --seeds 0 \
+        --silence-sec 8 --max-gen-sec 30 --response-sec 15
+fi
+
+# ---------------------------------------------------------------------------
+# 3) Collect transcripts and score
+# ---------------------------------------------------------------------------
+uv run python - "$EVAL_OUT/reference.jsonl" "$EVAL_OUT/inference" "$EVAL_OUT/predictions.jsonl" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+reference, inference, out = map(Path, sys.argv[1:])
+rows = [json.loads(line) for line in reference.read_text(encoding="utf-8").splitlines() if line]
+predictions = []
+missing = []
+for row in rows:
+    path = inference / str(row["id"]) / "seed_0" / "transcript.txt"
+    if path.is_file():
+        predictions.append({"id": row["id"], "response_text": path.read_text(encoding="utf-8").strip()})
+    else:
+        missing.append(str(row["id"]))
+out.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in predictions), encoding="utf-8")
+print(f"[eval] transcripts: {len(predictions)}/{len(rows)}")
+if missing:
+    print("[eval] WARN: still missing: " + ", ".join(missing[:10]) + ("..." if len(missing) > 10 else ""))
+PY
+
+[[ -s "$EVAL_OUT/predictions.jsonl" ]] || { echo "ERROR: no transcripts were produced" >&2; exit 1; }
+
+uv run python screw_poc/scripts/score_predictions.py "$EVAL_OUT/predictions.jsonl" \
+    --reference "$EVAL_OUT/reference.jsonl" | tee "$EVAL_OUT/score.json"
+
+echo "EVAL_OK=$EVAL_OUT"
+echo "finished_at: $(date -Iseconds)"

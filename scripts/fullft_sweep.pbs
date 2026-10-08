@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N job_full_hp
+#PBS -q xan_s
+#PBS -l select=1:res=middle
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# Runs one or more full-fine-tuning sweep patterns (scripts/run_fullft_sweep_pair.sh
+# -> scripts/run_nu_fullft_experiment.sh per pattern). After each pattern trains,
+# the best-eval-loss checkpoint is auto-selected, exported, and by default
+# evaluated on Full-Duplex-Bench-JA (scripts/run_full_duplex_eval.sh).
+#
+# Useful overrides:
+#   SWEEP_PATTERNS=f01,f02        Comma/space-separated sweep patterns.
+#   NUM_CASES=250                 Dataset size when generating a new shared dataset.
+#   SRC_RUN_DIR=data/runs/...     Reuse an existing dataset instead of generating one.
+#   SKIP_AUTO_POSTPROCESS=1       Skip best-checkpoint selection/export entirely.
+#   SKIP_AUTO_EVAL=1              Skip only the automatic Full-Duplex-Bench-JA eval
+#                                 (checkpoint export still happens).
+#   FDB_OPENING_GREETING=1        Passed through to the auto-eval (default 1). Keep
+#                                 at 1 when SRC_RUN_DIR's data was generated with the
+#                                 fixed opening greeting (generate_qwen3_tts_data.py's
+#                                 default). Set to 0 if the training data was
+#                                 generated with --no-opening-greeting, so the
+#                                 auto-eval doesn't reserve lead-in for a line the
+#                                 model was never trained to say.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+source scripts/setup_pbs_distributed.sh
+
+export RUN_ID="${RUN_ID:-full_${JOB_ID_SHORT}}"
+export SWEEP_PATTERNS="${SWEEP_PATTERNS:-f01}"
+export NUM_CASES="${NUM_CASES:-250}"
+export NPROC="${NPROC:-2}"
+# `#PBS -V` inherits the submit shell's whole environment, which can carry a
+# stale single-GPU CUDA_VISIBLE_DEVICES (e.g. "0" from a prior interactive
+# session or .bashrc). With `${VAR:-default}` that stale value survives, and
+# `accelerate launch --num_processes 2` then maps both ranks onto cuda:0 --
+# i.e. training silently runs on one GPU ("0,0"). Derive the visible-GPU list
+# from NPROC unconditionally so inheritance can't shrink it. To pick specific
+# GPUs on purpose, pass GPU_LIST=... (e.g. -v GPU_LIST=2,3) instead.
+if [[ -n "${GPU_LIST:-}" ]]; then
+    export CUDA_VISIBLE_DEVICES="$GPU_LIST"
+else
+    export CUDA_VISIBLE_DEVICES="$(seq -s, 0 $((NPROC - 1)))"
+fi
+export MLFLOW_EXPERIMENT_NAME="${MLFLOW_EXPERIMENT_NAME:-job_fullft_hp}"
+export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-sqlite:///$PWD/mlruns/mlflow.db}"
+export MLFLOW_ARTIFACT_ROOT="${MLFLOW_ARTIFACT_ROOT:-file:$PWD/mlruns/artifacts}"
+export MLFLOW_LIVE_SYNC_INTERVAL="${MLFLOW_LIVE_SYNC_INTERVAL:-120}"
+
+# tqdm writes one line per iteration when stdout is not a terminal, which is
+# exactly the case here (the stream is piped into tee). That alone produced
+# pbs_logs files too large to open. Silence it at the source; the periodic
+# logging_steps lines carry the same information in a readable amount.
+export TQDM_DISABLE="${TQDM_DISABLE:-1}"
+
+mkdir -p experiments/pbs_logs
+# Full stream to .raw.log for debugging, compacted stream to the file people
+# actually open (and to the PBS .o file). See scripts/compact_log.py.
+exec > >(python3 -u scripts/compact_log.py "experiments/pbs_logs/${RUN_ID}.raw.log" \
+    | tee -a "experiments/pbs_logs/${RUN_ID}.log") 2>&1
+
+# Which job file a chained handoff should resubmit. Patterns that do not
+# fit in this walltime are handed to a fresh copy of this job instead of
+# being silently dropped (scripts/sweep_chain.sh). Disable with SWEEP_CHAIN=0.
+export SELF_PBS="${SELF_PBS:-scripts/fullft_sweep.pbs}"
+
+bash scripts/run_fullft_sweep_pair.sh

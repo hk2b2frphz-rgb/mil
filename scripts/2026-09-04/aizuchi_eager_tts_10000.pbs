@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N az_e_tts10k3
+#PBS -q xvn_s
+#PBS -l select=1:res=middle2
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# Experiment 1: Qwen3-TTS for the eager-frequency v3 corpus.
+# Re-submit this file after walltime to resume unfinished shards.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export CLONE_OUT_DIR_MOSHI="$PWD/data/clone_examples/99999"
+export AIZUCHI_VERSION="v3"
+export SOURCE_BATCH_ID="qwen_aizuchi_10000_eager_${AIZUCHI_VERSION}"
+export BATCH_ID="aizuchi_eager_10000_${AIZUCHI_VERSION}_tts_vllm"
+export DIALOGUES_JSONL="$PWD/data/runs/aizuchi_eager_10000_${AIZUCHI_VERSION}/dialogue/llm_dialogues/dialogues.jsonl"
+export OUT_ROOT="$PWD/data/runs/aizuchi_eager_10000_${AIZUCHI_VERSION}/tts"
+export NUM_DIALOGUES="${NUM_DIALOGUES:-10000}"
+
+exec bash scripts/run_qwen_tts_vllm_10000_4gpu.pbs

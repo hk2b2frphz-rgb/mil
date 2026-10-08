@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N az_e_kabsmk
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# KABURI-TTS smoke on the EAGER(v7) aizuchi corpus. Eager counterpart of
+# aizuchi_normal_kaburi_smoke.pbs: same TTS, same voices, same report -- only
+# the backchannel-frequency corpus differs, which is what makes the two
+# comparable.
+#
+#   qsub -V scripts/2026-09-04/aizuchi_eager_kaburi_smoke.pbs
+#   NUM_DIALOGUES=10 qsub -V scripts/2026-09-04/aizuchi_eager_kaburi_smoke.pbs
+#
+# Interactive node equivalent:
+#
+#   AIZUCHI_PRESET=eager bash scripts/run_tts_smoke.sh kaburi-pred 3
+#
+# v7, not v6: the eager preset was raised above normal after the v6 eager run
+# came out sparser than normal-v6, so the eager v6 corpus is not comparable
+# with this one. Needs the corpus from
+# scripts/2026-09-04/aizuchi_eager_dialogue_3000.pbs.
+#
+# What to read in the report: eager raises reactions per turn (max 4 vs 3) and
+# drops min_gap to 0, so the script carries more backchannels than normal. That
+# does not by itself raise overlap -- whether they land on top of the speaker is
+# KABURI's gap model's decision, so compare the overlap column against the
+# normal run rather than assuming more backchannels means more overlap.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export AIZUCHI_PRESET="eager"
+
+exec bash scripts/run_tts_smoke.sh kaburi-pred "${NUM_DIALOGUES:-3}"
