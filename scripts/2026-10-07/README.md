@@ -1,12 +1,12 @@
-# real-v2との3条件の比較（2026-10-07）
+# real-v2との3条件の比較（2026-10-07作成、2026-10-08更新）
 
 | 条件 / 出力モデル | 相槌の位置・個数 | 音声の作り方 |
 |---|---|---|
 | `real_v2` | 現行v2：句の切れ目を密度条件の確率で選ぶ | 現行の相槌バンク＋KABURI予測配置 |
 | `traditional_overlap` | `real_v2`と同じ相槌テキスト・位置・個数 | 従来のwhole-utterance Qwen TTSで両者を合成し、句末付近で重畳。バンク・KABURIを使わない |
-| `ai_placement` | 相槌AIが意味を見て位置・語・個数を選ぶ | `real_v2`と同じバンク＋KABURI予測配置 |
+| `ai_placement` | 相槌AIが意味を見て位置・語・個数を選ぶ | `traditional_overlap`と同じ両側Qwen TTS＋重畳。バンク・KABURIを使わない |
 
-`real_v2`→`traditional_overlap`では音声生成・重畳処理を、`real_v2`→`ai_placement`では相槌の配置・個数選択を比較します。AI条件は個数と語も変わるため、位置だけの効果を測る実験ではありません。
+`real_v2`→`traditional_overlap`では音声生成・重畳処理を、`traditional_overlap`→`ai_placement`では同じ音声生成方式のまま相槌の配置・個数選択を比較します。AI条件は個数と語も変わるため、位置だけの効果を測る実験ではありません。`real_v2`とAI条件の直接比較では、音声生成方式も変わります。
 
 話者の発話、沈黙ターン、聞いているかの確認とその返答、対話ID、対話ごとの密度条件は共通です。AIの反応を受けて話者AIに続きを生成させることはせず、凍結した同じ対話に相槌を配置し直します。挨拶は全条件で外します。音声化の手法が異なるため、波形・実現した沈黙や対話の長さは一致しません。
 
@@ -29,17 +29,17 @@ AI側の全回答・制約違反と再要求は `ai_placement/dialogue/llm_dialo
 bash scripts/2026-10-07/submit_comparison.sh
 ```
 
-既定は10,000対話です。まず小さく動作確認する場合：
+既定は10,000対話です。2026-10-08更新後の既定実験IDは `aizuchi_compare_2026-10-08_10000` です。旧AIのKABURI音声・学習済みデータ・checkpointと混在しないよう、新しいIDで実行してください。旧実験の共通対話を使う場合は `COMPARE_SOURCE_INPUT` にその `shared/dialogues.jsonl` を指定できます。まず小さく動作確認する場合：
 
 ```bash
-COMPARE_N=20 COMPARE_ID=aizuchi_compare_2026-10-07_smoke \
+COMPARE_N=20 COMPARE_ID=aizuchi_compare_2026-10-08_smoke \
   bash scripts/2026-10-07/submit_comparison.sh
 ```
 
 既存の `data/runs/real_aizuchi_10000_v2/dialogue/llm_dialogues/dialogues.jsonl` を見つけると流用します。見つからない場合は現行v2の設定で共通対話を生成します。小規模実験でも既存の10,000件から使う場合：
 
 ```bash
-COMPARE_N=20 COMPARE_ID=aizuchi_compare_2026-10-07_smoke \
+COMPARE_N=20 COMPARE_ID=aizuchi_compare_2026-10-08_smoke \
 COMPARE_SOURCE_INPUT="$PWD/data/runs/real_aizuchi_10000_v2/dialogue/llm_dialogues/dialogues.jsonl" \
   bash scripts/2026-10-07/submit_comparison.sh
 ```
@@ -49,7 +49,7 @@ COMPARE_SOURCE_INPUT="$PWD/data/runs/real_aizuchi_10000_v2/dialogue/llm_dialogue
 バンク照合は完全一致を優先し、書き起こし側に句読点がない場合は両側を同じように正規化して照合します。従来の片側だけの正規化によって、同じ語の音声が存在するのに別の語へフォールバックする問題も修正しました。既に作成済みの音声は、この修正だけでは書き換わりません。
 
 ```bash
-COMPARE_ID=aizuchi_compare_2026-10-07_other_voice \
+COMPARE_ID=aizuchi_compare_2026-10-08_other_voice \
 COMPARE_CLONE_DIR="$PWD/data/clone_examples/your_reference" \
 COMPARE_BANK="$PWD/data/runs/diversity/your_matching_bank" \
   bash scripts/2026-10-07/submit_comparison.sh
@@ -66,14 +66,14 @@ COMPARE_BANK="$PWD/data/runs/diversity/your_matching_bank" \
 | `prepare_ai_placement.pbs` | 共通対話にAIが相槌を配置 |
 | `render_real_v2.pbs` | 現行のバンク＋KABURIで音声化 |
 | `render_traditional_overlap.pbs` | 従来の両側TTS＋重畳で音声化 |
-| `render_ai_placement.pbs` | AI配置対話をバンク＋KABURIで音声化 |
+| `render_ai_placement.pbs` | AI配置対話を従来方式と同じ両側TTS＋重畳で音声化 |
 | `condition_<条件>.pbs`（3本） | 元の対話密度を無音のテキストタグとして付与 |
 | `assemble_paired_data.pbs` | 3条件の対話IDを検査し、同じ並びの学習用manifestを作成 |
 | `train_<条件>.pbs`（3本） | 共通f01相当のfull-FT。時間切れ時は同じPBSを自動再投入 |
 | `eval_<条件>.pbs`（3本） | 最良checkpointのモデルを同じFull-Duplex-Bench-JAで評価 |
 | `compare_results.pbs` | 3モデルを列としてCSV・Markdown・JSONにまとめる |
 
-投入スクリプトは準備→音声化→条件タグ→対データ検査→学習を `afterok` の依存関係で繋ぎます。従来方式の音声化はバンク準備に依存しません。AI方式だけがAI配置準備にも依存します。
+投入スクリプトは準備→音声化→条件タグ→対データ検査→学習を `afterok` の依存関係で繋ぎます。バンク準備に依存する音声化はreal-v2だけです。従来方式とAI方式はバンク・KABURIの準備を待たずに音声化でき、AI方式はAI配置準備にも依存します。3条件を揃える学習前の検査は全条件の完成を待ちます。
 
 TTSの失敗を別の対話で埋めるspareは無効です。欠落IDや条件タグを付けられなかった対話があると、学習前の検査が失敗します。3条件で異なる成功例だけを使って学習が始まることはありません。3つのmanifestの順番と学習データ分割のseedを揃えます。ただし音声長による訓練チャンク数・具体的なstep数は条件で異なり得ます。
 
@@ -83,7 +83,7 @@ TTSの失敗を別の対話で埋めるspareは無効です。欠落IDや条件�
 
 ## 出力と再実行
 
-既定の出力は `data/runs/aizuchi_compare_2026-10-07_10000/` です。
+既定の出力は `data/runs/aizuchi_compare_2026-10-08_10000/` です。従来方式・AI方式の条件タグ付きデータは、各条件の `tts/merged_conditioned/training_set/` にまとまります。
 
 - `shared/dialogues.jsonl`：凍結した共通対話。
 - `<条件>/tts/`：各音声データ。`<条件>/paired/`：学習に使用するmanifest。
@@ -96,7 +96,7 @@ TTSの失敗を別の対話で埋めるspareは無効です。欠落IDや条件�
 音声化は途中再開に対応します。条件タグの付与は既存と同じく再実行不可です。途中で止まった出力に再度パディングを足さないため、条件付与が失敗した際はその条件のconditioned出力を退避し、当該PBSを再投入してください。一括投入スクリプト全体を再度投入すると学習ジョブが重複し得るため、再開には個別PBSを使います。
 
 ```bash
-qsub -V -v COMPARE_ID=aizuchi_compare_2026-10-07_10000,COMPARE_N=10000 \
+qsub -V -v COMPARE_ID=aizuchi_compare_2026-10-08_10000,COMPARE_N=10000 \
   scripts/2026-10-07/train_ai_placement.pbs
 
 qsub -V scripts/2026-10-07/compare_results.pbs

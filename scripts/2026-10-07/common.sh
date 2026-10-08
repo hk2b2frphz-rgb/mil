@@ -3,7 +3,9 @@
 set -euo pipefail
 export COMPARE_N="${COMPARE_N:-10000}"
 [[ "$COMPARE_N" =~ ^[0-9]+$ && "$COMPARE_N" -ge 2 ]] || { echo 'COMPARE_N must be >=2' >&2; exit 1; }
-export COMPARE_ID="${COMPARE_ID:-aizuchi_compare_2026-10-07_${COMPARE_N}}"
+# New default ID keeps the revised AI direct-TTS arm separate from old KABURI
+# data, prepared datasets, checkpoints and benchmark results.
+export COMPARE_ID="${COMPARE_ID:-aizuchi_compare_2026-10-08_${COMPARE_N}}"
 [[ "$COMPARE_ID" =~ ^[A-Za-z0-9_-]+$ ]] || { echo 'Invalid COMPARE_ID' >&2; exit 1; }
 export COMPARE_ROOT="$PWD/data/runs/$COMPARE_ID"
 export COMPARE_SOURCE="$COMPARE_ROOT/shared/dialogues.jsonl"

@@ -8,6 +8,7 @@
 #PBS -V
 
 # ASCII ONLY. Shared settings: scripts/2026-10-07/common.sh
+# Tag each direct-TTS shard, then merge the conditioned manifests.
 set -euo pipefail
 export ARM=ai_placement
 exec bash scripts/2026-10-07/run_stage.sh condition

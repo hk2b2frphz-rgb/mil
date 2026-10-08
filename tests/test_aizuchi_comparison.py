@@ -181,7 +181,7 @@ class DataTests(unittest.TestCase):
             source = root / "shared/dialogues.jsonl"
             cmp.write_rows(source, [row("a"), row("b")])
             for arm in cmp.ARMS:
-                suffix = "merged_conditioned" if arm == "traditional_overlap" else "placement_bank/shard_000_conditioned"
+                suffix = "placement_bank/shard_000_conditioned" if arm == "real_v2" else "merged_conditioned"
                 training = root / arm / "tts" / suffix / "training_set"
                 audio = training / "data_stereo"
                 audio.mkdir(parents=True)
@@ -272,21 +272,59 @@ class PBSTests(unittest.TestCase):
         env = dict(os.environ, COMPARE_N="20", COMPARE_ID="test_compare", PBS_O_WORKDIR=str(root), **extra)
         return subprocess.run([str(BASH), "-c", command], cwd=root, env=env, capture_output=True, text=True)
 
-    def test_legacy_render_routes_to_direct_tts_with_shared_voice_and_no_greeting(self):
+    def test_legacy_and_ai_render_use_the_same_direct_tts_without_bank_or_kaburi(self):
+        for arm in ("traditional_overlap", "ai_placement"):
+            with self.subTest(arm=arm), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                shutil.copytree(ROOT / "scripts/2026-10-07", root / "scripts/2026-10-07")
+                cmp.write_rows(root / "data/runs/test_compare/shared/dialogues.jsonl", [row()])
+                cmp.write_rows(root / "data/runs/test_compare/ai_placement/dialogue/llm_dialogues/dialogues.jsonl", [row()])
+                # No bank exists. Executing the old route must fail this test.
+                (root / "scripts/run_bank_stereo_test.sh").write_text("exit 77\n", encoding="ascii")
+                stub = root / "scripts/run_qwen_tts_vllm_3000_4gpu.pbs"
+                stub.write_text('printf "%s\\n" "$DIALOGUES_JSONL" "$OUT_ROOT" "$SPARE_RATIO" "$QWEN_NO_OPENING_GREETING" "$QWEN_VOICE_MODE" "$REF_RANK" > routed.txt\n', encoding="ascii")
+                result = self.shell(root, f"bash scripts/2026-10-07/render_{arm}.pbs", OUT_ROOT="wrong", FULL_RENDER="1")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                routes = (root / "routed.txt").read_text().splitlines()
+                expected = "/shared/dialogues.jsonl" if arm == "traditional_overlap" else "/ai_placement/dialogue/llm_dialogues/dialogues.jsonl"
+                self.assertTrue(routes[0].endswith(expected))
+                self.assertTrue(routes[1].endswith(f"/{arm}/tts"))
+                self.assertEqual(routes[2:], ["0", "1", "mixed", "1"])
+
+    def test_ai_condition_tags_each_tts_shard_then_merges_the_direct_output(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             shutil.copytree(ROOT / "scripts/2026-10-07", root / "scripts/2026-10-07")
-            source = root / "data/runs/test_compare/shared/dialogues.jsonl"
-            cmp.write_rows(source, [row()])
-            (root / "scripts/run_bank_stereo_test.sh").write_text("exit 77\n", encoding="ascii")
-            stub = root / "scripts/run_qwen_tts_vllm_3000_4gpu.pbs"
-            stub.write_text('printf "%s\\n" "$DIALOGUES_JSONL" "$OUT_ROOT" "$SPARE_RATIO" "$QWEN_NO_OPENING_GREETING" "$QWEN_VOICE_MODE" "$REF_RANK" > routed.txt\n', encoding="ascii")
-            result = self.shell(root, "bash scripts/2026-10-07/render_traditional_overlap.pbs", OUT_ROOT="wrong", FULL_RENDER="1")
+            dated = root / "scripts/2026-09-15"
+            dated.mkdir()
+            (dated / "real_aizuchi_condition_10000_v2.pbs").write_text(
+                'printf "%s\\t%s\\n" "$SRC_SHARD" "$DST_SHARD" >> conditioned.txt\n', encoding="ascii")
+            command = '''
+uv() { printf '%s\n' "$*" > merged.txt; }
+export -f uv
+bash scripts/2026-10-07/condition_ai_placement.pbs
+'''
+            result = self.shell(root, command, COMPARE_SHARDS="2")
             self.assertEqual(result.returncode, 0, result.stderr)
-            routes = (root / "routed.txt").read_text().splitlines()
-            self.assertTrue(routes[0].endswith("/shared/dialogues.jsonl"))
-            self.assertTrue(routes[1].endswith("/traditional_overlap/tts"))
-            self.assertEqual(routes[2:], ["0", "1", "mixed", "1"])
+            paths = (root / "conditioned.txt").read_text().splitlines()
+            self.assertEqual(len(paths), 2)
+            for i, line in enumerate(paths):
+                src, dst = line.split("\t")
+                self.assertTrue(src.endswith(f"/ai_placement/tts/shard_{i:03d}"))
+                self.assertTrue(dst.endswith(f"/ai_placement/tts/conditioned/shard_{i:03d}"))
+            self.assertIn("/ai_placement/tts/merged_conditioned", (root / "merged.txt").read_text())
+            self.assertNotIn("placement_bank", (root / "merged.txt").read_text())
+
+    def test_old_ai_kaburi_data_cannot_be_reused_for_the_new_render(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shutil.copytree(ROOT / "scripts/2026-10-07", root / "scripts/2026-10-07")
+            cmp.write_rows(root / "data/runs/test_compare/shared/dialogues.jsonl", [row()])
+            cmp.write_rows(root / "data/runs/test_compare/ai_placement/dialogue/llm_dialogues/dialogues.jsonl", [row()])
+            (root / "data/runs/test_compare/ai_placement/tts/placement_bank").mkdir(parents=True)
+            result = self.shell(root, "bash scripts/2026-10-07/render_ai_placement.pbs")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("use a new COMPARE_ID", result.stderr)
 
     def test_fullft_runner_honors_safe_checkpoint_and_refuses_a_foreign_directory(self):
         source = (ROOT / "scripts/run_nu_fullft_experiment.sh").read_text(encoding="utf-8")
@@ -365,7 +403,7 @@ bash scripts/2026-10-07/train_real_v2.pbs
             result = subprocess.run([str(BASH), "-n", str(file)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_submission_graph_keeps_legacy_independent_of_bank(self):
+    def test_submission_graph_keeps_legacy_and_ai_independent_of_bank(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             shutil.copytree(ROOT / "scripts/2026-10-07", root / "scripts/2026-10-07")
@@ -386,7 +424,10 @@ bash scripts/2026-10-07/train_real_v2.pbs
             self.assertIn("depend=afterok:1.server", legacy)
             self.assertNotIn("2.server", legacy)
             ai = next(c for c in calls if c.endswith("render_ai_placement.pbs"))
-            self.assertIn("depend=afterok:1.server:2.server:3.server", ai)
+            self.assertIn("depend=afterok:1.server:3.server", ai)
+            self.assertNotIn("2.server", ai)
+            baseline = next(c for c in calls if c.endswith("render_real_v2.pbs"))
+            self.assertIn("depend=afterok:1.server:2.server", baseline)
             pairing = next(c for c in calls if c.endswith("assemble_paired_data.pbs"))
             self.assertIn("depend=afterok:5.server:7.server:9.server", pairing)
             self.assertEqual(sum("depend=afterok:10.server" in c for c in calls), 3)

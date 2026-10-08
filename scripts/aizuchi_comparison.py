@@ -304,7 +304,7 @@ def assemble(args):
     manifests = {
         "real_v2": args.root / "real_v2/tts/placement_bank/shard_000_conditioned/training_set/synthetic_moshi_train.jsonl",
         "traditional_overlap": args.root / "traditional_overlap/tts/merged_conditioned/training_set/synthetic_moshi_train.jsonl",
-        "ai_placement": args.root / "ai_placement/tts/placement_bank/shard_000_conditioned/training_set/synthetic_moshi_train.jsonl",
+        "ai_placement": args.root / "ai_placement/tts/merged_conditioned/training_set/synthetic_moshi_train.jsonl",
     }
     indexed = {arm: index_manifest(path) for arm, path in manifests.items()}
     # Fail instead of silently selecting different successful dialogues per arm.

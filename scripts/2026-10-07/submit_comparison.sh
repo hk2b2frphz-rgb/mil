@@ -21,7 +21,7 @@ ai_job="$(submit prepare_ai_placement "$source_job")"
 condition_jobs=()
 for arm in real_v2 traditional_overlap ai_placement; do
     deps="$source_job"
-    [[ "$arm" == traditional_overlap ]] || deps="$deps:$bank_job"
+    [[ "$arm" != real_v2 ]] || deps="$deps:$bank_job"
     [[ "$arm" != ai_placement ]] || deps="$deps:$ai_job"
     render_job="$(submit "render_$arm" "$deps")"
     condition_jobs+=("$(submit "condition_$arm" "$render_job")")

@@ -8,6 +8,7 @@
 #PBS -V
 
 # ASCII ONLY. Shared settings: scripts/2026-10-07/common.sh
+# AI placements rendered by direct Qwen TTS overlap; no bank or KABURI.
 set -euo pipefail
 export ARM=ai_placement
 exec bash scripts/2026-10-07/run_stage.sh render

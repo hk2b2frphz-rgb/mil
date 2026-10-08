@@ -52,9 +52,13 @@ render)
     test -s "$DIALOGUES_JSONL"
     export SOURCE_BATCH_ID="${RUN_ID}_dialogue" BATCH_ID="${RUN_ID}_tts"
     export OUT_ROOT="$ARM_ROOT/tts"
-    if [[ "$ARM" == traditional_overlap ]]; then
+    if [[ "$ARM" != real_v2 ]]; then
         # Whole-utterance Qwen TTS with the existing near-clause-end overlap.
         # Synthesizes both voices. No bank rewrite, KABURI or bank splice.
+        if [[ "$ARM" == ai_placement && -d "$ARM_ROOT/tts/placement_bank" ]]; then
+            echo 'AI bank/KABURI output exists; use a new COMPARE_ID for direct overlap TTS.' >&2
+            exit 1
+        fi
         bash scripts/run_qwen_tts_vllm_3000_4gpu.pbs
     else
         python3 scripts/2026-10-07/check_bank.py "$COMPARE_BANK/samples.jsonl" "$COMPARE_VOCAB"
@@ -63,7 +67,7 @@ render)
     fi
     ;;
 condition)
-    if [[ "$ARM" == traditional_overlap ]]; then
+    if [[ "$ARM" != real_v2 ]]; then
         # The production merge holds absolute manifest paths, not data_stereo.
         # Condition each real shard, then merge their conditioned manifests.
         for ((i=0; i<NUM_SHARDS; i++)); do
