@@ -190,6 +190,7 @@ class Dialogue:
     # --from-aizuchi-density がこれを読み上げないテキストとして対話の先頭に
     # 埋め込み、モデルへの頻度の条件付けに使う。
     aizuchi_frequency_label: str = ""
+    listener_protocol: dict[str, Any] | None = None
 
 
 @dataclass
@@ -543,13 +544,19 @@ def parse_args() -> argparse.Namespace:
         "--aizuchi-only-min-blocks",
         type=int,
         default=int(os.environ.get("AIZUCHI_ONLY_MIN_BLOCKS") or 8),
-        help="Minimum user utterances before the judge may stop (aizuchi-only).",
+        help="Minimum user utterances in a randomly sized ongoing conversation excerpt.",
     )
     parser.add_argument(
         "--aizuchi-only-max-blocks",
         type=int,
         default=int(os.environ.get("AIZUCHI_ONLY_MAX_BLOCKS") or 14),
         help="Maximum user utterances in aizuchi-only mode.",
+    )
+    parser.add_argument(
+        "--aizuchi-only-greeting",
+        action="store_true",
+        default=os.environ.get("AIZUCHI_ONLY_GREETING") == "1",
+        help="Opt in to the legacy opening greeting; continuous listening defaults to none.",
     )
     parser.add_argument(
         "--aizuchi-only-frequency",
@@ -1134,6 +1141,7 @@ def dialogue_from_mapping(data: dict[str, Any], use_case: dict[str, Any]) -> Dia
         source_use_case=str(use_case.get("id") or dialogue_id),
         turns=turns,
         generator_notes=str(data.get("generator_notes") or ""),
+        listener_protocol=data.get("listener_protocol"),
         duplex_task=str(
             data.get("duplex_task") or use_case.get("duplex_task") or ""
         )
@@ -2052,10 +2060,10 @@ class LLMDialogueGenerator:
         # 毎回上限まで走っていた。
         block_count = rng.randint(min_blocks, max_blocks)
         plans = plan_aizuchi_only_blocks(rng, block_count, self.args)
-        # 電話は名乗りから始まる。ここだけは相づちではない固定文。
-        turns: list[DialogueTurn] = [
-            DialogueTurn("moshi", AIZUCHI_ONLY_GREETING, note="固定の名乗り")
-        ]
+        # 収録区間の先頭は会話開始ではない。挨拶は旧用途で明示された場合だけ。
+        turns: list[DialogueTurn] = []
+        if getattr(self.args, "aizuchi_only_greeting", False):
+            turns.append(DialogueTurn("moshi", AIZUCHI_ONLY_GREETING, note="固定の名乗り"))
         used_probe_replies: set[str] = set()
         silences_left = max(0, int(self.args.aizuchi_only_max_silences))
         case_id = str(use_case.get("id") or "aizuchi_only_dialogue")
@@ -2091,13 +2099,16 @@ class LLMDialogueGenerator:
                 user_prompt,
                 speaker="user",
                 temperature=self.args.multi_agent_user_temperature,
-                max_tokens=400,
+                max_tokens={"short": 250, "medium": 500, "long": 900}.get(
+                    plan.get("utterance_length"), 400
+                ),
                 role_name="userAI",
                 fallback_text=fallback_aizuchi_only_user_utterance(
                     use_case, turns, plan
                 ),
                 context=context,
-                extra_check=None if plan["probe"] else unplanned_probe,
+                extra_check=(ongoing_user_utterance if plan["probe"]
+                             else ongoing_non_probe_utterance),
             )
             logger.info(
                 "aizuchi-only case=%s block=%d probe=%s user=%s",
@@ -2162,7 +2173,7 @@ class LLMDialogueGenerator:
 
         # 終話文は学習させない。明示的な通話終了シグナルが無い実行環境では、
         # 「おやすみなさい」「失礼いたします」を通常の相づち候補として誤発火
-        # するため、話し手が締めた後は moshi の沈黙で終える。
+        # するため、会話が継続している区間で収録を切る。
         clean_turns = sanitize_aizuchi_only_turns(turns)
         self.trace_event(
             {
@@ -2192,6 +2203,7 @@ class LLMDialogueGenerator:
             duplex_task=str(use_case.get("duplex_task") or "") or None,
             emotional_state=str(use_case.get("emotional_state") or ""),
             aizuchi_frequency_label=aizuchi_frequency_label,
+            listener_protocol=continuous_listener_protocol(self.args),
         )
 
     def generate_transformers_subprocess(self, prompt: str) -> str:
@@ -2829,7 +2841,10 @@ def fallback_user_utterance(
     use_case: dict[str, Any], turns: list[DialogueTurn]
 ) -> str:
     if not any(turn.speaker == "user" for turn in turns):
-        return str(use_case.get("opening") or "少し話してもいいですか。")
+        opening = str(use_case.get("opening") or "")
+        if opening and ongoing_non_probe_utterance(opening) is None:
+            return opening
+        return "今日は気持ちが落ち着かなくて、そのことを考えていたんです。"
     return "はい。少しずつですが、もう少し話してみます。"
 
 
@@ -2878,6 +2893,39 @@ def unplanned_probe(text: str) -> tuple[str, bool] | None:
     if "もしもし" in body and len(body) <= 24 and QUESTION_RE.search(body):
         return ("相手がいるかの確認は、この発話では書きません", False)
     return None
+
+
+def ongoing_user_utterance(text: str) -> tuple[str, bool] | None:
+    """Reject direct greetings/signoffs, while allowing discussion of these words."""
+    body = RESIDUAL_TAG_RE.sub("", text).strip()
+    if re.search(r"^(?:もしもし[、。]?\s*)?(?:こんにちは|こんばんは|おはようございます)(?:[、。！!\s]|$)", body):
+        return ("挨拶せず、会話の途中として話してください", True)
+    if re.search(
+        r"(?:おやすみ(?:なさい)?|さようなら|失礼(?:します|いたします)|"
+        r"(?:では|それでは|じゃあ)[、\s]*(?:また(?:ね)?|今日はこの辺で)|"
+        r"また(?:電話|お電話|連絡)(?:します|させてください)(?:ね)?|"
+        r"(?:^|[。！!])[\s]*ありがとうございま(?:す|した)|"
+        r"(?:聞いて|話を聞いて)(?:くれて|くださって)ありがとう(?:ございました|ございます)?)"
+        r"[。.!！…\s]*$", body,
+    ):
+        return ("終話せず、今の話の続きを話してください", True)
+    return None
+
+
+def ongoing_non_probe_utterance(text: str) -> tuple[str, bool] | None:
+    return ongoing_user_utterance(text) or unplanned_probe(text)
+
+
+def continuous_listener_protocol(args: argparse.Namespace) -> dict[str, Any]:
+    maximum = max(1, int(args.aizuchi_only_max_blocks))
+    return {
+        "version": "continuous_listener_v1",
+        "greeting": bool(getattr(args, "aizuchi_only_greeting", False)),
+        "min_blocks": max(1, min(int(args.aizuchi_only_min_blocks), maximum)),
+        "max_blocks": maximum,
+        "utterance_lengths": ["short", "medium", "long"],
+        "ending": "ongoing_excerpt",
+    }
 
 
 def unusable_utterance(text: str) -> tuple[str, bool] | None:
@@ -3262,6 +3310,8 @@ AIZUCHI_ONLY_USER_SYSTEM_PROMPT = """
 同じことを言い直したり、途中で言葉に詰まってかまいません。
 書くのは user 一人分の発話だけです。相手の台詞を代わりに書かず、自分の問いに
 自分で答えません。相手が相づちしか返さないことには触れません。
+収録は会話の途中の抜粋です。挨拶・名乗り・お礼での締め・別れの言葉を入れず、
+現在の話を続けます。収録がいつ切られるかは分からないので、終了を先読みしません。
 すべて日本語で書きます（英単語・ローマ字は使いません）。
 出力は user の次の発話本文だけ。話者名、JSON、説明、引用符、箇条書きは出力しません。
 """.strip()
@@ -3312,19 +3362,16 @@ def plan_aizuchi_only_blocks(
     for index in range(num_blocks):
         # 沈黙の直後だけが確認の起きる場所。probe_rate は「沈黙のあと確認まで
         # 行く割合」で、確認ブロックは沈黙で終わらないので確認は連続しない。
-        # 最後のブロックを確認にすると、聞き手が「はい、聞いていますよ」と答えた
-        # ところで対話が終わり、締めのないまま切れる。
         probe = (
             previous_silence
             and probes_left > 0
-            and index < num_blocks - 1
             and rng.random() < probe_rate
         )
         if probe:
             probes_left -= 1
         trailing: float | None = None
         # 確認ブロックの直後に沈黙を置くと、応答したそばから黙ったことになる。
-        # 最後のブロックの後ろの沈黙も、話が終わった後の空白にしかならない。
+        # 最終ブロック後の無音は録音に含めない。終話を示すものではない。
         if not probe and index < num_blocks - 1 and rng.random() < silence_rate:
             trailing = round(rng.uniform(silence_min, silence_max), 1)
         plans.append(
@@ -3332,6 +3379,7 @@ def plan_aizuchi_only_blocks(
                 "probe": probe,
                 "trailing_silence": trailing,
                 "allow_pause": silence_enabled,
+                "utterance_length": rng.choice(("short", "medium", "long")),
             }
         )
         previous_silence = trailing is not None
@@ -3347,13 +3395,8 @@ def build_aizuchi_only_user_prompt(
     plan: dict[str, Any],
 ) -> AgentPrompt:
     transcript = dialogue_turns_to_transcript(turns) or "(まだ会話は始まっていません)"
-    is_last = block_index + 1 >= max_blocks
-    closing_directive = (
-        "- 最後の発話です。お礼か、また電話する旨を短く言って締めます。"
-        if is_last
-        # 締めの言葉を何度も並べる対話が出ていた（「ご機嫌よう」「では、また」…）。
-        else "- まだ途中です。別れの挨拶や締めの言葉は言いません。"
-    )
+    # max_blocks is a recording budget, never a conversational deadline.
+    continuity_directive = "- 会話は続いています。挨拶・名乗り・お礼での締め・別れの言葉は言いません。"
     if plan.get("probe"):
         directive = (
             "- 直前に相手の反応が途切れて、沈黙が続きました。\n"
@@ -3368,14 +3411,18 @@ def build_aizuchi_only_user_prompt(
                 f"\n- 言葉に詰まる位置にだけ <<pause:3.5>> と書いてかまいません"
                 f"（秒数は {PAUSE_MIN_SEC:.0f}〜{PAUSE_MAX_SEC:.0f}）。読点の代わりには使いません。"
             )
+        length_directive = {
+            "short": "- 今回は短いひと息の発話を1文で書きます。",
+            "medium": "- 今回は2〜3文で今の話を具体的に続けます。",
+            "long": "- 今回は4〜6文で、具体的な出来事や気持ちを話し続けます。要約で締めません。",
+        }[plan.get("utterance_length", "medium")]
         directive = (
-            "- 1〜2 文。ひと息で言える長さで切ります（長く続けません）。\n"
+            f"{length_directive}\n"
             "- 短く切っても、話題は変えません。今の話を続けるか、同じことを\n"
             "  言い直すか、さっき言ったことに戻ります。新しい話題を次々に\n"
             "  出すと、悩んで電話してきた人の話し方から離れます。\n"
             "- 相手に質問せず、許可を求める問いでも終えません。\n"
             "- 相手がいるかの確認（「もしもし」「まだ聞いていますか」）はしません。\n"
-            f"{closing_directive}"
             f"{pause_directive}"
         )
     prompt = f"""
@@ -3394,7 +3441,7 @@ def build_aizuchi_only_user_prompt(
 
 次に user として1発話だけ返してください。
 条件:
-- {block_index + 1}/{max_blocks} 回目の user 発話です。
+{continuity_directive}
 {directive}
 - moshi の発話、話者名、相づち指示、JSONは書きません。
 - 改行せず、1行で書きます。
@@ -5373,6 +5420,13 @@ def write_dialogues_only(args: argparse.Namespace) -> None:
     existing_count = 0
     if args.resume and dialogues_path.exists():
         existing_rows = load_jsonl(dialogues_path)
+        if args.dialogue_generation_mode == "aizuchi-only":
+            protocol = continuous_listener_protocol(args)
+            if any(row.get("listener_protocol") != protocol for row in existing_rows):
+                raise ValueError(
+                    "Listener generation protocol changed; use a new output directory "
+                    "instead of resuming legacy greetings/closing/length settings."
+                )
         existing_count = len(existing_rows)
         completed_source_ids = {
             str(row.get("source_use_case"))

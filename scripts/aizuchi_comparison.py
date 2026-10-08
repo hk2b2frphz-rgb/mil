@@ -66,21 +66,34 @@ def fixed_content(row):
     return out
 
 
-def freeze(source, out, count):
+def freeze(source, out, count, require_continuous=False):
     # Use the existing greeting detector, exactly as the bank rendering route does.
     from rewrite_aizuchi_vocab import is_greeting
     rows = read_rows(source)[:count]
     if len(rows) != count or len({r["id"] for r in rows}) != count:
         raise ValueError(f"Need {count} unique source dialogues")
     for row in rows:
+        if require_continuous:
+            protocol = row.get("listener_protocol") or {}
+            if (protocol.get("version") != "continuous_listener_v1"
+                    or protocol.get("greeting") is not False
+                    or protocol.get("ending") != "ongoing_excerpt"
+                    or protocol.get("min_blocks", 0) >= protocol.get("max_blocks", 0)):
+                raise ValueError(f"Need continuous listener data without greetings/endings and with variable lengths: {row['id']}")
         if not re.fullmatch(r"density=(?:0(?:\.\d+)?|1(?:\.0+)?)", row.get("aizuchi_frequency_label", "")):
             raise ValueError(f"Missing real-v2 density label: {row['id']}")
         row["turns"] = [t for t in row["turns"] if not (
             t.get("speaker") == "moshi" and is_greeting(t.get("text", "")))]
-    lock_config(out.parent / "source_config.json", {
+    config = {
         "source": str(source.resolve()), "sha256": digest(source), "count": count,
         "drop_greeting": True, "version": 1,
-    })
+    }
+    if require_continuous:
+        config["require_continuous"] = True
+        config["listener_protocol"] = rows[0]["listener_protocol"]
+        if any(row["listener_protocol"] != config["listener_protocol"] for row in rows):
+            raise ValueError("Mixed listener generation protocols in source")
+    lock_config(out.parent / "source_config.json", config)
     write_rows(out, rows)
 
 
@@ -330,6 +343,7 @@ def main():
     p.add_argument("--source", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--count", type=int, required=True)
+    p.add_argument("--require-continuous", action="store_true")
     p = sub.add_parser("ai")
     p.add_argument("--source", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True)
@@ -344,7 +358,7 @@ def main():
     if args.stage == "freeze":
         if args.count < 2:
             parser.error("count must be at least 2")
-        freeze(args.source, args.out, args.count)
+        freeze(args.source, args.out, args.count, args.require_continuous)
     elif args.stage == "ai":
         if args.concurrency < 1 or args.max_per_sentence < 1 or args.min_chars < 1:
             parser.error("AI limits must be positive")

@@ -442,6 +442,93 @@ class DensityDispatchTest(unittest.TestCase):
         self.assertEqual(turns, [user_turn])
 
 
+class ContinuousListenerTest(unittest.TestCase):
+    def make_generator(self, root):
+        with unittest.mock.patch.object(sys, "argv", ["generator", "--out-dir", str(root)]):
+            args = gen.parse_args()
+        args.llm_backend = "openai-compatible"
+        args.dialogue_generation_mode = "aizuchi-only"
+        args.aizuchi_only_greeting = False
+        args.aizuchi_only_min_blocks = 2
+        args.aizuchi_only_max_blocks = 12
+        args.aizuchi_only_max_silences = 0
+        args.aizuchi_only_placement = "density"
+        args.aizuchi_density = 0.0
+        args.aizuchi_density_mixed = False
+        args.multi_agent_empty_policy = "error"
+        generator = gen.LLMDialogueGenerator(args)
+        generator.trace_path = None
+        return generator
+
+    def test_recording_boundary_does_not_change_user_prompt(self):
+        profile = dict(opening_style="率直", disclosure_pace="普通", speech_texture="自然",
+                       emotional_arc="一定", topic_order="時系列")
+        plan = dict(probe=False, allow_pause=False, utterance_length="long")
+        first = gen.build_aizuchi_only_user_prompt({}, profile, [], 0, 12, plan)
+        last = gen.build_aizuchi_only_user_prompt({}, profile, [], 11, 12, plan)
+        self.assertEqual(first, last)
+        self.assertNotIn("最後の発話", last.user)
+        self.assertNotIn("12/12", last.user)
+        self.assertIn("4〜6文", last.user)
+        self.assertIn("会話は続いています", last.user)
+
+    def test_generated_excerpts_have_variable_lengths_and_no_greeting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            generator = self.make_generator(Path(tmp))
+            lengths = set()
+            with unittest.mock.patch.object(generator, "call_agent", return_value="今もそのことが気になっていて、まだ考えているんです。"), unittest.mock.patch.object(gen.logger, "info"):
+                for seed in range(30):
+                    dialogue = generator.generate_aizuchi_only({"id": "case"}, random.Random(seed))
+                    self.assertTrue(all(t.speaker == "user" for t in dialogue.turns))
+                    lengths.add(len(dialogue.turns))
+                    self.assertEqual(dialogue.listener_protocol["ending"], "ongoing_excerpt")
+                    self.assertFalse(dialogue.listener_protocol["greeting"])
+            self.assertEqual(min(lengths), 2)
+            self.assertEqual(max(lengths), 12)
+            self.assertGreater(len(lengths), 8)
+
+    def test_direct_signoffs_are_rejected_but_quoted_bedtime_words_are_allowed(self):
+        for text in ("おやすみなさい。", "では、また。", "また電話しますね。",
+                     "聞いてくれてありがとう。", "ありがとうございました。", "こんばんは。"):
+            with self.subTest(text=text):
+                self.assertTrue(gen.ongoing_user_utterance(text)[1])
+        for text in ("昨日はおやすみなさいと言われたのに、眠れなかったんです。",
+                     "おやすみなさいって言葉を聞くと少し寂しくなって。",
+                     "ありがとうと言われてうれしかったんです。"):
+            self.assertIsNone(gen.ongoing_user_utterance(text))
+
+    def test_repeated_signoff_fails_instead_of_entering_training_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            generator = self.make_generator(Path(tmp))
+            with unittest.mock.patch.object(generator, "call_agent", return_value="おやすみなさい。") as call:
+                with self.assertRaises(ValueError):
+                    generator.generate_aizuchi_only({"id": "case"}, random.Random(0))
+            self.assertEqual(call.call_count, 2)
+
+    def test_last_block_can_be_a_probe_without_a_conversation_closing(self):
+        args = argparse.Namespace(aizuchi_only_probe_rate=1.0, aizuchi_only_max_silences=2,
+                                  aizuchi_only_silence_rate=1.0, aizuchi_only_silence_min_sec=2,
+                                  aizuchi_only_silence_max_sec=5)
+        plans = gen.plan_aizuchi_only_blocks(random.Random(0), 2, args)
+        self.assertTrue(plans[-1]["probe"])
+        seen = {p["utterance_length"] for p in gen.plan_aizuchi_only_blocks(random.Random(1), 50, args)}
+        self.assertEqual(seen, {"short", "medium", "long"})
+
+    def test_resume_refuses_legacy_data_and_changed_length_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            generator = self.make_generator(root)
+            generator.args.resume = True
+            path = root / "dialogues.jsonl"
+            for protocol in (None, dict(gen.continuous_listener_protocol(generator.args), max_blocks=6)):
+                row = {"id": "old", "turns": [], "listener_protocol": protocol}
+                before = json.dumps(row) + "\n"
+                path.write_text(before)
+                with self.assertRaisesRegex(ValueError, "protocol changed"):
+                    gen.write_dialogues_only(generator.args)
+                self.assertEqual(path.read_text(), before)
+
+
 class AizuchiFrequencyConditioningLabelTest(unittest.TestCase):
     """Dialogue.aizuchi_frequency_label -- the value inject_inner_thoughts.py
     --from-aizuchi-density later embeds as an unspoken tag so the model can be

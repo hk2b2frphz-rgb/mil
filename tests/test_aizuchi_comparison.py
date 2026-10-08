@@ -268,6 +268,45 @@ BASH = Path(r"C:\Program Files\Git\bin\bash.exe") if os.name == "nt" else Path(s
 
 @unittest.skipUnless(BASH.is_file(), "bash is unavailable")
 class PBSTests(unittest.TestCase):
+    def test_source_stage_generates_new_continuous_data_instead_of_reusing_old_v2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shutil.copytree(ROOT / "scripts/2026-10-07", root / "scripts/2026-10-07")
+            cmp.write_rows(root / "data/runs/real_aizuchi_20_v2/dialogue/llm_dialogues/dialogues.jsonl", [row()])
+            (root / "scripts/run_dialogues_qwen_3000.pbs").write_text(
+                'printf "%s\\n" "$OUT_ROOT" "$AIZUCHI_ONLY_MIN_BLOCKS" "$AIZUCHI_ONLY_MAX_BLOCKS" "$AIZUCHI_ONLY_GREETING" > source_routed.txt\n', encoding="ascii")
+            result = self.shell(root, '''
+python3() { printf '%s\\n' "$*" > freeze_args.txt; }
+export -f python3
+bash scripts/2026-10-07/prepare_dialogues.pbs
+''')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            routed = (root / "source_routed.txt").read_text().splitlines()
+            self.assertTrue(routed[0].endswith("/test_compare/shared/generated"))
+            self.assertEqual(routed[1:], ["2", "12", "0"])
+            self.assertIn("--require-continuous", (root / "freeze_args.txt").read_text())
+
+    def test_freeze_refuses_legacy_or_fixed_length_listener_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, out = root / "in.jsonl", root / "shared/dialogues.jsonl"
+            rows = [row("a"), row("b")]
+            cmp.write_rows(source, rows)
+            with self.assertRaisesRegex(ValueError, "continuous listener data"):
+                cmp.freeze(source, out, 2, require_continuous=True)
+            protocol = dict(version="continuous_listener_v1", greeting=False,
+                            min_blocks=2, max_blocks=12, ending="ongoing_excerpt")
+            for item in rows:
+                item["listener_protocol"] = deepcopy(protocol)
+            cmp.write_rows(source, rows)
+            cmp.freeze(source, out, 2, require_continuous=True)
+            self.assertEqual(cmp.read_rows(out)[0]["listener_protocol"], protocol)
+            self.assertTrue(json.loads((out.parent / "source_config.json").read_text())["require_continuous"])
+            rows[0]["listener_protocol"]["min_blocks"] = 12
+            cmp.write_rows(source, rows)
+            with self.assertRaisesRegex(ValueError, "continuous listener data"):
+                cmp.freeze(source, root / "other/dialogues.jsonl", 2, require_continuous=True)
+
     def shell(self, root, command, **extra):
         env = dict(os.environ, COMPARE_N="20", COMPARE_ID="test_compare", PBS_O_WORKDIR=str(root), **extra)
         return subprocess.run([str(BASH), "-c", command], cwd=root, env=env, capture_output=True, text=True)

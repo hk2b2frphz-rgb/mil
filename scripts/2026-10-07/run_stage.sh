@@ -6,17 +6,20 @@ stage="${1:?stage required}"
 case "$stage" in
 source)
     export CUDA_VISIBLE_DEVICES=0
-    candidate="${COMPARE_SOURCE_INPUT:-$PWD/data/runs/real_aizuchi_${COMPARE_N}_v2/dialogue/llm_dialogues/dialogues.jsonl}"
-    if [[ ! -s "$candidate" ]]; then
-        if [[ -n "${COMPARE_SOURCE_INPUT:-}" ]]; then
+    candidate="${COMPARE_SOURCE_INPUT:-$COMPARE_ROOT/shared/generated/llm_dialogues/dialogues.jsonl}"
+    if [[ -n "${COMPARE_SOURCE_INPUT:-}" ]]; then
+        if [[ ! -s "$candidate" ]]; then
             echo "Requested source does not exist: $candidate" >&2; exit 1
         fi
+    else
         export BATCH_ID="${COMPARE_ID}_shared"
         export OUT_ROOT="$COMPARE_ROOT/shared/generated"
         export DIALOGUE_GENERATION_MODE=aizuchi-only AIZUCHI_ONLY_PLACEMENT=density
         export AIZUCHI_DENSITY_MIXED=1 AIZUCHI_DENSITY=0.5
         export AIZUCHI_ONLY_EXAMPLE=0 AIZUCHI_ENABLE_THINKING=0
-        export AIZUCHI_ONLY_MIN_BLOCKS=4 AIZUCHI_ONLY_MAX_BLOCKS=6
+        export MULTI_AGENT_EMPTY_POLICY=fail
+        export AIZUCHI_ONLY_GREETING=0
+        export AIZUCHI_ONLY_MIN_BLOCKS=2 AIZUCHI_ONLY_MAX_BLOCKS=12
         export AIZUCHI_ONLY_MAX_SILENCES=2 AIZUCHI_ONLY_SILENCE_RATE=0.25
         export AIZUCHI_ONLY_SILENCE_MIN_SEC=2.0 AIZUCHI_ONLY_SILENCE_MAX_SEC=5.0
         export AIZUCHI_ONLY_PROBE_RATE=0.5 DIALOGUE_RESUME=1 OVERWRITE=1
@@ -24,7 +27,7 @@ source)
         bash scripts/run_dialogues_qwen_3000.pbs
         candidate="$OUT_ROOT/llm_dialogues/dialogues.jsonl"
     fi
-    python3 scripts/aizuchi_comparison.py freeze --source "$candidate" --out "$COMPARE_SOURCE" --count "$COMPARE_N"
+    python3 scripts/aizuchi_comparison.py freeze --source "$candidate" --out "$COMPARE_SOURCE" --count "$COMPARE_N" --require-continuous
     ;;
 bank)
     if [[ -s "$COMPARE_BANK/samples.jsonl" ]]; then

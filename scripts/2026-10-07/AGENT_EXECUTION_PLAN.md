@@ -17,7 +17,7 @@
 リポジトリ直下で設定し、すべての個別投入に同じ値を引き継ぎます。
 
 ```bash
-export COMPARE_ID=aizuchi_compare_2026-10-08_10000
+export COMPARE_ID=aizuchi_compare_2026-10-08_continuous_10000
 export COMPARE_N=10000
 export COMPARE_SEED=0
 export COMPARE_EVAL_SEEDS=0
@@ -46,7 +46,7 @@ mkdir -p "$PLAN_ROOT/jobs"
 
 **`submit_comparison.sh` はこの順次実行では使いません。** このスクリプトは複数条件を並行投入します。全PBSを先にキューへ積むことも避け、未完了の段階は1つだけにします。ログインノードで `run_stage.sh`、TTS、学習、評価を直接実行せず、重い処理は個別PBSで実行します。
 
-旧実験の共通対話を流用する場合は、最初の投入前に `COMPARE_SOURCE_INPUT` にその `shared/dialogues.jsonl` の絶対パスを設定します。バンク・clone参照を変更するなら、同じ参照のバンクを指定し、別の実験IDにします。2026-10-07版AIのKABURI音声・学習済みデータ・checkpointと新方式を混在させません。
+今回の共通対話は挨拶・終話なしの会話途中の抜粋です。話者発話数2〜12回と各発話の短・中・長を混ぜ、話者AIに残り回数を知らせません。旧v2対話は流用しません。新方針の生成済み対話だけは `COMPARE_SOURCE_INPUT` にその `shared/dialogues.jsonl` の絶対パスを設定して使えます。`listener_protocol` が一致することを確認します。バンク・clone参照を変更するなら、同じ参照のバンクを指定し、別の実験IDにします。旧データ・checkpointとは混在させません。
 
 ## 実行順序と完了の判定
 
@@ -54,7 +54,7 @@ mkdir -p "$PLAN_ROOT/jobs"
 
 | 順序 | 投入するPBS | 次へ進む前の確認 |
 |---:|---|---|
-| 1 | `prepare_dialogues.pbs` | `shared/dialogues.jsonl` が10,000件。IDが一意、密度ラベルあり。`source_config.json` と入力が一致 |
+| 1 | `prepare_dialogues.pbs` | `shared/dialogues.jsonl` が10,000件。IDが一意、密度ラベルと `continuous_listener_v1` 方針あり。挨拶・終話なし、長さの分布を確認。`source_config.json` と入力が一致 |
 | 2 | `prepare_bank.pbs` | `check_bank.py` の検証が成功。既存バンクを使える場合は合成されず検証だけで終了 |
 | 3 | `prepare_ai_placement.pbs` | AIの `dialogue/llm_dialogues/dialogues.jsonl` が10,000件。IDが共通対話と一致し、制約違反で中断していない |
 | 4 | `render_real_v2.pbs` | real-v2の `tts/placement_bank/shard_000/training_set/synthetic_moshi_train.jsonl` が10,000件 |
