@@ -43,3 +43,7 @@ vllm_build.log
 qwen3_tts_compat.txt
 qwen3_tts_revisions.txt
 vllm_omni_expected_model.txt
+
+# Separate Qwen3.6 V100 runtime and build log.
+.venv-vllm-qwen-v100/
+vllm_qwen_v100_build.log

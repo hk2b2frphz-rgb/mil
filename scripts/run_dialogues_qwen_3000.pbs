@@ -76,6 +76,16 @@ export VLLM_VERSION="${VLLM_VERSION:-0.21.0}"
 export VLLM_CUDA_MODULE="${VLLM_CUDA_MODULE:-}"
 export VLLM_ENV_DIR="${VLLM_ENV_DIR:-.venv_vllm_qwen_3000}"
 export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
+# The V100 entry point reuses this runner with its prebuilt cu126 environment.
+export VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
+export VLLM_DTYPE="${VLLM_DTYPE:-auto}"
+export VLLM_SKIP_INSTALL="${VLLM_SKIP_INSTALL:-0}"
+[[ "$VLLM_SKIP_INSTALL" == 0 || "$VLLM_SKIP_INSTALL" == 1 ]] || {
+    echo "ERROR: VLLM_SKIP_INSTALL must be 0 or 1." >&2; exit 1;
+}
+[[ "$VLLM_TENSOR_PARALLEL_SIZE" =~ ^[1-9][0-9]*$ ]] || {
+    echo "ERROR: VLLM_TENSOR_PARALLEL_SIZE must be positive." >&2; exit 1;
+}
 # Disable multimodal profiling for the (multimodal) Qwen3.6-27B to cut startup
 # time/memory; set this var empty to keep multimodal enabled.
 if [[ ! -v VLLM_LIMIT_MM_PER_PROMPT ]]; then
@@ -122,6 +132,9 @@ echo "port:          $PORT"
 echo "max_model_len: $MAX_MODEL_LEN"
 echo "gpu_mem_util:  $VLLM_GPU_MEMORY_UTILIZATION"
 echo "torch_backend: $UV_TORCH_BACKEND"
+echo "tensor_parallel: $VLLM_TENSOR_PARALLEL_SIZE"
+echo "dtype:         $VLLM_DTYPE"
+echo "skip_install:  $VLLM_SKIP_INSTALL"
 echo "vllm_version:  $VLLM_VERSION"
 echo "cuda_module:   ${VLLM_CUDA_MODULE:-n/a}"
 echo "vllm_install:  $VLLM_INSTALL_SPEC"
@@ -149,26 +162,48 @@ if [[ -n "$VLLM_CUDA_MODULE" ]]; then
     module load "$VLLM_CUDA_MODULE"
 fi
 
-[[ -d "$VLLM_ENV_DIR" ]] || uv venv "$VLLM_ENV_DIR"
-# Put the venv bin on PATH so ninja/cmake/python resolve by name. We invoke vllm
-# by absolute path, which does NOT activate the venv, so without this torch's
-# inductor (shutil.which("ninja")) cannot find ninja at serve time.
+if [[ "$VLLM_SKIP_INSTALL" == 1 ]]; then
+    [[ -x "$VLLM_PYTHON" && -x "$VLLM_BIN" ]] || {
+        echo "ERROR: prebuilt vLLM environment is missing: $VLLM_ENV_DIR" >&2; exit 1;
+    }
+else
+    [[ -d "$VLLM_ENV_DIR" ]] || uv venv "$VLLM_ENV_DIR"
+    export PATH="$(cd "$VLLM_ENV_DIR" && pwd)/bin:$PATH"
+    # Build tools are also needed for torch.compile/inductor at serve time.
+    # shellcheck disable=SC2086
+    uv pip install --python "$VLLM_PYTHON" ${VLLM_BUILD_TOOLS:-ninja cmake}
+    uv pip install --python "$VLLM_PYTHON" "$VLLM_INSTALL_SPEC" --torch-backend="$UV_TORCH_BACKEND"
+fi
 export PATH="$(cd "$VLLM_ENV_DIR" && pwd)/bin:$PATH"
-# Build tools for any source builds at install time and for torch.compile/inductor
-# kernel compilation at serve time (ninja must be on PATH inside the venv).
-# shellcheck disable=SC2086
-uv pip install --python "$VLLM_PYTHON" ${VLLM_BUILD_TOOLS:-ninja cmake}
-uv pip install --python "$VLLM_PYTHON" "$VLLM_INSTALL_SPEC" --torch-backend="$UV_TORCH_BACKEND"
+if [[ "${QWEN_V100_PREFLIGHT:-0}" == 1 ]]; then
+    "$VLLM_PYTHON" scripts/check_qwen_v100.py runtime
+fi
 
 vllm_args=(
     "$VLLM_BIN" serve "$VLLM_MODEL"
-    --tensor-parallel-size 1
+    --tensor-parallel-size "$VLLM_TENSOR_PARALLEL_SIZE"
+    --dtype "$VLLM_DTYPE"
     --host 127.0.0.1
     --port "$PORT"
     --max-model-len "$MAX_MODEL_LEN"
     --gpu-memory-utilization "$VLLM_GPU_MEMORY_UTILIZATION"
     --reasoning-parser qwen3
 )
+if [[ -n "${VLLM_ATTENTION_BACKEND:-}" ]]; then
+    vllm_args+=(--attention-backend "$VLLM_ATTENTION_BACKEND")
+fi
+if [[ -n "${VLLM_MAX_NUM_SEQS:-}" ]]; then
+    vllm_args+=(--max-num-seqs "$VLLM_MAX_NUM_SEQS")
+fi
+if [[ -n "${VLLM_MAX_NUM_BATCHED_TOKENS:-}" ]]; then
+    vllm_args+=(--max-num-batched-tokens "$VLLM_MAX_NUM_BATCHED_TOKENS")
+fi
+if [[ "${VLLM_LANGUAGE_MODEL_ONLY:-0}" == 1 ]]; then
+    vllm_args+=(--language-model-only)
+fi
+if [[ "${VLLM_ENABLE_CHUNKED_PREFILL:-0}" == 1 ]]; then
+    vllm_args+=(--enable-chunked-prefill)
+fi
 # --enforce-eager disables CUDA graphs (slower decode) but starts faster. With
 # concurrent requests we want graphs ON for throughput, so default to off here.
 # Re-enable by exporting VLLM_ENFORCE_EAGER=1.
@@ -217,6 +252,10 @@ while true; do
     fi
     sleep 5
 done
+if [[ "${QWEN_V100_PREFLIGHT:-0}" == 1 ]]; then
+    "$VLLM_PYTHON" scripts/check_qwen_v100.py chat \
+        --api-base "http://127.0.0.1:${PORT}/v1" --model "$VLLM_MODEL"
+fi
 echo "vLLM is ready and serving $VLLM_MODEL; starting dialogue generation."
 
 export STEPS="use_cases,dialogues"
