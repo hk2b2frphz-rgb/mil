@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N fd_end_request
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# Separate explicit end requests from continuous, backchannel-only data.
+# Uses the existing local Qwen server and its multi-agent dialogue generator.
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+export NUM_CASES="${NUM_CASES:-1000}"
+export BATCH_ID="${END_REQUEST_ID:-qwen_end_request_${NUM_CASES}_axes_v1}"
+export OUT_ROOT="${END_REQUEST_ROOT:-$PWD/data/runs/$BATCH_ID}"
+export INTERACTION_TRACK=end-request DIALOGUE_GENERATION_MODE=multi-agent
+export DIALOGUE_RESUME=0 MULTI_AGENT_EMPTY_POLICY=fail ALLOW_TEMPLATE_FALLBACK=0
+unset AIZUCHI_REPOSITION_SOURCE DIALOGUES_JSONL
+exec bash scripts/run_dialogues_qwen_3000.pbs

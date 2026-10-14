@@ -15,6 +15,7 @@ source)
         export BATCH_ID="${COMPARE_ID}_shared"
         export OUT_ROOT="$COMPARE_ROOT/shared/generated"
         export DIALOGUE_GENERATION_MODE=aizuchi-only AIZUCHI_ONLY_PLACEMENT=density
+        export INTERACTION_TRACK=ongoing
         export AIZUCHI_DENSITY_MIXED=1 AIZUCHI_DENSITY=0.5
         export AIZUCHI_ONLY_EXAMPLE=0 AIZUCHI_ENABLE_THINKING=0
         export MULTI_AGENT_EMPTY_POLICY=fail

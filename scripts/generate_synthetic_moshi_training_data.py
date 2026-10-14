@@ -55,6 +55,11 @@ from response_recorder import (  # noqa: E402
     run_trial,
     synthesize_text_to_wav,
 )
+from scripts.use_case_situations import CATALOG_VERSION  # noqa: E402
+from scripts.use_case_interactions import (  # noqa: E402
+    INTERACTION_VERSION, adapt_profile, interaction_summary, speaking_length_guidance,
+    user_interaction_guidance, user_requests_end, require_end_request,
+)
 
 
 logging.basicConfig(
@@ -191,6 +196,10 @@ class Dialogue:
     # 埋め込み、モデルへの頻度の条件付けに使う。
     aizuchi_frequency_label: str = ""
     listener_protocol: dict[str, Any] | None = None
+    situation_id: str = ""
+    situation_group: str = ""
+    situation_kind: str = ""
+    interaction_axes: dict[str, Any] | None = None
 
 
 @dataclass
@@ -1142,6 +1151,10 @@ def dialogue_from_mapping(data: dict[str, Any], use_case: dict[str, Any]) -> Dia
         turns=turns,
         generator_notes=str(data.get("generator_notes") or ""),
         listener_protocol=data.get("listener_protocol"),
+        situation_id=str(data.get("situation_id") or use_case.get("situation_id") or ""),
+        situation_group=str(data.get("situation_group") or use_case.get("situation_group") or ""),
+        situation_kind=str(data.get("situation_kind") or use_case.get("situation_kind") or ""),
+        interaction_axes=data.get("interaction_axes") or use_case.get("interaction_axes"),
         duplex_task=str(
             data.get("duplex_task") or use_case.get("duplex_task") or ""
         )
@@ -1632,6 +1645,12 @@ class LLMDialogueGenerator:
                 role_name="userAI",
                 fallback_text=fallback_user_utterance(use_case, core_turns),
                 context=context,
+                extra_check=(
+                    require_end_request
+                    if (use_case.get("interaction_axes") or {}).get("track") == "end-request"
+                    and (pair_index > 0 or max_pairs == 1)
+                    else None
+                ),
             )
             logger.info(
                 "multi-agent case=%s pair=%d user=%s",
@@ -1702,6 +1721,10 @@ class LLMDialogueGenerator:
                 }
             )
 
+            # 最小往復数より、本人の直接の終了希望を優先する。
+            if user_requests_end(user_text):
+                self.trace_event({"event": "user_requested_end", **context})
+                break
             if pair_index + 1 >= min_pairs:
                 judge_prompt = build_judge_agent_prompt(
                     use_case, core_turns, pair_index, min_pairs, max_pairs
@@ -1750,6 +1773,7 @@ class LLMDialogueGenerator:
             ),
             duplex_task=str(use_case.get("duplex_task") or "") or None,
             emotional_state=str(use_case.get("emotional_state") or ""),
+            interaction_axes=use_case.get("interaction_axes"),
         )
 
     def add_aizuchi_for_user_turn(
@@ -2031,6 +2055,8 @@ class LLMDialogueGenerator:
         multi-agent との違いは systemAI を呼ばないこと。moshi の発話は
         aizuchiAI が決めた相づちと、「聞いていますか?」への定型応答だけになる。
         """
+        if (use_case.get("interaction_axes") or {}).get("track") == "end-request":
+            raise ValueError("End-request cases require multi-agent dialogue generation; do not mix them into ongoing listener data.")
         if self.args.llm_backend == "template":
             return template_dialogue(use_case)
         if self.args.llm_backend != "openai-compatible":
@@ -2204,6 +2230,7 @@ class LLMDialogueGenerator:
             emotional_state=str(use_case.get("emotional_state") or ""),
             aizuchi_frequency_label=aizuchi_frequency_label,
             listener_protocol=continuous_listener_protocol(self.args),
+            interaction_axes=use_case.get("interaction_axes"),
         )
 
     def generate_transformers_subprocess(self, prompt: str) -> str:
@@ -2398,7 +2425,7 @@ def pipeline_result_to_text(result: Any) -> str:
 USER_AGENT_SYSTEM_PROMPT = """
 あなたは合成対話データの userAI です。孤独・孤立相談窓口に来る相談者 user として発話します。
 会話のランダム性、話題の出し方、ためらい、感情の揺れはあなたが担当します。
-相談者らしく一度に全部を説明せず、少しずつ開示してください。
+ケースの目的・話し方・開示方針に従ってください。最初から話す人に段階的な開示を強制しません。
 出力は user の次の発話本文だけ。話者名、JSON、説明、引用符、箇条書きは出力しません。
 """.strip()
 
@@ -2455,6 +2482,8 @@ def case_brief(use_case: dict[str, Any]) -> str:
         f"category: {use_case.get('category', 'unknown')}",
         f"risk_level: {use_case.get('risk_level', 'low')}",
         f"situation: {use_case.get('situation', '')}",
+        f"situation_kind: {use_case.get('situation_kind', '')}",
+        f"situation_guidance: {use_case.get('situation_guidance', '')}",
         f"user_profile: {use_case.get('user_profile', '')}",
         # personality / emotional_state / conversation_type are what make two
         # cases with the same demographics different dialogues. emotional_state
@@ -2467,11 +2496,12 @@ def case_brief(use_case: dict[str, Any]) -> str:
         f"opening_hint: {use_case.get('opening', '')}",
         f"topic: {use_case.get('topic', '')}",
         f"talking_points: {points}",
+        interaction_summary(use_case),
     ]
     return "\n".join(line for line in lines if line and not line.endswith(": "))
 
 
-def build_user_agent_profile(
+def _base_user_agent_profile(
     use_case: dict[str, Any], rng: random.Random, listener_only: bool = False
 ) -> dict[str, str]:
     """userAI の当たり札。listener_only では、相手が応えられない札を外す。"""
@@ -2481,6 +2511,27 @@ def build_user_agent_profile(
         rng.shuffle(ordered_points)
     else:
         ordered_points = []
+    if use_case.get("situation_kind") in {"meta", "everyday", "positive"}:
+        return {
+            "opening_style": rng.choice([
+                "かけたきっかけを率直に話す",
+                "具体的な出来事や気になった点から話す",
+                "少し照れながら、自分が感じたことを話す",
+                "言葉を選びながら自分の感想を話す",
+            ]),
+            "disclosure_pace": rng.choice([
+                "最初から全部まとめず、具体的な場面を少しずつ足す",
+                "自分の感想と、そのきっかけを行き来する",
+                "話してみて気づいたことを言い直す",
+            ]),
+            "speech_texture": rng.choice([
+                "短い文を重ねる自然な口語",
+                "具体的な場面を少し詳しく話す",
+                "ためらいや言い直しを時々含む",
+            ]),
+            "emotional_arc": "背景に合う気分のまま話す。隠れた悩み・孤独・気分の改善・終話を無理に作らない",
+            "topic_order": " / ".join(ordered_points[:4]) or "かけたきっかけと、そこから感じたことにとどまる",
+        }
     return {
         "opening_style": rng.choice(
             [
@@ -2521,6 +2572,12 @@ def build_user_agent_profile(
         "topic_order": " / ".join(ordered_points[:4])
         or "ひとつの話にとどまり、行きつ戻りつする",
     }
+
+
+def build_user_agent_profile(
+    use_case: dict[str, Any], rng: random.Random, listener_only: bool = False,
+) -> dict[str, str]:
+    return adapt_profile(_base_user_agent_profile(use_case, rng, listener_only), use_case)
 
 
 def dialogue_turns_to_transcript(turns: list[DialogueTurn]) -> str:
@@ -2664,8 +2721,9 @@ def build_user_agent_prompt(
 次に user として1発話だけ返してください。
 条件:
 - {pair_index + 1}/{max_pairs} 回目の user 発話です。
-- 相談者として自然に、短すぎず長すぎず 1〜3 文で話します。
-- 最終盤なら、少し区切りがつく発話や感謝も自然に入れてよいです。{pause_directive}
+{speaking_length_guidance(use_case, "- 相談者として自然に1〜3文で話します。")}
+- 収録の残り回数だけを理由に、解決したり感謝したりする必要はありません。{pause_directive}
+{user_interaction_guidance(use_case, turns, request_end=(pair_index > 0 or max_pairs == 1))}
 - moshi の発話、話者名、相づち指示、JSONは書きません。
 - 改行せず、1行で書きます。
 """.strip()
@@ -2687,6 +2745,7 @@ def build_moshi_agent_prompt(
 条件:
 - 必ず1文だけ。短く、長く話しません。
 - 直前の相手の発話を受け止め、その言葉や気持ちを短く言い換えて返すのを基本にします。
+- ケースの反応目標を先回りせず、実際の発話に応じます。本人が言っていない終了希望を了承しません。
 - ときどき、相手の言葉のキーワードだけをそのまま復唱して返します（例:「人間関係、ですか。」）。
 - 感情がにじむ発話には、その気持ちを言葉にして承認します（例:「さみしいですよね。」）。
 - 相手のテンポに合わせます: 明るく勢いのある発話には短く明るく、沈んだ発話にはゆっくり静かな一言で。
@@ -2696,6 +2755,8 @@ def build_moshi_agent_prompt(
 - 「うん」「うんうん」「なるほど」は使いません。「そうなんですね」を続けて使いません。
 - 話者名、JSON、説明は書きません。
 """.strip()
+    if turns and turns[-1].speaker == "user" and user_requests_end(turns[-1].text):
+        prompt += "\n- 相手が明確に終了を望んでいます。短く了承し、新しい質問や話題で引き留めません。"
     return AgentPrompt(system=MOSHI_AGENT_SYSTEM_PROMPT, user=prompt)
 
 
@@ -2898,6 +2959,8 @@ def unplanned_probe(text: str) -> tuple[str, bool] | None:
 def ongoing_user_utterance(text: str) -> tuple[str, bool] | None:
     """Reject direct greetings/signoffs, while allowing discussion of these words."""
     body = RESIDUAL_TAG_RE.sub("", text).strip()
+    if user_requests_end(body):
+        return ("終了希望は別の収録条件です。今は会話の途中として話してください", True)
     if re.search(r"^(?:もしもし[、。]?\s*)?(?:こんにちは|こんばんは|おはようございます)(?:[、。！!\s]|$)", body):
         return ("挨拶せず、会話の途中として話してください", True)
     if re.search(
@@ -2925,6 +2988,8 @@ def continuous_listener_protocol(args: argparse.Namespace) -> dict[str, Any]:
         "max_blocks": maximum,
         "utterance_lengths": ["short", "medium", "long"],
         "ending": "ongoing_excerpt",
+        "situation_catalog_version": CATALOG_VERSION,
+        "interaction_axes_version": INTERACTION_VERSION,
     }
 
 
@@ -3306,10 +3371,14 @@ AIZUCHI_ONLY_USER_SYSTEM_PROMPT = """
 「聞いてもらう」ためだけに話す user として発話します。
 相手（moshi）は相づちしか返しません。助言も質問も返ってこない前提で、
 自分のほうから話し続けます。
-整理された説明ではなく、気持ちを吐き出すように話してください。話が前後したり、
-同じことを言い直したり、途中で言葉に詰まってかまいません。
+整理された説明ではなく、背景に合う出来事・気持ち・感想を自然に話してください。
+悩みだけでなく、好奇心、試用、嬉しい報告、窓口や会話そのものへの関心でもかまいません。
+悩みのない背景に隠れた孤独や危機を追加しません。話が前後したり、同じことを
+言い直したり、途中で言葉に詰まってかまいません。
 書くのは user 一人分の発話だけです。相手の台詞を代わりに書かず、自分の問いに
-自分で答えません。相手が相づちしか返さないことには触れません。
+自分で答えません。生成条件として相手が相づちしか返さないことには触れません。
+ただし背景が会話への感想なら、反応の多さや間などへの主観的な感想は話してかまいません。
+窓口の料金、録音、個人情報の扱い、相手の正体や仕組みを推測で確定しません。
 収録は会話の途中の抜粋です。挨拶・名乗り・お礼での締め・別れの言葉を入れず、
 現在の話を続けます。収録がいつ切られるかは分からないので、終了を先読みしません。
 すべて日本語で書きます（英単語・ローマ字は使いません）。
@@ -3416,12 +3485,15 @@ def build_aizuchi_only_user_prompt(
             "medium": "- 今回は2〜3文で今の話を具体的に続けます。",
             "long": "- 今回は4〜6文で、具体的な出来事や気持ちを話し続けます。要約で締めません。",
         }[plan.get("utterance_length", "medium")]
+        length_directive = speaking_length_guidance(use_case, length_directive)
         directive = (
             f"{length_directive}\n"
             "- 短く切っても、話題は変えません。今の話を続けるか、同じことを\n"
             "  言い直すか、さっき言ったことに戻ります。新しい話題を次々に\n"
-            "  出すと、悩んで電話してきた人の話し方から離れます。\n"
+            "  出さず、かけた動機に沿った具体的な話を続けます。\n"
             "- 相手に質問せず、許可を求める問いでも終えません。\n"
+            "- 窓口やAIへの疑問は『気になってかけた』『どうなのかなと思った』と\n"
+            "  自分の関心として話します。相手が説明したことにして話を進めません。\n"
             "- 相手がいるかの確認（「もしもし」「まだ聞いていますか」）はしません。\n"
             f"{pause_directive}"
         )
@@ -3443,6 +3515,7 @@ def build_aizuchi_only_user_prompt(
 条件:
 {continuity_directive}
 {directive}
+{user_interaction_guidance(use_case, turns, listener_only=True) if not plan.get('probe') else ''}
 - moshi の発話、話者名、相づち指示、JSONは書きません。
 - 改行せず、1行で書きます。
 """.strip()
@@ -5158,6 +5231,10 @@ def generate_dialogues(
             if str(use_case.get("id", "")) not in skip_source_ids
         ]
     use_cases = [use_case for _, use_case in indexed_use_cases]
+    if args.dialogue_generation_mode != "multi-agent" and any(
+        (case.get("interaction_axes") or {}).get("track") == "end-request" for case in use_cases
+    ):
+        raise ValueError("End-request cases require multi-agent dialogue generation.")
     generator = LLMDialogueGenerator(args)
     dialogues: list[Dialogue] = []
     if args.dialogue_generation_mode in AGENT_DIALOGUE_MODES:
@@ -5183,6 +5260,10 @@ def generate_dialogues(
                     dialogue = generator.generate_aizuchi_only(use_case, case_rng)
                 else:
                     dialogue = generator.generate_multi_agent(use_case, case_rng)
+                dialogue.situation_id = str(use_case.get("situation_id") or "")
+                dialogue.situation_group = str(use_case.get("situation_group") or "")
+                dialogue.situation_kind = str(use_case.get("situation_kind") or "")
+                dialogue.interaction_axes = use_case.get("interaction_axes")
                 logger.info(
                     "Generated dialogue with %s LLM agents: %s",
                     args.dialogue_generation_mode,
@@ -5425,7 +5506,7 @@ def write_dialogues_only(args: argparse.Namespace) -> None:
             if any(row.get("listener_protocol") != protocol for row in existing_rows):
                 raise ValueError(
                     "Listener generation protocol changed; use a new output directory "
-                    "instead of resuming legacy greetings/closing/length settings."
+                    "instead of resuming legacy greetings/closing/length/catalog/interaction settings."
                 )
         existing_count = len(existing_rows)
         completed_source_ids = {

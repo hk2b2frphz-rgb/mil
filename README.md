@@ -33,6 +33,10 @@ qsub -V scripts/run_qwen_tts_whole_utterance_3000_4gpu.pbs
 ```
 
 対話数は `1000` / `3000` / `10000` の3系統。動作確認は `_smoke` を使う。
+相談・雑談の背景は400種類（従来46種類＋354種類）です。窓口やAIへの好奇心、
+会話への感想、利用へのためらいなど96種類も含みます。
+[全背景と生成方針](docs/use_case_backgrounds.md)を参照してください。
+背景とは別に[相談目的・障壁・話し方・開示・反応](docs/use_case_interactions.md)も抽選します。終了希望は別条件で生成します。
 TTS のバックエンドは 1000 が Qwen3-TTS、3000/10000 は Kokoro（Qwen3-TTS では
 walltime 内に終わらないため）。
 

@@ -17,8 +17,10 @@ from pathlib import Path
 
 try:
     from scripts.build_use_cases import build_one
+    from scripts.use_case_interactions import INTERACTION_TRACKS
 except ModuleNotFoundError:
     from build_use_cases import build_one
+    from use_case_interactions import INTERACTION_TRACKS
 
 
 TASKS = [
@@ -111,6 +113,7 @@ def main() -> int:
         default=2,
         help="Max talking points injected per card when --content-seeds is set.",
     )
+    parser.add_argument("--interaction-track", choices=INTERACTION_TRACKS, default="ongoing")
     args = parser.parse_args()
 
     if args.num <= 0:
@@ -161,7 +164,7 @@ def main() -> int:
     counts: dict[str, int] = {"listening": 0}
     with args.out_path.open("w", encoding="utf-8") as handle:
         for index, task in enumerate(plan, start=1):
-            row = asdict(build_one(rng, index))
+            row = asdict(build_one(rng, index, args.interaction_track))
             row["source_profile"] = "full_duplex_training_ja_v2"
             if content_seeds and args.seeds_per_card > 0:
                 k = min(args.seeds_per_card, len(content_seeds))

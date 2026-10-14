@@ -1,6 +1,6 @@
 # 別Agentへの実行引き継ぎ：3条件を順次実行する方針
 
-更新日：2026-10-08（日本時間）。実行対象のPBSはこの `2026-10-07` フォルダにあります。
+更新日：2026-10-14（日本時間）。実行対象のPBSはこの `2026-10-07` フォルダにあります。
 
 目的はreal-v2・従来の重畳TTS・AI配置の3モデルを同じ対話集合で比較することです。**重い計算は同時に1ジョブだけ**にし、次のPBSは前段の成功を確認してから投入してください。この文書の追加作業ではサーバーへの投入を行っていません。引き継ぐAgentは実際のサーバーの状態から着手段階を判断します。
 
@@ -17,7 +17,7 @@
 リポジトリ直下で設定し、すべての個別投入に同じ値を引き継ぎます。
 
 ```bash
-export COMPARE_ID=aizuchi_compare_2026-10-08_continuous_10000
+export COMPARE_ID=aizuchi_compare_2026-10-14_backgrounds_v2_axes_v1_10000
 export COMPARE_N=10000
 export COMPARE_SEED=0
 export COMPARE_EVAL_SEEDS=0

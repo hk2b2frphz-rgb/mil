@@ -1,4 +1,4 @@
-# real-v2との3条件の比較（2026-10-07作成、2026-10-08更新）
+# real-v2との3条件の比較（2026-10-07作成、2026-10-14更新）
 
 | 条件 / 出力モデル | 相槌の位置・個数 | 音声の作り方 |
 |---|---|---|
@@ -17,6 +17,20 @@
 収録ごとの話者発話数は2〜12回で無作為に選び、各発話も短文1文・中程度2〜3文・長め4〜6文の指示を混ぜます。音声を一定秒数に揃える設定ではありません。沈黙中は待ち、話が再開したら相槌を返す教師データを使います。密度0の条件と重複・連発の抑制は維持します。
 
 `listener_protocol` に収録方針と長さの範囲を保存し、生成の再開では方針の一致を検査します。旧データや異なる方針を混ぜた入力の凍結は拒否します。学習の170秒はコンテキストの上限であり、会話を170秒で終了させる指示ではありません。長時間推論で反応が弱くならないかは、再学習後に別途確認が必要です。
+
+## 相談背景の拡張（2026-10-14）
+
+背景は46種類から400種類へ拡張しました。うち96種類は窓口やAIへの好奇心、会話への感想、利用へのためらいです。嬉しい報告、何となくかけた、日常の発見なども含みます。[全背景一覧](../../docs/use_case_backgrounds.md)を参照してください。
+
+悩み以外の背景はlowとし、理由なく孤独・危機・感情の改善を付け加えない話者設定を使います。メタ的な疑問は、相槌専用条件では利用者の関心や感想として語り、料金・録音・AIの正体を聞き手が説明したことにはしません。相槌の頻度や間への主観的な感想は許容します。
+
+生成データには背景ID・背景グループ・種類を保存し、listener_protocolに背景カタログ版を追加します。旧カタログからの生成再開は拒否します。旧データは新背景の実験へ流用せず、新しい既定実験IDを使ってください。旧データを明示的に凍結して使う経路は互換性のため残りますが、背景が400種類へ増えるわけではありません。
+
+## 相談目的・障壁・話し方・開示・反応（2026-10-14）
+
+400背景に加えて5つの軸を独立に持たせます。[軸の一覧と条件ごとの扱い](../../docs/use_case_interactions.md)を参照してください。相槌の比較実験は `INTERACTION_TRACK=ongoing` に固定し、終了希望の条件を混ぜません。終了希望の別データは `scripts/2026-10-14/prepare_end_request_dialogues.pbs` で生成できます。質問や提案に対する反応は、実際の履歴にその前提がある場合のみ指示します。相槌条件では質問・提案・誤解を創作しません。
+
+`listener_protocol` の `interaction_axes_version` が異なるデータへの生成再開は拒否します。400背景だけを拡張した直前の出力先からも分離するため、既定実験IDに `axes_v1` を加えています。
 
 ## 相槌AIの設計
 
@@ -39,18 +53,18 @@ AI側の全回答・制約違反と再要求は `ai_placement/dialogue/llm_dialo
 bash scripts/2026-10-07/submit_comparison.sh
 ```
 
-既定は10,000対話です。2026-10-08更新後の既定実験IDは `aizuchi_compare_2026-10-08_continuous_10000` です。挨拶・終話のある旧対話、旧AIのKABURI音声、学習済みデータ、checkpointと混在しないよう、新しいIDで実行してください。まず小さく動作確認する場合：
+既定は10,000対話です。2026-10-14更新後の既定実験IDは `aizuchi_compare_2026-10-14_backgrounds_v2_axes_v1_10000` です。挨拶・終話のある旧対話、旧AIのKABURI音声、学習済みデータ、checkpointと混在しないよう、新しいIDで実行してください。まず小さく動作確認する場合：
 
 ```bash
-COMPARE_N=20 COMPARE_ID=aizuchi_compare_2026-10-08_continuous_smoke \
+COMPARE_N=20 COMPARE_ID=aizuchi_compare_2026-10-14_backgrounds_v2_axes_v1_smoke \
   bash scripts/2026-10-07/submit_comparison.sh
 ```
 
 旧v2対話は自動流用せず、継続する聞き手の新しい方針で共通対話を生成します。途中で止まった場合は同じ方針の生成済み分から再開します。新方針で生成済みの共通対話だけは明示的に流用できます：
 
 ```bash
-COMPARE_N=20 COMPARE_ID=aizuchi_compare_2026-10-08_continuous_smoke \
-COMPARE_SOURCE_INPUT="$PWD/data/runs/aizuchi_compare_2026-10-08_continuous_10000/shared/dialogues.jsonl" \
+COMPARE_N=20 COMPARE_ID=aizuchi_compare_2026-10-14_backgrounds_v2_axes_v1_smoke \
+COMPARE_SOURCE_INPUT="$PWD/data/runs/aizuchi_compare_2026-10-14_backgrounds_v2_axes_v1_10000/shared/dialogues.jsonl" \
   bash scripts/2026-10-07/submit_comparison.sh
 ```
 
@@ -59,7 +73,7 @@ COMPARE_SOURCE_INPUT="$PWD/data/runs/aizuchi_compare_2026-10-08_continuous_10000
 バンク照合は完全一致を優先し、書き起こし側に句読点がない場合は両側を同じように正規化して照合します。従来の片側だけの正規化によって、同じ語の音声が存在するのに別の語へフォールバックする問題も修正しました。既に作成済みの音声は、この修正だけでは書き換わりません。
 
 ```bash
-COMPARE_ID=aizuchi_compare_2026-10-08_continuous_other_voice \
+COMPARE_ID=aizuchi_compare_2026-10-14_backgrounds_v2_axes_v1_other_voice \
 COMPARE_CLONE_DIR="$PWD/data/clone_examples/your_reference" \
 COMPARE_BANK="$PWD/data/runs/diversity/your_matching_bank" \
   bash scripts/2026-10-07/submit_comparison.sh
@@ -93,7 +107,7 @@ TTSの失敗を別の対話で埋めるspareは無効です。欠落IDや条件�
 
 ## 出力と再実行
 
-既定の出力は `data/runs/aizuchi_compare_2026-10-08_continuous_10000/` です。従来方式・AI方式の条件タグ付きデータは、各条件の `tts/merged_conditioned/training_set/` にまとまります。
+既定の出力は `data/runs/aizuchi_compare_2026-10-14_backgrounds_v2_axes_v1_10000/` です。従来方式・AI方式の条件タグ付きデータは、各条件の `tts/merged_conditioned/training_set/` にまとまります。
 
 - `shared/dialogues.jsonl`：凍結した共通対話。
 - `<条件>/tts/`：各音声データ。`<条件>/paired/`：学習に使用するmanifest。
@@ -106,7 +120,7 @@ TTSの失敗を別の対話で埋めるspareは無効です。欠落IDや条件�
 音声化は途中再開に対応します。条件タグの付与は既存と同じく再実行不可です。途中で止まった出力に再度パディングを足さないため、条件付与が失敗した際はその条件のconditioned出力を退避し、当該PBSを再投入してください。一括投入スクリプト全体を再度投入すると学習ジョブが重複し得るため、再開には個別PBSを使います。
 
 ```bash
-qsub -V -v COMPARE_ID=aizuchi_compare_2026-10-08_continuous_10000,COMPARE_N=10000 \
+qsub -V -v COMPARE_ID=aizuchi_compare_2026-10-14_backgrounds_v2_axes_v1_10000,COMPARE_N=10000 \
   scripts/2026-10-07/train_ai_placement.pbs
 
 qsub -V scripts/2026-10-07/compare_results.pbs

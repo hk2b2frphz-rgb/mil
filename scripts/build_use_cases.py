@@ -4,10 +4,10 @@
 孤独・孤立相談窓口を想定した use case カードを「軸の組み合わせ」で生成する。
 
 方針 (大規模生成向けに多様性を抜本拡張):
-- 状況・話題・会話タイプ・職業・時間帯・季節を直交に近い形で組み合わせる
+- 状況・会話タイプ・職業・時間帯を、背景との整合性を保って組み合わせる
 - 雑談/傾聴を基準に置き、相談だけに偏らない会話の「型」を持たせる
-- 配分はリスクレベルで層化（low:medium:high = 6:3:1 目安）
-- 沈黙ありを 35% 程度混ぜる
+- 悩みの背景ではリスクを 6:3:1 で抽選。好奇心・雑談・嬉しい報告は low
+- 背景に応じた沈黙を混ぜる
 - LLM に渡せる use case JSONL 1 件ごとに 1 対話が生成される想定
 
 出力:
@@ -21,9 +21,16 @@ from __future__ import annotations
 import argparse
 import json
 import random
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any
+
+try:
+    from scripts.use_case_situations import CATALOG_VERSION, EXPANDED_SITUATIONS, SITUATION_DETAILS
+    from scripts.use_case_interactions import INTERACTION_TRACKS, sample_interaction_axes
+except ModuleNotFoundError:
+    from use_case_situations import CATALOG_VERSION, EXPANDED_SITUATIONS, SITUATION_DETAILS
+    from use_case_interactions import INTERACTION_TRACKS, sample_interaction_axes
 
 # ---------------------------------------------------------------------------
 # 軸の定義
@@ -79,6 +86,8 @@ SITUATIONS: list[tuple[str, str, str, int, bool]] = [
     ("seasonal_blues",         "季節の変わり目で気分が落ち込みやすい",             "feelings", 9,  False),
     ("late_evening_quiet",     "仕事を終えた後の静けさが急に寂しくなる",           "smalltalk", 8, False),
 ]
+
+SITUATIONS.extend(EXPANDED_SITUATIONS)
 
 AGE_BANDS = ["20代", "30代", "40代", "50代", "60代", "70代"]
 GENDERS = ["男性", "女性"]
@@ -164,6 +173,34 @@ SITUATION_PROFILE_CONSTRAINTS: dict[str, dict[str, list[str]]] = {
 }
 
 
+# 新しい背景の役割と属性を一致させる。
+for _token, _details in SITUATION_DETAILS.items():
+    if _details["group"] == "work_and_roles" and _token != "unpaid_role_overload":
+        SITUATION_PROFILE_CONSTRAINTS[_token] = {
+            "exclude_occupations": ["学生", "退職した人", "求職中", "主婦・主夫"],
+        }
+    if _token.startswith("parenting_"):
+        SITUATION_PROFILE_CONSTRAINTS[_token] = {
+            "ages": ["20代", "30代", "40代", "50代"],
+            "exclude_occupations": ["学生", "退職した人"],
+        }
+
+SITUATION_PROFILE_CONSTRAINTS.update({
+    "remote_work_unseen": {"occupations": ["会社員", "技術職", "在宅ワーカー", "自営業"]},
+    "business_owner_no_peer": {"occupations": ["経営者", "自営業"]},
+    "class_no_group": {"occupations": ["学生"]},
+    "research_no_progress": {"occupations": ["学生", "技術職"]},
+    "lab_communication": {"occupations": ["学生", "技術職"]},
+    "study_career_choice": {"occupations": ["学生"]},
+    "study_family_expectation": {"occupations": ["学生"]},
+    "study_work_balance": {"exclude_occupations": ["学生", "退職した人", "求職中", "主婦・主夫"]},
+    "retirement_approaching": {"ages": ["50代", "60代", "70代"], "occupations": ["会社員", "公務員", "技術職", "医療・介護職", "サービス業"]},
+    "pension_budget_adjustment": {"ages": ["50代", "60代", "70代"], "occupations": ["退職した人"]},
+    "child_independence_mix": {"ages": ["30代", "40代", "50代", "60代", "70代"]},
+    "grandchild_boundary": {"ages": ["50代", "60代", "70代"]},
+})
+
+
 def profile_pools(sit_token: str) -> tuple[list[str], list[str], list[str]]:
     """この状況で引いてよい年代・性別・職業。"""
     rules = SITUATION_PROFILE_CONSTRAINTS.get(sit_token, {})
@@ -236,6 +273,17 @@ EMOTIONAL_STATES: list[tuple[str, str, str, int]] = [
 
 # (id_token, opening_template)
 OPENING_TEMPLATES = {
+    "positive": [
+        "今日はちょっと嬉しいことがあって、誰かに話したくなったんです。",
+        "自分には小さくない出来事で、その話を聞いてもらいたくて。",
+        "まだ少し嬉しい気持ちが残っていて、声に出して話してみたくなりました。",
+    ],
+    "curiosity": [
+        "どんなところなのかなと思って、気になってかけてみたんです。",
+        "特に話をまとめてきたわけではなくて、少し試してみたくなったんです。",
+        "こうして声で話すのがどんな感じなのか、気になっていたんです。",
+        "話す前にいろいろ想像してしまって、その感じを聞いてもらいたくて。",
+    ],
     "smalltalk": [
         "こんばんは。相談というほどでもないんですが、少し話してもいいですか。",
         "あの、ちょっと話を聞いてもらえますか。",
@@ -320,6 +368,12 @@ class UseCase:
     personality_guidance: str = ""
     emotional_state: str = ""
     emotional_state_hint: str = ""
+    situation_id: str = ""
+    situation_group: str = "legacy_loneliness"
+    situation_kind: str = "distress"
+    situation_guidance: str = ""
+    situation_catalog_version: str = CATALOG_VERSION
+    interaction_axes: dict[str, Any] = field(default_factory=dict)
 
 
 def weighted_choice(rng: random.Random, items: list[tuple[Any, int]]) -> Any:
@@ -351,22 +405,28 @@ def choose_topic(
     return situation
 
 
-def build_one(rng: random.Random, index: int) -> UseCase:
+def build_one(rng: random.Random, index: int, interaction_track: str = "ongoing") -> UseCase:
     sit_token, situation, opening_kind, target_turns, prefers_silence = rng.choice(SITUATIONS)
+    details = SITUATION_DETAILS.get(sit_token, {})
+    kind = details.get("kind", "distress")
+    if kind == "positive":
+        opening_kind = "positive"
     age_pool, gender_pool, occupation_pool = profile_pools(sit_token)
     age = rng.choice(age_pool)
     gender = rng.choice(gender_pool)
     occupation = rng.choice(occupation_pool)
-    risk = weighted_choice(rng, RISK_WEIGHTS)
-    topic = choose_topic(sit_token, situation, conv_hint_token(rng), rng)
+    risk = weighted_choice(rng, RISK_WEIGHTS) if kind == "distress" else "low"
+    topic = situation if kind == "meta" else choose_topic(sit_token, situation, conv_hint_token(rng), rng)
     time_token, time_label = rng.choice(TIME_OF_DAY)
     pers_token, pers_label, pers_guidance = rng.choice(PERSONALITIES)
-    state_token, state_label, state_hint, _ = weighted_choice(
-        rng, [(item, item[3]) for item in EMOTIONAL_STATES]
-    )
-    conv_token, conv_label, conv_guidance, _ = weighted_choice(
-        rng, [(item, item[3]) for item in CONVERSATION_TYPES]
-    )
+    emotion_pool = EMOTIONAL_STATES
+    conversation_pool = CONVERSATION_TYPES
+    if kind != "distress":
+        allowed_states = {"steady", "anxious"} if kind == "meta" else {"steady", "high_tension"}
+        emotion_pool = [item for item in EMOTIONAL_STATES if item[0] in allowed_states]
+        conversation_pool = [item for item in CONVERSATION_TYPES if item[0] in {"smalltalk", "listening", "reflection"}]
+    state_token, state_label, state_hint, _ = weighted_choice(rng, [(item, item[3]) for item in emotion_pool])
+    conv_token, conv_label, conv_guidance, _ = weighted_choice(rng, [(item, item[3]) for item in conversation_pool])
 
     # 沈黙パターン: situation が好む場合は heavy 寄りに、それ以外は通常分布
     if prefers_silence and rng.random() < 0.55:
@@ -375,7 +435,7 @@ def build_one(rng: random.Random, index: int) -> UseCase:
         silence_pattern = weighted_choice(rng, [(t, w) for _, t, w in SILENCE_PATTERNS])
 
     # 沈黙ありなら opening_kind を silence にすることがある
-    if silence_pattern == "heavy" and rng.random() < 0.4:
+    if kind == "distress" and silence_pattern == "heavy" and rng.random() < 0.4:
         chosen_opening_kind = "silence"
     else:
         chosen_opening_kind = opening_kind
@@ -398,18 +458,26 @@ def build_one(rng: random.Random, index: int) -> UseCase:
         target_turns += 1
 
     tone = rng.choice(TONES_BY_RISK[risk])
+    if kind != "distress":
+        tone = "かけた動機に沿って自然に聞く。悩み・孤独・解決策・感情の改善を無理に付け加えない。"
 
     category = {
         "low":    "loneliness_light",
         "medium": "loneliness_deep",
         "high":   "loneliness_high",
     }[risk]
+    if kind != "distress":
+        category = f"{kind}_{details['group']}"
 
     # Keep user_profile to demographics + situation only. personality, today's
     # emotional_state and time_of_day are separate fields with their own prompt
     # lines; embedding them here too triples the same facts in the prompt and
     # bloats/derails generation.
     user_profile = f"{age}{gender}、{occupation}。{situation}という背景がある。"
+
+    interaction_axes = sample_interaction_axes(rng, kind, interaction_track)
+    if interaction_axes["speaking_style"] == "anger":
+        state_token, state_label, state_hint = next((item[0], item[1], item[2]) for item in EMOTIONAL_STATES if item[0] == "agitated")
 
     use_case_id = (
         f"{sit_token}_{conv_token}_{pers_token}_{state_token}_"
@@ -434,6 +502,11 @@ def build_one(rng: random.Random, index: int) -> UseCase:
         personality_guidance=pers_guidance,
         emotional_state=state_label,
         emotional_state_hint=state_hint,
+        situation_id=sit_token,
+        situation_group=details.get("group", "legacy_loneliness"),
+        situation_kind=kind,
+        situation_guidance=details.get("guidance", ""),
+        interaction_axes=interaction_axes,
     )
 
 
@@ -442,6 +515,7 @@ def main() -> None:
     parser.add_argument("--out-path", type=Path, required=True)
     parser.add_argument("--num", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--interaction-track", choices=INTERACTION_TRACKS, default="ongoing")
     args = parser.parse_args()
 
     if args.num <= 0:
@@ -456,7 +530,7 @@ def main() -> None:
         attempts = 0
         while written < args.num and attempts < args.num * 20:
             attempts += 1
-            uc = build_one(rng, written + 1)
+            uc = build_one(rng, written + 1, args.interaction_track)
             if uc.id in seen_ids:
                 continue
             seen_ids.add(uc.id)

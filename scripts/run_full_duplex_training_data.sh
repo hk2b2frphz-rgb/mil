@@ -78,6 +78,7 @@ if has_step use_cases; then
         --seed "$SEED"
         --tasks "$FULL_DUPLEX_TASKS"
         --listening-ratio "$LISTENING_RATIO"
+        --interaction-track "${INTERACTION_TRACK:-ongoing}"
     )
     # Optional concrete talking-point bank for content diversity.
     if [[ -n "${CONTENT_SEEDS:-}" && -s "${CONTENT_SEEDS}" ]]; then

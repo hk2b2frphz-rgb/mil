@@ -3,8 +3,8 @@
 set -euo pipefail
 export COMPARE_N="${COMPARE_N:-10000}"
 [[ "$COMPARE_N" =~ ^[0-9]+$ && "$COMPARE_N" -ge 2 ]] || { echo 'COMPARE_N must be >=2' >&2; exit 1; }
-# Separate ongoing excerpts from legacy greetings, endings and narrow lengths.
-export COMPARE_ID="${COMPARE_ID:-aizuchi_compare_2026-10-08_continuous_${COMPARE_N}}"
+# Separate the expanded background catalog/prompts from existing generated data.
+export COMPARE_ID="${COMPARE_ID:-aizuchi_compare_2026-10-14_backgrounds_v2_axes_v1_${COMPARE_N}}"
 [[ "$COMPARE_ID" =~ ^[A-Za-z0-9_-]+$ ]] || { echo 'Invalid COMPARE_ID' >&2; exit 1; }
 export COMPARE_ROOT="$PWD/data/runs/$COMPARE_ID"
 export COMPARE_SOURCE="$COMPARE_ROOT/shared/dialogues.jsonl"
