@@ -1,0 +1,295 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N grpo_judge
+#PBS -q xan_s
+#PBS -l select=1:res=middle
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# GRPO interactivity alignment, end to end in one job:
+#
+#   0. segments   extract GRPO segments if they are not there yet
+#   1. judge      start Qwen3.6-27B on GPU 1 (vLLM, OpenAI-compatible)
+#   2. train      GRPO on LoRA adapters on GPU 0
+#   3. merge      fold the final adapter into the base weights
+#   4. eval       Full-Duplex-Bench-JA on the merged model
+#
+# GPU layout (two A100 80GB):
+#   GPU 1  vLLM judge, ~54GB of weights plus KV cache, resident for step 2 only
+#   GPU 0  the training process, which reaches the judge over HTTP
+# The judge is stopped as soon as training ends, so step 4 gets the whole node.
+#
+# EVERYTHING lands under one directory:
+#
+#   experiments/grpo/<RUN_NAME>/
+#     config.yaml                 the exact config this run used
+#     segments/                   per-axis segment JSONL (if extracted here)
+#     checkpoints/                checkpoint_epoch_XXXX/consolidated/lora.safetensors
+#     merged/consolidated.safetensors
+#     eval/                       Full-Duplex-Bench-JA output
+#     logs/                       train.log, judge_server.log, merge.log, eval.log
+#     training_log.jsonl          per-epoch reward / loss / judge score
+#
+# RUN_NAME is a FIXED name, not a timestamp, and the job resumes from the
+# newest adapter already in that directory. Re-submitting the same job after a
+# walltime kill continues the run instead of starting a second one beside it.
+#
+# Submit (first run):
+#   qsub -V -v BATCH_ID=qwen_dialogues_1000,MOSHI_WEIGHT=$PWD/merged_model/consolidated.safetensors scripts/2026-09-04/grpo_judge_lora.pbs
+#
+# Submit (continue the same run after 24h):
+#   qsub -V -v BATCH_ID=qwen_dialogues_1000,MOSHI_WEIGHT=$PWD/merged_model/consolidated.safetensors scripts/2026-09-04/grpo_judge_lora.pbs
+#
+# MOSHI_WEIGHT should be the MERGED SFT model. GRPO's reference policy is that
+# model with the adapters switched off, so passing the untuned base makes the
+# KL term pull the listener back toward a model that was never fine-tuned.
+#
+# Optional:
+#   RUN_NAME=grpo_judge_lora     output directory name under experiments/grpo/
+#   BATCH_ID=qwen_dialogues_1000 source corpus for segment extraction
+#   GRPO_SEGMENT_DIR=...         use existing segments instead of extracting
+#   GRPO_CONFIG=configs/grpo_judge_lora.yaml
+#   MAX_PER_AXIS=2000
+#   JUDGE_MODEL=Qwen/Qwen3.6-27B
+#   JUDGE_PORT=8000
+#   JUDGE_GPU_UTIL=0.90
+#   JUDGE_MAX_LEN=8192
+#   RUN_MERGE=1                  set 0 to stop after training
+#   RUN_EVAL=1                   set 0 to skip Full-Duplex-Bench-JA
+#   RESUME=1                     set 0 to ignore adapters already in RUN_DIR
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+RUN_NAME="${RUN_NAME:-grpo_judge_lora}"
+if ! [[ "$RUN_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "ERROR: RUN_NAME may contain only letters, digits, dot, underscore, hyphen." >&2
+    exit 1
+fi
+
+RUN_DIR="$PWD/experiments/grpo/$RUN_NAME"
+SEG_DIR_LOCAL="$RUN_DIR/segments"
+CKPT_DIR="$RUN_DIR/checkpoints"
+MERGED_DIR="$RUN_DIR/merged"
+EVAL_DIR="$RUN_DIR/eval"
+LOG_DIR="$RUN_DIR/logs"
+mkdir -p "$SEG_DIR_LOCAL" "$CKPT_DIR" "$MERGED_DIR" "$EVAL_DIR" "$LOG_DIR"
+
+GRPO_CONFIG="${GRPO_CONFIG:-configs/grpo_judge_lora.yaml}"
+BATCH_ID="${BATCH_ID:-qwen_dialogues_1000}"
+MAX_PER_AXIS="${MAX_PER_AXIS:-2000}"
+JUDGE_MODEL="${JUDGE_MODEL:-Qwen/Qwen3.6-27B}"
+JUDGE_PORT="${JUDGE_PORT:-8000}"
+JUDGE_GPU_UTIL="${JUDGE_GPU_UTIL:-0.90}"
+JUDGE_MAX_LEN="${JUDGE_MAX_LEN:-8192}"
+RUN_MERGE="${RUN_MERGE:-1}"
+RUN_EVAL="${RUN_EVAL:-1}"
+RESUME="${RESUME:-1}"
+MOSHI_FT_REPO="${MOSHI_FT_REPO:-$PWD/../moshi-finetune}"
+
+export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+# qsub -v already exports these, but a direct "bash scripts/..." run does not,
+# and train_grpo.py reads both from the environment.
+[[ -n "${MOSHI_WEIGHT:-}" ]] && export MOSHI_WEIGHT
+[[ -n "${LORA_RESUME:-}" ]] && export LORA_RESUME
+true
+
+# The config is copied into the run directory, so a checkpoint months later
+# still says what produced it even after the tracked config has moved on.
+cp "$GRPO_CONFIG" "$RUN_DIR/config.yaml"
+
+echo "===== GRPO with LLM judge ====="
+echo "run_name:   $RUN_NAME"
+echo "run_dir:    $RUN_DIR"
+echo "config:     $GRPO_CONFIG"
+echo "base model: ${MOSHI_WEIGHT:-<hf base, NOT the SFT model>}"
+echo "started:    $(date -Iseconds)"
+echo "==============================="
+
+# ---------------------------------------------------------------------------
+# 0. Segments
+# ---------------------------------------------------------------------------
+if [[ -z "${GRPO_SEGMENT_DIR:-}" ]]; then
+    SHARED_SEGMENTS="$PWD/data/runs/$BATCH_ID/grpo_segments"
+    if [[ -f "$SHARED_SEGMENTS/turn_taking_segments.jsonl" ]]; then
+        GRPO_SEGMENT_DIR="$SHARED_SEGMENTS"
+        echo "[grpo] using existing segments: $GRPO_SEGMENT_DIR"
+    elif [[ -f "$SEG_DIR_LOCAL/turn_taking_segments.jsonl" ]]; then
+        GRPO_SEGMENT_DIR="$SEG_DIR_LOCAL"
+        echo "[grpo] reusing segments from a previous run of this job"
+    else
+        MANIFEST="$PWD/data/runs/$BATCH_ID/training_set/synthetic_moshi_train.jsonl"
+        if [[ ! -f "$MANIFEST" ]]; then
+            echo "ERROR: no segments and no manifest to build them from." >&2
+            echo "       looked for: $MANIFEST" >&2
+            echo "       Set GRPO_SEGMENT_DIR, or set BATCH_ID to a generated corpus." >&2
+            exit 1
+        fi
+        echo "[grpo] extracting segments from $MANIFEST"
+        uv run python scripts/grpo/segment_extractor.py \
+            --manifest "$MANIFEST" \
+            --out-dir "$SEG_DIR_LOCAL" \
+            --max-per-axis "$MAX_PER_AXIS" 2>&1 | tee "$LOG_DIR/segments.log"
+        GRPO_SEGMENT_DIR="$SEG_DIR_LOCAL"
+    fi
+fi
+export GRPO_SEGMENT_DIR
+
+# ---------------------------------------------------------------------------
+# Resume: continue from the newest adapter this run already produced.
+# ---------------------------------------------------------------------------
+if [[ "$RESUME" == "1" && -z "${LORA_RESUME:-}" ]]; then
+    LATEST="$(ls -1d "$CKPT_DIR"/checkpoint_epoch_*/consolidated/lora.safetensors 2>/dev/null | sort | tail -n 1 || true)"
+    if [[ -n "$LATEST" ]]; then
+        export LORA_RESUME="$LATEST"
+        echo "[grpo] resuming from $LORA_RESUME"
+        echo "[grpo] note: adapters only. Optimizer state is not carried across"
+        echo "[grpo]       jobs, same as the SFT chain."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 1. Judge server on GPU 1
+# ---------------------------------------------------------------------------
+GPU_COUNT="$(nvidia-smi --list-gpus | wc -l)"
+if [[ "$GPU_COUNT" -lt 2 ]]; then
+    echo "ERROR: this job needs 2 GPUs, found $GPU_COUNT." >&2
+    echo "       Request a larger resource class, or serve the judge on another" >&2
+    echo "       node and point judge_base_url at it." >&2
+    exit 1
+fi
+
+JUDGE_LOG="$LOG_DIR/judge_server.log"
+echo "[grpo] starting judge $JUDGE_MODEL on GPU 1 -> $JUDGE_LOG"
+CUDA_VISIBLE_DEVICES=1 python3 -m vllm.entrypoints.openai.api_server \
+    --model "$JUDGE_MODEL" \
+    --served-model-name "$JUDGE_MODEL" \
+    --host 127.0.0.1 \
+    --port "$JUDGE_PORT" \
+    --gpu-memory-utilization "$JUDGE_GPU_UTIL" \
+    --max-model-len "$JUDGE_MAX_LEN" \
+    --disable-log-requests \
+    > "$JUDGE_LOG" 2>&1 &
+JUDGE_PID=$!
+
+stop_judge() {
+    if [[ -n "${JUDGE_PID:-}" ]] && kill -0 "$JUDGE_PID" 2>/dev/null; then
+        echo "[grpo] stopping judge (pid $JUDGE_PID)"
+        kill "$JUDGE_PID" 2>/dev/null || true
+        wait "$JUDGE_PID" 2>/dev/null || true
+    fi
+    JUDGE_PID=""
+}
+# Covers the walltime kill too: without this the judge would outlive the job.
+trap stop_judge EXIT INT TERM
+
+# The trainer waits for /health itself, but a server that died during load
+# would otherwise only be noticed after Moshi finished loading.
+for _ in $(seq 1 180); do
+    if ! kill -0 "$JUDGE_PID" 2>/dev/null; then
+        echo "ERROR: judge server exited during startup. Tail of $JUDGE_LOG:" >&2
+        tail -n 40 "$JUDGE_LOG" >&2
+        exit 1
+    fi
+    if curl -sf "http://127.0.0.1:$JUDGE_PORT/health" >/dev/null 2>&1; then
+        echo "[grpo] judge ready"
+        break
+    fi
+    sleep 10
+done
+
+# ---------------------------------------------------------------------------
+# 2. GRPO training on GPU 0
+# ---------------------------------------------------------------------------
+export GRPO_JUDGE_BASE_URL="http://127.0.0.1:$JUDGE_PORT/v1"
+export GRPO_JUDGE_MODEL="$JUDGE_MODEL"
+
+echo "[grpo] training on GPU 0 -> $CKPT_DIR"
+CUDA_VISIBLE_DEVICES=0 python3 scripts/grpo/train_grpo.py \
+    --config "$RUN_DIR/config.yaml" \
+    --segment-dir "$GRPO_SEGMENT_DIR" \
+    --save-dir "$CKPT_DIR" 2>&1 | tee -a "$LOG_DIR/train.log"
+
+# Free GPU 1 before the merge and the evaluation: neither needs the judge, and
+# holding 54GB through a multi-hour eval is pure waste.
+stop_judge
+
+# ---------------------------------------------------------------------------
+# 3. Merge the final adapter
+# ---------------------------------------------------------------------------
+FINAL_LORA="$(ls -1d "$CKPT_DIR"/checkpoint_epoch_*/consolidated/lora.safetensors 2>/dev/null | sort | tail -n 1 || true)"
+if [[ -z "$FINAL_LORA" ]]; then
+    echo "ERROR: training produced no adapter under $CKPT_DIR" >&2
+    exit 1
+fi
+echo "[grpo] final adapter: $FINAL_LORA"
+
+MERGED_WEIGHT="$MERGED_DIR/consolidated.safetensors"
+if [[ "$RUN_MERGE" != "1" ]]; then
+    echo "[grpo] RUN_MERGE=0, stopping after training."
+    exit 0
+fi
+if [[ -e "$MERGED_WEIGHT" ]]; then
+    # A resumed job produces a newer adapter than the merge already on disk.
+    ARCHIVE="$MERGED_DIR/previous_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$ARCHIVE"
+    mv "$MERGED_WEIGHT" "$ARCHIVE/consolidated.safetensors"
+    echo "[grpo] moved the previous merge to $ARCHIVE"
+fi
+
+# The adapter was trained on top of MOSHI_WEIGHT, so that is what it has to be
+# folded back into. Merging it into the HF base instead would throw away the
+# SFT underneath and produce a model that is neither the SFT one nor the
+# GRPO-aligned one.
+MERGE_BASE_ARGS=()
+if [[ -n "${MOSHI_WEIGHT:-}" ]]; then
+    MERGE_BASE_ARGS=(--base-weight "$MOSHI_WEIGHT")
+fi
+
+echo "[grpo] merging -> $MERGED_WEIGHT"
+uv run --project "$MOSHI_FT_REPO" python "$PWD/scripts/merge_lora.py" \
+    --lora-ckpt "$FINAL_LORA" \
+    --out "$MERGED_WEIGHT" \
+    ${MERGE_BASE_ARGS[@]+"${MERGE_BASE_ARGS[@]}"} \
+    2>&1 | tee "$LOG_DIR/merge.log"
+
+# ---------------------------------------------------------------------------
+# 4. Full-Duplex-Bench-JA on the merged model
+# ---------------------------------------------------------------------------
+if [[ "$RUN_EVAL" != "1" ]]; then
+    echo "[grpo] RUN_EVAL=0, stopping after the merge."
+    echo "[grpo] merged model: $MERGED_WEIGHT"
+    exit 0
+fi
+
+echo "[grpo] evaluating -> $EVAL_DIR"
+echo "[grpo] NOTE: this eval is judged by the SAME rubric GRPO trained against."
+echo "[grpo]       Treat it as a training-progress signal. For anything reported,"
+echo "[grpo]       judge with Azure GPT (eval/judge_full_duplex_azure.py) as a"
+echo "[grpo]       held-out judge; see docs/grpo_judge_lora.md."
+
+set +e
+MODEL_ID="grpo_${RUN_NAME}" \
+RUN_ID="grpo_${RUN_NAME}_$(date +%Y%m%d_%H%M%S)" \
+MODEL_WEIGHT="$MERGED_WEIGHT" \
+FDB_OUT_DIR="$EVAL_DIR" \
+    bash scripts/run_full_duplex_eval.sh 2>&1 | tee "$LOG_DIR/eval.log"
+EVAL_STATUS=${PIPESTATUS[0]}
+set -e
+if [[ "$EVAL_STATUS" -ne 0 ]]; then
+    # The checkpoints and the merge are already on disk and are the expensive
+    # part of this job, so a failed eval must not mark the whole run as lost.
+    echo "[grpo] WARNING: evaluation failed (exit $EVAL_STATUS). Training output is intact." >&2
+fi
+
+echo "===== done ====="
+echo "run_dir:  $RUN_DIR"
+echo "adapters: $CKPT_DIR"
+echo "merged:   $MERGED_WEIGHT"
+echo "eval:     $EVAL_DIR"
+echo "logs:     $LOG_DIR"
+echo "ended:    $(date -Iseconds)"

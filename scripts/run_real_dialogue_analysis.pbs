@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N real_dialogue
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -V
+
+# Ear-check analysis of real 1ch roleplay dialogue WAVs
+# (scripts/analyze_real_dialogue.py). Diarization uses
+# nvidia/diar_streaming_sortformer_4spk-v2 (ungated, CC-BY-4.0, no HF token),
+# transcription uses faster-whisper. Outputs per-speaker solo tracks, an L/R
+# stereo preview, and per-utterance segment wavs for listening.
+#
+# Required:
+#   qsub -v WAVS=/path/to/dialogue1.wav scripts/run_real_dialogue_analysis.pbs
+#
+# Multiple files (comma separated) or globs also work:
+#   qsub -v 'WAVS=/path/a.wav,/path/b.wav' scripts/run_real_dialogue_analysis.pbs
+#   qsub -v 'WAVS=/path/sessions/*.wav'    scripts/run_real_dialogue_analysis.pbs
+#
+# Optional:
+#   OUT_DIR=data/real_dialogue/<name>   (default: data/real_dialogue/<jobid>)
+#   WHISPER_MODEL=large-v3
+#   EXTRA_ARGS="--skip-asr"             (skip transcription for a quick listen)
+#   DIAR_UV_WITH="--with torch==2.5.1"  (extra uv --with args for the isolated
+#                                        env, e.g. a specific torch/CUDA wheel)
+#
+# Diarization runs in an isolated uv env (--no-project) because streaming
+# Sortformer v2 needs a newer NeMo than the main project env can hold.
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+WAVS="${WAVS:?Set WAVS to one or more input wav paths (comma separated, glob ok)}"
+
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+OUT_DIR="${OUT_DIR:-data/real_dialogue/${JOB_ID_SHORT}}"
+
+# Comma separated -> array; globs expand here.
+IFS=',' read -r -a wav_patterns <<< "$WAVS"
+wav_files=()
+for pat in "${wav_patterns[@]}"; do
+    for f in $pat; do
+        wav_files+=("$f")
+    done
+done
+if [[ ${#wav_files[@]} -eq 0 ]]; then
+    echo "ERROR: no wav files matched: $WAVS" >&2
+    exit 1
+fi
+
+# Keep a durable log next to the results (separate from the PBS .o file).
+mkdir -p "$OUT_DIR"
+LOG_FILE="${LOG_FILE:-$OUT_DIR/run.log}"
+
+{
+    echo "===== real dialogue analysis ====="
+    echo "job:     ${JOB_ID_RAW}"
+    echo "started: $(date -Is)"
+    echo "inputs:  ${wav_files[*]}"
+    echo "out_dir: $OUT_DIR"
+    echo "log:     $LOG_FILE"
+} | tee "$LOG_FILE"
+
+# tee copies to the log while still printing to stdout; pipefail propagates
+# the python exit code through the pipe. Unbuffered output (python -u +
+# PYTHONUNBUFFERED=1) so `tail -f run.log` follows progress live instead of
+# arriving in large blocks through the pipe.
+export PYTHONUNBUFFERED=1
+
+# Streaming Sortformer v2 needs a newer NeMo that pins transformers/numpy below
+# what the main project env requires (moshi/qwen-tts need transformers>=4.57 and
+# numpy 2.x), so the two cannot share one environment. Run the analysis in an
+# isolated, uv-managed env (--no-project) carrying only the diarization + ASR
+# deps.
+#
+# torch/torchvision/torchaudio MUST be a matched set from the same CUDA build,
+# otherwise NeMo's torchvision import fails at runtime with
+#   "operator torchvision::nms does not exist"
+# (version/ABI skew from uv resolving them independently). Pin a matched cu121
+# trio from the pytorch index -- same CUDA as the main env, known good on this
+# node. If this pin forces an older, non-streaming NeMo (the spkcache_len error
+# returns), bump the whole trio to a newer torch/CUDA via DIAR_UV_WITH, e.g.
+#   qsub -v 'WAVS=...,DIAR_UV_WITH=--with torch==2.6.0 --with torchvision==0.21.0 --with torchaudio==2.6.0' ...
+# shellcheck disable=SC2086
+uv run --no-project --python 3.11 \
+    --index-url https://download.pytorch.org/whl/cu121 \
+    --extra-index-url https://pypi.org/simple \
+    --with 'torch==2.5.1' \
+    --with 'torchvision==0.20.1' \
+    --with 'torchaudio==2.5.1' \
+    --with 'nemo_toolkit[asr]>=2.5.0' \
+    --with faster-whisper \
+    --with librosa \
+    --with soundfile \
+    --with 'numpy<2' \
+    ${DIAR_UV_WITH:-} \
+    python -u scripts/analyze_real_dialogue.py \
+    "${wav_files[@]}" \
+    --out-dir "$OUT_DIR" \
+    ${WHISPER_MODEL:+--whisper-model "$WHISPER_MODEL"} \
+    ${EXTRA_ARGS:-} 2>&1 | tee -a "$LOG_FILE"
+
+echo "done: $OUT_DIR (log: $LOG_FILE)" | tee -a "$LOG_FILE"

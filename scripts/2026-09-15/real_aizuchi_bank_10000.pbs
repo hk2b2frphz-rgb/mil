@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N ra_bank
+#PBS -q xvn_s
+#PBS -l select=1:res=middle2
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# STEP 2 of 4. The response bank: many clips of each real backchannel, on four
+# GPUs.
+#
+#   qsub -V scripts/2026-09-15/real_aizuchi_bank_10000.pbs
+#   REPEATS=800 qsub -V scripts/2026-09-15/real_aizuchi_bank_10000.pbs
+#
+# 24 forms x 120 draws x 4 shards = 11,520 clips. REPEATS is per shard, and
+# every shard draws the whole vocabulary, so losing a shard costs depth rather
+# than coverage.
+#
+# The forms include lengthening and trailing ellipsis. Whether Qwen3-TTS reads
+# those as prosody rather than ignoring them is answerable from the bank's own
+# report: if "sokka" and "sokka..." come out the same length, the notation is
+# doing nothing and the vocabulary needs rethinking rather than more clips.
+#
+# The bank is worth building because the same string does not come back the
+# same way twice: at the engine default the measured spread for one word ran
+# 0.17-0.92s, wider than the spread across twenty different spellings. Raising
+# temperature does NOT widen it further -- 0.7 measured wider than 1.3, and the
+# extra width at 0.7 was a tail of runaway draws rather than range -- so this
+# runs at the default and buys variety with count instead.
+#
+# At 0.355 s/sample a shard of 2,800 is about twenty minutes plus engine load.
+# The outliers the report counts are worth dropping before use; the splice
+# drops them by default.
+#
+# V100 x4 (vLLM-Omni, .venv-vllm-omni).
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export CORPUS_VERSION="${CORPUS_VERSION:-v1}"
+export BATCH_ID="${BATCH_ID:-real_aizuchi_bank_${CORPUS_VERSION}}"
+export OUT_ROOT="$PWD/data/runs/diversity/$BATCH_ID"
+# The same file the dialogues were generated from. It has to be: the splice
+# matches a bank clip to a backchannel by the word itself, and a word the bank
+# does not hold falls back to a length match with a different word.
+export TEXTS_FILE="$PWD/scripts/2026-09-15/listening_vocab.tsv"
+export REPEATS="${REPEATS:-120}"
+export NUM_SHARDS="${NUM_SHARDS:-4}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+
+exec bash scripts/run_qwen3_bank_4gpu.sh

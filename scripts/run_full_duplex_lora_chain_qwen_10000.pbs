@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N fd_lora_chain_10000
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# 10000-dialogue full-duplex LoRA chain: vLLM-served Qwen3.6-27B dialogues
+# (scripts/run_dialogues_qwen_10000.pbs) + Qwen3-TTS whole-utterance audio
+# (scripts/run_qwen_tts_whole_utterance_10000_4gpu.pbs), then LoRA training,
+# all driven end-to-end by scripts/run_full_duplex_lora_chain.pbs. This is
+# just a thin default-setting wrapper; every DATA_RUNNER/DATA_QUEUE default
+# already matches (see run_full_duplex_lora_chain.pbs's own header).
+#
+# Submit:
+#   qsub -V scripts/run_full_duplex_lora_chain_qwen_10000.pbs
+#
+# Override anything run_full_duplex_lora_chain.pbs or
+# run_full_duplex_training_data_qwen.sh accepts the normal way, e.g.:
+#   qsub -v RUN_ID=fd_10000_v2 scripts/run_full_duplex_lora_chain_qwen_10000.pbs
+#
+# Clone moshi's voice for the audio stage (mixed mode -- user stays a built-in
+# CustomVoice; PROXY_URL is carried through by -V like any other variable):
+#   qsub -V -v 'QWEN_VOICE_MODE=mixed,CLONE_OUT_DIR_MOSHI=data/clone_examples/<result>,PROXY_URL=http://<proxy-host>:<port>' \
+#       scripts/run_full_duplex_lora_chain_qwen_10000.pbs
+
+set -euo pipefail
+
+REPO_ROOT="${PBS_O_WORKDIR:-$(pwd)}"
+cd "$REPO_ROOT"
+
+export NUM_CASES="${NUM_CASES:-10000}"
+export RUN_ID="${RUN_ID:-fd_qwen_10000}"
+
+exec bash scripts/run_full_duplex_lora_chain.pbs

@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N cascade_eval
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# Runs the local cascade (ASR->LLM->TTS) comparison baseline over both eval
+# pipelines and packs the results, so they can be judged locally side by
+# side with a Moshi run. This job never calls OpenAI/Azure APIs (same rule
+# as scripts/run_full_duplex_eval.pbs) -- judging happens on the local PC,
+# see docs/evaluation_plan.md and docs/local_baselines.md.
+#
+#   qsub -v CASCADE_MODEL_ID=cascade_gemma2b scripts/run_local_baseline_cascade_eval.pbs
+#
+# faster-whisper (cascade ASR) is a declared pyproject.toml dependency, so the
+# `uv run` calls below install it automatically. The isolated Gemma LLM
+# subprocess still needs `uv sync --project gemma_runtime` -- see
+# docs/local_baselines.md.
+#
+# Useful overrides:
+#   CASCADE_MODEL_ID=cascade_gemma2b      Label used throughout meta.json/model_repo.
+#   CASCADE_ASR_MODEL=large-v3            faster-whisper model size.
+#   CASCADE_ASR_COMPUTE_TYPE=float16
+#   CASCADE_LLM_MODEL=google/gemma-4-E2B-it
+#   CASCADE_LLM_MAX_NEW_TOKENS=200
+#   CASCADE_TTS_BACKEND=qwen3
+#   CASCADE_TTS_SPEAKER=Serena
+#   CASCADE_DEVICE=cuda
+#   CASCADE_DTYPE=float16
+#   FDB_SCENARIOS=eval_sets/full_duplex_ja/scenarios_expanded.jsonl
+#   FDB_CASES_PER_TASK=1                  Smoke: first N cases per task.
+#   FDB_DATA_DIR=data/full_duplex_ja_v2_nogreeting Built with --no-opening-greeting;
+#                                                  a cascade baseline was never
+#                                                  trained to say Moshi's fixed
+#                                                  greeting (see docs/local_baselines.md).
+#   REFRESH_FDB_DATA=1                    Rebuild FDB_DATA_DIR even if it exists.
+#   LONELINESS_SCENARIOS=eval_sets/loneliness_support.jsonl
+#   SKIP_FULL_DUPLEX=1                    Skip the Full-Duplex-Bench-JA pipeline.
+#   SKIP_LONELINESS=1                     Skip the domain-C pipeline.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+source scripts/kokoro_uv_env.sh
+source scripts/model_cache_env.sh
+model_cache_init "$PWD"
+
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+
+CASCADE_MODEL_ID="${CASCADE_MODEL_ID:-cascade_${JOB_ID_SHORT}}"
+CASCADE_ASR_MODEL="${CASCADE_ASR_MODEL:-large-v3}"
+CASCADE_ASR_DEVICE="${CASCADE_ASR_DEVICE:-cuda}"
+CASCADE_ASR_COMPUTE_TYPE="${CASCADE_ASR_COMPUTE_TYPE:-float16}"
+CASCADE_LLM_MODEL="${CASCADE_LLM_MODEL:-google/gemma-4-E2B-it}"
+CASCADE_LLM_DTYPE="${CASCADE_LLM_DTYPE:-float16}"
+CASCADE_LLM_TASK="${CASCADE_LLM_TASK:-any-to-any}"
+CASCADE_LLM_MAX_NEW_TOKENS="${CASCADE_LLM_MAX_NEW_TOKENS:-200}"
+CASCADE_TTS_BACKEND="${CASCADE_TTS_BACKEND:-qwen3}"
+CASCADE_TTS_MODEL="${CASCADE_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
+CASCADE_TTS_SPEAKER="${CASCADE_TTS_SPEAKER:-Serena}"
+CASCADE_DEVICE="${CASCADE_DEVICE:-cuda}"
+CASCADE_DTYPE="${CASCADE_DTYPE:-float16}"
+BASELINE_VAD_TAIL_SEC="${BASELINE_VAD_TAIL_SEC:-8}"
+BASELINE_VAD_SILENCE_MS="${BASELINE_VAD_SILENCE_MS:-800}"
+BASELINE_VAD_THRESHOLD="${BASELINE_VAD_THRESHOLD:-0.5}"
+BASELINE_VAD_INPUT_FRAME_MS="${BASELINE_VAD_INPUT_FRAME_MS:-20}"
+
+FDB_SCENARIOS="${FDB_SCENARIOS:-$PWD/eval_sets/full_duplex_ja/scenarios_expanded.jsonl}"
+FDB_CASES_PER_TASK="${FDB_CASES_PER_TASK:-}"
+FDB_TTS_SPEAKER="${FDB_TTS_SPEAKER:-Ono_Anna}"
+FDB_TTS_BACKGROUND_SPEAKER="${FDB_TTS_BACKGROUND_SPEAKER:-Uncle_Fu}"
+FDB_DATA_DIR="${FDB_DATA_DIR:-$PWD/data/full_duplex_ja_v2_nogreeting}"
+REFRESH_FDB_DATA="${REFRESH_FDB_DATA:-0}"
+FDB_OUT_DIR="${FDB_OUT_DIR:-$PWD/eval_runs/full_duplex/$CASCADE_MODEL_ID}"
+FDB_BACKCHANNEL_GT="${FDB_BACKCHANNEL_GT:-$PWD/eval_sets/full_duplex_ja/backchannel_gt.json}"
+FDB_ASR_MODEL="${FDB_ASR_MODEL:-nvidia/parakeet-tdt-0.6b-v2}"
+
+if [[ -n "$FDB_CASES_PER_TASK" ]] && ! [[ "$FDB_CASES_PER_TASK" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: FDB_CASES_PER_TASK must be a positive integer: $FDB_CASES_PER_TASK" >&2
+    exit 1
+fi
+
+LONELINESS_SCENARIOS="${LONELINESS_SCENARIOS:-$PWD/eval_sets/loneliness_support.jsonl}"
+LONELINESS_OUT_DIR="${LONELINESS_OUT_DIR:-$PWD/results/${CASCADE_MODEL_ID}_loneliness}"
+LONELINESS_PACKED="${LONELINESS_PACKED:-$PWD/eval_runs/${CASCADE_MODEL_ID}_responses.jsonl}"
+
+SKIP_FULL_DUPLEX="${SKIP_FULL_DUPLEX:-0}"
+SKIP_LONELINESS="${SKIP_LONELINESS:-0}"
+
+# Disable Triton / torch.compile -- V100 lacks support for many Triton kernels.
+export TORCHINDUCTOR_DISABLE=1
+export NO_TORCH_COMPILE="${NO_TORCH_COMPILE:-1}"
+export TORCH_COMPILE_DISABLE=1
+export FDB_GIT_COMMIT="${FDB_GIT_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
+
+# Unbuffer Python stdout so per-trial progress prints appear in real time
+# through the `tee` pipe below instead of being block-buffered until the
+# buffer fills (see the same note in scripts/run_full_duplex_eval.sh).
+export PYTHONUNBUFFERED=1
+
+mkdir -p experiments/pbs_logs
+JOB_LOG="experiments/pbs_logs/${CASCADE_MODEL_ID}.log"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
+echo "===== Local cascade baseline eval ====="
+echo "job_id:       ${PBS_JOBID:-n/a}"
+echo "queue:        xvn_s"
+echo "host:         $(hostname)"
+echo "model_id:     $CASCADE_MODEL_ID"
+echo "asr:          $CASCADE_ASR_MODEL ($CASCADE_ASR_COMPUTE_TYPE, $CASCADE_ASR_DEVICE)"
+echo "llm:          $CASCADE_LLM_MODEL"
+echo "llm task:     $CASCADE_LLM_TASK"
+echo "tts:          $CASCADE_TTS_BACKEND / $CASCADE_TTS_SPEAKER"
+echo "fdb_data_dir: $FDB_DATA_DIR"
+echo "started_at:   $(date -Iseconds)"
+echo "========================================"
+
+command -v uv >/dev/null 2>&1 || {
+    echo "ERROR: uv is not available on PATH." >&2
+    exit 1
+}
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+fi
+
+# kokoro is not a project dependency; layer it in when it is the TTS backend
+# (scripts/kokoro_uv_env.sh).
+kokoro_uv_run UV_RUN "$CASCADE_TTS_BACKEND" cascade-eval
+
+if [[ "$SKIP_FULL_DUPLEX" != "1" ]]; then
+    rm -f "$FDB_OUT_DIR/azure_judge_input.jsonl"
+    echo
+    echo "===== 1/4: Full-Duplex-Bench-JA dataset (no opening greeting) ====="
+    if [[ "$REFRESH_FDB_DATA" == "1" || ! -f "$FDB_DATA_DIR/manifest.json" ]]; then
+        "${UV_RUN[@]}" python eval/build_full_duplex_ja_dataset.py \
+            --scenarios "$FDB_SCENARIOS" \
+            --out-dir "$FDB_DATA_DIR" \
+            --tts-backend "$CASCADE_TTS_BACKEND" \
+            --tts-model "$CASCADE_TTS_MODEL" \
+            --tts-speaker "$FDB_TTS_SPEAKER" \
+            --tts-background-speaker "$FDB_TTS_BACKGROUND_SPEAKER" \
+            --device "$CASCADE_DEVICE" \
+            --dtype "$CASCADE_DTYPE" \
+            --no-opening-greeting \
+            --overwrite
+    else
+        echo "[cascade-eval] reusing Japanese dataset: $FDB_DATA_DIR"
+    fi
+
+    echo
+    echo "===== 2/4: cascade inference over Full-Duplex-Bench-JA ====="
+    baseline_args=(
+        "${UV_RUN[@]}" python eval/run_local_baseline_full_duplex.py
+        --system cascade
+        --dataset-dir "$FDB_DATA_DIR"
+        --out-dir "$FDB_OUT_DIR/inference"
+        --model-id "$CASCADE_MODEL_ID"
+        --asr-model "$CASCADE_ASR_MODEL"
+        --asr-device "$CASCADE_ASR_DEVICE"
+        --asr-compute-type "$CASCADE_ASR_COMPUTE_TYPE"
+        --llm-model "$CASCADE_LLM_MODEL"
+        --llm-dtype "$CASCADE_LLM_DTYPE"
+        --llm-task "$CASCADE_LLM_TASK"
+        --llm-max-new-tokens "$CASCADE_LLM_MAX_NEW_TOKENS"
+        --tts-backend "$CASCADE_TTS_BACKEND"
+        --tts-model "$CASCADE_TTS_MODEL"
+        --tts-speaker "$CASCADE_TTS_SPEAKER"
+        --device "$CASCADE_DEVICE"
+        --dtype "$CASCADE_DTYPE"
+        --vad-tail-sec "$BASELINE_VAD_TAIL_SEC"
+        --vad-silence-ms "$BASELINE_VAD_SILENCE_MS"
+        --vad-threshold "$BASELINE_VAD_THRESHOLD"
+        --vad-input-frame-ms "$BASELINE_VAD_INPUT_FRAME_MS"
+        --overwrite
+    )
+    if [[ -n "$FDB_CASES_PER_TASK" ]]; then baseline_args+=(--cases-per-task "$FDB_CASES_PER_TASK"); fi
+    "${baseline_args[@]}"
+
+    # The cascade runner has already re-recognized its synthesized Japanese
+    # response and written audio-derived chunks. Keep them instead of
+    # overwriting with English Parakeet-TDT alignment.
+    uv run python eval/full_duplex_official_timing.py --run-dir "$FDB_OUT_DIR/inference"
+
+    evaluate_args=(
+        uv run python eval/evaluate_full_duplex_ja.py
+        --run-dir "$FDB_OUT_DIR/inference"
+        --out-dir "$FDB_OUT_DIR/benchmark_results"
+    )
+    if [[ -f "$FDB_BACKCHANNEL_GT" ]]; then
+        evaluate_args+=(--backchannel-gt "$FDB_BACKCHANNEL_GT")
+    fi
+    evaluation_status=0
+    if "${evaluate_args[@]}"; then
+        :
+    else
+        evaluation_status=$?
+        echo "[cascade-eval] WARNING: deterministic evaluation was partial (exit $evaluation_status); packing successful trials for Azure." >&2
+    fi
+
+    uv run python eval/pack_full_duplex_azure.py \
+        --per-case "$FDB_OUT_DIR/benchmark_results/per_case.jsonl" \
+        --out "$FDB_OUT_DIR/azure_judge_input.jsonl"
+
+    echo "[cascade-eval] Full-Duplex-Bench-JA deterministic summary: $FDB_OUT_DIR/benchmark_results/summary.json"
+    echo "[cascade-eval] Azure/LLM-judge input only:                 $FDB_OUT_DIR/azure_judge_input.jsonl"
+else
+    evaluation_status=0
+    echo "[cascade-eval] SKIP_FULL_DUPLEX=1: skipping Full-Duplex-Bench-JA pipeline"
+fi
+
+if [[ "$SKIP_LONELINESS" != "1" ]]; then
+    echo
+    echo "===== 3/4: cascade inference over loneliness_support ====="
+    "${UV_RUN[@]}" python eval/run_local_baseline_loneliness.py \
+        --system cascade \
+        --scenarios "$LONELINESS_SCENARIOS" \
+        --out-dir "$LONELINESS_OUT_DIR" \
+        --model-id "$CASCADE_MODEL_ID" \
+        --asr-model "$CASCADE_ASR_MODEL" \
+        --asr-device "$CASCADE_ASR_DEVICE" \
+        --asr-compute-type "$CASCADE_ASR_COMPUTE_TYPE" \
+        --llm-model "$CASCADE_LLM_MODEL" \
+        --llm-dtype "$CASCADE_LLM_DTYPE" \
+        --llm-task "$CASCADE_LLM_TASK" \
+        --llm-max-new-tokens "$CASCADE_LLM_MAX_NEW_TOKENS" \
+        --tts-backend "$CASCADE_TTS_BACKEND" \
+        --tts-model "$CASCADE_TTS_MODEL" \
+        --tts-speaker "$CASCADE_TTS_SPEAKER" \
+        --device "$CASCADE_DEVICE" \
+        --dtype "$CASCADE_DTYPE" \
+        --overwrite
+
+    echo
+    echo "===== 4/4: pack loneliness_support responses ====="
+    uv run python eval/pack_response_recorder_results.py \
+        --recorder-dir "$LONELINESS_OUT_DIR" \
+        --scenarios "$LONELINESS_SCENARIOS" \
+        --system-id "$CASCADE_MODEL_ID" \
+        --out "$LONELINESS_PACKED"
+
+    echo "[cascade-eval] loneliness_support packed responses: $LONELINESS_PACKED"
+else
+    echo "[cascade-eval] SKIP_LONELINESS=1: skipping loneliness_support pipeline"
+fi
+
+echo
+echo "[cascade-eval] No OpenAI/Azure API was called by this server run."
+echo "[cascade-eval] Copy the *_responses.jsonl / azure_judge_input.jsonl files to the"
+echo "[cascade-eval] local PC and judge them per docs/evaluation_plan.md and"
+echo "[cascade-eval] docs/full_duplex_evaluation.md, then compare against a Moshi run"
+echo "[cascade-eval] packed/judged the same way -- see docs/local_baselines.md."
+echo "finished_at: $(date -Iseconds)"
+exit "$evaluation_status"

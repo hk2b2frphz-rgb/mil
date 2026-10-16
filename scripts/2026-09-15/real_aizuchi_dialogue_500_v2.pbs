@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N ra_dlg500v2
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# STEP 1 of 5. 500 listener-only dialogues, each one generated at its own
+# backchannel density and labeled with it.
+#
+#   qsub -V scripts/2026-09-15/real_aizuchi_dialogue_500_v2.pbs
+#
+# WHAT V2 CHANGES, AND WHY
+#
+# 1. Frequency becomes an input to the model, not just a property of the data.
+#    In v1 the density knob only shaped what got generated; the model saw the
+#    result and had no way to know, or be told, how talkative to be. V2 records
+#    each dialogue's density in aizuchi_frequency_label, and step 4 writes it
+#    into the listener's text stream as an unspoken tag ahead of the greeting.
+#    The model reads it during training and can be given it at inference.
+#
+# 2. AIZUCHI_DENSITY_MIXED=1 draws a fresh density per dialogue instead of
+#    pinning the whole job to one value. A corpus where every dialogue carries
+#    the same tag teaches the model nothing about the tag -- there is no
+#    contrast to learn from. Spreading 0..1 across 500 dialogues is what makes
+#    the tag mean something.
+#
+# 3. Placement is back to probability per clause boundary (v1 briefly had the
+#    model choose positions, which is where the "sokka" bias and the thinking
+#    budget failures came from), with one deliberate change: the end of an
+#    utterance is now guaranteed rather than rolled for. A listener that goes
+#    quiet exactly when the speaker finishes reads as one who stopped
+#    listening. Word choice stays with the LLM, as it always was -- picking
+#    among short acknowledgements still benefits from hearing what landed.
+#
+# 4. Vocabulary is the written default minus bare "un." (see the vocab file's
+#    own header for why that one word had to go). IMPORTANT: step 2 must build
+#    its bank from this same file. In v1 it did not, and since the splice
+#    matches a clip to a backchannel by the word itself, a mismatched bank
+#    makes every backchannel fall back to a length match with a different
+#    word -- the audio says something the transcript does not.
+#
+# A100 for the dialogue LLM (vLLM, Qwen3.6-27B).
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export CORPUS_VERSION="${CORPUS_VERSION:-v2}"
+export BATCH_ID="real_aizuchi_500_${CORPUS_VERSION}"
+export OUT_ROOT="$PWD/data/runs/real_aizuchi_500_${CORPUS_VERSION}/dialogue"
+export NUM_CASES="${NUM_CASES:-500}"
+
+export DIALOGUE_GENERATION_MODE="aizuchi-only"
+# Position: probability per clause boundary, end of utterance guaranteed.
+# Word: the same LLM call the rule-based route used, not a random draw.
+export AIZUCHI_ONLY_PLACEMENT="density"
+# Draw a fresh 0-1 density per dialogue. This is the setting that makes the
+# corpus conditionable; with it off, every dialogue gets the same tag and the
+# model has nothing to distinguish. AIZUCHI_DENSITY is ignored while this is 1.
+export AIZUCHI_DENSITY_MIXED="${AIZUCHI_DENSITY_MIXED:-1}"
+# Only read when AIZUCHI_DENSITY_MIXED=0. 0 = silent listener, 0.25/0.5/0.75 =
+# reserved/normal/eager, 1 = flood. Values between anchors interpolate.
+export AIZUCHI_DENSITY="${AIZUCHI_DENSITY:-0.5}"
+# Must match step 2's TEXTS_FILE exactly. See note 4 above.
+export AIZUCHI_VOCAB_FILE="$PWD/scripts/2026-09-15/aizuchi_vocab_no_bare_un.tsv"
+# Density mode calls the same word-choice prompt builder as rule mode, so the
+# example flag applies here too. Thinking stays llm-mode-only, and is left
+# here so it takes effect again if AIZUCHI_ONLY_PLACEMENT is switched to llm.
+export AIZUCHI_ONLY_EXAMPLE="${AIZUCHI_ONLY_EXAMPLE:-0}"
+export AIZUCHI_ENABLE_THINKING="${AIZUCHI_ENABLE_THINKING:-0}"
+export AIZUCHI_THINKING_MAX_TOKENS="${AIZUCHI_THINKING_MAX_TOKENS:-1600}"
+# Only read by AIZUCHI_ONLY_PLACEMENT=rule. Density mode resolves its own
+# rates from the density value, so this is inert here.
+export AIZUCHI_ONLY_FREQUENCY="normal"
+
+# Dialogue shape. Unchanged from v1 -- these set how long a call runs, how
+# often the speaker falls silent, and how often they check whether anyone is
+# still there. Silences matter for a listener model: they are where it has to
+# learn NOT to speak.
+export AIZUCHI_ONLY_MIN_BLOCKS="${AIZUCHI_ONLY_MIN_BLOCKS:-4}"
+export AIZUCHI_ONLY_MAX_BLOCKS="${AIZUCHI_ONLY_MAX_BLOCKS:-6}"
+export AIZUCHI_ONLY_MAX_SILENCES="${AIZUCHI_ONLY_MAX_SILENCES:-2}"
+export AIZUCHI_ONLY_SILENCE_RATE="${AIZUCHI_ONLY_SILENCE_RATE:-0.25}"
+export AIZUCHI_ONLY_SILENCE_MIN_SEC="${AIZUCHI_ONLY_SILENCE_MIN_SEC:-2.0}"
+export AIZUCHI_ONLY_SILENCE_MAX_SEC="${AIZUCHI_ONLY_SILENCE_MAX_SEC:-5.0}"
+export AIZUCHI_ONLY_PROBE_RATE="${AIZUCHI_ONLY_PROBE_RATE:-0.5}"
+
+exec bash scripts/run_dialogues_qwen_3000.pbs

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N ra_ft500
+#PBS -q xan_s
+#PBS -l select=1:res=middle
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# STEP 4 of 4. Full fine-tuning on the bank-voiced corpus.
+# Full-Duplex-Bench-JA runs automatically after best-checkpoint export.
+#
+#   qsub -V scripts/2026-09-15/real_aizuchi_fullft_500.pbs
+#
+# Re-submit to continue: the sweep carries itself across walltime.
+#
+# Check the rendered durations before committing a reservation to this:
+#   python3 -c "import json; p='data/runs/real_aizuchi_500_v1/tts/placement_bank/shard_000/training_set/synthetic_moshi_train.jsonl'; d=sorted(json.loads(l)['duration'] for l in open(p)); n=len(d); print('n=%d p95=%.1f max=%.1f' % (n, d[int(n*.95)], d[-1]))"
+#
+# 500 dialogues is a fifth of the corpora the f01 pattern was tuned on, so
+# treat the first run as a check that the data trains at all rather than as a
+# result: whether the listener learns to come in where the bank clips were
+# placed, and whether the retrieved audio is consistent enough to learn from.
+#
+# To train the frequency-conditioned variant instead (step 1 run with
+# AIZUCHI_DENSITY_MIXED=1, so each dialogue's metadata carries a distinct
+# aizuchi_frequency_label), run:
+#   python3 scripts/inject_inner_thoughts.py \
+#       --data-dir  <step-3 stereo output>/training_set/data_stereo \
+#       --out-dir   <...>/data_stereo_density \
+#       --from-aizuchi-density --pad-lead-in-sec 3.0
+# then point SRC_RUN_DIR at its --out-dir, same pattern as
+# scripts/2026-09-04/aizuchi_normal_fullft_10000.pbs's inner-thought variant.
+#
+# --pad-lead-in-sec matters here, not just belt-and-suspenders: the KABURI
+# renderer this pipeline uses drops silence turns and builds timing itself,
+# so generation has no way to guarantee silence before the greeting. Without
+# padding, a dialogue whose greeting has no natural lead-in silence loses its
+# tag, and trains as unconditioned data mislabeled with a frequency nothing
+# in the audio actually reflects. Confirm this by checking the printed
+# WARNING for density_tag_dropped is absent before training on it.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export CORPUS_VERSION="${CORPUS_VERSION:-v1}"
+export RUN_ID="${RUN_ID:-real_aizuchi_500_${CORPUS_VERSION}_fullft}"
+export SRC_RUN_DIR="${SRC_RUN_DIR:-$PWD/data/runs/real_aizuchi_500_${CORPUS_VERSION}/tts/placement_bank/shard_000}"
+export SWEEP_PATTERNS="${SWEEP_PATTERNS:-f01}"
+export NU_KEEP_BEST_ONLY="0"
+export SELF_PBS="scripts/2026-09-15/real_aizuchi_fullft_500.pbs"
+
+exec bash scripts/fullft_sweep.pbs

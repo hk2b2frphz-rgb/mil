@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N ra_stereo
+#PBS -q xvn_s
+#PBS -l select=1:res=middle2
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# STEP 3 of 4. Stereo training data: the user side synthesized, the listener
+# side retrieved from the bank, the timing predicted by KABURI.
+#
+#   qsub -V scripts/2026-09-15/real_aizuchi_stereo_500.pbs
+#
+# Needs step 1 (the dialogues) and step 2 (the bank).
+#
+# The listener is never synthesized. Its audio comes from the bank, and
+# rendering it in order to throw it away would also push the user's turns later
+# on the timeline, since a listener turn that is not overlapped occupies time
+# of its own.
+#
+# KEEP_TEXT=1 because step 1 already generated the real vocabulary. The rewrite
+# step runs only to write the user-only copy of the corpus and the list of
+# words the splice is allowed to substitute; it must not draw new words over
+# the ones the model chose.
+#
+# Three passes, of which only the middle one uses the GPU:
+#   Qwen3-TTS   the user side, V100
+#   KABURI      where the listener comes in, CPU, no acoustic model
+#   insert      bank clips into the silent listener channel, CPU
+#
+# What to read in the output: the line reporting how many backchannels KABURI
+# placed inside an utterance versus after one. Inside means overlap, which is
+# the thing this whole route exists to get; a measured KABURI run gave overlap
+# 0.021 against the paper's 0.096-0.161, so this is not to be assumed.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export CORPUS_VERSION="${CORPUS_VERSION:-v1}"
+export CORPUS_ROOT="real_aizuchi_500_${CORPUS_VERSION}"
+export DIALOGUES_JSONL="$PWD/data/runs/$CORPUS_ROOT/dialogue/llm_dialogues/dialogues.jsonl"
+export BANK_DIR="${BANK_DIR:-$PWD/data/runs/diversity/real_aizuchi_bank_${CORPUS_VERSION}}"
+export OUT_ROOT="$PWD/data/runs/$CORPUS_ROOT/tts"
+export NUM_DIALOGUES="${NUM_DIALOGUES:-500}"
+export KEEP_TEXT=1
+export MATCH_TOP_K="${MATCH_TOP_K:-5}"
+
+exec bash scripts/run_bank_stereo_test.sh "$NUM_DIALOGUES"

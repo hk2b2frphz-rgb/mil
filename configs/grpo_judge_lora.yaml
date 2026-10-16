@@ -1,0 +1,85 @@
+# GRPO interactivity alignment with LoRA adapters and a local Qwen3.6-27B judge.
+#
+# Two A100 80GB: the policy trains on GPU 0 (base bf16 ~14GB + mimi + adapters,
+# well under 40GB), and vLLM holds the 27B judge on GPU 1 (~54GB of weights plus
+# KV cache). Launch with scripts/2026-09-04/grpo_judge_lora.pbs, which starts the
+# judge server and waits for it before training begins.
+
+# --- Model ---
+hf_repo: "llm-jp/llm-jp-moshi-v1"
+# Point this at the MERGED SFT model (scripts/merge_lora.py output). GRPO's
+# reference policy is this file with the adapters switched off, so what is
+# loaded here is exactly what the KL term pulls back toward. Leaving it empty
+# aligns the base checkpoint instead of the fine-tuned listener.
+moshi_weight: ""
+moshi_config: "moshi_lm_kwargs.json"
+device: "cuda"
+half: true
+
+# --- LoRA ---
+use_lora: true
+lora_rank: 32
+lora_scaling: 2.0
+# Leave empty to use the defaults in scripts/grpo/lora.py. If the first run
+# aborts with "LoRA matched no module", it prints the Linear modules that do
+# exist -- copy the right ones here as regexes.
+lora_target_patterns: []
+# Keeps adapters off the depth transformer, which gets no gradient from a
+# text-token-only loss. Empty uses the defaults in scripts/grpo/lora.py.
+lora_exclude_patterns: []
+lora_resume: ""
+
+# --- GRPO core ---
+lr: 1.0e-5
+epochs: 100
+segments_per_epoch: 8
+group_size: 8
+grad_accum_segments: 1
+kl_beta: 0.01
+clip_epsilon: 0.2
+adam_beta1: 0.9
+adam_beta2: 0.95
+weight_decay: 0.1
+grad_clip: 2.0
+
+max_context_sec: 30.0
+context_prob: 0.5
+
+# --- Segment data ---
+segment_dir: ""   # filled by the PBS job from GRPO_SEGMENT_DIR
+
+# --- Deterministic reward axes ---
+pause_threshold_sec: 1.0
+backchannel_window_sec: 1.0
+backchannel_max_dur_sec: 1.0
+reward_weights: [1.0, 1.0, 1.0, 1.0]
+
+# --- LLM judge ---
+judge_model: "Qwen/Qwen3.6-27B"
+judge_base_url: "http://127.0.0.1:8000/v1"
+judge_temperature: 0.0
+judge_max_tokens: 1000
+judge_concurrency: 8
+judge_guided_decoding: true
+judge_ready_timeout_sec: 1800.0
+judge_all_axes: true
+judge_weight: 1.0
+judge_flag_penalty: 1.0
+# Per-rubric-axis weights. Unlisted axes fall back to judge_weight.
+# "overall" is deliberately held down: it correlates with the seven axes above
+# it, so leaving it at 1.0 would count the same judgement roughly twice.
+judge_axis_weights:
+  overall: 0.5
+  flags: 2.0
+
+# --- Inference ---
+temp_text: 0.7
+temp_audio: 0.8
+top_k_audio: 250
+
+# --- Checkpointing ---
+save_dir: "experiments/grpo_judge_lora"
+save_every: 5
+log_every: 1
+
+seed: 42

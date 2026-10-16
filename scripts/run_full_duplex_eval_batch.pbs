@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N real_eval_batch
+#PBS -q xvn_s
+#PBS -l select=1:res=middle2
+#PBS -l walltime=08:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Non-ASCII anywhere in this file (comments included) makes the
+# job die immediately at submission.
+#
+# Real dialogue response evaluation, one model per line of MODELS_FILE, in
+# parallel across the four allocated GPUs. Each model's results land under
+# BATCH_OUT_DIR/<output_name>/ plus a combined_summary.json comparing every
+# model side by side (eval/combine_real_summaries.py). One model's failure does
+# not stop the rest -- see the summary table at the end of the log /
+# <BATCH_OUT_DIR>/batch.log. This job never calls OpenAI/Azure APIs; it only
+# writes the LLM-as-a-judge input for scoring later on a local machine.
+#
+# Metrics: response rate, response latency, speech quality (UTMOS).
+#
+#   qsub -v MODELS_FILE=scripts/models_manifest.txt \
+#     scripts/run_full_duplex_eval_batch.pbs
+#
+# Manifest format (one model per line, "|"-delimited, "#" starts a comment):
+#   model_id|model_weight|model_config|hf_repo|extra_env|opening_greeting|output_name
+# See scripts/models_manifest.example.txt for details and an example.
+#
+# A row with model_id=gold runs no model: it places the real counselor's own
+# response as the output and scores it with the same code, so the human sits in
+# the same table as the ceiling. Put it in the manifest as:
+#   gold||||||
+#
+# Prerequisite: the test set must already exist (scripts/build_test_wav_from_tsv.py,
+# default data/test_data/real_dialogue). The batch turns it into an evaluation
+# dataset once, before any worker starts, and all workers share it.
+#
+# Useful overrides (batch-wide defaults; a manifest row's own extra_env
+# column overrides these for that row only):
+#   BATCH_ID=my_batch_label        Defaults to batch_<PBS job id>.
+#   BATCH_OUT_DIR=...              Defaults to eval_runs/full_duplex_batches/<BATCH_ID>.
+#   TEST_DATA_DIR=data/test_data/real_dialogue
+#   REAL_DATASET_DIR=data/eval_sets/real_response
+#   REBUILD_REAL_DATASET=1         Rebuild the shared dataset before running.
+#   REAL_SEEDS=0,1,2
+#   REAL_TAIL_SEC=8                How long the model is given to answer.
+#   REAL_CASES_PER_TASK=1          Smoke: first N cases only.
+#   REAL_CONTEXT_SEC=0             Audio prepended before the user utterance.
+#                                  Above 0 leaks the counselor's voice into the
+#                                  input -- leave at 0 unless you mean it.
+#   REAL_MOS_BACKEND=utmos         "none" skips speech quality.
+#   REAL_MOS_DEVICE=cpu            UTMOS device; cpu keeps it off the model GPU.
+#   REAL_MAX_LATENCY_SEC=          Answers later than this count as no answer.
+#   FDB_BATCH_GPUS=0,1,2,3         GPU IDs assigned to model workers.
+#   FDB_BATCH_PARALLELISM=4        Number of concurrent models (max: visible GPUs).
+#
+# The synthetic Full-Duplex-Bench-JA route still exists per row via
+# FDB_SYSTEM=moshi / FDB_SYSTEM=cascade in extra_env, along with its FDB_* and
+# TTS settings. Those scores are a different track: do not read them in the
+# same table as the real-data ones.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+source scripts/setup_proxy.sh
+
+MODELS_FILE="${MODELS_FILE:?Set MODELS_FILE to a manifest listing models to evaluate, e.g. -v MODELS_FILE=scripts/models_manifest.txt}"
+
+JOB_ID_RAW="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"
+JOB_ID_SHORT="${JOB_ID_RAW%%.*}"
+export BATCH_ID="${BATCH_ID:-batch_${JOB_ID_SHORT}}"
+# Do not inherit a stale single-GPU CUDA_VISIBLE_DEVICES through #PBS -V.
+# FDB_BATCH_GPUS is the explicit opt-out when fewer allocated GPUs are wanted.
+export CUDA_VISIBLE_DEVICES="${FDB_BATCH_GPUS:-0,1,2,3}"
+# Keep the full allocation available to the one-time shared input-TTS build;
+# run_full_duplex_eval.sh then shards that work before model workers start.
+export FDB_TTS_BUILD_GPUS="${FDB_TTS_BUILD_GPUS:-$CUDA_VISIBLE_DEVICES}"
+if [[ -z "${FDB_BATCH_PARALLELISM:-}" ]]; then
+    IFS=',' read -r -a _batch_gpu_ids <<< "$CUDA_VISIBLE_DEVICES"
+    export FDB_BATCH_PARALLELISM="${#_batch_gpu_ids[@]}"
+fi
+export HALF="${HALF:-1}"
+export FDB_TTS_BACKEND="${FDB_TTS_BACKEND:-qwen3}"
+export FDB_TTS_MODEL="${FDB_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}"
+export FDB_TTS_SPEAKER="${FDB_TTS_SPEAKER:-Ono_Anna}"
+export FDB_TTS_BACKGROUND_SPEAKER="${FDB_TTS_BACKGROUND_SPEAKER:-Uncle_Fu}"
+export FDB_DEVICE="${FDB_DEVICE:-cuda}"
+export FDB_DTYPE="${FDB_DTYPE:-float16}"
+export FDB_WHOLE_UTTERANCE="${FDB_WHOLE_UTTERANCE:-1}"
+export FDB_WHOLE_UTTERANCE_MAX_CHARS="${FDB_WHOLE_UTTERANCE_MAX_CHARS:-150}"
+export FDB_OPENING_GREETING="${FDB_OPENING_GREETING:-1}"
+export FDB_OPENING_GREETING_GAP_SEC="${FDB_OPENING_GREETING_GAP_SEC:-0.4}"
+
+# Disable Triton / torch.compile -- V100 lacks support for many Triton kernels.
+export TORCHINDUCTOR_DISABLE=1
+export NO_TORCH_COMPILE="${NO_TORCH_COMPILE:-1}"
+export TORCH_COMPILE_DISABLE=1
+
+mkdir -p experiments/pbs_logs
+exec > >(tee -a "experiments/pbs_logs/full_duplex_batch_${BATCH_ID}.log") 2>&1
+
+echo "job_id:      ${PBS_JOBID:-n/a}"
+echo "queue:       xvn_s (middle2 / 4 GPU)"
+echo "host:        $(hostname)"
+echo "workdir:     $(pwd)"
+echo "batch_id:    $BATCH_ID"
+echo "models_file: $MODELS_FILE"
+echo "cuda:        $CUDA_VISIBLE_DEVICES"
+echo "parallelism: $FDB_BATCH_PARALLELISM"
+echo "eval:        real dialogue response (rate / latency / UTMOS)"
+echo "test_data:   ${TEST_DATA_DIR:-data/test_data/real_dialogue}"
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi
+fi
+
+bash scripts/run_full_duplex_eval_batch.sh

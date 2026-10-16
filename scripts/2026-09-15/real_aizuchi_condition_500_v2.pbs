@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N ra_condv2
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# STEP 4 of 5. Write each dialogue's backchannel density into the listener's
+# text stream as an unspoken tag. This is the step that makes the corpus
+# conditionable; without it the density only shapes the data and the model
+# never learns it is a thing it can be told.
+#
+#   qsub -V scripts/2026-09-15/real_aizuchi_condition_500_v2.pbs
+#
+# Needs step 3. CPU only, no model, minutes not hours.
+#
+# WHAT IT DOES, MECHANICALLY
+#
+# Moshi tokenizes the text stream and the audio stream separately and pairs
+# them afterwards by timestamp, so a text entry placed over a silent stretch
+# is read by the model but never spoken. The tag rides in that gap: the
+# listener's TEXT channel carries "<aizuchi:density=0.75>" (written with the
+# Japanese word for backchannel, matching the existing inner-thought tags --
+# this file is ASCII-only so the literal cannot be reproduced here) while its
+# AUDIO channel over the same span is silence.
+#
+# 1. --pad-lead-in-sec, when set, prepends real silence to the audio and
+#    shifts every timestamp by the same amount, reserving the slot. Nothing
+#    upstream can promise silence: KABURI drops silence turns and builds its
+#    own timing. See the note on the default below -- this route does not
+#    normally need it.
+# 2. --from-aizuchi-density reads metadata.dialogue.aizuchi_frequency_label,
+#    which step 1 recorded and steps 2-3 carried through, and writes one tag
+#    per dialogue just before the listener's first sound. Note that in this
+#    route that is the first backchannel: step 3 synthesizes the speaker side
+#    only and drops the fixed opening (DROP_GREETING=1), so this corpus has no
+#    greeting at all. Either way the tag lands before the listener has made
+#    any sound, which is what matters.
+# 3. The manifest is rebuilt from what actually came out: a dialogue whose tag
+#    could not be placed is not in the output, and padding (when used) changes
+#    every duration.
+#
+# NOT IDEMPOTENT WHEN PADDING: with a pad above 0, running it twice over the
+# same --out-dir pads twice. Delete the output directory and re-run rather than
+# re-running on top.
+#
+# PAD_LEAD_IN_SEC DEFAULTS TO auto, which measures the corpus before touching
+# any audio and uses the smallest pad that lets every dialogue take the tag.
+# The measurement reads only the sidecar JSON, so it costs seconds. It prints
+# the value it picked and whether it is going to rewrite the wavs.
+#
+# The pad it picks is 0 whenever the listener is silent long enough at the
+# start, and then nothing is rewritten at all -- the wavs are symlinked and the
+# step stays in the minutes. That is the case when step 3 dropped the opening
+# (DROP_GREETING=1), which leaves the listener channel empty until its first
+# backchannel: seconds of room against a tag under a second.
+#
+# It is NOT the case when a greeting survived into the audio. Then the listener
+# starts talking about 0.3s in, the window is 0.2s against the 0.75s the tag
+# needs, and EVERY dialogue loses its tag. That is what auto exists to catch:
+# it used to default to 0, and a 10,000-dialogue run reported
+# density_tag_dropped 9997/9997 after the fact.
+#
+# Padding is not free: it rewrites every wav, i.e. a second copy of the corpus
+# (order of 100-300 GB at the 10,000 scale, depending on length and sample
+# rate) and an hour or more rather than minutes. Check the free space when the
+# measured value comes out above 0. PAD_LEAD_IN_SEC=0 forces the old behavior.
+#
+# (Overlapping the SPEAKER is fine and is what inject_inner_thoughts.py has
+# always allowed; only a collision with the listener's own audio is avoided.)
+#
+# CHECK BEFORE MOVING ON: the tool must not print a density_tag_dropped
+# WARNING. With auto it should print none.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export CORPUS_VERSION="${CORPUS_VERSION:-v2}"
+SRC_SHARD="${SRC_SHARD:-$PWD/data/runs/real_aizuchi_500_${CORPUS_VERSION}/tts/placement_bank/shard_000}"
+DST_SHARD="${DST_SHARD:-${SRC_SHARD}_conditioned}"
+PAD_LEAD_IN_SEC="${PAD_LEAD_IN_SEC:-auto}"
+
+SRC_DIR="$SRC_SHARD/training_set/data_stereo"
+DST_DIR="$DST_SHARD/training_set/data_stereo"
+
+if [[ ! -d "$SRC_DIR" ]]; then
+    echo "ERROR: step 3 output not found: $SRC_DIR" >&2
+    exit 1
+fi
+if [[ -e "$DST_DIR" ]]; then
+    echo "ERROR: output already exists: $DST_DIR" >&2
+    echo "  This step is not idempotent (it would pad the audio twice)." >&2
+    echo "  Remove it and re-run, or set DST_SHARD to a new path." >&2
+    exit 1
+fi
+
+mkdir -p "$DST_DIR"
+
+echo ">>> 1/2 inject the density tags -> $DST_DIR"
+uv run python scripts/inject_inner_thoughts.py \
+    --data-dir "$SRC_DIR" \
+    --out-dir "$DST_DIR" \
+    --from-aizuchi-density \
+    --pad-lead-in-sec "$PAD_LEAD_IN_SEC"
+
+echo
+echo ">>> 2/2 rebuild the manifest for what actually came out"
+uv run python scripts/build_training_manifest.py \
+    --training-set "$DST_SHARD/training_set"
+
+echo
+echo "done. train on it with:"
+echo "  qsub -V -v SRC_RUN_DIR=$DST_SHARD \\"
+echo "      scripts/2026-09-15/real_aizuchi_fullft_500_v2.pbs"

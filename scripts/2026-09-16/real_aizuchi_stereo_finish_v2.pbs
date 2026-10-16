@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N ra_st_finish
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# Finish a stereo run whose TTS is done but whose two CPU passes never ran.
+#
+#   qsub -V scripts/2026-09-16/real_aizuchi_stereo_finish_v2.pbs
+#   qsub -V -v NUM_DIALOGUES=500,CORPUS_ROOT=real_aizuchi_500_v2 \
+#       scripts/2026-09-16/real_aizuchi_stereo_finish_v2.pbs
+#
+# WHY THIS EXISTS
+#
+# The TTS step stops with a "success-target not reached" error when even one
+# dialogue fails forced alignment, because run_bank_stereo_test.sh ran it with
+# SPARE_RATIO=0 (no spare dialogues to backfill with). The stereo job dies
+# there, so the KABURI placement and the bank splice never run -- even though
+# the rendered audio is complete apart from the handful that failed.
+#
+# Losing a couple of dialogues out of thousands does not matter: everything
+# downstream works off the files that exist, not off a count. What matters is
+# getting the two CPU passes to run over what was rendered. This job does that
+# and nothing else. It does not touch the TTS, so it cannot trip the
+# generation config lock and cannot lose the audio already on disk.
+#
+# SPARE_RATIO is overridable now, so a NEW run can set e.g. SPARE_RATIO=0.02
+# and heal itself instead of needing this. Do not change it on a run already in
+# flight -- the lock will reject the resume and the rendered audio is wasted.
+#
+# WHAT IT DOES
+#
+# 1. Collects every shard's data_stereo into one directory of symlinks.
+#    Multi-shard runs (NUM_SHARDS=4) leave the audio split across
+#    shard_000..003, and the downstream passes read a single data_stereo.
+#    The TTS's own merged/ cannot be used: merge_training_shards.py writes an
+#    absolute-path manifest and no data_stereo at all. Symlinks, so no audio is
+#    copied, and re-running only refreshes the links.
+# 2. Prints how many samples that came to. CHECK THIS NUMBER before letting the
+#    rest run -- if it is about a quarter of what you expect, only one shard
+#    was picked up and something is wrong with the paths below.
+# 3. Runs the KABURI placement and the bank splice over that directory, exactly
+#    as step 3 of run_bank_stereo_test.sh would have.
+#
+# Output lands where step 4 expects it:
+#   <corpus>/tts/placement_bank/shard_000/training_set/data_stereo
+#
+# CPU only (KABURI runs with --device cpu here; no acoustic model is loaded).
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+CORPUS_VERSION="${CORPUS_VERSION:-v2}"
+CORPUS_ROOT="${CORPUS_ROOT:-real_aizuchi_10000_${CORPUS_VERSION}}"
+NUM_DIALOGUES="${NUM_DIALOGUES:-10000}"
+
+TTS_ROOT="$PWD/data/runs/$CORPUS_ROOT/tts"
+QWEN_ROOT="$TTS_ROOT/qwen"
+DIALOGUE_OUT="$TTS_ROOT/dialogues_bank.jsonl"
+VOCAB_FILE="${DIALOGUE_OUT}.vocab.txt"
+MERGED_STEREO="$QWEN_ROOT/merged_stereo/training_set"
+
+BANK_DIR="${BANK_DIR:-$PWD/data/runs/diversity/real_aizuchi_bank_${CORPUS_VERSION}}"
+KABURI_REPO="${KABURI_REPO:-$PWD/../kaburi-tts}"
+RASTER_MODE="${RASTER_MODE:-pred}"
+MATCH_TOP_K="${MATCH_TOP_K:-5}"
+SEED="${SEED:-0}"
+
+echo "===== stereo finish ====="
+echo "corpus:      $CORPUS_ROOT"
+echo "tts root:    $TTS_ROOT"
+echo "bank:        $BANK_DIR"
+echo "started_at:  $(date -Iseconds)"
+echo "========================="
+
+for required in "$DIALOGUE_OUT" "$VOCAB_FILE"; do
+    if [[ ! -s "$required" ]]; then
+        echo "ERROR: missing input from the rewrite pass: $required" >&2
+        echo "  That file is written before the TTS runs, so its absence means" >&2
+        echo "  this corpus never got past step 1 of run_bank_stereo_test.sh." >&2
+        exit 1
+    fi
+done
+if ! compgen -G "$QWEN_ROOT/shard_*/training_set/data_stereo/*.json" >/dev/null 2>&1; then
+    echo "ERROR: no rendered audio under $QWEN_ROOT/shard_*/training_set/data_stereo" >&2
+    exit 1
+fi
+
+echo
+echo ">>> 1/2 collect every shard into one directory -> $MERGED_STEREO"
+mkdir -p "$MERGED_STEREO/data_stereo"
+# One find -exec ... + per shard rather than a process pair per file: at 10000
+# dialogues that is 20000 files, and spawning ln (and readlink) for each one
+# takes minutes. The shard paths are already absolute, so no readlink is needed.
+linked=0
+for shard_stereo in "$QWEN_ROOT"/shard_*/training_set/data_stereo; do
+    [[ -d "$shard_stereo" ]] || continue
+    find "$shard_stereo" -maxdepth 1 -type f \
+        -exec ln -sfn -t "$MERGED_STEREO/data_stereo" {} +
+    linked=$((linked + $(find "$shard_stereo" -maxdepth 1 -type f | wc -l)))
+done
+wav_count="$(find "$MERGED_STEREO/data_stereo" -name '*.wav' | wc -l)"
+json_count="$(find "$MERGED_STEREO/data_stereo" -name '*.json' | wc -l)"
+shard_count="$(find "$QWEN_ROOT" -maxdepth 1 -name 'shard_*' -type d | wc -l)"
+
+echo "shards:      $shard_count"
+echo "linked:      $linked file(s)"
+echo "samples:     $wav_count wav / $json_count json  (asked for $NUM_DIALOGUES)"
+if [[ "$wav_count" -eq 0 ]]; then
+    echo "ERROR: collected no audio." >&2
+    exit 1
+fi
+if [[ "$wav_count" -lt "$((NUM_DIALOGUES / 2))" ]]; then
+    echo
+    echo "WARNING: that is less than half of $NUM_DIALOGUES. If it is roughly" >&2
+    echo "  one shard's worth, the shards were not all picked up. Continuing," >&2
+    echo "  but the corpus will only be as large as the number above." >&2
+fi
+
+echo
+echo ">>> 2/2 KABURI placement + bank splice"
+export KABURI_REPO
+export DIALOGUES_JSONL="$DIALOGUE_OUT"
+export SOURCE_DIR="$MERGED_STEREO"
+export BANK_DIR
+export OUT_ROOT="$TTS_ROOT/placement_bank"
+export AIZUCHI_VOCAB_FILE="$VOCAB_FILE"
+export NUM_DIALOGUES RASTER_MODE MATCH_TOP_K SEED
+bash scripts/run_kaburi_placement_bank.sh "$NUM_DIALOGUES"
+
+echo
+echo "finished_at: $(date -Iseconds)"
+echo "next: step 4 (the density tags)"
+echo "  qsub -V scripts/2026-09-15/real_aizuchi_condition_10000_v2.pbs"

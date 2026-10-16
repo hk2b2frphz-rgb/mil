@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N cmp_condition_ai
+#PBS -q xvn_s
+#PBS -l select=1:res=small
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Shared settings: scripts/2026-10-07/common.sh
+# Tag each direct-TTS shard, then merge the conditioned manifests.
+set -euo pipefail
+export ARM=ai_placement
+exec bash scripts/2026-10-07/run_stage.sh condition

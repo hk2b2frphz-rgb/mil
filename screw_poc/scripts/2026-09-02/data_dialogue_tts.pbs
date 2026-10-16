@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N screw_0902_tts
+#PBS -q xvn_s
+#PBS -l select=1:res=middle2
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# V100 job: create the dialogue data and render it with Kokoro on the system
+# (left) channel and Qwen3-TTS on the user (right) channel. Submit first.
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+[[ -f screw_poc/scripts/generate_dialogues.py ]] || { echo "ERROR: run from repository root" >&2; exit 1; }
+[[ -f scripts/setup_proxy.sh ]] && source scripts/setup_proxy.sh
+
+RUN_DATE="2026-09-02"
+JOB_ID="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"; JOB_ID="${JOB_ID%%.*}"
+OUT_ROOT="${OUT_ROOT:-$PWD/screw_poc/artifacts/${RUN_DATE}_mixed_tts}"
+DIALOGUES_JSONL="${DIALOGUES_JSONL:-$PWD/screw_poc/artifacts/train_dialogues.jsonl}"
+NUM_DIALOGUES="${NUM_DIALOGUES:-1000}"
+NUM_SHARDS="${NUM_SHARDS:-4}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+export TTS_DEVICE="${TTS_DEVICE:-cuda}"
+export TTS_DTYPE="${TTS_DTYPE:-float16}"
+export LEAD_IN_SEC="${LEAD_IN_SEC:-0.3}"
+export GAP_SEC="${GAP_SEC:-0.2}"
+
+IFS=',' read -r -a GPU_IDS <<< "$CUDA_VISIBLE_DEVICES"
+[[ "${#GPU_IDS[@]}" -ge "$NUM_SHARDS" ]] || { echo "ERROR: insufficient GPUs" >&2; exit 1; }
+mkdir -p "$OUT_ROOT/logs" screw_poc/artifacts/pbs_logs
+exec > >(tee -a "screw_poc/artifacts/pbs_logs/${RUN_DATE}_tts_${JOB_ID}.log") 2>&1
+
+echo "===== screw PoC ${RUN_DATE}: dialogue + mixed TTS (V100) ====="
+echo "out_root=$OUT_ROOT  gpus=$CUDA_VISIBLE_DEVICES  samples=$NUM_DIALOGUES"
+uv run python screw_poc/scripts/generate_dialogues.py --out-dir screw_poc/artifacts
+uv run python screw_poc/scripts/build_training_subsets.py
+uv run python screw_poc/scripts/validate_dataset.py "$DIALOGUES_JSONL" --expected-count 1000
+
+TORCH_VERSION="$(uv run python -c 'import torch; print(torch.__version__)')"
+TORCHAUDIO_VERSION="$(uv run python -c 'import torchaudio; print(torchaudio.__version__)')"
+MIXED_UV=(
+    uv run --isolated --no-project --index "pytorch-cu121=https://download.pytorch.org/whl/cu121"
+    --with qwen-tts --with "kokoro>=0.9.4" --with "misaki[ja]" --with unidic
+    --with numpy --with sphn --with soundfile --with uroman --with pyopenjtalk
+    --with "torch==$TORCH_VERSION" --with "torchaudio==$TORCHAUDIO_VERSION"
+)
+"${MIXED_UV[@]}" python -m unidic download
+"${MIXED_UV[@]}" python -c 'import qwen_tts; from kokoro import KPipeline; print("mixed TTS preflight: OK")'
+
+uv run python - "$DIALOGUES_JSONL" "$OUT_ROOT" "$NUM_DIALOGUES" "$NUM_SHARDS" <<'PY'
+import json, sys
+from pathlib import Path
+src, root, limit, shards = Path(sys.argv[1]), Path(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+rows = [line for line in src.read_text(encoding="utf-8").splitlines() if line.strip()][:limit]
+if len(rows) != limit: raise SystemExit(f"expected {limit} dialogues, found {len(rows)}")
+for shard in range(shards):
+    target = root / f"shard_{shard:03d}"; target.mkdir(parents=True, exist_ok=True)
+    selected = rows[shard::shards]
+    (target / "dialogues.jsonl").write_text("\n".join(selected) + "\n", encoding="utf-8")
+    (target / "success_target.txt").write_text(f"{len(selected)}\n", encoding="utf-8")
+PY
+
+pids=()
+for ((shard=0; shard<NUM_SHARDS; shard++)); do
+    shard_dir="$OUT_ROOT/$(printf 'shard_%03d' "$shard")"
+    gpu="${GPU_IDS[$shard]}"
+    target="$(cat "$shard_dir/success_target.txt")"
+    (
+        CUDA_VISIBLE_DEVICES="$gpu" "${MIXED_UV[@]}" python scripts/generate_qwen3_tts_data.py \
+            --tts-backend qwen3 --moshi-tts-backend kokoro \
+            --model Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+            --dialogues-jsonl "$shard_dir/dialogues.jsonl" \
+            --out-dir "$shard_dir/training_set" --success-target "$target" --resume \
+            --no-opening-greeting --no-emotion --speaker-moshi Ono_Anna \
+            --speaker-user Serena --user-speaker-pool Serena,Sohee,Vivian,Dylan,Eric,Aiden,Uncle_Fu,Ryan \
+            --speaker-other Dylan --speaker-background Ryan --device "$TTS_DEVICE" --dtype "$TTS_DTYPE" \
+            --lead-in-sec "$LEAD_IN_SEC" --gap-sec "$GAP_SEC" --log-every 20
+    ) > "$OUT_ROOT/logs/shard_${shard}.log" 2>&1 &
+    pids+=("$!")
+done
+failed=0; for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+[[ "$failed" == 0 ]] || { echo "ERROR: mixed-TTS shard failed" >&2; exit 1; }
+
+uv run python scripts/merge_training_shards.py --batch-dir "$OUT_ROOT" --out-dir "$OUT_ROOT/merged" --expected-shards "$NUM_SHARDS"
+MANIFEST="$OUT_ROOT/merged/training_set/synthetic_moshi_train.jsonl"
+[[ "$(grep -c . "$MANIFEST")" == "$NUM_DIALOGUES" ]] || { echo "ERROR: merged sample count mismatch" >&2; exit 1; }
+echo "TTS_OK=$OUT_ROOT/merged"

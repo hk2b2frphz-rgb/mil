@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N az_n_kabsmk
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# KABURI-TTS smoke on the normal(v6) aizuchi corpus: render a handful of
+# dialogues on one GPU and report what they cost and what they contain.
+#
+#   qsub -V scripts/2026-09-04/aizuchi_normal_kaburi_smoke.pbs
+#   NUM_DIALOGUES=10 qsub -V scripts/2026-09-04/aizuchi_normal_kaburi_smoke.pbs
+#
+# This is scripts/run_tts_smoke.sh with a queue attached. On an interactive
+# node run that directly instead:
+#
+#   bash scripts/run_tts_smoke.sh kaburi 3
+#
+# The report at the end gives seconds per dialogue and a projection to the full
+# 3000 -- so the production walltime comes from a measurement -- plus overlap,
+# silence and switches-per-minute of the rendered stereo, which is the point of
+# the exercise: the Qwen3/Kokoro layout lands near overlap 0.013 and 11.6
+# switches/min, real dialogue near 0.076 and 35.4.
+#
+# scripts/2026-09-04/aizuchi_normal_qwen_smoke.pbs is the other arm, and
+# `run_tts_smoke.sh both` runs the pair and prints them side by side.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+exec bash scripts/run_tts_smoke.sh kaburi "${NUM_DIALOGUES:-3}"

@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N az_e_dlg3k7
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# 3,000 listener-only dialogues, EAGER frequency, v7.
+# Eager counterpart of aizuchi_normal_dialogue_3000.pbs: the same recipe
+# (no explicit silence, no inline pause tags, no learned closings, dense
+# replies) with AIZUCHI_ONLY_FREQUENCY=eager, so the comparison against the
+# normal-v6 3,000 corpus isolates the backchannel policy.
+#
+# v7, not v6: the first eager v6 attempt came out sparser than normal-v6,
+# because v6 made normal talkative and left the eager preset alone. The preset
+# has since been raised above normal (see AIZUCHI_FREQUENCY_PRESETS in
+# scripts/generate_synthetic_moshi_training_data.py), so this job writes a new
+# root -- resuming the old eager v6 root would interleave both densities in one
+# corpus.
+#
+# Note the difference from the eager v3 job (aizuchi_eager_dialogue_10000.pbs):
+# that one carried MIN/MAX_BLOCKS 6/10 and nonzero silence and probe rates.
+# Both are dropped here for the same reason the normal v6 job dropped them --
+# moshi-finetune splits any dialogue past duration_sec (170s) into equal chunks
+# and every chunk after the first starts mid-conversation with no greeting, so
+# dialogues must stay inside one chunk at the source.
+#
+# Every AIZUCHI_ONLY_* value below can be overridden at submit time, e.g.:
+#   qsub -V -v AIZUCHI_ONLY_MAX_BLOCKS=8 scripts/2026-09-04/aizuchi_eager_dialogue_3000.pbs
+#
+# Output goes to its own v7 eager root, isolated from the normal corpus and
+# from the 10,000-dialogue runs.
+#
+# Submit:
+#   qsub -V scripts/2026-09-04/aizuchi_eager_dialogue_3000.pbs
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export AIZUCHI_VERSION="v7"
+export BATCH_ID="qwen_aizuchi_3000_eager_${AIZUCHI_VERSION}"
+export OUT_ROOT="$PWD/data/runs/aizuchi_eager_3000_${AIZUCHI_VERSION}/dialogue"
+export NUM_CASES="${NUM_CASES:-3000}"
+export DIALOGUE_GENERATION_MODE="aizuchi-only"
+export AIZUCHI_ONLY_FREQUENCY="eager"
+
+# Kept at the normal-v6 values (4/6) rather than v3's 6/10: eager raises the
+# reaction density per block, and holding the block count equal is what keeps
+# the comparison about frequency and every dialogue inside one 170s chunk.
+export AIZUCHI_ONLY_MIN_BLOCKS="${AIZUCHI_ONLY_MIN_BLOCKS:-4}"
+export AIZUCHI_ONLY_MAX_BLOCKS="${AIZUCHI_ONLY_MAX_BLOCKS:-6}"
+
+# This experiment assumes the listener responds instead of learning periodic
+# quiet stretches. Zero also suppresses userAI inline pause tags.
+export AIZUCHI_ONLY_MAX_SILENCES="0"
+export AIZUCHI_ONLY_SILENCE_RATE="0"
+export AIZUCHI_ONLY_SILENCE_MIN_SEC="${AIZUCHI_ONLY_SILENCE_MIN_SEC:-2.0}"
+export AIZUCHI_ONLY_SILENCE_MAX_SEC="${AIZUCHI_ONLY_SILENCE_MAX_SEC:-4.0}"
+export AIZUCHI_ONLY_PROBE_RATE="0"
+
+exec bash scripts/run_dialogues_qwen_3000.pbs

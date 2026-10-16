@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N screw_0902_train_eval
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# A100 job: train the LoRA model, then run held-out screw audio inference and
+# score the text response. Submit with an afterok dependency on data_dialogue_tts.pbs.
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+[[ -f screw_poc/scripts/run_train.sh ]] || { echo "ERROR: run from repository root" >&2; exit 1; }
+[[ -f scripts/setup_proxy.sh ]] && source scripts/setup_proxy.sh
+# Python run as a file only gets that file's directory on sys.path, so anything
+# under screw_poc/ importing scripts.* needs the repository root as well.
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+
+RUN_DATE="2026-09-02"
+JOB_ID="${PBS_JOBID:-manual_$(date +%Y%m%d_%H%M%S)}"; JOB_ID="${JOB_ID%%.*}"
+TTS_RUN_DIR="${TTS_RUN_DIR:-$PWD/screw_poc/artifacts/${RUN_DATE}_mixed_tts/merged}"
+EVAL_SOURCE="${EVAL_SOURCE:-$PWD/screw_poc/artifacts/evaluation_dialogues.jsonl}"
+EVAL_OUT="${EVAL_OUT:-$PWD/screw_poc/artifacts/${RUN_DATE}_heldout_${JOB_ID}}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export NPROC=1 REFRESH_EXP_DATA=1 SKIP_AUTO_EVAL=1
+[[ -f scripts/setup_pbs_distributed.sh ]] && source scripts/setup_pbs_distributed.sh
+[[ -s "$TTS_RUN_DIR/training_set/synthetic_moshi_train.jsonl" ]] || { echo "ERROR: missing TTS manifest" >&2; exit 1; }
+[[ -s "$EVAL_SOURCE" ]] || { echo "ERROR: missing held-out dialogue data" >&2; exit 1; }
+mkdir -p "$EVAL_OUT" screw_poc/artifacts/pbs_logs
+exec > >(tee -a "screw_poc/artifacts/pbs_logs/${RUN_DATE}_train_eval_${JOB_ID}.log") 2>&1
+
+echo "===== screw PoC ${RUN_DATE}: LoRA + held-out evaluation (A100) ====="
+bash screw_poc/scripts/run_train.sh "$TTS_RUN_DIR"
+
+# The evaluation half lives in evaluate_only.pbs so there is exactly one
+# implementation of it. If this job dies during evaluation, or the model needs
+# to be scored again, submit that script with the same EVAL_OUT: it reuses the
+# TTS inputs and only runs inference for queries that have no transcript yet.
+EVAL_OUT="$EVAL_OUT" EVAL_SOURCE="$EVAL_SOURCE" EVAL_LIMIT="${EVAL_LIMIT:-48}" \
+    bash "screw_poc/scripts/${RUN_DATE}/evaluate_only.pbs"
+echo "TRAIN_EVAL_OK=$EVAL_OUT"

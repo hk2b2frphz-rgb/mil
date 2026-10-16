@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N cmp_source_shared
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Shared settings: scripts/2026-10-07/common.sh
+set -euo pipefail
+unset ARM
+exec bash scripts/2026-10-07/run_stage.sh source

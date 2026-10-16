@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N ra_bankv2
+#PBS -q xvn_s
+#PBS -l select=1:res=middle2
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# STEP 2 of 5. The backchannel audio bank: many synthesized takes of each
+# listener word, to be spliced into the listener channel in step 3.
+#
+#   qsub -V scripts/2026-09-15/real_aizuchi_bank_10000_v2.pbs
+#
+# Independent of step 1 -- run them in either order, or at the same time.
+#
+# WHAT V2 FIXES
+#
+# v1 built this bank from listening_vocab.tsv while step 1 generated dialogues
+# from aizuchi_vocab_no_bare_un.tsv. Those two files have ZERO words in common:
+# listening_vocab is the real-recording family (un / sokka / nee ...), the
+# dialogue vocabulary is the written one (hai / ee / sou-nan-desu-ne ...). The
+# splice in step 3 matches a clip to a backchannel by the word itself and falls
+# back to a length match when the word is absent, so with a mismatched bank
+# EVERY backchannel gets audio of a different word than the transcript says --
+# the corpus would teach the model to say one thing and transcribe another.
+#
+# The rule is simply: this must be the same file step 1 used. If step 1's
+# AIZUCHI_VOCAB_FILE changes, change it here too.
+#
+# REPEATS is per shard, so the bank holds vocab_size * REPEATS * NUM_SHARDS
+# clips. The written vocabulary is 16 words: 16 * 160 * 4 = 10240. (v1 used
+# 120 repeats over a 22-word file for a similar total; the repeat count is
+# raised here so the smaller vocabulary still fills the same bank.)
+#
+# Depth per word is the point: the splice picks by duration among the takes of
+# the right word, so more takes means a better length fit and less stretching.
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export CORPUS_VERSION="${CORPUS_VERSION:-v2}"
+export BATCH_ID="${BATCH_ID:-real_aizuchi_bank_${CORPUS_VERSION}}"
+export OUT_ROOT="$PWD/data/runs/diversity/$BATCH_ID"
+# MUST match step 1's AIZUCHI_VOCAB_FILE. See above.
+export TEXTS_FILE="$PWD/scripts/2026-09-15/aizuchi_vocab_no_bare_un.tsv"
+export REPEATS="${REPEATS:-160}"
+export NUM_SHARDS="${NUM_SHARDS:-4}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+
+exec bash scripts/run_qwen3_bank_4gpu.sh

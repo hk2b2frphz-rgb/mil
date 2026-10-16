@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N mixft_dlg_resp
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII text anywhere in this file.
+#
+# STAGE 1 of the mixed-corpus pipeline. See scripts/mixed_corpus_fullft_2026-09-04/README.md.
+#
+# Generates the RESPONSE half of the corpus: multi-agent dialogues in which
+# moshi actually answers (systemAI turns), not just backchannels.
+#
+# Why this stage exists:
+#   The aizuchi-only generator runs every dialogue through
+#   sanitize_aizuchi_only_turns, which mechanically drops any moshi utterance
+#   outside AIZUCHI_ONLY_VOCAB. A model fine-tuned on that corpus alone has
+#   never emitted a full sentence, so injecting external-LLM text into its
+#   text stream at inference produces out-of-distribution acoustics. Mixing in
+#   a smaller multi-agent corpus is what teaches the model to speak content.
+#
+# Dialogue length: MULTI_AGENT_MIN_PAIRS/MAX_PAIRS stay at the 3/5 defaults so
+# rendered dialogues land under the 170s training chunk budget. Raising them
+# re-introduces the mid-conversation-chunk problem that v2 of the aizuchi
+# corpus was created to fix.
+#
+# Submit:
+#   qsub -V scripts/mixed_corpus_fullft_2026-09-04/11_dialogue_response.pbs
+# Stages are submitted one at a time; this job does not submit the next one.
+# It prints the exact command for the following stage when it finishes.
+# Different size:
+#   qsub -V -v NUM_CASES=6000 scripts/mixed_corpus_fullft_2026-09-04/11_dialogue_response.pbs
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export RESPONSE_VERSION="${RESPONSE_VERSION:-v1}"
+export NUM_CASES="${NUM_CASES:-10000}"
+
+export BATCH_ID="qwen_response_${NUM_CASES}_${RESPONSE_VERSION}"
+export OUT_ROOT="$PWD/data/runs/response_${NUM_CASES}_${RESPONSE_VERSION}/dialogue"
+
+# multi-agent is already run_dialogues_qwen_10000.pbs's default; set it
+# explicitly so a stale DIALOGUE_GENERATION_MODE inherited through `qsub -V`
+# (e.g. aizuchi-only left over from a previous submit shell) cannot silently
+# turn this stage back into a backchannel-only corpus.
+export DIALOGUE_GENERATION_MODE="multi-agent"
+
+# Keep a whole dialogue inside one 170s training chunk.
+export MULTI_AGENT_MIN_PAIRS="${MULTI_AGENT_MIN_PAIRS:-3}"
+export MULTI_AGENT_MAX_PAIRS="${MULTI_AGENT_MAX_PAIRS:-5}"
+
+# Backchannels still appear inside long user turns here, so the mixed model
+# does not lose backchannel behaviour in the response half of the data.
+export MULTI_AGENT_AIZUCHI_MODE="${MULTI_AGENT_AIZUCHI_MODE:-separate}"
+export MULTI_AGENT_MAX_AIZUCHI_PER_USER="${MULTI_AGENT_MAX_AIZUCHI_PER_USER:-2}"
+
+bash scripts/run_dialogues_qwen_10000.pbs
+
+DIALOGUES="$OUT_ROOT/llm_dialogues/dialogues.jsonl"
+test -s "$DIALOGUES"
+echo "stage 1 done: $DIALOGUES"
+
+echo "next: qsub -V -v RESPONSE_VERSION=$RESPONSE_VERSION,NUM_CASES=$NUM_CASES \\"
+echo "        scripts/mixed_corpus_fullft_2026-09-04/21_tts_response.pbs"

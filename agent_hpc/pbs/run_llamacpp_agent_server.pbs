@@ -1,0 +1,398 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N fd_infer2
+#PBS -q xan_s
+#PBS -l select=1:res=small
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# ASCII ONLY. Do not add non-ASCII characters anywhere in this file
+# (not even in comments) -- the job dies immediately at submission.
+#
+# The same agent server as run_qwen_agent_server.pbs, but served by llama.cpp
+# instead of vLLM.
+#
+# Why: the node driver is 570.x, so vLLM is pinned at 0.21.0 (0.22+ require
+# CUDA 13). That version cannot load anything released after early 2026 --
+# Qwen3.8-27B among them. llama.cpp builds against CUDA 12, so it can.
+#
+# The tradeoff is prefill speed: llama.cpp decodes at roughly vLLM's rate for a
+# single user but processes prompts more slowly, and an agent turn is mostly
+# prompt. Measure it before committing:
+#   llama-bench -m <model>.gguf -p 8192,32768 -n 128
+#
+# Everything downstream is unchanged. llama-server speaks the OpenAI API, so
+# the same LiteLLM proxy, endpoint file, tunnel and local scripts all apply.
+#
+# Submit:
+#   qsub -V agent_hpc/pbs/run_llamacpp_agent_server.pbs
+# Pick a different quant (Q8_0 is ~29GB and near-lossless; the A100 has room):
+#   GGUF_FILE=Qwen3.8-27B-UD-Q8_K_XL.gguf qsub -V agent_hpc/pbs/run_llamacpp_agent_server.pbs
+# Build llama.cpp from source instead of downloading a release binary
+#   (needed if the prebuilt one lacks the DeltaNet CUDA kernels):
+#   LLAMACPP_FROM_SOURCE=1 qsub -V agent_hpc/pbs/run_llamacpp_agent_server.pbs
+#
+# Smoke-test the plumbing on a V100 with a small model, while the A100s are
+# busy. This proves the tunnel, the proxy and -- most importantly -- that tool
+# calls form at all, none of which depend on which model is loaded:
+#   qsub -q xvn_s -V #     -v GGUF_REPO=Qwen/Qwen2.5-Coder-7B-Instruct-GGUF,GGUF_FILE=qwen2.5-coder-7b-instruct-q8_0.gguf,# MAX_MODEL_LEN=16384,LLAMACPP_FROM_SOURCE=1,LLAMACPP_CUDA_ARCH=70,LLAMA_FLASH_ATTN=0 #     agent_hpc/pbs/run_llamacpp_agent_server.pbs
+# Volta needs the source build (release binaries omit sm_70), has no flash-attn
+# path, and 32GB will not hold a 29GB Q8 plus its cache -- hence the small model.
+# Do NOT smoke-test with Qwen3.8 here: its DeltaNet kernels are the least
+# exercised code on SM70, so a failure would tell you nothing about the plumbing.
+#
+# Stop it with: qdel <jobid>
+#
+# This duplicates the endpoint/proxy plumbing from run_qwen_agent_server.pbs on
+# purpose: that job works today, and this one is an experiment. Fold them
+# together once llama.cpp has proven itself here, or delete this file.
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+if [[ -f "$PWD/scripts/setup_proxy.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$PWD/scripts/setup_proxy.sh"
+fi
+
+command -v uv >/dev/null 2>&1 || { echo "ERROR: uv is not on PATH." >&2; exit 1; }
+command -v curl >/dev/null 2>&1 || { echo "ERROR: curl is not on PATH." >&2; exit 1; }
+
+JOB_TAG="${PBS_JOBID%%.*}"
+JOB_NUM="${JOB_TAG//[^0-9]/}"
+
+mkdir -p experiments/pbs_logs
+JOB_LOG="experiments/pbs_logs/llamacpp_agent_srv_${JOB_TAG:-local}.log"
+exec > >(tee -a "$JOB_LOG") 2>&1
+
+# ---------------------------------------------------------------- ports / model
+if [[ -z "${PROXY_PORT:-}" ]]; then
+    if [[ -n "$JOB_NUM" ]]; then
+        PROXY_PORT="$((43000 + (10#$JOB_NUM % 2000)))"
+    else
+        PROXY_PORT="43000"
+    fi
+fi
+export PROXY_PORT
+export LLAMA_PORT="${LLAMA_PORT:-$((PROXY_PORT + 2000))}"
+
+GGUF_REPO="${GGUF_REPO:-unsloth/Qwen3.8-27B-GGUF}"
+# Q8_0 is ~29GB. On an 80GB card there is no reason to quantize harder: the
+# usual motive for Q4 is fitting a consumer GPU, and paying accuracy for space
+# we are not short of would be backwards.
+GGUF_FILE="${GGUF_FILE:-Qwen3.8-27B-Q8_0.gguf}"
+MODEL_DIR="${MODEL_DIR:-$PWD/models/gguf}"
+MODEL_PATH="$MODEL_DIR/$GGUF_FILE"
+
+export AGENT_MODEL_ALIAS="${AGENT_MODEL_ALIAS:-qwen-agent}"
+# 48 of the 64 layers use linear attention and keep no KV cache, so long
+# contexts cost far less here than the number suggests.
+export MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export PROXY_ENV_DIR="${PROXY_ENV_DIR:-.venv_agent_proxy}"
+LLAMACPP_DIR="${LLAMACPP_DIR:-$PWD/.llamacpp}"
+# Only needed for LLAMACPP_FROM_SOURCE=1, which wants nvcc. Must be a cuda12.x
+# module: the node driver is 570.x and cannot run CUDA 13.
+LLAMACPP_CUDA_MODULE="${LLAMACPP_CUDA_MODULE:-}"
+# Volta has no working flash-attn path in llama.cpp; turn this off there.
+LLAMA_FLASH_ATTN="${LLAMA_FLASH_ATTN:-1}"
+
+# ------------------------------------------------------------------- endpoint io
+ENDPOINT_FILE="${ENDPOINT_FILE:-$HOME/.miltoka/agent_endpoint.json}"
+ENDPOINT_DIR="$(dirname "$ENDPOINT_FILE")"
+ENDPOINT_BASE="${ENDPOINT_FILE%.json}"
+ENDPOINT_TXT="${ENDPOINT_BASE}.txt"
+ENDPOINT_ENV="${ENDPOINT_BASE}.env"
+mkdir -p "$ENDPOINT_DIR"
+chmod 700 "$ENDPOINT_DIR" 2>/dev/null || true
+
+AGENT_API_KEY="${AGENT_API_KEY:-}"
+if [[ -z "$AGENT_API_KEY" ]]; then
+    AGENT_API_KEY="sk-hpc-$(head -c 18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+fi
+export AGENT_API_KEY
+
+NODE_HOST="$(hostname -f 2>/dev/null || hostname)"
+NODE_IP="$(hostname -i 2>/dev/null | awk '{print $1}')"
+if [[ -z "${NODE_IP:-}" || "$NODE_IP" == 127.* ]]; then
+    NODE_IP="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1)"
+fi
+NODE_IP="${NODE_IP:-$NODE_HOST}"
+LOGIN_HOST="${LOGIN_HOST:-${PBS_O_HOST:-unknown-login-host}}"
+LOCAL_PORT="${LOCAL_PORT:-8787}"
+SSH_USER="${SSH_USER:-$(id -un)}"
+SSH_TUNNEL="ssh -N -L ${LOCAL_PORT}:${NODE_IP}:${PROXY_PORT} ${SSH_USER}@${LOGIN_HOST}"
+
+write_endpoint() {
+    local status="$1"
+    local tmp="${ENDPOINT_FILE}.tmp.$$"
+    cat > "$tmp" <<JSON
+{
+  "status": "${status}",
+  "backend": "llama.cpp",
+  "job_id": "${PBS_JOBID:-local}",
+  "node_host": "${NODE_HOST}",
+  "node_ip": "${NODE_IP}",
+  "login_host": "${LOGIN_HOST}",
+  "ssh_user": "${SSH_USER}",
+  "proxy_port": ${PROXY_PORT},
+  "local_port": ${LOCAL_PORT},
+  "model": "${GGUF_REPO}/${GGUF_FILE}",
+  "model_alias": "${AGENT_MODEL_ALIAS}",
+  "api_key": "${AGENT_API_KEY}",
+  "anthropic_base_url": "http://127.0.0.1:${LOCAL_PORT}",
+  "openai_base_url": "http://127.0.0.1:${LOCAL_PORT}/v1",
+  "ssh_tunnel": "${SSH_TUNNEL}",
+  "job_log": "${PWD}/${JOB_LOG}",
+  "updated_at": "$(date -Iseconds)"
+}
+JSON
+    mv "$tmp" "$ENDPOINT_FILE"
+    chmod 600 "$ENDPOINT_FILE" 2>/dev/null || true
+
+    cat > "$ENDPOINT_ENV" <<ENVEOF
+export ANTHROPIC_BASE_URL="http://127.0.0.1:${LOCAL_PORT}"
+export ANTHROPIC_AUTH_TOKEN="${AGENT_API_KEY}"
+export ANTHROPIC_MODEL="${AGENT_MODEL_ALIAS}"
+export ANTHROPIC_SMALL_FAST_MODEL="${AGENT_MODEL_ALIAS}"
+export OPENAI_BASE_URL="http://127.0.0.1:${LOCAL_PORT}/v1"
+export OPENAI_API_KEY="${AGENT_API_KEY}"
+ENVEOF
+    chmod 600 "$ENDPOINT_ENV" 2>/dev/null || true
+
+    cat > "$ENDPOINT_TXT" <<TXTEOF
+status     : ${status}
+backend    : llama.cpp
+job_id     : ${PBS_JOBID:-local}
+node       : ${NODE_HOST} (${NODE_IP})
+proxy_port : ${PROXY_PORT}
+model      : ${GGUF_FILE}  (alias: ${AGENT_MODEL_ALIAS})
+api_key    : ${AGENT_API_KEY}
+updated_at : $(date -Iseconds)
+
+Open the tunnel from the local PC:
+  ${SSH_TUNNEL}
+TXTEOF
+    chmod 600 "$ENDPOINT_TXT" 2>/dev/null || true
+}
+
+write_endpoint "starting"
+
+echo "===== llama.cpp agent server ====="
+echo "job_id:      ${PBS_JOBID:-n/a}"
+echo "node:        ${NODE_HOST} (${NODE_IP})"
+echo "model:       ${GGUF_REPO} / ${GGUF_FILE}"
+echo "context:     ${MAX_MODEL_LEN}"
+echo "llama_port:  ${LLAMA_PORT} (127.0.0.1 only)"
+echo "proxy_port:  ${PROXY_PORT} (0.0.0.0)"
+echo "started_at:  $(date -Iseconds)"
+echo "=================================="
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
+fi
+
+# ------------------------------------------------------------- llama.cpp binary
+LLAMA_SERVER="${LLAMACPP_BIN:-}"
+if [[ -z "$LLAMA_SERVER" && "${LLAMACPP_FROM_SOURCE:-0}" != "1" ]]; then
+    # Prebuilt release. Ships sm_80 kernels, so it is fine on an A100; a V100
+    # would need the source build, since the prebuilts skip sm_70.
+    if [[ ! -x "$LLAMACPP_DIR/build/bin/llama-server" ]]; then
+        echo "[llamacpp] resolving the latest release"
+        mkdir -p "$LLAMACPP_DIR"
+        curl -fsSL -o "$LLAMACPP_DIR/latest.json" \
+            https://api.github.com/repos/ggml-org/llama.cpp/releases/latest
+        # Asset names carry the build number and have changed shape over time,
+        # so match on what the file is rather than on an exact name.
+        ASSET_URL="$(python3 "$PWD/agent_hpc/pick_llamacpp_asset.py" "$LLAMACPP_DIR/latest.json" || true)"
+        if [[ -z "$ASSET_URL" ]]; then
+            echo "ERROR: no ubuntu-cuda-x64 asset in the latest llama.cpp release." >&2
+            echo "       Retry with LLAMACPP_FROM_SOURCE=1." >&2
+            exit 1
+        fi
+        echo "[llamacpp] downloading $ASSET_URL"
+        curl -fsSL -o "$LLAMACPP_DIR/release.zip" "$ASSET_URL"
+        rm -rf "$LLAMACPP_DIR/build"
+        mkdir -p "$LLAMACPP_DIR/build"
+        (cd "$LLAMACPP_DIR/build" && unzip -oq ../release.zip)
+        # Release layouts have moved around; find the binary wherever it landed.
+        FOUND="$(find "$LLAMACPP_DIR/build" -name llama-server -type f | head -n1)"
+        if [[ -z "$FOUND" ]]; then
+            echo "ERROR: llama-server not found in the release archive." >&2
+            exit 1
+        fi
+        mkdir -p "$LLAMACPP_DIR/build/bin"
+        [[ "$FOUND" == "$LLAMACPP_DIR/build/bin/llama-server" ]] || cp "$FOUND" "$LLAMACPP_DIR/build/bin/llama-server"
+        chmod +x "$LLAMACPP_DIR/build/bin/llama-server"
+        # The binary needs its sibling shared objects on the library path.
+        LIB_DIR="$(dirname "$FOUND")"
+        export LD_LIBRARY_PATH="$LIB_DIR:$LLAMACPP_DIR/build/bin:${LD_LIBRARY_PATH:-}"
+    fi
+    LLAMA_SERVER="$LLAMACPP_DIR/build/bin/llama-server"
+    export LD_LIBRARY_PATH="$(dirname "$LLAMA_SERVER"):${LD_LIBRARY_PATH:-}"
+fi
+
+if [[ -z "$LLAMA_SERVER" ]]; then
+    if [[ -n "$LLAMACPP_CUDA_MODULE" ]]; then
+        if ! command -v module >/dev/null 2>&1; then
+            for module_init in /etc/profile.d/modules.sh /usr/share/Modules/init/bash; do
+                if [[ -f "$module_init" ]]; then
+                    # shellcheck source=/dev/null
+                    source "$module_init"
+                    break
+                fi
+            done
+        fi
+        module load "$LLAMACPP_CUDA_MODULE"
+    fi
+    command -v nvcc >/dev/null 2>&1 || {
+        echo "ERROR: LLAMACPP_FROM_SOURCE=1 needs nvcc on PATH." >&2
+        echo "       Pass LLAMACPP_CUDA_MODULE=<cuda12.x module name> to load one." >&2
+        exit 1
+    }
+    if [[ ! -x "$LLAMACPP_DIR/build/bin/llama-server" ]]; then
+        echo "[llamacpp] building from source"
+        [[ -d "$LLAMACPP_DIR/src" ]] || git clone --depth 1 https://github.com/ggml-org/llama.cpp "$LLAMACPP_DIR/src"
+        git -C "$LLAMACPP_DIR/src" pull --ff-only || true
+        # CUDA_ARCHITECTURES: 80 = A100. Add 70 to also cover V100.
+        cmake -S "$LLAMACPP_DIR/src" -B "$LLAMACPP_DIR/build" \
+            -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES="${LLAMACPP_CUDA_ARCH:-80}"
+        cmake --build "$LLAMACPP_DIR/build" --config Release -j "${BUILD_JOBS:-8}" --target llama-server
+    fi
+    LLAMA_SERVER="$LLAMACPP_DIR/build/bin/llama-server"
+fi
+echo "[llamacpp] server binary: $LLAMA_SERVER"
+
+# ------------------------------------------------------------------ model file
+if [[ ! -f "$MODEL_PATH" ]]; then
+    echo "[llamacpp] downloading ${GGUF_REPO}/${GGUF_FILE} (this is tens of GB)"
+    mkdir -p "$MODEL_DIR"
+    uv run --with huggingface_hub python - <<PY
+from huggingface_hub import hf_hub_download
+p = hf_hub_download(repo_id="${GGUF_REPO}", filename="${GGUF_FILE}",
+                    local_dir="${MODEL_DIR}")
+print("downloaded:", p)
+PY
+fi
+test -s "$MODEL_PATH"
+echo "[llamacpp] model: $MODEL_PATH ($(du -h "$MODEL_PATH" | cut -f1))"
+
+# ------------------------------------------------------------------ proxy deps
+PROXY_PYTHON="$PROXY_ENV_DIR/bin/python"
+PROXY_BIN="$PROXY_ENV_DIR/bin/litellm"
+[[ -d "$PROXY_ENV_DIR" ]] || uv venv "$PROXY_ENV_DIR"
+uv pip install --python "$PROXY_PYTHON" "litellm[proxy]${LITELLM_VERSION:+==$LITELLM_VERSION}"
+
+# ------------------------------------------------------------------ llama-server
+llama_args=(
+    "$LLAMA_SERVER"
+    --model "$MODEL_PATH"
+    --alias "$AGENT_MODEL_ALIAS"
+    --host 127.0.0.1
+    --port "$LLAMA_PORT"
+    --ctx-size "$MAX_MODEL_LEN"
+    --n-gpu-layers "${NGL:-99}"
+    # Without --jinja the model's own chat template is ignored and tool calls
+    # never form. For an agent this is the flag that decides whether it works.
+    --jinja
+    # Reuse the unchanged prefix between agent turns instead of re-reading it.
+    # This is the main defence against llama.cpp's slower prefill.
+    --cache-reuse "${CACHE_REUSE:-256}"
+    --parallel "${LLAMA_PARALLEL:-1}"
+)
+if [[ "$LLAMA_FLASH_ATTN" == "1" ]]; then
+    llama_args+=(--flash-attn)
+fi
+if [[ -n "${LLAMA_EXTRA_ARGS:-}" ]]; then
+    # shellcheck disable=SC2206
+    llama_args+=($LLAMA_EXTRA_ARGS)
+fi
+
+echo "[llamacpp] launching: ${llama_args[*]}"
+"${llama_args[@]}" &
+LLAMA_PID=$!
+
+PROXY_PID=""
+cleanup() {
+    write_endpoint "stopped" || true
+    if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
+        kill "$PROXY_PID"; wait "$PROXY_PID" 2>/dev/null || true
+    fi
+    if kill -0 "$LLAMA_PID" 2>/dev/null; then
+        kill "$LLAMA_PID"; wait "$LLAMA_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+echo "waiting for llama-server (loading ~29GB onto the GPU)..."
+while true; do
+    if ! kill -0 "$LLAMA_PID" 2>/dev/null; then
+        echo "ERROR: llama-server exited before becoming ready." >&2
+        echo "       If it died on an unknown tensor or a CUDA error, the release" >&2
+        echo "       binary is probably too old for Qwen3.8's DeltaNet layers --" >&2
+        echo "       retry with LLAMACPP_FROM_SOURCE=1." >&2
+        exit 1
+    fi
+    if curl --fail --silent "http://127.0.0.1:${LLAMA_PORT}/health" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 5
+done
+echo "llama-server is ready; starting the Anthropic-compatible proxy."
+
+# ------------------------------------------------------------------- proxy
+LITELLM_CONFIG="${LITELLM_CONFIG:-$ENDPOINT_DIR/litellm_llamacpp_${JOB_TAG:-local}.yaml}"
+cat > "$LITELLM_CONFIG" <<YAML
+model_list:
+  - model_name: ${AGENT_MODEL_ALIAS}
+    litellm_params:
+      model: openai/${AGENT_MODEL_ALIAS}
+      api_base: http://127.0.0.1:${LLAMA_PORT}/v1
+      api_key: none
+  - model_name: "*"
+    litellm_params:
+      model: openai/${AGENT_MODEL_ALIAS}
+      api_base: http://127.0.0.1:${LLAMA_PORT}/v1
+      api_key: none
+
+litellm_settings:
+  drop_params: true
+
+general_settings:
+  master_key: ${AGENT_API_KEY}
+YAML
+chmod 600 "$LITELLM_CONFIG" 2>/dev/null || true
+
+"$PROXY_BIN" --config "$LITELLM_CONFIG" --host 0.0.0.0 --port "$PROXY_PORT" &
+PROXY_PID=$!
+
+echo "waiting for the proxy on 0.0.0.0:${PROXY_PORT}..."
+while true; do
+    if ! kill -0 "$PROXY_PID" 2>/dev/null; then
+        echo "ERROR: LiteLLM proxy exited (port ${PROXY_PORT} may be held)." >&2
+        exit 1
+    fi
+    if curl --fail --silent "http://127.0.0.1:${PROXY_PORT}/health/liveliness" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 3
+done
+
+write_endpoint "ready"
+echo "READY at $(date -Iseconds)"
+echo "open the tunnel on the local PC:"
+echo "  ${SSH_TUNNEL}"
+
+while true; do
+    if ! kill -0 "$LLAMA_PID" 2>/dev/null; then
+        echo "ERROR: llama-server died at $(date -Iseconds)." >&2
+        exit 1
+    fi
+    if ! kill -0 "$PROXY_PID" 2>/dev/null; then
+        echo "ERROR: LiteLLM proxy died at $(date -Iseconds)." >&2
+        exit 1
+    fi
+    sleep 30
+done

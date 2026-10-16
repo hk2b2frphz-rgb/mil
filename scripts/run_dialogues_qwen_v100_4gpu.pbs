@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+#PBS -S /bin/bash
+#PBS -N fd_qwen_v100_4gpu
+#PBS -q xvn_s
+#PBS -l select=1:res=middle2
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -V
+
+# Qwen3.6-27B, FP16, TP4 on four V100 32GB GPUs. No weight quantization.
+# First build: qsub -V scripts/setup_vllm_qwen_v100_env.pbs
+# Smoke: NUM_CASES=20 qsub -V scripts/run_dialogues_qwen_v100_4gpu.pbs
+# The same dialogue generator and interaction axes as the A100 job are used.
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$(pwd)}"
+
+export NUM_CASES="${NUM_CASES:-3000}"
+[[ "$NUM_CASES" =~ ^[0-9]+$ && "$NUM_CASES" -ge 1 ]] || {
+    echo "ERROR: NUM_CASES must be positive." >&2; exit 1;
+}
+export BATCH_ID="${BATCH_ID:-qwen_dialogues_v100_4gpu_${NUM_CASES}_${DIALOGUES_VERSION:-v1}}"
+export VLLM_MODEL="${VLLM_MODEL:-Qwen/Qwen3.6-27B}"
+export QWEN_V100_MODEL="$VLLM_MODEL"
+export VLLM_QWEN_V100_ENV_DIR="${VLLM_QWEN_V100_ENV_DIR:-$PWD/.venv-vllm-qwen-v100}"
+# Ignore the A100 environment/install spec that PBS -V may have inherited.
+export VLLM_ENV_DIR="$VLLM_QWEN_V100_ENV_DIR"
+export VLLM_VERSION=0.21.0 UV_TORCH_BACKEND=cu126 VLLM_SKIP_INSTALL=1
+export PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu126
+export CUDA_WHEEL_TAG=cu126 EXPECTED_TORCH_CUDA=12.6 TORCH_CUDA_ARCH_LIST=7.0
+export TORCH_VERSION=2.11.0 TORCHAUDIO_VERSION=2.11.0 TORCHVISION_VERSION=0.26.0
+export TRANSFORMERS_SPEC='transformers==4.57.1'
+export VLLM_CUDA_MODULE="${QWEN_V100_CUDA_MODULE:-cuda12.6_cudnn9.7.1_nccl2.24.3}"
+export CUDA_VISIBLE_DEVICES="${QWEN_V100_CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+export VLLM_DTYPE=float16 VLLM_TENSOR_PARALLEL_SIZE=4 QWEN_V100_PREFLIGHT=1
+export VLLM_ATTENTION_BACKEND=TRITON_ATTN
+export VLLM_LANGUAGE_MODEL_ONLY=1 VLLM_ENABLE_CHUNKED_PREFILL=1
+export VLLM_ENFORCE_EAGER="${VLLM_ENFORCE_EAGER:-1}"
+export MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
+export VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-8}"
+export VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-1024}"
+export MULTI_AGENT_CONCURRENCY="${MULTI_AGENT_CONCURRENCY:-8}"
+# Keep all FP8/TF32 and BF16 paths out of this profile, including inherited flags.
+export FLA_TRIL_PRECISION=ieee
+export VLLM_QWEN_CHAT_TEMPLATE_KWARGS='{"enable_thinking": false}'
+export AIZUCHI_ENABLE_THINKING=0
+unset LLM_REASONING_EFFORT
+export LLM_OPENAI_ENDPOINT=chat
+export MULTI_AGENT_EMPTY_POLICY=fail ALLOW_TEMPLATE_FALLBACK=0
+
+bash scripts/setup_vllm_qwen_v100_env.sh
+exec bash scripts/run_dialogues_qwen_3000.pbs

@@ -1,7 +1,7 @@
 # Core model package
 # Install from source if the PyPI version is outdated:
 #   pip install git+https://github.com/kyutai-labs/moshi.git
-moshi
+moshi>=0.2.11
 
 # Deep-learning stack (CUDA wheels should match your driver; adjust as needed)
 torch>=2.1.0
@@ -16,6 +16,19 @@ pyttsx3
 
 # Numerical
 numpy
+scipy
+
+# Language-agnostic VAD for Full-Duplex-Bench evaluation
+silero-vad
 
 # Model downloading (pulled in transitively by moshi, listed explicitly)
 huggingface_hub
+
+# Data-generation pipeline (Gemma dialogues + Qwen3-TTS synthesis).
+# Required by scripts/generate_*.py. `uv sync` installs these from pyproject.toml;
+# listed here so a plain `pip install -r requirements.txt` setup also works.
+transformers>=4.51.0
+accelerate
+qwen-tts
+soundfile
+websocket-client
