@@ -1,0 +1,6 @@
+.venv/
+vendor/
+models/
+openvoice-revision.txt
+model-revision.json
+outputs/
